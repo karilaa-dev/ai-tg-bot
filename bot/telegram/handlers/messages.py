@@ -169,9 +169,14 @@ async def handle_message(message: Message, bot: Bot) -> None:
     thinking_finalized = False
     in_code_block = False
     thinking_msg_replaced = False
+    pending_tool: str | None = None
 
     try:
         async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
+            # Prepend tool indicator when new thinking arrives after tool use
+            if chunk.reasoning and pending_tool:
+                reasoning += f"(Used {pending_tool})\n"
+                pending_tool = None
             reasoning += chunk.reasoning
             content += chunk.content
             if chunk.is_tool_use:
@@ -181,9 +186,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
                 if step_content.strip():
                     reasoning += f"\n{step_content.strip()}\n"
                     sent_parts.append(step_content)
-
-                # Add tool use indicator to thinking
-                reasoning += f"(Using {chunk.tool_name}...)\n"
+                pending_tool = chunk.tool_name
 
             if time.time() - last_update < 0.5:
                 continue
