@@ -4,15 +4,15 @@ An AI-powered Telegram bot with streaming responses, tool support (web search an
 
 ## Codebase Overview
 
-**Stack**: Python 3.12+, aiohttp, OpenAI SDK (via OpenRouter), SQLAlchemy 2.0, Tavily, Telegram Bot API 9.3
+**Stack**: Python 3.12+, aiogram 3.24+, OpenAI SDK (via OpenRouter), SQLAlchemy 2.0, Tavily, Telegram Bot API 9.3
 
 **Structure**:
-- `main.py` - Entry point, starts polling loop
+- `main.py` - Entry point, starts aiogram polling
 - `bot/ai/` - OpenRouter client with streaming and tool calling
 - `bot/database/` - SQLAlchemy models and repository
-- `bot/handlers/` - Telegram message and command handlers
+- `bot/telegram/` - aiogram Bot, Dispatcher, and handlers
 - `bot/tools/` - Tavily web search integration
-- `bot/utils/` - Formatting, token counting, file handling
+- `bot/utils/` - Formatting, token counting
 
 For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
 
@@ -40,8 +40,9 @@ Optional:
 
 ## Architecture Notes
 
-- All I/O is async (aiohttp, aiosqlite, async OpenAI client)
-- Singleton pattern for all clients (`telegram_client`, `openrouter_client`, `repository`)
+- All I/O is async (aiogram, aiosqlite, async OpenAI client)
+- Singleton pattern for all clients (`bot`, `dp`, `openrouter_client`, `repository`)
 - Streaming responses with Telegram draft messages (Bot API 9.3)
 - Token-aware context window management
 - Multimodal support (images, PDFs converted to base64)
+- aiogram routers for handler organization

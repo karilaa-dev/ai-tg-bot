@@ -1,7 +1,7 @@
 ---
 last_mapped: 2026-01-27T00:00:00Z
-total_files: 27
-total_tokens: 10364
+total_files: 25
+total_tokens: 10000
 ---
 
 # Codebase Map
@@ -16,14 +16,12 @@ graph TB
         Main[main.py]
     end
 
-    subgraph Polling
-        Poll[polling.py]
-    end
-
-    subgraph Handlers
-        Cmd[commands.py]
-        Msg[message.py]
-        TG[telegram.py]
+    subgraph Telegram
+        Bot[bot.py]
+        DP[Dispatcher]
+        CmdH[commands.py]
+        MsgH[messages.py]
+        Files[files.py]
     end
 
     subgraph AI
@@ -43,24 +41,21 @@ graph TB
     subgraph Utils
         Format[formatting.py]
         Tokens[tokens.py]
-        Image[image.py]
-        PDF[pdf.py]
     end
 
-    Main --> Poll
+    Main --> Bot
+    Main --> DP
     Main --> Repo
-    Poll --> Cmd
-    Poll --> Msg
-    Poll --> TG
-    Cmd --> Repo
-    Cmd --> TG
-    Msg --> OR
-    Msg --> Repo
-    Msg --> TG
-    Msg --> Format
-    Msg --> Tokens
-    Msg --> Image
-    Msg --> PDF
+    DP --> CmdH
+    DP --> MsgH
+    CmdH --> Repo
+    CmdH --> Bot
+    MsgH --> OR
+    MsgH --> Repo
+    MsgH --> Bot
+    MsgH --> Files
+    MsgH --> Format
+    MsgH --> Tokens
     OR --> Tools
     OR --> Tavily
     Repo --> Models
@@ -76,7 +71,6 @@ ai-tg-bot/
 ├── bot/
 │   ├── __init__.py
 │   ├── config.py        # Pydantic settings (singleton)
-│   ├── polling.py       # Telegram long polling loop
 │   ├── ai/
 │   │   ├── __init__.py
 │   │   ├── openrouter.py  # AI client with streaming & tool calling
@@ -85,19 +79,20 @@ ai-tg-bot/
 │   │   ├── __init__.py
 │   │   ├── models.py      # SQLAlchemy ORM models
 │   │   └── repository.py  # Data access layer
-│   ├── handlers/
-│   │   ├── __init__.py
-│   │   ├── commands.py    # /thinking command handler
-│   │   ├── message.py     # Core message processing
-│   │   └── telegram.py    # Telegram Bot API client
+│   ├── telegram/
+│   │   ├── __init__.py    # Exports bot, dp, router
+│   │   ├── bot.py         # aiogram Bot and Dispatcher setup
+│   │   ├── files.py       # File download & base64 encoding
+│   │   └── handlers/
+│   │       ├── __init__.py    # Main router combining all handlers
+│   │       ├── commands.py    # /start and /thinking handlers
+│   │       └── messages.py    # Core message processing
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   └── tavily.py      # Web search & extraction
 │   └── utils/
 │       ├── __init__.py
 │       ├── formatting.py  # Telegram MarkdownV2 formatting
-│       ├── image.py       # Image download & base64 encoding
-│       ├── pdf.py         # PDF download & base64 encoding
 │       └── tokens.py      # Token counting & context trimming
 └── docs/
     └── CODEBASE_MAP.md    # This file
@@ -108,7 +103,7 @@ ai-tg-bot/
 ### Entry Point (`main.py`)
 
 **Purpose**: Application lifecycle management
-**Key functions**: `main()` - initializes database, starts polling, handles shutdown
+**Key functions**: `main()` - initializes database, starts aiogram polling, handles shutdown
 
 ### Configuration (`bot/config.py`)
 
@@ -123,7 +118,7 @@ ai-tg-bot/
 | `OPENROUTER_API_KEY` | Yes | - | AI API access |
 | `OPENROUTER_MODEL` | No | `moonshotai/kimi-k2.5` | Model ID |
 | `TAVILY_API_KEY` | Yes | - | Web search API |
-| `DATABASE_URL` | No | `sqlite+aiosqlite:///./bot.db` | Database connection |
+| `DATABASE_URL` | No | `sqlite+aiosqlite:///bot.db` | Database connection |
 | `CONTEXT_TOKEN_LIMIT` | No | `8000` | Max context tokens |
 
 ### AI Module (`bot/ai/`)
@@ -171,25 +166,30 @@ User (telegram_id, username, full_name, show_thinking)
 - `add_message()` / `get_conversation_with_messages()`
 - `trim_messages_to_limit()` - removes old messages beyond token limit
 
-### Handlers Module (`bot/handlers/`)
+### Telegram Module (`bot/telegram/`)
 
-#### `telegram.py`
-**Purpose**: Low-level Telegram Bot API HTTP client
-**Exports**: `TelegramClient`, `telegram_client` (singleton)
-**Uses**: aiohttp for async HTTP requests
+#### `bot.py`
+**Purpose**: aiogram Bot and Dispatcher initialization
+**Exports**: `bot`, `dp`
+**Uses**: aiogram 3.24+ with Bot API 9.3 support
 
-**Key methods**:
-- `send_message()` / `send_message_draft()` (Bot API 9.3)
-- `finalize_draft()` - converts draft to permanent message
-- `get_file()` / `download_file()` - file handling
+#### `files.py`
+**Purpose**: Download and base64 encode files from Telegram
+**Exports**: `download_and_encode_image()`, `download_and_encode_pdf()`
+**Pattern**: Returns data URL string (`data:mime/type;base64,...`)
+**Gotchas**: Returns `None` on error (silent failure with logging)
 
-#### `commands.py`
-**Purpose**: Command handlers
-**Exports**: `handle_thinking_command()` - toggles thinking trace visibility
+#### `handlers/commands.py`
+**Purpose**: Command handlers using aiogram decorators
+**Exports**: `router`, `cmd_start()`, `cmd_thinking()`
 
-#### `message.py`
+**Handlers**:
+- `@router.message(CommandStart())` - Welcome message
+- `@router.message(Command("thinking"))` - Toggle thinking traces
+
+#### `handlers/messages.py`
 **Purpose**: Core message processing with streaming responses
-**Exports**: `handle_message()`, `build_content()`, `format_history()`
+**Exports**: `router`, `handle_message()`
 
 **Data flow**:
 1. Load user, conversation, message history
@@ -203,7 +203,7 @@ User (telegram_id, username, full_name, show_thinking)
 - Separate draft IDs for thinking vs content
 - Code block state tracked across message splits
 - Falls back to plain text on MarkdownV2 parse errors
-- Rate limiting handled with retry_after
+- Rate limiting handled with TelegramRetryAfter exception
 
 ### Tools Module (`bot/tools/`)
 
@@ -239,11 +239,6 @@ User (telegram_id, username, full_name, show_thinking)
 - Images/files estimated at 85 tokens each
 - 4 base tokens added per message for formatting overhead
 
-#### `image.py` / `pdf.py`
-**Purpose**: Download and base64 encode files from Telegram
-**Pattern**: Returns data URL string (`data:mime/type;base64,...`)
-**Gotchas**: Returns `None` on error (silent failure with logging)
-
 ## Data Flow
 
 ### Message Processing Flow
@@ -251,14 +246,14 @@ User (telegram_id, username, full_name, show_thinking)
 ```mermaid
 sequenceDiagram
     participant TG as Telegram
-    participant Poll as polling.py
-    participant Msg as message.py
+    participant DP as Dispatcher
+    participant Msg as messages.py
     participant DB as repository.py
     participant AI as openrouter.py
     participant Tool as tavily.py
 
-    TG->>Poll: Update (message)
-    Poll->>Msg: handle_message()
+    TG->>DP: Update (message)
+    DP->>Msg: handle_message()
     Msg->>DB: get_or_create_user/conversation
     Msg->>DB: add_message (user)
     Msg->>DB: get_conversation_with_messages
@@ -278,7 +273,7 @@ sequenceDiagram
         Msg->>TG: send_message_draft (every 0.5s)
     end
 
-    Msg->>TG: finalize_draft
+    Msg->>TG: send_message (finalized)
     Msg->>DB: add_message (assistant)
 ```
 
@@ -287,15 +282,15 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant TG as Telegram
-    participant Poll as polling.py
+    participant DP as Dispatcher
     participant Cmd as commands.py
     participant DB as repository.py
 
-    TG->>Poll: /thinking command
-    Poll->>Cmd: handle_thinking_command()
+    TG->>DP: /thinking command
+    DP->>Cmd: cmd_thinking()
     Cmd->>TG: send_message_draft
     Cmd->>DB: toggle_thinking()
-    Cmd->>TG: finalize_draft (new status)
+    Cmd->>TG: send_message (new status)
 ```
 
 ## Conventions
@@ -311,35 +306,39 @@ sequenceDiagram
 - **Repository**: Database access abstracted through Repository class
 - **Async Generator**: Streaming responses via `async for`
 - **Draft Messages**: Real-time updates using Telegram Bot API 9.3
+- **aiogram Routers**: Handlers organized by routers with decorator-based registration
 
 ### Naming
 - `*_client` suffix for API clients
-- `handle_*` prefix for handlers
+- `cmd_*` prefix for command handlers (aiogram convention)
+- `handle_*` prefix for message handlers
 - `get_or_create_*` for upsert operations
 - `*_file_id` for Telegram file references
+
+### Error Handling
+- aiogram uses exception-based error handling
+- `TelegramBadRequest` for API errors (check `"parse"` in message for markdown issues)
+- `TelegramRetryAfter` for rate limiting
 
 ## Gotchas
 
 ### Critical
-1. **Unhandled task exceptions**: Background tasks in `polling.py` created without awaiting
-2. **Silent failures**: Utils return `None` on error instead of raising
-3. **Deprecated datetime**: `datetime.utcnow` used in models (Python 3.12+ deprecation)
+1. **Deprecated datetime**: `datetime.utcnow` used in models (Python 3.12+ deprecation)
 
 ### Important
-4. **Model-specific behavior**: Reasoning extracted from `model_extra.get("reasoning")`
-5. **Hardcoded limits**: Max 6 tool rounds, 3900 char message length, 85 tokens per image
-6. **Rate limiting**: Handled for finalized messages, skipped for drafts
+2. **Model-specific behavior**: Reasoning extracted from `model_extra.get("reasoning")`
+3. **Hardcoded limits**: Max 6 tool rounds, 3900 char message length, 85 tokens per image
+4. **Silent failures**: File utilities return `None` on error instead of raising
 
 ### Architectural
-7. **Fire-and-forget**: Updates processed as background tasks (potential lost errors)
-8. **Manual transactions**: Repository uses `flush()`, caller must `commit()`
-9. **Thread safety**: Global singletons may cause issues in multi-threaded environments
+5. **Manual transactions**: Repository uses `flush()`, caller must `commit()`
+6. **Thread safety**: Global singletons may cause issues in multi-threaded environments
 
 ## Navigation Guide
 
 **To add a new command**:
-1. Add handler function in `bot/handlers/commands.py`
-2. Add routing in `bot/polling.py:process_update()`
+1. Add handler function in `bot/telegram/handlers/commands.py` with `@router.message(Command("name"))`
+2. Router is automatically included via `bot/telegram/handlers/__init__.py`
 
 **To add a new AI tool**:
 1. Add schema in `bot/ai/tools.py`
@@ -356,6 +355,6 @@ sequenceDiagram
 2. Check if model supports reasoning field in `model_extra` (for thinking traces)
 
 **To add new message content type**:
-1. Add utility in `bot/utils/` (like `image.py`, `pdf.py`)
-2. Update `bot/handlers/message.py:build_content()` to handle new type
+1. Add utility in `bot/telegram/files.py`
+2. Update `bot/telegram/handlers/messages.py:_build_content()` to handle new type
 3. Optionally add field to Message model for file_id storage

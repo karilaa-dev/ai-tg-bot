@@ -1,11 +1,10 @@
 """File download and base64 encoding utilities for Telegram."""
 
 import base64
+import io
 import logging
-from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from bot.handlers.telegram import TelegramClient
+from aiogram import Bot
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +17,26 @@ MIME_TYPES = {
 }
 
 
-async def _download_file(file_id: str, client: "TelegramClient") -> tuple[bytes, str] | None:
+async def _download_file(file_id: str, bot: Bot) -> tuple[bytes, str] | None:
     """Download a file from Telegram and return bytes with file path."""
-    file_info = await client.get_file(file_id)
-    if not file_info.get("ok"):
-        logger.error(f"Failed to get file info: {file_info}")
+    try:
+        file = await bot.get_file(file_id)
+        if not file.file_path:
+            logger.error(f"No file path returned for file_id: {file_id}")
+            return None
+
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        buffer.seek(0)
+        return buffer.read(), file.file_path
+    except Exception as e:
+        logger.error(f"Failed to download file: {e}")
         return None
 
-    file_path = file_info["result"]["file_path"]
-    file_data = await client.download_file(file_path)
-    return file_data, file_path
 
-
-async def download_and_encode_image(file_id: str, client: "TelegramClient") -> str | None:
+async def download_and_encode_image(file_id: str, bot: Bot) -> str | None:
     """Download an image from Telegram and encode it as base64 data URL."""
-    result = await _download_file(file_id, client)
+    result = await _download_file(file_id, bot)
     if not result:
         return None
 
@@ -43,13 +47,13 @@ async def download_and_encode_image(file_id: str, client: "TelegramClient") -> s
     return f"data:{mime_type};base64,{base64_data}"
 
 
-async def download_and_encode_pdf(file_id: str, client: "TelegramClient") -> tuple[str, str] | None:
+async def download_and_encode_pdf(file_id: str, bot: Bot) -> tuple[str, str] | None:
     """Download a PDF from Telegram and encode it as base64 data URL.
 
     Returns:
         Tuple of (base64 data URL, filename) or None if download fails
     """
-    result = await _download_file(file_id, client)
+    result = await _download_file(file_id, bot)
     if not result:
         return None
 

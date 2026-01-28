@@ -4,8 +4,7 @@ import asyncio
 import logging
 
 from bot.database.repository import repository
-from bot.handlers.telegram import telegram_client
-from bot.polling import start_polling
+from bot.telegram import bot, dp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,10 +21,10 @@ async def main() -> None:
 
     logger.info("Starting bot...")
     try:
-        await start_polling()
+        await dp.start_polling(bot, allowed_updates=["message"])
     finally:
         logger.info("Shutting down...")
-        await telegram_client.close()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
