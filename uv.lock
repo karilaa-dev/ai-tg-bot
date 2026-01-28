@@ -14,6 +14,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "sqlalchemy" },
     { name = "tavily-python" },
+    { name = "telegramify-markdown" },
     { name = "tiktoken" },
 ]
 
@@ -26,6 +27,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.0" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
     { name = "tavily-python", specifier = ">=0.7.0" },
+    { name = "telegramify-markdown", specifier = ">=0.5.4" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 
@@ -503,6 +505,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mistletoe"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/96/ea46a376a7c4cd56955ecdfff0ea68de43996a4e6d1aee4599729453bd11/mistletoe-1.4.0.tar.gz", hash = "sha256:1630f906e5e4bbe66fdeb4d29d277e2ea515d642bb18a9b49b136361a9818c9d", size = 107203 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/0f/b5e545f0c7962be90366af3418989b12cf441d9da1e5d89d88f2f3e5cf8f/mistletoe-1.4.0-py3-none-any.whl", hash = "sha256:44a477803861de1237ba22e375c6b617690a31d2902b47279d1f8f7ed498a794", size = 51304 },
+]
+
+[[package]]
 name = "multidict"
 version = "6.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -975,6 +986,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bd/e1/21639fc5904d52d66f217e3031cd28d1e2227fd3f3f0b7fb51582d2f6d26/tavily_python-0.7.19.tar.gz", hash = "sha256:b5c195f58f8df0886814e50e641ba10ef8e5ec72be1e884b8f4b3b99c49934cf", size = 21458 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/51/d6056841a4b440ba0a1703a9aff3a87b8be57c6bb5c42c6615696f01a890/tavily_python-0.7.19-py3-none-any.whl", hash = "sha256:b3d95041f22c5dff37255f65308379e4f8ccef8fe0d92b860815812b570f5ef2", size = 18340 },
+]
+
+[[package]]
+name = "telegramify-markdown"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mistletoe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/33/eb/8a3a557eec87c0fcd4c0939232fa5ea407801050370596daa4ca3e51a1db/telegramify_markdown-0.5.4.tar.gz", hash = "sha256:c32bd04e5a1c22519c011ccf7350a01b6d162e6cc9a9d89c83eff964d491007e", size = 40370 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/f0/4d07bcada3cddb66bccf061661b733e8512c5580e1bd11fba2aea1488d70/telegramify_markdown-0.5.4-py3-none-any.whl", hash = "sha256:7c806e12b6c7045d7723e064a0ff25afcb16c92c0d95385b61a57b8c53a430d3", size = 33536 },
 ]
 
 [[package]]

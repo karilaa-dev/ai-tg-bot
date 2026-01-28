@@ -1,5 +1,7 @@
 """Text formatting utilities for Telegram."""
 
+import telegramify_markdown
+
 SAFE_MESSAGE_LENGTH = 3900
 
 
@@ -11,62 +13,9 @@ def _escape_markdown_v2_full(text: str) -> str:
     return text
 
 
-def _escape_markdown_v2_light(text: str) -> str:
-    """Escape special chars outside of code blocks."""
-    text = text.replace("\\", "\\\\")
-    for char in "_*[]()~>#+-=|{}.!":
-        text = text.replace(char, f"\\{char}")
-    return text
-
-
-def escape_markdown_v2_preserve_code(text: str, close_incomplete: bool = False) -> str:
-    """Escape MarkdownV2 special chars, preserving code blocks and inline code."""
-    result = []
-    i = 0
-    n = len(text)
-
-    while i < n:
-        # Check for code block (```)
-        if text[i:i+3] == "```":
-            end = text.find("```", i + 3)
-            if end != -1:
-                result.append(text[i:end + 3])
-                i = end + 3
-                continue
-            else:
-                # Unclosed code block
-                result.append(text[i:] + "\n```" if close_incomplete else text[i:])
-                break
-
-        # Check for inline code (`)
-        if text[i] == "`":
-            end = text.find("`", i + 1)
-            if end != -1:
-                result.append(text[i:end + 1])
-                i = end + 1
-                continue
-            elif close_incomplete:
-                result.append(text[i:] + "`")
-                break
-
-        # Find next code marker
-        next_triple = text.find("```", i)
-        next_single = text.find("`", i)
-
-        if next_triple == -1 and next_single == -1:
-            result.append(_escape_markdown_v2_light(text[i:]))
-            break
-        elif next_triple == -1:
-            end = next_single
-        elif next_single == -1:
-            end = next_triple
-        else:
-            end = min(next_triple, next_single)
-
-        result.append(_escape_markdown_v2_light(text[i:end]))
-        i = end
-
-    return "".join(result)
+def convert_to_telegram_markdown(text: str) -> str:
+    """Convert standard Markdown to Telegram MarkdownV2 format."""
+    return telegramify_markdown.markdownify(text)
 
 
 def format_thinking_block(thinking: str) -> str:

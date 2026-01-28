@@ -11,9 +11,9 @@ from bot.database.repository import repository
 from bot.handlers.telegram import telegram_client
 from bot.utils import (
     SAFE_MESSAGE_LENGTH,
+    convert_to_telegram_markdown,
     download_and_encode_image,
     download_and_encode_pdf,
-    escape_markdown_v2_preserve_code,
     format_thinking_block,
     split_message,
     trim_messages_to_limit,
@@ -57,13 +57,13 @@ async def _send_with_markdown_fallback(
     chat_id: int,
     text: str,
     thread_id: int | None,
-    escape: bool = True,
+    convert: bool = True,
 ) -> dict[str, Any]:
     """Send message with MarkdownV2, falling back to plain text on parse errors."""
-    escaped = escape_markdown_v2_preserve_code(text) if escape else text
+    formatted = convert_to_telegram_markdown(text) if convert else text
     result = await telegram_client.send_message(
         chat_id=chat_id,
-        text=escaped,
+        text=formatted,
         message_thread_id=thread_id,
         parse_mode="MarkdownV2",
     )
@@ -179,15 +179,15 @@ async def handle_message(update: dict[str, Any]) -> None:
                     # Finalize thinking first
                     if show_thinking and reasoning and not thinking_finalized:
                         await _send_with_markdown_fallback(
-                            chat_id, format_thinking_block(reasoning), thread_id, escape=False
+                            chat_id, format_thinking_block(reasoning), thread_id, convert=False
                         )
                         thinking_finalized = True
 
                     # Send content part
-                    escaped = escape_markdown_v2_preserve_code(part, close_incomplete=ends_mid_block)
+                    formatted = convert_to_telegram_markdown(part)
                     result = await telegram_client.send_message(
                         chat_id=chat_id,
-                        text=escaped,
+                        text=formatted,
                         message_thread_id=thread_id,
                         parse_mode="MarkdownV2",
                     )
@@ -215,11 +215,11 @@ async def handle_message(update: dict[str, Any]) -> None:
             # Update content draft
             if preview.strip():
                 draft_text = ("```\n" + preview if in_code_block else preview)[:SAFE_MESSAGE_LENGTH]
-                escaped = escape_markdown_v2_preserve_code(draft_text, close_incomplete=True)
+                formatted = convert_to_telegram_markdown(draft_text)
                 result = await telegram_client.send_message_draft(
                     chat_id=chat_id,
                     draft_id=content_draft_id,
-                    text=escaped,
+                    text=formatted,
                     message_thread_id=thread_id,
                     parse_mode="MarkdownV2",
                 )
