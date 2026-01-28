@@ -2,59 +2,80 @@
 
 import asyncio
 import logging
+import time
 from typing import Any
 
-from bot.handlers.commands import handle_thinking_command
+from bot.database.repository import repository
 from bot.handlers.message import handle_message
 from bot.handlers.telegram import telegram_client
-from bot.database.repository import repository
 
 logger = logging.getLogger(__name__)
 
 
+async def _handle_thinking_command(
+    chat_id: int,
+    telegram_id: int,
+    message_thread_id: int | None = None,
+) -> None:
+    """Handle /thinking command to toggle thinking traces."""
+    draft_id = int(time.time() * 1000) % (2**31 - 1)
+
+    await telegram_client.send_message_draft(
+        chat_id=chat_id,
+        draft_id=draft_id,
+        text="Toggling thinking traces...",
+        message_thread_id=message_thread_id,
+    )
+
+    async with repository.session_factory() as session:
+        new_value = await repository.toggle_show_thinking(session, telegram_id)
+        await session.commit()
+
+    status = "enabled" if new_value else "disabled"
+    await telegram_client.send_message(
+        chat_id=chat_id,
+        text=f"Thinking traces {status}.",
+        message_thread_id=message_thread_id,
+    )
+
+
 async def process_update(update: dict[str, Any]) -> None:
     """Process a single update from Telegram."""
-    try:
-        message = update.get("message")
-        if not message:
-            return
+    message = update.get("message")
+    if not message:
+        return
 
-        text = message.get("text", "")
-        chat_id = message.get("chat", {}).get("id")
-        from_user = message.get("from", {})
-        telegram_id = from_user.get("id")
-        message_thread_id = message.get("message_thread_id")
+    text = message.get("text", "")
+    chat_id = message.get("chat", {}).get("id")
+    from_user = message.get("from", {})
+    telegram_id = from_user.get("id")
+    message_thread_id = message.get("message_thread_id")
 
-        if text.startswith("/thinking"):
-            async with repository.session_factory() as session:
-                await repository.get_or_create_user(
-                    session,
-                    telegram_id,
-                    from_user.get("username"),
-                    from_user.get("first_name"),
-                )
-                await session.commit()
-
-            await handle_thinking_command(
-                chat_id, telegram_id, message_thread_id
+    if text.startswith("/thinking"):
+        async with repository.session_factory() as session:
+            await repository.get_or_create_user(
+                session,
+                telegram_id,
+                from_user.get("username"),
+                from_user.get("first_name"),
             )
-            return
+            await session.commit()
 
-        if text.startswith("/start"):
-            await telegram_client.send_message(
-                chat_id=chat_id,
-                text="Hello! I'm an AI assistant. Send me a message, image, or PDF and I'll respond.",
-                message_thread_id=message_thread_id,
-            )
-            return
+        await _handle_thinking_command(chat_id, telegram_id, message_thread_id)
+        return
 
-        if text.startswith("/"):
-            return
+    if text.startswith("/start"):
+        await telegram_client.send_message(
+            chat_id=chat_id,
+            text="Hello! I'm an AI assistant. Send me a message, image, or PDF and I'll respond.",
+            message_thread_id=message_thread_id,
+        )
+        return
 
-        await handle_message(update)
+    if text.startswith("/"):
+        return
 
-    except Exception as e:
-        logger.exception(f"Error processing update: {e}")
+    await handle_message(update)
 
 
 async def start_polling() -> None:
@@ -75,12 +96,8 @@ async def start_polling() -> None:
                 await asyncio.sleep(1)
                 continue
 
-            updates = result.get("result", [])
-
-            for update in updates:
-                update_id = update.get("update_id", 0)
-                offset = update_id + 1
-
+            for update in result.get("result", []):
+                offset = update.get("update_id", 0) + 1
                 asyncio.create_task(process_update(update))
 
         except asyncio.CancelledError:
