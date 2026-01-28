@@ -19,21 +19,36 @@ def convert_to_telegram_markdown(text: str) -> str:
 
 
 def format_thinking_block(thinking: str) -> str:
-    """Format thinking as collapsed/expandable blockquote for MarkdownV2."""
+    """Format thinking as collapsed/expandable blockquote for MarkdownV2.
+
+    Telegram expandable blockquotes use **> for the first line, > for middle lines,
+    and || to close the expandable section.
+    """
     if not thinking:
         return ""
 
     escaped = _escape_markdown_v2_full(thinking)
     lines = escaped.split("\n")
 
-    # Expandable blockquote: first line **>, rest >, last ends with ||
-    if len(lines) == 1:
-        return f"**>{lines[0]}||"
+    # Build expandable blockquote: **>first line, >middle lines, last line||
+    quoted_lines = [f"**>{lines[0]}"]
+    quoted_lines.extend(f">{line}" for line in lines[1:])
+    quoted_lines[-1] += "||"
+    return "\n".join(quoted_lines)
 
-    result = [f"**>{lines[0]}"]
-    result.extend(f">{line}" for line in lines[1:-1])
-    result.append(f">{lines[-1]}||")
-    return "\n".join(result)
+
+def find_split_point(text: str, max_length: int) -> int:
+    """Find a good point to split text, preferring natural boundaries.
+
+    Searches for paragraph breaks, line breaks, sentence ends, then word breaks.
+    Returns max_length if no suitable boundary is found.
+    """
+    chunk = text[:max_length]
+    for sep in ["\n\n", "\n", ". ", " "]:
+        pos = chunk.rfind(sep)
+        if pos > max_length // 3:
+            return pos + len(sep)
+    return max_length
 
 
 def split_message(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]:
@@ -49,21 +64,8 @@ def split_message(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]
             parts.append(remaining)
             break
 
-        chunk = remaining[:max_length]
-
-        # Find a good split point - prefer paragraph, line, sentence, word
-        split_pos = None
-        for sep in ["\n\n", "\n", ". ", " "]:
-            pos = chunk.rfind(sep)
-            if pos > max_length // 3:
-                split_pos = pos + len(sep)
-                break
-
-        if split_pos:
-            parts.append(remaining[:split_pos].rstrip())
-            remaining = remaining[split_pos:].lstrip()
-        else:
-            parts.append(chunk)
-            remaining = remaining[max_length:]
+        split_pos = find_split_point(remaining, max_length)
+        parts.append(remaining[:split_pos].rstrip())
+        remaining = remaining[split_pos:].lstrip()
 
     return parts

@@ -14,6 +14,7 @@ from bot.utils import (
     convert_to_telegram_markdown,
     download_and_encode_image,
     download_and_encode_pdf,
+    find_split_point,
     format_thinking_block,
     split_message,
     trim_messages_to_limit,
@@ -75,16 +76,6 @@ async def _send_with_markdown_fallback(
             message_thread_id=thread_id,
         )
     return result
-
-
-def _find_split_point(text: str, max_length: int) -> int:
-    """Find a good point to split text, preferring natural boundaries."""
-    chunk = text[:max_length]
-    for sep in ["\n\n", "\n", ". ", " "]:
-        pos = chunk.rfind(sep)
-        if pos > max_length // 2:
-            return pos + len(sep)
-    return max_length
 
 
 def _generate_draft_id() -> int:
@@ -168,7 +159,7 @@ async def handle_message(update: dict[str, Any]) -> None:
 
             # Finalize and send if approaching limit
             if len(preview) >= SAFE_MESSAGE_LENGTH - 100:
-                split_point = _find_split_point(preview, SAFE_MESSAGE_LENGTH - 200)
+                split_point = find_split_point(preview, SAFE_MESSAGE_LENGTH - 200)
                 part = preview[:split_point].rstrip()
 
                 if part:
@@ -241,17 +232,8 @@ async def handle_message(update: dict[str, Any]) -> None:
     if show_thinking and reasoning and not thinking_finalized:
         thinking_msg = format_thinking_block(reasoning)
         if thinking_msg:
-            result = await telegram_client.send_message(
-                chat_id=chat_id,
-                text=thinking_msg,
-                message_thread_id=thread_id,
-                parse_mode="MarkdownV2",
-            )
-            if not result.get("ok"):
-                await telegram_client.send_message(
-                    chat_id=chat_id, text=reasoning, message_thread_id=thread_id
-                )
-        await asyncio.sleep(0.1)
+            await _send_with_markdown_fallback(chat_id, thinking_msg, thread_id, convert=False)
+            await asyncio.sleep(0.1)
 
     # Send remaining content
     final_content = content or "No response generated."
