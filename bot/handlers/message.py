@@ -114,6 +114,13 @@ async def handle_message(update: dict[str, Any]) -> None:
     # Prepare AI messages
     ai_messages = trim_messages_to_limit(await _format_history(db_messages))
 
+    # Send thinking indicator
+    await telegram_client.send_chat_action(chat_id, "typing", thread_id)
+    thinking_msg = await telegram_client.send_message(
+        chat_id, "🤔 Thinking...", message_thread_id=thread_id
+    )
+    thinking_message_id = thinking_msg.get("result", {}).get("message_id")
+
     # Stream response
     thinking_draft_id = _generate_draft_id()
     content_draft_id = (thinking_draft_id + 1) % (2**31 - 1)
@@ -122,6 +129,7 @@ async def handle_message(update: dict[str, Any]) -> None:
     sent_parts: list[str] = []
     thinking_finalized = False
     in_code_block = False
+    thinking_msg_replaced = False
 
     try:
         async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
@@ -174,6 +182,11 @@ async def handle_message(update: dict[str, Any]) -> None:
                         )
                         thinking_finalized = True
 
+                    # Delete thinking message if not yet done
+                    if not thinking_msg_replaced and thinking_message_id:
+                        await telegram_client.delete_message(chat_id, thinking_message_id)
+                        thinking_msg_replaced = True
+
                     # Send content part
                     formatted = convert_to_telegram_markdown(part)
                     result = await telegram_client.send_message(
@@ -205,6 +218,11 @@ async def handle_message(update: dict[str, Any]) -> None:
 
             # Update content draft
             if preview.strip():
+                # Delete the "Thinking..." message when first content arrives
+                if not thinking_msg_replaced and thinking_message_id:
+                    await telegram_client.delete_message(chat_id, thinking_message_id)
+                    thinking_msg_replaced = True
+
                 draft_text = ("```\n" + preview if in_code_block else preview)[:SAFE_MESSAGE_LENGTH]
                 formatted = convert_to_telegram_markdown(draft_text)
                 result = await telegram_client.send_message_draft(
@@ -244,10 +262,19 @@ async def handle_message(update: dict[str, Any]) -> None:
         if in_code_block:
             remaining = "```\n" + remaining
 
+        # Delete thinking message if not yet done
+        if not thinking_msg_replaced and thinking_message_id:
+            await telegram_client.delete_message(chat_id, thinking_message_id)
+            thinking_msg_replaced = True
+
         for i, part in enumerate(split_message(remaining)):
             if i > 0 or sent_parts:
                 await asyncio.sleep(0.1)
             await _send_with_markdown_fallback(chat_id, part, thread_id)
+
+    # Delete thinking message if it somehow wasn't deleted yet
+    if not thinking_msg_replaced and thinking_message_id:
+        await telegram_client.delete_message(chat_id, thinking_message_id)
 
     # Save assistant response
     async with repository.session_factory() as session:

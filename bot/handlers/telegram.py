@@ -133,5 +133,31 @@ class TelegramClient:
 
         return await self._request("POST", "sendChatAction", json=data)
 
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit an existing message's text."""
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+
+        return await self._request("POST", "editMessageText", json=data)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> dict[str, Any]:
+        """Delete a message."""
+        data: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        return await self._request("POST", "deleteMessage", json=data)
+
 
 telegram_client = TelegramClient()

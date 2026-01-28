@@ -139,11 +139,12 @@ class OpenRouterClient:
 
                     delta = chunk.choices[0].delta
 
-                    # Reasoning from model_extra
-                    if show_thinking and hasattr(delta, "model_extra") and delta.model_extra:
+                    # Reasoning from model_extra (always capture, but only yield when show_thinking)
+                    if hasattr(delta, "model_extra") and delta.model_extra:
                         if r := delta.model_extra.get("reasoning"):
                             reasoning += r
-                            yield StreamChunk(reasoning=r)
+                            if show_thinking:
+                                yield StreamChunk(reasoning=r)
 
                     # Content
                     if delta and delta.content:
