@@ -32,6 +32,19 @@ def _generate_draft_id() -> int:
     return int(time.time() * 1000) % (2**31 - 1)
 
 
+def _get_tool_status_text(tool_name: str) -> str:
+    """Get user-friendly status text for a tool."""
+    tool_display_map = {
+        "web_search": "Searching web\\.\\.\\.",
+        "extract_webpage": "Reading webpage\\.\\.\\.",
+    }
+    return tool_display_map.get(tool_name, f"Using {tool_name}\\.\\.\\.")
+
+
+# Minimum characters to confirm final response (tool planning is typically shorter)
+FINAL_CONTENT_MIN_LENGTH = 100
+
+
 async def _build_content(
     text: str, image_id: str | None, pdf_id: str | None, bot: Bot
 ) -> str | list[dict[str, Any]]:
@@ -153,12 +166,11 @@ async def handle_message(message: Message, bot: Bot) -> None:
     # Prepare AI messages
     ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
 
-    # Send thinking indicator
+    # Send thinking indicator (only when not showing thinking blocks)
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
-    thinking_msg = await bot.send_message(
-        chat_id, "Thinking\\.\\.\\.", message_thread_id=thread_id
-    )
-    thinking_message_id = thinking_msg.message_id
+
+    # Use a unified draft for status/content (when not showing full thinking)
+    status_draft_id = _generate_draft_id() if not show_thinking else None
 
     # Stream response
     thinking_draft_id = _generate_draft_id()
@@ -170,13 +182,28 @@ async def handle_message(message: Message, bot: Bot) -> None:
     in_code_block = False
     thinking_msg_replaced = False
     pending_tool: str | None = None
+    current_thinking_text = "Thinking\\.\\.\\."
+    any_tool_used = False
+    final_content_confirmed = False
 
     try:
+        # Send initial "Thinking..." as draft
+        if status_draft_id:
+            await _send_draft_with_fallback(
+                bot, chat_id, status_draft_id, "Thinking\\.\\.\\.", thread_id
+            )
         async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
             # Prepend tool indicator when new thinking arrives after tool use
             if chunk.reasoning and pending_tool:
                 reasoning += f"(Used {pending_tool})\n"
                 pending_tool = None
+                # Restore "Thinking..." after tool completes
+                if status_draft_id and not thinking_msg_replaced:
+                    if current_thinking_text != "Thinking\\.\\.\\.":
+                        await _send_draft_with_fallback(
+                            bot, chat_id, status_draft_id, "Thinking\\.\\.\\.", thread_id
+                        )
+                        current_thinking_text = "Thinking\\.\\.\\."
             reasoning += chunk.reasoning
             content += chunk.content
             if chunk.is_tool_use:
@@ -187,6 +214,18 @@ async def handle_message(message: Message, bot: Bot) -> None:
                     reasoning += f"\n{step_content.strip()}\n"
                     sent_parts.append(step_content)
                 pending_tool = chunk.tool_name
+                any_tool_used = True
+                final_content_confirmed = False  # Reset - this content was pre-tool
+                thinking_msg_replaced = False  # Reset - draft should show tool status now
+                # Abandon current content draft by generating new ID
+                content_draft_id = _generate_draft_id()
+                # Update status draft to show tool status
+                if status_draft_id:
+                    new_text = _get_tool_status_text(chunk.tool_name)
+                    await _send_draft_with_fallback(
+                        bot, chat_id, status_draft_id, new_text, thread_id
+                    )
+                    current_thinking_text = new_text
 
             if time.time() - last_update < 0.5:
                 continue
@@ -224,14 +263,6 @@ async def handle_message(message: Message, bot: Bot) -> None:
                             bot, chat_id, format_thinking_block(reasoning), thread_id, convert=False
                         )
                         thinking_finalized = True
-
-                    # Delete thinking message if not yet done
-                    if not thinking_msg_replaced and thinking_message_id:
-                        try:
-                            await bot.delete_message(chat_id, thinking_message_id)
-                        except TelegramBadRequest:
-                            pass
-                        thinking_msg_replaced = True
 
                     # Send content part
                     formatted = convert_to_telegram_markdown(part)
@@ -272,20 +303,33 @@ async def handle_message(message: Message, bot: Bot) -> None:
                     continue
 
             # Update content draft
-            if preview.strip():
-                # Delete the "Thinking..." message when first content arrives
-                if not thinking_msg_replaced and thinking_message_id:
-                    try:
-                        await bot.delete_message(chat_id, thinking_message_id)
-                    except TelegramBadRequest:
-                        pass
-                    thinking_msg_replaced = True
+            if preview.strip() and (not show_thinking or thinking_finalized):
+                if status_draft_id:
+                    # Wait for 100+ chars before streaming (avoids showing pre-tool planning)
+                    if not final_content_confirmed:
+                        if len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
+                            final_content_confirmed = True
+                        # Don't stream yet - wait for confirmation or stream ends
 
-                draft_text = ("```\n" + preview if in_code_block else preview)[:SAFE_MESSAGE_LENGTH]
-                formatted = convert_to_telegram_markdown(draft_text)
-                await _send_draft_with_fallback(
-                    bot, chat_id, content_draft_id, draft_text, thread_id, formatted
-                )
+                    if final_content_confirmed:
+                        # Use the status draft that showed "Thinking..."
+                        draft_text = ("```\n" + preview if in_code_block else preview)[
+                            :SAFE_MESSAGE_LENGTH
+                        ]
+                        formatted = convert_to_telegram_markdown(draft_text)
+                        await _send_draft_with_fallback(
+                            bot, chat_id, status_draft_id, draft_text, thread_id, formatted
+                        )
+                        thinking_msg_replaced = True  # Draft now shows content, not status
+                else:
+                    # show_thinking mode: use separate content draft (no threshold)
+                    draft_text = ("```\n" + preview if in_code_block else preview)[
+                        :SAFE_MESSAGE_LENGTH
+                    ]
+                    formatted = convert_to_telegram_markdown(draft_text)
+                    await _send_draft_with_fallback(
+                        bot, chat_id, content_draft_id, draft_text, thread_id, formatted
+                    )
 
             last_update = time.time()
 
@@ -309,25 +353,19 @@ async def handle_message(message: Message, bot: Bot) -> None:
         if in_code_block:
             remaining = "```\n" + remaining
 
-        # Delete thinking message if not yet done
-        if not thinking_msg_replaced and thinking_message_id:
-            try:
-                await bot.delete_message(chat_id, thinking_message_id)
-            except TelegramBadRequest:
-                pass
-            thinking_msg_replaced = True
+        parts = split_message(remaining)
 
-        for i, part in enumerate(split_message(remaining)):
+        # Update draft with final content before sending (smooth transition)
+        if status_draft_id and not sent_parts:
+            formatted = convert_to_telegram_markdown(parts[0])
+            await _send_draft_with_fallback(
+                bot, chat_id, status_draft_id, parts[0], thread_id, formatted
+            )
+
+        for i, part in enumerate(parts):
             if i > 0 or sent_parts:
                 await asyncio.sleep(0.1)
             await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
-
-    # Delete thinking message if it somehow wasn't deleted yet
-    if not thinking_msg_replaced and thinking_message_id:
-        try:
-            await bot.delete_message(chat_id, thinking_message_id)
-        except TelegramBadRequest:
-            pass
 
     # Save assistant response
     async with repository.session_factory() as session:
