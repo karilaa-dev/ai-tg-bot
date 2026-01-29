@@ -249,7 +249,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
             sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
             current_thinking = reasoning[sent_thinking_len:]
 
-            if show_thinking and current_thinking and not thinking_finalized and not pending_tool:
+            if show_thinking and current_thinking and not thinking_finalized and not pending_tool and not final_content_confirmed:
                 # Check for thinking overflow (~3800 chars formatted)
                 thinking_expanded = format_thinking_expanded(current_thinking)
                 if len(thinking_expanded) >= SAFE_MESSAGE_LENGTH - 100:
@@ -344,15 +344,15 @@ async def handle_message(message: Message, bot: Bot) -> None:
                     last_update = time.time()
                     continue
 
-            # Update content draft (when thinking is finalized or not showing thinking)
-            if preview.strip() and (not show_thinking or thinking_finalized):
-                # Wait for 100+ chars before streaming (avoids showing pre-tool planning)
-                if not final_content_confirmed:
-                    if len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
-                        final_content_confirmed = True
-                    # Don't stream yet - wait for confirmation or stream ends
+            # Check for final content confirmation (both modes)
+            if preview.strip() and not final_content_confirmed:
+                if len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
+                    final_content_confirmed = True
 
-                if final_content_confirmed:
+            # Update content draft
+            if preview.strip() and final_content_confirmed:
+                if not show_thinking or thinking_finalized:
+                    # Non-thinking mode or thinking already finalized: stream content directly
                     draft_text = ("```\n" + preview if in_code_block else preview)[
                         :SAFE_MESSAGE_LENGTH
                     ]
@@ -360,18 +360,18 @@ async def handle_message(message: Message, bot: Bot) -> None:
                     await _send_draft_with_fallback(
                         bot, chat_id, unified_draft_id, draft_text, thread_id, formatted
                     )
-                    thinking_msg_replaced = True  # Draft now shows content, not status
-            elif show_thinking and not thinking_finalized and final_content_confirmed:
-                # Transition: collapse thinking and show combined draft
-                sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-                current_thinking = reasoning[sent_thinking_len:]
-                if current_thinking and preview.strip():
-                    combined = format_thinking_with_content(current_thinking, preview)
-                    if len(combined) <= SAFE_MESSAGE_LENGTH:
-                        await _send_draft_with_fallback(
-                            bot, chat_id, unified_draft_id, combined, thread_id, combined
-                        )
-                        thinking_msg_replaced = True
+                    thinking_msg_replaced = True
+                else:
+                    # show_thinking mode with thinking not finalized: show combined draft
+                    sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
+                    current_thinking = reasoning[sent_thinking_len:]
+                    if current_thinking:
+                        combined = format_thinking_with_content(current_thinking, preview)
+                        if len(combined) <= SAFE_MESSAGE_LENGTH:
+                            await _send_draft_with_fallback(
+                                bot, chat_id, unified_draft_id, combined, thread_id, combined
+                            )
+                            thinking_msg_replaced = True
 
             last_update = time.time()
 
