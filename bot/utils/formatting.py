@@ -18,11 +18,24 @@ def convert_to_telegram_markdown(text: str) -> str:
     return telegramify_markdown.markdownify(text)
 
 
-def format_thinking_block(thinking: str) -> str:
+def format_thinking_expanded(thinking: str) -> str:
+    """Format thinking as expanded blockquote for MarkdownV2 (visible while streaming).
+
+    Uses standard blockquote format (>line) which displays fully expanded.
+    """
+    if not thinking:
+        return ""
+
+    escaped = _escape_markdown_v2_full(thinking)
+    lines = escaped.split("\n")
+    return "\n".join(f">{line}" for line in lines)
+
+
+def format_thinking_collapsed(thinking: str) -> str:
     """Format thinking as collapsed/expandable blockquote for MarkdownV2.
 
     Telegram expandable blockquotes use **> for the first line, > for middle lines,
-    and || to close the expandable section.
+    and || to close the expandable section. Collapsed by default.
     """
     if not thinking:
         return ""
@@ -35,6 +48,48 @@ def format_thinking_block(thinking: str) -> str:
     quoted_lines.extend(f">{line}" for line in lines[1:])
     quoted_lines[-1] += "||"
     return "\n".join(quoted_lines)
+
+
+# Keep for backwards compatibility
+format_thinking_block = format_thinking_collapsed
+
+
+def format_thinking_with_content(thinking: str, content: str) -> str:
+    """Combine collapsed thinking block with content for final message.
+
+    Returns MarkdownV2 formatted string with collapsed thinking + separator + content.
+    """
+    if not thinking:
+        return convert_to_telegram_markdown(content)
+
+    thinking_block = format_thinking_collapsed(thinking)
+    content_formatted = convert_to_telegram_markdown(content)
+    return f"{thinking_block}\n\n{content_formatted}"
+
+
+def split_thinking(thinking: str, max_length: int) -> tuple[str, str]:
+    """Split thinking at safe boundary for overflow handling.
+
+    Args:
+        thinking: Raw thinking text (unescaped)
+        max_length: Maximum length for formatted output
+
+    Returns:
+        Tuple of (part_to_send_raw, remaining_raw_text)
+    """
+    if not thinking:
+        return "", ""
+
+    # Estimate raw text length that fits in max_length when formatted
+    # Collapsed format adds ~4 chars overhead (**>, ||) plus escaping (~20% overhead)
+    estimated_raw_limit = int(max_length * 0.8) - 10
+
+    if len(thinking) <= estimated_raw_limit:
+        return thinking, ""
+
+    # Find a good split point in raw text
+    split_pos = find_split_point(thinking, estimated_raw_limit)
+    return thinking[:split_pos].rstrip(), thinking[split_pos:].lstrip()
 
 
 def find_split_point(text: str, max_length: int) -> int:
