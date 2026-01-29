@@ -8,10 +8,9 @@ An AI-powered Telegram bot with streaming responses, tool support (web search an
 
 **Structure**:
 - `main.py` - Entry point, starts aiogram polling
-- `bot/ai/` - OpenRouter client with streaming and tool calling
+- `bot/ai/` - OpenRouter client with streaming, tool calling, and Tavily integration
 - `bot/database/` - SQLAlchemy models and repository
 - `bot/telegram/` - aiogram Bot, Dispatcher, and handlers
-- `bot/tools/` - Tavily web search integration
 - `bot/utils/` - Formatting, token counting
 
 For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
