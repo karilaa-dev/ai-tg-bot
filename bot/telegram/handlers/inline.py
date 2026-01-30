@@ -1,8 +1,5 @@
 """Inline query handlers for sharing invite codes."""
 
-import random
-import string
-
 from aiogram import Router
 from aiogram.types import (
     InlineKeyboardButton,
@@ -16,6 +13,7 @@ from bot.config import settings
 from bot.database.repository import repository
 from bot.i18n import Language, get_text
 from bot.telegram.bot import bot
+from bot.utils import generate_invite_code
 
 router = Router(name="inline")
 
@@ -26,27 +24,56 @@ LANG_NAMES = {
 }
 
 
-def _generate_invite_code() -> str:
-    """Generate a random alphanumeric invite code."""
-    chars = string.ascii_lowercase + string.digits
-    return "".join(random.choices(chars, k=8))
-
-
 async def _get_or_create_custom_code(code: str, created_by: int) -> str:
     """Get or create a custom invite code, adding uses if exhausted."""
     async with repository.session_factory() as session:
         existing = await repository.get_invite_code(session, code)
         if existing:
-            # Check if exhausted
             if existing.max_uses is not None and existing.current_uses >= existing.max_uses:
-                # Add +1 to max_uses
                 await repository.add_invite_uses(session, code, 1)
                 await session.commit()
         else:
-            # Create new code with max_uses=1
             await repository.create_invite_code(session, code, created_by, max_uses=1)
             await session.commit()
     return code
+
+
+async def _create_random_code(created_by: int) -> str:
+    """Generate and store a random invite code."""
+    code = generate_invite_code()
+    async with repository.session_factory() as session:
+        existing = await repository.get_invite_code(session, code)
+        if not existing:
+            await repository.create_invite_code(session, code, created_by, max_uses=1)
+            await session.commit()
+    return code
+
+
+def _build_invite_result(
+    code: str, lang: Language, bot_username: str, bot_name: str
+) -> InlineQueryResultArticle:
+    """Build an inline query result for an invite code."""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=get_text("inline_join_button", lang),
+                    url=f"https://t.me/{bot_username}?text=/code {code}",
+                )
+            ]
+        ]
+    )
+
+    return InlineQueryResultArticle(
+        id=f"{code}_{lang.value}",
+        title=get_text("inline_new_invite_title", lang, lang_name=LANG_NAMES[lang]),
+        description=get_text("inline_new_invite_desc", lang),
+        input_message_content=InputTextMessageContent(
+            message_text=get_text("invite_share_message", lang, bot_name=bot_name, code=code),
+            parse_mode="MarkdownV2",
+        ),
+        reply_markup=keyboard,
+    )
 
 
 @router.inline_query()
@@ -62,87 +89,22 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
         await inline_query.answer([], cache_time=60)
         return
 
-    # Get bot info
     bot_info = await bot.get_me()
     bot_username = bot_info.username
     bot_name = bot_info.first_name or "AI Bot"
 
-    # Check for custom code in query
     custom_code = inline_query.query.strip() if inline_query.query else None
-
-    results: list[InlineQueryResultArticle] = []
     languages = [Language.EN, Language.RU, Language.UK]
 
+    results: list[InlineQueryResultArticle] = []
+
     if custom_code:
-        # Use custom code for all languages
         code = await _get_or_create_custom_code(custom_code, telegram_id)
         for lang in languages:
-            result_id = f"{code}_{lang.value}"
-            title = get_text("inline_new_invite_title", lang, lang_name=LANG_NAMES[lang])
-            description = get_text("inline_new_invite_desc", lang)
-            invite_message = get_text(
-                "invite_share_message", lang, bot_name=bot_name, code=code
-            )
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=get_text("inline_join_button", lang),
-                            url=f"https://t.me/{bot_username}?text=/code {code}",
-                        )
-                    ]
-                ]
-            )
-            results.append(
-                InlineQueryResultArticle(
-                    id=result_id,
-                    title=title,
-                    description=description,
-                    input_message_content=InputTextMessageContent(
-                        message_text=invite_message,
-                        parse_mode="MarkdownV2",
-                    ),
-                    reply_markup=keyboard,
-                )
-            )
+            results.append(_build_invite_result(code, lang, bot_username, bot_name))
     else:
-        # Generate random codes for each language
         for lang in languages:
-            code = _generate_invite_code()
-
-            async with repository.session_factory() as session:
-                existing = await repository.get_invite_code(session, code)
-                if not existing:
-                    await repository.create_invite_code(session, code, telegram_id, max_uses=1)
-                    await session.commit()
-
-            result_id = f"{code}_{lang.value}"
-            title = get_text("inline_new_invite_title", lang, lang_name=LANG_NAMES[lang])
-            description = get_text("inline_new_invite_desc", lang)
-            invite_message = get_text(
-                "invite_share_message", lang, bot_name=bot_name, code=code
-            )
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=get_text("inline_join_button", lang),
-                            url=f"https://t.me/{bot_username}?text=/code {code}",
-                        )
-                    ]
-                ]
-            )
-            results.append(
-                InlineQueryResultArticle(
-                    id=result_id,
-                    title=title,
-                    description=description,
-                    input_message_content=InputTextMessageContent(
-                        message_text=invite_message,
-                        parse_mode="MarkdownV2",
-                    ),
-                    reply_markup=keyboard,
-                )
-            )
+            code = await _create_random_code(telegram_id)
+            results.append(_build_invite_result(code, lang, bot_username, bot_name))
 
     await inline_query.answer(results, cache_time=0, is_personal=True)

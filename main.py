@@ -17,45 +17,45 @@ logging.basicConfig(
 logging.getLogger("bot.ai").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# User commands (visible to everyone)
+USER_COMMAND_KEYS = [
+    ("start", "cmd_start_desc"),
+    ("help", "cmd_help_desc"),
+    ("thinking", "cmd_thinking_desc"),
+    ("redo", "cmd_redo_desc"),
+    ("edit", "cmd_edit_desc"),
+    ("lang", "cmd_lang_desc"),
+    ("code", "cmd_code_desc"),
+]
+
+# Admin commands (only visible to admins)
+ADMIN_COMMAND_KEYS = [
+    ("invite", "cmd_invite_desc"),
+    ("invites", "cmd_invites_desc"),
+    ("deleteinvite", "cmd_deleteinvite_desc"),
+    ("approve", "cmd_approve_desc"),
+]
+
+
+def make_commands(keys: list[tuple[str, str]], lang: Language) -> list[BotCommand]:
+    """Build BotCommand list from command key pairs."""
+    return [
+        BotCommand(command=cmd, description=get_text(desc_key, lang))
+        for cmd, desc_key in keys
+    ]
+
 
 async def set_bot_commands() -> None:
     """Register bot commands for each supported language."""
-    # User commands (visible to everyone)
-    user_commands_keys = [
-        ("start", "cmd_start_desc"),
-        ("help", "cmd_help_desc"),
-        ("thinking", "cmd_thinking_desc"),
-        ("redo", "cmd_redo_desc"),
-        ("edit", "cmd_edit_desc"),
-        ("lang", "cmd_lang_desc"),
-        ("code", "cmd_code_desc"),
-    ]
-
-    # Admin commands (only visible to admins)
-    admin_commands_keys = [
-        ("invite", "cmd_invite_desc"),
-        ("invites", "cmd_invites_desc"),
-        ("deleteinvite", "cmd_deleteinvite_desc"),
-        ("approve", "cmd_approve_desc"),
-    ]
-
     for lang in Language:
-        # Register user commands for everyone
-        user_commands = [
-            BotCommand(command=cmd, description=get_text(desc_key, lang))
-            for cmd, desc_key in user_commands_keys
-        ]
+        user_commands = make_commands(USER_COMMAND_KEYS, lang)
         await bot.set_my_commands(
             user_commands,
             scope=BotCommandScopeDefault(),
             language_code=lang.value,
         )
 
-        # Register all commands (user + admin) for each admin
-        all_commands = user_commands + [
-            BotCommand(command=cmd, description=get_text(desc_key, lang))
-            for cmd, desc_key in admin_commands_keys
-        ]
+        all_commands = user_commands + make_commands(ADMIN_COMMAND_KEYS, lang)
         for admin_id in settings.admin_ids:
             await bot.set_my_commands(
                 all_commands,

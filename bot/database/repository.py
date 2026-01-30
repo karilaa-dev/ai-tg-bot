@@ -1,6 +1,6 @@
 """Database repository for CRUD operations."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -75,7 +75,7 @@ class Repository:
             session.add(conversation)
             await session.flush()
         else:
-            conversation.updated_at = datetime.utcnow()
+            conversation.updated_at = datetime.now(UTC)
 
         return conversation
 
@@ -229,7 +229,7 @@ class Repository:
         """Get active invite code by string."""
         stmt = select(InviteCode).where(
             InviteCode.code == code,
-            InviteCode.is_active == True,  # noqa: E712
+            InviteCode.is_active.is_(True),
         )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
@@ -241,7 +241,7 @@ class Repository:
         """List all active invite codes."""
         stmt = (
             select(InviteCode)
-            .where(InviteCode.is_active == True)  # noqa: E712
+            .where(InviteCode.is_active.is_(True))
             .order_by(desc(InviteCode.created_at))
         )
         result = await session.execute(stmt)

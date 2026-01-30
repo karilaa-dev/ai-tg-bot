@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from openai import AsyncOpenAI
+from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
 from tavily import AsyncTavilyClient
 
 from bot.config import settings
@@ -72,33 +73,69 @@ def _get_tavily() -> AsyncTavilyClient:
     return _tavily
 
 
+def _create_empty_tool_call() -> dict[str, Any]:
+    """Create an empty tool call structure for accumulation."""
+    return {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+
+
+def _accumulate_tool_call(tool_calls: list[dict[str, Any]], delta: ChoiceDeltaToolCall) -> None:
+    """Accumulate streaming tool call delta into tool_calls list."""
+    idx = delta.index or 0
+
+    while len(tool_calls) <= idx:
+        tool_calls.append(_create_empty_tool_call())
+
+    tc = tool_calls[idx]
+
+    if delta.id:
+        tc["id"] = delta.id
+
+    if delta.function:
+        if delta.function.name:
+            tc["function"]["name"] = delta.function.name
+        if delta.function.arguments:
+            tc["function"]["arguments"] += delta.function.arguments
+
+
+def _format_search_results(query: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Format Tavily search results for tool response."""
+    return {
+        "query": query,
+        "results": [
+            {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
+            for r in results
+        ],
+    }
+
+
+def _format_extract_result(url: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Format Tavily extract results for tool response."""
+    if results:
+        return {"url": url, "content": results[0].get("raw_content", "")}
+    return {"url": url, "content": "", "error": "No content extracted"}
+
+
 async def _execute_tool(name: str, args: dict[str, Any]) -> str:
     """Execute a tool and return JSON result."""
     tavily = _get_tavily()
-    if name == "web_search":
-        result = await tavily.search(
-            query=args["query"],
-            max_results=5,
-            search_depth="basic",
-        )
-        formatted = {
-            "query": args["query"],
-            "results": [
-                {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
-                for r in result.get("results", [])
-            ],
-        }
-        return json.dumps(formatted, ensure_ascii=False)
-    elif name == "extract_webpage":
-        result = await tavily.extract(urls=[args["url"]])
-        results = result.get("results", [])
-        if results:
-            formatted = {"url": args["url"], "content": results[0].get("raw_content", "")}
-        else:
-            formatted = {"url": args["url"], "content": "", "error": "No content extracted"}
-        return json.dumps(formatted, ensure_ascii=False)
-    else:
-        return json.dumps({"error": f"Unknown tool: {name}"})
+
+    match name:
+        case "web_search":
+            result = await tavily.search(
+                query=args["query"],
+                max_results=5,
+                search_depth="basic",
+            )
+            formatted = _format_search_results(args["query"], result.get("results", []))
+
+        case "extract_webpage":
+            result = await tavily.extract(urls=[args["url"]])
+            formatted = _format_extract_result(args["url"], result.get("results", []))
+
+        case _:
+            formatted = {"error": f"Unknown tool: {name}"}
+
+    return json.dumps(formatted, ensure_ascii=False)
 
 
 class OpenRouterClient:
@@ -140,11 +177,11 @@ class OpenRouterClient:
                     delta = chunk.choices[0].delta
 
                     # Reasoning from model_extra (always capture, but only yield when show_thinking)
-                    if hasattr(delta, "model_extra") and delta.model_extra:
-                        if r := delta.model_extra.get("reasoning"):
-                            reasoning += r
-                            if show_thinking:
-                                yield StreamChunk(reasoning=r)
+                    reasoning_delta = getattr(delta, "model_extra", {}).get("reasoning") if delta else None
+                    if reasoning_delta:
+                        reasoning += reasoning_delta
+                        if show_thinking:
+                            yield StreamChunk(reasoning=reasoning_delta)
 
                     # Content
                     if delta and delta.content:
@@ -154,16 +191,7 @@ class OpenRouterClient:
                     # Tool calls
                     if delta and delta.tool_calls:
                         for tc in delta.tool_calls:
-                            idx = tc.index or 0
-                            while len(tool_calls) <= idx:
-                                tool_calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                            if tc.id:
-                                tool_calls[idx]["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls[idx]["function"]["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+                            _accumulate_tool_call(tool_calls, tc)
 
             except Exception as e:
                 logger.error(f"Stream error: {e}")

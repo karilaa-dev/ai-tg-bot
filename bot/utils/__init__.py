@@ -8,6 +8,7 @@ from bot.utils.formatting import (
     format_thinking_expanded,
     format_thinking_with_content,
     generate_draft_id,
+    generate_invite_code,
     split_message,
     split_thinking,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "format_thinking_expanded",
     "format_thinking_with_content",
     "generate_draft_id",
+    "generate_invite_code",
     "split_message",
     "split_thinking",
     "trim_messages_to_limit",

@@ -1,39 +1,20 @@
 """Admin command handlers for the Telegram bot."""
 
-import random
-import string
-
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.config import settings
 from bot.database.repository import repository
-from bot.i18n import Language, get_text
+from bot.i18n import Language, get_text, get_user_language
 from bot.telegram.bot import bot
 from bot.telegram.filters import AdminFilter
+from bot.utils import generate_invite_code
 
 router = Router(name="admin")
 router.message.filter(AdminFilter())
 
 
-async def _get_admin_lang(telegram_id: int) -> Language:
-    """Get admin's language preference."""
-    async with repository.session_factory() as session:
-        lang_code = await repository.get_user_language(session, telegram_id)
-    try:
-        return Language(lang_code)
-    except ValueError:
-        return Language.EN
-
-
-def _generate_invite_code() -> str:
-    """Generate a random alphanumeric invite code."""
-    chars = string.ascii_lowercase + string.digits
-    return "".join(random.choices(chars, k=8))
-
-
-async def _build_invite_message_async(code: str, lang: Language) -> tuple[str, InlineKeyboardMarkup]:
+async def _build_invite_message(code: str, lang: Language) -> tuple[str, InlineKeyboardMarkup]:
     """Build invite message and keyboard."""
     info = await bot.get_me()
     bot_name = info.first_name or "AI Bot"
@@ -69,36 +50,21 @@ async def cmd_invite(message: Message) -> None:
         return
 
     telegram_id = message.from_user.id
-    lang = await _get_admin_lang(telegram_id)
+    lang = await get_user_language(telegram_id)
 
-    # Parse arguments
-    text = message.text or ""
-    parts = text.split()[1:]  # Remove /invite
+    # Parse arguments: /invite [code] [max_uses]
+    parts = (message.text or "").split()[1:]
+    code = None
+    max_uses = 1
 
-    code: str | None = None
-    max_uses: int | None = None
+    for part in parts:
+        if part.isdigit():
+            max_uses = int(part)
+        elif code is None:
+            code = part
 
-    if len(parts) == 0:
-        # /invite - random code, 1 use (default)
-        code = _generate_invite_code()
-        max_uses = 1
-    elif len(parts) == 1:
-        # Could be /invite mycode or /invite 5
-        if parts[0].isdigit():
-            # /invite 5 - random code, 5 uses
-            code = _generate_invite_code()
-            max_uses = int(parts[0])
-        else:
-            # /invite mycode - custom code, 1 use (default)
-            code = parts[0]
-            max_uses = 1
-    elif len(parts) >= 2:
-        # /invite mycode 5
-        code = parts[0]
-        if parts[1].isdigit():
-            max_uses = int(parts[1])
-        else:
-            max_uses = 1
+    if code is None:
+        code = generate_invite_code()
 
     async with repository.session_factory() as session:
         # Check if code already exists
@@ -121,7 +87,7 @@ async def cmd_invite(message: Message) -> None:
     await message.answer(admin_response, parse_mode="MarkdownV2")
 
     # Send the shareable invite message
-    invite_msg, keyboard = await _build_invite_message_async(code, lang)
+    invite_msg, keyboard = await _build_invite_message(code, lang)
     await message.answer(invite_msg, parse_mode="MarkdownV2", reply_markup=keyboard)
 
 
@@ -132,7 +98,7 @@ async def cmd_invites(message: Message) -> None:
         return
 
     telegram_id = message.from_user.id
-    lang = await _get_admin_lang(telegram_id)
+    lang = await get_user_language(telegram_id)
 
     async with repository.session_factory() as session:
         codes = await repository.get_all_invite_codes(session)
@@ -170,7 +136,7 @@ async def cmd_deleteinvite(message: Message) -> None:
         return
 
     telegram_id = message.from_user.id
-    lang = await _get_admin_lang(telegram_id)
+    lang = await get_user_language(telegram_id)
 
     # Parse code argument
     text = message.text or ""
@@ -202,7 +168,7 @@ async def cmd_approve(message: Message) -> None:
         return
 
     telegram_id = message.from_user.id
-    lang = await _get_admin_lang(telegram_id)
+    lang = await get_user_language(telegram_id)
 
     # Parse user_id argument
     text = message.text or ""

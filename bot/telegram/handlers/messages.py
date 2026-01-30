@@ -40,6 +40,11 @@ class StreamingResult:
     content: str
     sent_message_ids: list[int] = field(default_factory=list)
 
+    @property
+    def first_message_id(self) -> int | None:
+        """Get first sent message ID or None."""
+        return self.sent_message_ids[0] if self.sent_message_ids else None
+
 
 @dataclass
 class StreamingState:
@@ -596,10 +601,6 @@ async def handle_message(message: Message, bot: Bot) -> None:
     async with repository.session_factory() as session:
         conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
         await repository.add_message(
-            session,
-            conv.id,
-            "assistant",
-            result.content,
-            message_id=result.sent_message_ids[0] if result.sent_message_ids else None,
+            session, conv.id, "assistant", result.content, message_id=result.first_message_id
         )
         await session.commit()

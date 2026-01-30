@@ -404,3 +404,25 @@ def get_text(key: str, lang: Language | str, **kwargs: str) -> str:
         text = text.format(**kwargs)
 
     return text
+
+
+async def get_user_language(telegram_id: int) -> Language:
+    """Get user's language preference from database.
+
+    Args:
+        telegram_id: Telegram user ID
+
+    Returns:
+        User's preferred Language, defaults to EN if not set or invalid
+    """
+    from bot.database.repository import repository
+
+    async with repository.session_factory() as session:
+        lang_code = await repository.get_user_language(session, telegram_id)
+
+    if lang_code:
+        try:
+            return Language(lang_code)
+        except ValueError:
+            pass
+    return Language.EN

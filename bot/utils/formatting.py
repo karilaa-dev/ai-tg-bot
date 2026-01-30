@@ -1,5 +1,7 @@
 """Text formatting utilities for Telegram."""
 
+import random
+import string
 import time
 
 import telegramify_markdown
@@ -50,9 +52,6 @@ def format_thinking_collapsed(thinking: str) -> str:
     quoted_lines.extend(f">{line}" for line in lines[1:])
     quoted_lines[-1] += "||"
     return "\n".join(quoted_lines)
-
-
-format_thinking_block = format_thinking_collapsed
 
 
 def format_thinking_with_content(thinking: str, content: str) -> str:
@@ -130,3 +129,9 @@ def split_message(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]
 def generate_draft_id() -> int:
     """Generate a unique draft ID for Telegram message drafts."""
     return int(time.time() * 1000) % (2**31 - 1)
+
+
+def generate_invite_code() -> str:
+    """Generate a random 8-character alphanumeric invite code."""
+    chars = string.ascii_lowercase + string.digits
+    return "".join(random.choices(chars, k=8))

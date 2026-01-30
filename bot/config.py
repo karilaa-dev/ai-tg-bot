@@ -1,6 +1,7 @@
 """Configuration management using pydantic-settings."""
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv(override=True)
@@ -23,22 +24,17 @@ class Settings(BaseSettings):
     context_token_limit: int = 8000
     admin_ids: list[int] = []
 
+    @field_validator("admin_ids", mode="before")
     @classmethod
-    def parse_admin_ids(cls, v: str | list[int] | None) -> list[int]:
+    def parse_admin_ids(cls, v: str | int | list[int] | None) -> list[int]:
         """Parse comma-separated admin IDs from string."""
         if v is None or v == "":
             return []
+        if isinstance(v, int):
+            return [v]
         if isinstance(v, list):
             return v
         return [int(x.strip()) for x in v.split(",") if x.strip()]
-
-    def __init__(self, **kwargs: object) -> None:
-        import os
-
-        admin_ids_str = os.getenv("ADMIN_IDS", "")
-        if admin_ids_str and "admin_ids" not in kwargs:
-            kwargs["admin_ids"] = self.parse_admin_ids(admin_ids_str)
-        super().__init__(**kwargs)
 
 
 settings = Settings()
