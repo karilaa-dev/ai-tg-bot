@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from bot.config import settings
 from bot.database.repository import repository
 from bot.i18n import Language, detect_language, get_text
 from bot.telegram.handlers.messages import _format_history, generate_and_stream_response
@@ -22,9 +23,9 @@ def _build_language_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="English", callback_data="lang:en"),
-                InlineKeyboardButton(text="Русский", callback_data="lang:ru"),
-                InlineKeyboardButton(text="Українська", callback_data="lang:uk"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:en"),
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"),
+                InlineKeyboardButton(text="🇺🇦 Українська", callback_data="lang:uk"),
             ]
         ]
     )
@@ -40,48 +41,141 @@ async def _get_user_lang(telegram_id: int) -> Language:
         return Language.EN
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
-    """Handle /start command."""
+@router.message(CommandStart(deep_link=True))
+async def cmd_start_with_invite(message: Message) -> None:
+    """Handle /start command with deep link invite code."""
     if not message.from_user:
         return
 
     telegram_id = message.from_user.id
+    detected_lang = detect_language(message.from_user.language_code)
 
-    # Detect language from Telegram settings for new users
+    # Extract invite code from deep link
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    invite_code = parts[1] if len(parts) > 1 else None
+
+    async with repository.session_factory() as session:
+        user = await repository.get_user_by_telegram_id(session, telegram_id)
+        is_admin = telegram_id in settings.admin_ids
+
+        # If user exists, just show welcome
+        if user is not None:
+            lang = Language(user.language) if user.language else detected_lang
+            await session.commit()
+            await message.answer(get_text("start_welcome", lang), parse_mode="MarkdownV2")
+            return
+
+        # Admin without user record - auto-create
+        if is_admin:
+            await repository.get_or_create_user(
+                session,
+                telegram_id,
+                message.from_user.username,
+                message.from_user.first_name,
+            )
+            await repository.update_user_language(session, telegram_id, detected_lang.value)
+            await session.commit()
+            lang_prompt = get_text("lang_select", detected_lang)
+            welcome_text = get_text("start_welcome", detected_lang)
+            await message.answer(
+                f"{welcome_text}\n\n{lang_prompt}",
+                parse_mode="MarkdownV2",
+                reply_markup=_build_language_keyboard(),
+            )
+            return
+
+        # New user with invite code
+        if invite_code:
+            invite = await repository.get_invite_code(session, invite_code)
+            if not invite:
+                await session.commit()
+                await message.answer(
+                    get_text("invite_invalid", detected_lang), parse_mode="MarkdownV2"
+                )
+                return
+
+            # Check usage limit
+            if invite.max_uses is not None and invite.current_uses >= invite.max_uses:
+                await session.commit()
+                await message.answer(
+                    get_text("invite_exhausted", detected_lang), parse_mode="MarkdownV2"
+                )
+                return
+
+            # Use the invite and create user
+            await repository.use_invite_code(session, invite_code)
+            await repository.get_or_create_user(
+                session,
+                telegram_id,
+                message.from_user.username,
+                message.from_user.first_name,
+                invited_by_code=invite_code,
+            )
+            await repository.update_user_language(session, telegram_id, detected_lang.value)
+            await session.commit()
+
+            success_text = get_text("invite_success", detected_lang)
+            welcome_text = get_text("start_welcome", detected_lang)
+            lang_prompt = get_text("lang_select", detected_lang)
+            await message.answer(
+                f"{success_text}\n\n{welcome_text}\n\n{lang_prompt}",
+                parse_mode="MarkdownV2",
+                reply_markup=_build_language_keyboard(),
+            )
+            return
+
+        # New user without valid code - show invite required
+        await session.commit()
+        await message.answer(
+            get_text("invite_required", detected_lang), parse_mode="MarkdownV2"
+        )
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message) -> None:
+    """Handle /start command without deep link."""
+    if not message.from_user:
+        return
+
+    telegram_id = message.from_user.id
     detected_lang = detect_language(message.from_user.language_code)
 
     async with repository.session_factory() as session:
         user = await repository.get_user_by_telegram_id(session, telegram_id)
-        is_new_user = user is None
+        is_admin = telegram_id in settings.admin_ids
 
-        await repository.get_or_create_user(
-            session,
-            telegram_id,
-            message.from_user.username,
-            message.from_user.first_name,
-        )
+        # If user exists, just show welcome
+        if user is not None:
+            lang = Language(user.language) if user.language else detected_lang
+            await session.commit()
+            await message.answer(get_text("start_welcome", lang), parse_mode="MarkdownV2")
+            return
 
-        if is_new_user:
+        # Admin without user record - auto-create
+        if is_admin:
+            await repository.get_or_create_user(
+                session,
+                telegram_id,
+                message.from_user.username,
+                message.from_user.first_name,
+            )
             await repository.update_user_language(session, telegram_id, detected_lang.value)
-            lang = detected_lang
-        else:
-            lang = Language(user.language) if user else detected_lang
+            await session.commit()
+            lang_prompt = get_text("lang_select", detected_lang)
+            welcome_text = get_text("start_welcome", detected_lang)
+            await message.answer(
+                f"{welcome_text}\n\n{lang_prompt}",
+                parse_mode="MarkdownV2",
+                reply_markup=_build_language_keyboard(),
+            )
+            return
 
+        # New user without invite - show invite required
         await session.commit()
-
-    welcome_text = get_text("start_welcome", lang)
-
-    if is_new_user:
-        # Show language selector for new users
-        lang_prompt = get_text("lang_select", lang)
         await message.answer(
-            f"{welcome_text}\n\n{lang_prompt}",
-            parse_mode="MarkdownV2",
-            reply_markup=_build_language_keyboard(),
+            get_text("invite_required", detected_lang), parse_mode="MarkdownV2"
         )
-    else:
-        await message.answer(welcome_text, parse_mode="MarkdownV2")
 
 
 @router.message(Command("help"))
@@ -233,3 +327,68 @@ async def cmd_edit(message: Message, bot: Bot) -> None:
 
     new_prompt = parts[1]
     await _handle_redo_latest(message, bot, new_prompt)
+
+
+@router.message(Command("code"))
+async def cmd_code(message: Message) -> None:
+    """Handle /code command to manually enter an invite code."""
+    if not message.from_user:
+        return
+
+    telegram_id = message.from_user.id
+    detected_lang = detect_language(message.from_user.language_code)
+
+    # Parse code argument
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        await message.answer(get_text("code_usage", detected_lang), parse_mode="MarkdownV2")
+        return
+
+    invite_code = parts[1].strip()
+
+    async with repository.session_factory() as session:
+        user = await repository.get_user_by_telegram_id(session, telegram_id)
+
+        # If user already exists, they already have access
+        if user is not None:
+            lang = Language(user.language) if user.language else detected_lang
+            await message.answer(get_text("code_already_approved", lang), parse_mode="MarkdownV2")
+            return
+
+        # Validate invite code
+        invite = await repository.get_invite_code(session, invite_code)
+        if not invite:
+            await message.answer(
+                get_text("invite_invalid", detected_lang), parse_mode="MarkdownV2"
+            )
+            return
+
+        # Check usage limit
+        if invite.max_uses is not None and invite.current_uses >= invite.max_uses:
+            await message.answer(
+                get_text("invite_exhausted", detected_lang), parse_mode="MarkdownV2"
+            )
+            return
+
+        # Use the invite and create user
+        await repository.use_invite_code(session, invite_code)
+        await repository.get_or_create_user(
+            session,
+            telegram_id,
+            message.from_user.username,
+            message.from_user.first_name,
+            invited_by_code=invite_code,
+        )
+        await repository.update_user_language(session, telegram_id, detected_lang.value)
+        await session.commit()
+
+    success_text = get_text("invite_success", detected_lang)
+    welcome_text = get_text("start_welcome", detected_lang)
+    lang_prompt = get_text("lang_select", detected_lang)
+    await message.answer(
+        f"{success_text}\n\n{welcome_text}\n\n{lang_prompt}",
+        parse_mode="MarkdownV2",
+        reply_markup=_build_language_keyboard(),
+    )

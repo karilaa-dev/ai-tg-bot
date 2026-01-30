@@ -15,6 +15,7 @@ from bot.database.models import Message as DbMessage
 from bot.database.repository import repository
 from bot.i18n import Language, get_text
 from bot.telegram.files import download_and_encode_image, download_and_encode_pdf
+from bot.telegram.filters import ApprovedUserFilter
 from bot.utils import (
     SAFE_MESSAGE_LENGTH,
     convert_to_telegram_markdown,
@@ -509,7 +510,7 @@ async def _send_final_content(
         state.sent_message_ids.append(sent_msg.message_id)
 
 
-@router.message(F.text & ~F.text.startswith("/") | F.photo | F.document)
+@router.message(ApprovedUserFilter(), F.text & ~F.text.startswith("/") | F.photo | F.document)
 async def handle_message(message: Message, bot: Bot) -> None:
     """Handle an incoming message."""
     if not message.from_user:

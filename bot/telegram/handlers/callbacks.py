@@ -42,24 +42,23 @@ async def handle_language_selection(callback: CallbackQuery) -> None:
 
     await callback.answer()
 
-    # Delete old message with keyboard
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest as e:
-        logger.debug(f"Could not delete language selection message: {e}")
-
     # Detect what language would have been auto-detected
     detected_lang = detect_language(callback.from_user.language_code)
 
-    # Send confirmation message
-    await callback.message.answer(
-        get_text("lang_changed", lang),
-        parse_mode="MarkdownV2",
-    )
-
-    # If user picked a different language than detected default, resend commands info
+    # Build confirmation message
+    confirmation = get_text("lang_changed", lang)
     if lang != detected_lang:
-        await callback.message.answer(
-            get_text("start_welcome", lang),
+        # If user picked a different language, include welcome info
+        confirmation = f"{confirmation}\n\n{get_text('start_welcome', lang)}"
+
+    # Edit the message in-place instead of delete+send
+    try:
+        await callback.message.edit_text(
+            confirmation,
             parse_mode="MarkdownV2",
+            reply_markup=None,
         )
+    except TelegramBadRequest as e:
+        logger.debug(f"Could not edit language selection message: {e}")
+        # Fallback to sending new message if edit fails
+        await callback.message.answer(confirmation, parse_mode="MarkdownV2")

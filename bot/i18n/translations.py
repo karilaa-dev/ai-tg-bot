@@ -43,6 +43,31 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         Language.RU: "Сменить язык",
         Language.UK: "Змінити мову",
     },
+    "cmd_invite_desc": {
+        Language.EN: "Create invite code (admin)",
+        Language.RU: "Создать приглашение (админ)",
+        Language.UK: "Створити запрошення (адмін)",
+    },
+    "cmd_invites_desc": {
+        Language.EN: "List invite codes (admin)",
+        Language.RU: "Список приглашений (админ)",
+        Language.UK: "Список запрошень (адмін)",
+    },
+    "cmd_deleteinvite_desc": {
+        Language.EN: "Delete invite code (admin)",
+        Language.RU: "Удалить приглашение (админ)",
+        Language.UK: "Видалити запрошення (адмін)",
+    },
+    "cmd_approve_desc": {
+        Language.EN: "Approve user by ID (admin)",
+        Language.RU: "Одобрить пользователя (админ)",
+        Language.UK: "Схвалити користувача (адмін)",
+    },
+    "cmd_code_desc": {
+        Language.EN: "Enter invite code",
+        Language.RU: "Ввести код приглашения",
+        Language.UK: "Ввести код запрошення",
+    },
     # Welcome and help messages
     "start_welcome": {
         Language.EN: (
@@ -174,6 +199,151 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         Language.EN: "Reading webpage\\.\\.\\.",
         Language.RU: "Читаю страницу\\.\\.\\.",
         Language.UK: "Читаю сторінку\\.\\.\\.",
+    },
+    # Invite system
+    "invite_required": {
+        Language.EN: (
+            "This bot is invite\\-only\\.\n\n"
+            "Please use a valid invite link to get access\\."
+        ),
+        Language.RU: (
+            "Этот бот доступен только по приглашению\\.\n\n"
+            "Пожалуйста, используйте действительную ссылку\\-приглашение\\."
+        ),
+        Language.UK: (
+            "Цей бот доступний лише за запрошенням\\.\n\n"
+            "Будь ласка, використайте дійсне посилання\\-запрошення\\."
+        ),
+    },
+    "invite_success": {
+        Language.EN: "Welcome\\! Your invite code has been accepted\\.",
+        Language.RU: "Добро пожаловать\\! Ваш код приглашения принят\\.",
+        Language.UK: "Ласкаво просимо\\! Ваш код запрошення прийнято\\.",
+    },
+    "invite_invalid": {
+        Language.EN: "Invalid or expired invite code\\.",
+        Language.RU: "Недействительный или истёкший код приглашения\\.",
+        Language.UK: "Недійсний або прострочений код запрошення\\.",
+    },
+    "invite_exhausted": {
+        Language.EN: "This invite code has reached its usage limit\\.",
+        Language.RU: "Этот код приглашения исчерпал лимит использований\\.",
+        Language.UK: "Цей код запрошення вичерпав ліміт використань\\.",
+    },
+    # Admin commands
+    "admin_only": {
+        Language.EN: "This command is for admins only\\.",
+        Language.RU: "Эта команда только для администраторов\\.",
+        Language.UK: "Ця команда лише для адміністраторів\\.",
+    },
+    "invite_created": {
+        Language.EN: "Invite code created: `{code}`",
+        Language.RU: "Код приглашения создан: `{code}`",
+        Language.UK: "Код запрошення створено: `{code}`",
+    },
+    "invite_created_with_limit": {
+        Language.EN: "Invite code created: `{code}` \\(max {max_uses} uses\\)",
+        Language.RU: "Код приглашения создан: `{code}` \\(макс\\. {max_uses} использований\\)",
+        Language.UK: "Код запрошення створено: `{code}` \\(макс\\. {max_uses} використань\\)",
+    },
+    "invite_code_exists": {
+        Language.EN: "An invite code with this name already exists\\.",
+        Language.RU: "Код приглашения с таким именем уже существует\\.",
+        Language.UK: "Код запрошення з такою назвою вже існує\\.",
+    },
+    "invite_list_header": {
+        Language.EN: "*Active invite codes:*",
+        Language.RU: "*Активные коды приглашения:*",
+        Language.UK: "*Активні коди запрошення:*",
+    },
+    "invite_list_empty": {
+        Language.EN: "No active invite codes\\.",
+        Language.RU: "Нет активных кодов приглашения\\.",
+        Language.UK: "Немає активних кодів запрошення\\.",
+    },
+    "invite_list_item": {
+        Language.EN: "• `{code}` \\- {uses} uses",
+        Language.RU: "• `{code}` \\- {uses} использований",
+        Language.UK: "• `{code}` \\- {uses} використань",
+    },
+    "invite_list_item_limited": {
+        Language.EN: "• `{code}` \\- {current}/{max} uses",
+        Language.RU: "• `{code}` \\- {current}/{max} использований",
+        Language.UK: "• `{code}` \\- {current}/{max} використань",
+    },
+    "invite_deleted": {
+        Language.EN: "Invite code `{code}` deleted\\.",
+        Language.RU: "Код приглашения `{code}` удалён\\.",
+        Language.UK: "Код запрошення `{code}` видалено\\.",
+    },
+    "invite_not_found": {
+        Language.EN: "Invite code not found\\.",
+        Language.RU: "Код приглашения не найден\\.",
+        Language.UK: "Код запрошення не знайдено\\.",
+    },
+    "user_approved": {
+        Language.EN: "User {user_id} has been approved\\.",
+        Language.RU: "Пользователь {user_id} одобрен\\.",
+        Language.UK: "Користувача {user_id} схвалено\\.",
+    },
+    "user_already_approved": {
+        Language.EN: "User {user_id} is already approved\\.",
+        Language.RU: "Пользователь {user_id} уже одобрен\\.",
+        Language.UK: "Користувач {user_id} вже схвалений\\.",
+    },
+    "approve_usage": {
+        Language.EN: "Usage: /approve \\<user\\_id\\>",
+        Language.RU: "Использование: /approve \\<user\\_id\\>",
+        Language.UK: "Використання: /approve \\<user\\_id\\>",
+    },
+    "deleteinvite_usage": {
+        Language.EN: "Usage: /deleteinvite \\<code\\>",
+        Language.RU: "Использование: /deleteinvite \\<код\\>",
+        Language.UK: "Використання: /deleteinvite \\<код\\>",
+    },
+    # Inline mode and invite sharing
+    "inline_new_invite_title": {
+        Language.EN: "Send invite ({lang_name})",
+        Language.RU: "Отправить приглашение ({lang_name})",
+        Language.UK: "Надіслати запрошення ({lang_name})",
+    },
+    "inline_new_invite_desc": {
+        Language.EN: "Creates a new one\\-time invite code",
+        Language.RU: "Создаёт новый одноразовый код",
+        Language.UK: "Створює новий одноразовый код",
+    },
+    "inline_join_button": {
+        Language.EN: "Start Bot",
+        Language.RU: "Запустить бота",
+        Language.UK: "Запустити бота",
+    },
+    "invite_share_message": {
+        Language.EN: (
+            "🎉 *You're invited\\!*\n\n"
+            "You've been invited to use *{bot_name}* \\- an AI assistant that can help you with various tasks\\.\n\n"
+            "Your invite code: `{code}`"
+        ),
+        Language.RU: (
+            "🎉 *Вас приглашают\\!*\n\n"
+            "Вы приглашены использовать *{bot_name}* \\- ИИ\\-ассистента, который поможет вам с различными задачами\\.\n\n"
+            "Ваш код приглашения: `{code}`"
+        ),
+        Language.UK: (
+            "🎉 *Вас запрошують\\!*\n\n"
+            "Вас запрошено використовувати *{bot_name}* \\- ШІ\\-асистента, який допоможе вам з різними завданнями\\.\n\n"
+            "Ваш код запрошення: `{code}`"
+        ),
+    },
+    # /code command
+    "code_usage": {
+        Language.EN: "Usage: /code \\<invite\\_code\\>",
+        Language.RU: "Использование: /code \\<код\\_приглашения\\>",
+        Language.UK: "Використання: /code \\<код\\_запрошення\\>",
+    },
+    "code_already_approved": {
+        Language.EN: "You already have access to this bot\\!",
+        Language.RU: "У вас уже есть доступ к этому боту\\!",
+        Language.UK: "Ви вже маєте доступ до цього бота\\!",
     },
 }
 

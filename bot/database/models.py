@@ -24,6 +24,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     show_thinking: Mapped[bool] = mapped_column(Boolean, default=False)
     language: Mapped[str] = mapped_column(String(5), default="en")
+    invited_by_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -68,3 +69,17 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class InviteCode(Base):
+    """Invite code model for access control."""
+
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    created_by: Mapped[int] = mapped_column(BigInteger)  # Admin telegram_id
+    max_uses: Mapped[int | None] = mapped_column(nullable=True)  # None = unlimited
+    current_uses: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
