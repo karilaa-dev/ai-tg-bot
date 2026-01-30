@@ -1,5 +1,7 @@
 """Text formatting utilities for Telegram."""
 
+import time
+
 import telegramify_markdown
 
 SAFE_MESSAGE_LENGTH = 3900
@@ -127,5 +129,4 @@ def split_message(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]
 
 def generate_draft_id() -> int:
     """Generate a unique draft ID for Telegram message drafts."""
-    import time
     return int(time.time() * 1000) % (2**31 - 1)

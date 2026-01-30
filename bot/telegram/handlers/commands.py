@@ -46,14 +46,12 @@ async def cmd_thinking(message: Message, bot: Bot) -> None:
     await message.answer(f"Thinking traces {status}\\.")
 
 
-async def _delete_telegram_messages(bot: Bot, chat_id: int, message_ids: list[int]) -> None:
-    """Delete Telegram messages, ignoring errors for old messages."""
-    for msg_id in message_ids:
-        try:
-            await bot.delete_message(chat_id, msg_id)
-        except TelegramBadRequest as e:
-            # Message too old or already deleted
-            logger.debug(f"Could not delete message {msg_id}: {e}")
+async def _delete_telegram_message(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Delete a Telegram message, ignoring errors for old or already deleted messages."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except TelegramBadRequest as e:
+        logger.debug(f"Could not delete message {message_id}: {e}")
 
 
 async def _handle_redo_latest(
@@ -93,7 +91,7 @@ async def _handle_redo_latest(
 
     # Delete from Telegram
     if tg_msg_id:
-        await _delete_telegram_messages(bot, chat_id, [tg_msg_id])
+        await _delete_telegram_message(bot, chat_id, tg_msg_id)
 
     # Prepare AI messages and regenerate
     ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))

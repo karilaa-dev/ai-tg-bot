@@ -35,6 +35,51 @@ class StreamingResult:
     content: str
     sent_message_ids: list[int] = field(default_factory=list)
 
+
+@dataclass
+class StreamingState:
+    """Tracks state during response streaming."""
+
+    content: str = ""
+    reasoning: str = ""
+    sent_parts: list[str] = field(default_factory=list)
+    sent_thinking_parts: list[str] = field(default_factory=list)
+    sent_message_ids: list[int] = field(default_factory=list)
+    thinking_finalized: bool = False
+    in_code_block: bool = False
+    thinking_msg_replaced: bool = False
+    pending_tool: str | None = None
+    current_status_text: str = "Thinking\\.\\.\\."
+    final_content_confirmed: bool = False
+    last_update: float = 0.0
+    draft_id: int = field(default_factory=generate_draft_id)
+
+    @property
+    def sent_content_len(self) -> int:
+        """Total length of content already sent as permanent messages."""
+        return sum(len(p) for p in self.sent_parts)
+
+    @property
+    def sent_thinking_len(self) -> int:
+        """Total length of thinking already sent as permanent messages."""
+        return sum(len(p) for p in self.sent_thinking_parts)
+
+    @property
+    def current_thinking(self) -> str:
+        """Get thinking text not yet sent as permanent messages."""
+        return self.reasoning[self.sent_thinking_len:]
+
+    @property
+    def current_preview(self) -> str:
+        """Get content text not yet sent as permanent messages."""
+        return self.content[self.sent_content_len:] if self.content else ""
+
+    def new_draft_id(self) -> int:
+        """Generate and set a new draft ID."""
+        self.draft_id = generate_draft_id()
+        return self.draft_id
+
+
 logger = logging.getLogger(__name__)
 
 router = Router(name="messages")
@@ -151,249 +196,283 @@ async def generate_and_stream_response(
 
     Returns StreamingResult with the final content and list of sent Telegram message IDs.
     """
-    # Use a unified draft for all streaming (both show_thinking modes)
-    unified_draft_id = generate_draft_id()
-
-    # Stream response
-    content, reasoning = "", ""
-    last_update = 0.0
-    sent_parts: list[str] = []  # Content parts already sent as permanent messages
-    sent_thinking_parts: list[str] = []  # Thinking parts sent as permanent (overflow)
-    sent_message_ids: list[int] = []  # Telegram message IDs of sent messages
-    thinking_finalized = False
-    in_code_block = False
-    thinking_msg_replaced = False
-    pending_tool: str | None = None
-    current_status_text = "Thinking\\.\\.\\."
-    final_content_confirmed = False
+    state = StreamingState()
 
     try:
-        # Send initial "Thinking..." as draft
-        await _send_draft_with_fallback(
-            bot, chat_id, unified_draft_id, "Thinking\\.\\.\\.", thread_id
-        )
+        await _send_draft_with_fallback(bot, chat_id, state.draft_id, "Thinking\\.\\.\\.", thread_id)
 
         async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
-            # Prepend tool indicator when new thinking arrives after tool use
-            if chunk.reasoning and pending_tool:
-                reasoning += f"(Used {pending_tool})\n"
-                pending_tool = None
-                # Restore "Thinking..." status after tool completes (non-thinking mode)
-                if not show_thinking and not thinking_msg_replaced:
-                    if current_status_text != "Thinking\\.\\.\\.":
-                        await _send_draft_with_fallback(
-                            bot, chat_id, unified_draft_id, "Thinking\\.\\.\\.", thread_id
-                        )
-                        current_status_text = "Thinking\\.\\.\\."
+            await _handle_chunk(bot, chat_id, thread_id, chunk, state, show_thinking)
 
-            reasoning += chunk.reasoning
-            content += chunk.content
-
-            if chunk.is_tool_use:
-                # Move accumulated content to thinking (tool planning steps)
-                sent_len = sum(len(p) for p in sent_parts)
-                step_content = content[sent_len:]
-                if step_content.strip():
-                    reasoning += f"\n{step_content.strip()}\n"
-                    sent_parts.append(step_content)
-                pending_tool = chunk.tool_name
-                final_content_confirmed = False  # Reset - this content was pre-tool
-                thinking_msg_replaced = False  # Reset - draft should show tool status now
-                # Update draft to show tool status
-                new_text = _get_tool_status_text(chunk.tool_name)
-                if show_thinking and reasoning:
-                    # Append tool status to expanded thinking
-                    sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-                    current_thinking = reasoning[sent_thinking_len:]
-                    if current_thinking:
-                        thinking_with_status = format_thinking_expanded(
-                            current_thinking + f"\n{new_text.replace('\\\\', '').replace('\\.', '.')}"
-                        )
-                        await _send_draft_with_fallback(
-                            bot, chat_id, unified_draft_id, thinking_with_status, thread_id, thinking_with_status
-                        )
-                    else:
-                        await _send_draft_with_fallback(
-                            bot, chat_id, unified_draft_id, new_text, thread_id
-                        )
-                else:
-                    await _send_draft_with_fallback(
-                        bot, chat_id, unified_draft_id, new_text, thread_id
-                    )
-                current_status_text = new_text
-
-            if time.time() - last_update < 0.5:
+            if time.time() - state.last_update < 0.5:
                 continue
 
-            # Get current thinking (excluding already-sent overflow parts)
-            sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-            current_thinking = reasoning[sent_thinking_len:]
+            if show_thinking and not state.thinking_finalized and not state.pending_tool and not state.final_content_confirmed:
+                await _handle_thinking_overflow(bot, chat_id, thread_id, state)
 
-            if show_thinking and current_thinking and not thinking_finalized and not pending_tool and not final_content_confirmed:
-                # Check for thinking overflow (~3800 chars formatted)
-                thinking_expanded = format_thinking_expanded(current_thinking)
-                if len(thinking_expanded) >= SAFE_MESSAGE_LENGTH - 100:
-                    # Collapse and send overflow as permanent message
-                    part_to_send, remaining_thinking = split_thinking(
-                        current_thinking, SAFE_MESSAGE_LENGTH - 200
-                    )
-                    if part_to_send:
-                        collapsed = format_thinking_collapsed(part_to_send)
-                        sent_msg = await _send_with_markdown_fallback(
-                            bot, chat_id, collapsed, thread_id, convert=False
-                        )
-                        sent_message_ids.append(sent_msg.message_id)
-                        sent_thinking_parts.append(part_to_send)
-                        # Generate new draft ID for continued thinking
-                        unified_draft_id = generate_draft_id()
-                        current_thinking = remaining_thinking
+            await _handle_content_overflow(bot, chat_id, thread_id, state, show_thinking)
 
-                # Update draft with expanded thinking (visible while streaming)
-                if current_thinking:
-                    thinking_expanded = format_thinking_expanded(current_thinking)
-                    await _send_draft_with_fallback(
-                        bot,
-                        chat_id,
-                        unified_draft_id,
-                        thinking_expanded[:SAFE_MESSAGE_LENGTH],
-                        thread_id,
-                        thinking_expanded[:SAFE_MESSAGE_LENGTH],
-                    )
+            await _update_content_draft(bot, chat_id, thread_id, state, show_thinking)
 
-            # Stream content draft
-            sent_len = sum(len(p) for p in sent_parts)
-            preview = content[sent_len:] if content else ""
-
-            # Finalize and send if approaching limit
-            if len(preview) >= SAFE_MESSAGE_LENGTH - 100:
-                split_point = find_split_point(preview, SAFE_MESSAGE_LENGTH - 200)
-                part = preview[:split_point].rstrip()
-
-                if part:
-                    if in_code_block:
-                        part = "```\n" + part
-                    ends_mid_block = part.count("```") % 2 == 1
-
-                    # Finalize thinking first (send all remaining as collapsed)
-                    if show_thinking and reasoning and not thinking_finalized:
-                        sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-                        remaining_thinking = reasoning[sent_thinking_len:]
-                        if remaining_thinking:
-                            collapsed = format_thinking_collapsed(remaining_thinking)
-                            sent_msg = await _send_with_markdown_fallback(
-                                bot, chat_id, collapsed, thread_id, convert=False
-                            )
-                            sent_message_ids.append(sent_msg.message_id)
-                        thinking_finalized = True
-                        # Generate new draft for content
-                        unified_draft_id = generate_draft_id()
-
-                    # Send content part
-                    try:
-                        sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
-                        sent_message_ids.append(sent_msg.message_id)
-                    except TelegramRetryAfter as e:
-                        await asyncio.sleep(e.retry_after)
-                        sent_msg = await bot.send_message(
-                            chat_id=chat_id,
-                            text=part,
-                            message_thread_id=thread_id,
-                            parse_mode=None,
-                        )
-                        sent_message_ids.append(sent_msg.message_id)
-                    in_code_block = ends_mid_block
-                    sent_parts.append(part)
-                    unified_draft_id = generate_draft_id()
-
-                    last_update = time.time()
-                    continue
-
-            # Check for final content confirmation (both modes)
-            if not final_content_confirmed and len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
-                final_content_confirmed = True
-
-            # Update content draft
-            if preview.strip() and final_content_confirmed:
-                if not show_thinking or thinking_finalized:
-                    # Non-thinking mode or thinking already finalized: stream content directly
-                    draft_text = ("```\n" + preview if in_code_block else preview)[
-                        :SAFE_MESSAGE_LENGTH
-                    ]
-                    formatted = convert_to_telegram_markdown(draft_text)
-                    await _send_draft_with_fallback(
-                        bot, chat_id, unified_draft_id, draft_text, thread_id, formatted
-                    )
-                    thinking_msg_replaced = True
-                else:
-                    # show_thinking mode with thinking not finalized: show combined draft
-                    sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-                    current_thinking = reasoning[sent_thinking_len:]
-                    if current_thinking:
-                        combined = format_thinking_with_content(current_thinking, preview)
-                        if len(combined) <= SAFE_MESSAGE_LENGTH:
-                            await _send_draft_with_fallback(
-                                bot, chat_id, unified_draft_id, combined, thread_id, combined
-                            )
-                            thinking_msg_replaced = True
-
-            last_update = time.time()
+            state.last_update = time.time()
 
     except Exception as e:
         logger.error(f"Error generating response: {e}")
-        content = "Sorry, an error occurred."
+        state.content = "Sorry, an error occurred."
 
-    # Handle final message
-    final_content = content or "No response generated."
-    sent_len = sum(len(p) for p in sent_parts)
-    remaining = final_content[sent_len:] if sent_len < len(final_content) else final_content
-    sent_thinking_len = sum(len(p) for p in sent_thinking_parts)
-    remaining_thinking = reasoning[sent_thinking_len:] if reasoning else ""
+    await _finalize_response(bot, chat_id, thread_id, state, show_thinking)
 
-    if show_thinking and remaining_thinking and not thinking_finalized:
-        # Try to combine thinking + content in single message
-        if remaining.strip():
-            combined = format_thinking_with_content(remaining_thinking, remaining)
-            if len(combined) <= SAFE_MESSAGE_LENGTH:
-                # Update draft with combined, then send
-                await _send_draft_with_fallback(
-                    bot, chat_id, unified_draft_id, combined, thread_id, combined
-                )
-                sent_msg = await _send_with_markdown_fallback(bot, chat_id, combined, thread_id, convert=False)
-                sent_message_ids.append(sent_msg.message_id)
-                remaining = ""  # Already sent
-            else:
-                # Send thinking separately (collapsed)
-                collapsed = format_thinking_collapsed(remaining_thinking)
-                sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
-                sent_message_ids.append(sent_msg.message_id)
-                await asyncio.sleep(0.1)
+    return StreamingResult(content=state.content, sent_message_ids=state.sent_message_ids)
+
+
+async def _handle_chunk(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    chunk: Any,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Process a single chunk from the AI stream."""
+    # Prepend tool indicator when new thinking arrives after tool use
+    if chunk.reasoning and state.pending_tool:
+        state.reasoning += f"(Used {state.pending_tool})\n"
+        state.pending_tool = None
+        # Restore "Thinking..." status after tool completes (non-thinking mode)
+        if not show_thinking and not state.thinking_msg_replaced:
+            if state.current_status_text != "Thinking\\.\\.\\.":
+                await _send_draft_with_fallback(bot, chat_id, state.draft_id, "Thinking\\.\\.\\.", thread_id)
+                state.current_status_text = "Thinking\\.\\.\\."
+
+    state.reasoning += chunk.reasoning
+    state.content += chunk.content
+
+    if chunk.is_tool_use:
+        await _handle_tool_use(bot, chat_id, thread_id, chunk, state, show_thinking)
+
+
+async def _handle_tool_use(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    chunk: Any,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Handle tool use chunk by moving content to thinking and updating draft."""
+    step_content = state.current_preview
+    if step_content.strip():
+        state.reasoning += f"\n{step_content.strip()}\n"
+        state.sent_parts.append(step_content)
+
+    state.pending_tool = chunk.tool_name
+    state.final_content_confirmed = False
+    state.thinking_msg_replaced = False
+
+    new_text = _get_tool_status_text(chunk.tool_name)
+
+    if show_thinking and state.reasoning:
+        current_thinking = state.current_thinking
+        if current_thinking:
+            status_plain = new_text.replace("\\\\", "").replace("\\.", ".")
+            thinking_with_status = format_thinking_expanded(current_thinking + f"\n{status_plain}")
+            await _send_draft_with_fallback(
+                bot, chat_id, state.draft_id, thinking_with_status, thread_id, thinking_with_status
+            )
         else:
-            # No content, just send thinking
+            await _send_draft_with_fallback(bot, chat_id, state.draft_id, new_text, thread_id)
+    else:
+        await _send_draft_with_fallback(bot, chat_id, state.draft_id, new_text, thread_id)
+
+    state.current_status_text = new_text
+
+
+async def _handle_thinking_overflow(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+) -> None:
+    """Handle thinking overflow by sending excess as collapsed permanent message."""
+    current_thinking = state.current_thinking
+    if not current_thinking:
+        return
+
+    thinking_expanded = format_thinking_expanded(current_thinking)
+    if len(thinking_expanded) >= SAFE_MESSAGE_LENGTH - 100:
+        part_to_send, remaining = split_thinking(current_thinking, SAFE_MESSAGE_LENGTH - 200)
+        if part_to_send:
+            collapsed = format_thinking_collapsed(part_to_send)
+            sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+            state.sent_message_ids.append(sent_msg.message_id)
+            state.sent_thinking_parts.append(part_to_send)
+            state.new_draft_id()
+            current_thinking = remaining
+
+    if current_thinking:
+        thinking_expanded = format_thinking_expanded(current_thinking)
+        await _send_draft_with_fallback(
+            bot, chat_id, state.draft_id,
+            thinking_expanded[:SAFE_MESSAGE_LENGTH], thread_id,
+            thinking_expanded[:SAFE_MESSAGE_LENGTH],
+        )
+
+
+async def _handle_content_overflow(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Handle content overflow by sending as permanent message."""
+    preview = state.current_preview
+
+    if len(preview) < SAFE_MESSAGE_LENGTH - 100:
+        return
+
+    split_point = find_split_point(preview, SAFE_MESSAGE_LENGTH - 200)
+    part = preview[:split_point].rstrip()
+
+    if not part:
+        return
+
+    if state.in_code_block:
+        part = "```\n" + part
+    ends_mid_block = part.count("```") % 2 == 1
+
+    # Finalize thinking first if needed
+    if show_thinking and state.reasoning and not state.thinking_finalized:
+        remaining_thinking = state.current_thinking
+        if remaining_thinking:
             collapsed = format_thinking_collapsed(remaining_thinking)
             sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
-            sent_message_ids.append(sent_msg.message_id)
+            state.sent_message_ids.append(sent_msg.message_id)
+        state.thinking_finalized = True
+        state.new_draft_id()
 
-    # Send remaining content (if not already combined)
+    # Send content part
+    try:
+        sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+        state.sent_message_ids.append(sent_msg.message_id)
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        sent_msg = await bot.send_message(
+            chat_id=chat_id, text=part, message_thread_id=thread_id, parse_mode=None
+        )
+        state.sent_message_ids.append(sent_msg.message_id)
+
+    state.in_code_block = ends_mid_block
+    state.sent_parts.append(part)
+    state.new_draft_id()
+    state.last_update = time.time()
+
+
+async def _update_content_draft(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Update the draft message with current content preview."""
+    preview = state.current_preview
+
+    if not state.final_content_confirmed and len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
+        state.final_content_confirmed = True
+
+    if not preview.strip() or not state.final_content_confirmed:
+        return
+
+    if not show_thinking or state.thinking_finalized:
+        draft_text = ("```\n" + preview if state.in_code_block else preview)[:SAFE_MESSAGE_LENGTH]
+        formatted = convert_to_telegram_markdown(draft_text)
+        await _send_draft_with_fallback(bot, chat_id, state.draft_id, draft_text, thread_id, formatted)
+        state.thinking_msg_replaced = True
+    else:
+        current_thinking = state.current_thinking
+        if current_thinking:
+            combined = format_thinking_with_content(current_thinking, preview)
+            if len(combined) <= SAFE_MESSAGE_LENGTH:
+                await _send_draft_with_fallback(bot, chat_id, state.draft_id, combined, thread_id, combined)
+                state.thinking_msg_replaced = True
+
+
+async def _finalize_response(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Send final messages after streaming completes."""
+    final_content = state.content or "No response generated."
+    remaining = final_content[state.sent_content_len:] if state.sent_content_len < len(final_content) else final_content
+    remaining_thinking = state.current_thinking if state.reasoning else ""
+
+    if show_thinking and remaining_thinking and not state.thinking_finalized:
+        remaining = await _send_final_thinking(
+            bot, chat_id, thread_id, state, remaining, remaining_thinking
+        )
+
     if remaining.strip():
-        if in_code_block:
-            remaining = "```\n" + remaining
+        await _send_final_content(bot, chat_id, thread_id, state, remaining, remaining_thinking, show_thinking)
 
-        parts = split_message(remaining)
 
-        # Update draft with final content before sending (smooth transition)
-        if not sent_parts and not (show_thinking and remaining_thinking):
-            formatted = convert_to_telegram_markdown(parts[0])
-            await _send_draft_with_fallback(
-                bot, chat_id, unified_draft_id, parts[0], thread_id, formatted
-            )
+async def _send_final_thinking(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    remaining: str,
+    remaining_thinking: str,
+) -> str:
+    """Send final thinking block, possibly combined with content."""
+    if remaining.strip():
+        combined = format_thinking_with_content(remaining_thinking, remaining)
+        if len(combined) <= SAFE_MESSAGE_LENGTH:
+            await _send_draft_with_fallback(bot, chat_id, state.draft_id, combined, thread_id, combined)
+            sent_msg = await _send_with_markdown_fallback(bot, chat_id, combined, thread_id, convert=False)
+            state.sent_message_ids.append(sent_msg.message_id)
+            return ""  # Already sent
+        else:
+            collapsed = format_thinking_collapsed(remaining_thinking)
+            sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+            state.sent_message_ids.append(sent_msg.message_id)
+            await asyncio.sleep(0.1)
+    else:
+        collapsed = format_thinking_collapsed(remaining_thinking)
+        sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+        state.sent_message_ids.append(sent_msg.message_id)
 
-        for i, part in enumerate(parts):
-            if i > 0 or sent_parts:
-                await asyncio.sleep(0.1)
-            sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
-            sent_message_ids.append(sent_msg.message_id)
+    return remaining
 
-    return StreamingResult(content=content, sent_message_ids=sent_message_ids)
+
+async def _send_final_content(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    remaining: str,
+    remaining_thinking: str,
+    show_thinking: bool,
+) -> None:
+    """Send remaining content as final messages."""
+    if state.in_code_block:
+        remaining = "```\n" + remaining
+
+    parts = split_message(remaining)
+
+    # Update draft with final content before sending (smooth transition)
+    if not state.sent_parts and not (show_thinking and remaining_thinking):
+        formatted = convert_to_telegram_markdown(parts[0])
+        await _send_draft_with_fallback(bot, chat_id, state.draft_id, parts[0], thread_id, formatted)
+
+    for i, part in enumerate(parts):
+        if i > 0 or state.sent_parts:
+            await asyncio.sleep(0.1)
+        sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+        state.sent_message_ids.append(sent_msg.message_id)
 
 
 @router.message(F.text & ~F.text.startswith("/") | F.photo | F.document)

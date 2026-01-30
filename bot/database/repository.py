@@ -136,20 +136,29 @@ class Repository:
             return user.show_thinking
         return False
 
+    async def _get_latest_message_by_role(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        role: str,
+    ) -> Message | None:
+        """Get the most recent message with the specified role."""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id, Message.role == role)
+            .order_by(desc(Message.created_at))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_latest_assistant_response(
         self,
         session: AsyncSession,
         conversation_id: int,
     ) -> Message | None:
         """Get the latest assistant message."""
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id, Message.role == "assistant")
-            .order_by(desc(Message.created_at))
-            .limit(1)
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._get_latest_message_by_role(session, conversation_id, "assistant")
 
     async def get_latest_user_message(
         self,
@@ -157,14 +166,7 @@ class Repository:
         conversation_id: int,
     ) -> Message | None:
         """Get most recent user message."""
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id, Message.role == "user")
-            .order_by(desc(Message.created_at))
-            .limit(1)
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._get_latest_message_by_role(session, conversation_id, "user")
 
     async def delete_latest_assistant_response(
         self,
