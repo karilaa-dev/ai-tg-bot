@@ -4,6 +4,8 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -11,6 +13,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import Message
 
 from bot.ai.openrouter import openrouter_client
+from bot.config import settings
 from bot.database.models import Message as DbMessage
 from bot.database.repository import repository
 from bot.i18n import Language, get_text
@@ -87,6 +90,42 @@ class StreamingState:
 logger = logging.getLogger(__name__)
 
 router = Router(name="messages")
+
+# Cache for system prompt template
+_sys_prompt_template: str | None = None
+
+
+def _load_sys_prompt_template() -> str:
+    """Load system prompt template from SYS_PROMPT.md."""
+    global _sys_prompt_template
+    if _sys_prompt_template is None:
+        prompt_path = Path(__file__).parent.parent.parent.parent / "SYS_PROMPT.md"
+        _sys_prompt_template = prompt_path.read_text(encoding="utf-8")
+    return _sys_prompt_template
+
+
+_LANG_NAMES = {
+    "en": "English",
+    "ru": "Russian",
+    "uk": "Ukrainian",
+}
+
+
+async def _build_system_prompt(user_name: str, user_lang: str, bot: Bot) -> str:
+    """Build system prompt with runtime values."""
+    template = _load_sys_prompt_template()
+    now = datetime.now(UTC)
+    bot_info = await bot.get_me()
+
+    return template.format(
+        model_name=settings.openrouter_model,
+        bot_name=bot_info.first_name,
+        time=now.strftime("%H:%M"),
+        timezone="UTC",
+        date=now.strftime("%Y-%m-%d"),
+        user_name=user_name,
+        user_lang=_LANG_NAMES.get(user_lang, "English"),
+    )
 
 
 def _get_tool_status_text(tool_name: str, count: int, lang: Language) -> str:
@@ -542,8 +581,10 @@ async def handle_message(message: Message, bot: Bot) -> None:
         lang = user.language
         await session.commit()
 
-    # Prepare AI messages
+    # Prepare AI messages with system prompt
     ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
+    system_prompt = await _build_system_prompt(user_data.first_name or "User", lang, bot)
+    ai_messages.insert(0, {"role": "system", "content": system_prompt})
 
     # Send thinking indicator
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
