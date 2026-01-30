@@ -4,7 +4,6 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import selectinload
 
 from bot.config import settings
 from bot.database.models import Base, Conversation, Message, User
@@ -136,24 +135,5 @@ class Repository:
             user.show_thinking = not user.show_thinking
             return user.show_thinking
         return False
-
-    async def get_conversation_with_messages(
-        self,
-        session: AsyncSession,
-        chat_id: int,
-        thread_id: int | None = None,
-    ) -> Conversation | None:
-        """Get conversation with all messages loaded."""
-        stmt = (
-            select(Conversation)
-            .options(selectinload(Conversation.messages))
-            .where(
-                Conversation.chat_id == chat_id,
-                Conversation.thread_id == thread_id,
-            )
-        )
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
-
 
 repository = Repository()

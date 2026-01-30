@@ -1,22 +1,17 @@
 """Command handlers for the Telegram bot."""
 
 import logging
-import time
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from bot.database.repository import repository
+from bot.utils import generate_draft_id
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="commands")
-
-
-def _generate_draft_id() -> int:
-    """Generate a unique draft ID."""
-    return int(time.time() * 1000) % (2**31 - 1)
 
 
 @router.message(CommandStart())
@@ -37,7 +32,7 @@ async def cmd_thinking(message: Message, bot: Bot) -> None:
     chat_id = message.chat.id
     thread_id = message.message_thread_id
 
-    draft_id = _generate_draft_id()
+    draft_id = generate_draft_id()
 
     await bot.send_message_draft(
         chat_id=chat_id,

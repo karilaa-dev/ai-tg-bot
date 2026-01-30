@@ -20,6 +20,7 @@ from bot.utils import (
     format_thinking_collapsed,
     format_thinking_expanded,
     format_thinking_with_content,
+    generate_draft_id,
     split_message,
     split_thinking,
     trim_messages_to_limit,
@@ -28,11 +29,6 @@ from bot.utils import (
 logger = logging.getLogger(__name__)
 
 router = Router(name="messages")
-
-
-def _generate_draft_id() -> int:
-    """Generate a unique draft ID."""
-    return int(time.time() * 1000) % (2**31 - 1)
 
 
 def _get_tool_status_text(tool_name: str) -> str:
@@ -173,7 +169,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
 
     # Use a unified draft for all streaming (both show_thinking modes)
-    unified_draft_id = _generate_draft_id()
+    unified_draft_id = generate_draft_id()
 
     # Stream response
     content, reasoning = "", ""
@@ -264,7 +260,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
                         )
                         sent_thinking_parts.append(part_to_send)
                         # Generate new draft ID for continued thinking
-                        unified_draft_id = _generate_draft_id()
+                        unified_draft_id = generate_draft_id()
                         current_thinking = remaining_thinking
 
                 # Update draft with expanded thinking (visible while streaming)
@@ -304,31 +300,11 @@ async def handle_message(message: Message, bot: Bot) -> None:
                             )
                         thinking_finalized = True
                         # Generate new draft for content
-                        unified_draft_id = _generate_draft_id()
+                        unified_draft_id = generate_draft_id()
 
                     # Send content part
-                    formatted = convert_to_telegram_markdown(part)
                     try:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=formatted,
-                            message_thread_id=thread_id,
-                            parse_mode="MarkdownV2",
-                        )
-                        in_code_block = ends_mid_block
-                        sent_parts.append(part)
-                        unified_draft_id = _generate_draft_id()
-                    except TelegramBadRequest as e:
-                        if "parse" in str(e).lower():
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=part,
-                                message_thread_id=thread_id,
-                                parse_mode=None,
-                            )
-                            in_code_block = ends_mid_block
-                            sent_parts.append(part)
-                            unified_draft_id = _generate_draft_id()
+                        await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
                     except TelegramRetryAfter as e:
                         await asyncio.sleep(e.retry_after)
                         await bot.send_message(
@@ -337,17 +313,16 @@ async def handle_message(message: Message, bot: Bot) -> None:
                             message_thread_id=thread_id,
                             parse_mode=None,
                         )
-                        in_code_block = ends_mid_block
-                        sent_parts.append(part)
-                        unified_draft_id = _generate_draft_id()
+                    in_code_block = ends_mid_block
+                    sent_parts.append(part)
+                    unified_draft_id = generate_draft_id()
 
                     last_update = time.time()
                     continue
 
             # Check for final content confirmation (both modes)
-            if preview.strip() and not final_content_confirmed:
-                if len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
-                    final_content_confirmed = True
+            if not final_content_confirmed and len(preview.strip()) >= FINAL_CONTENT_MIN_LENGTH:
+                final_content_confirmed = True
 
             # Update content draft
             if preview.strip() and final_content_confirmed:

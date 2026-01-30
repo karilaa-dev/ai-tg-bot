@@ -50,7 +50,6 @@ def format_thinking_collapsed(thinking: str) -> str:
     return "\n".join(quoted_lines)
 
 
-# Keep for backwards compatibility
 format_thinking_block = format_thinking_collapsed
 
 
@@ -124,3 +123,9 @@ def split_message(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]
         remaining = remaining[split_pos:].lstrip()
 
     return parts
+
+
+def generate_draft_id() -> int:
+    """Generate a unique draft ID for Telegram message drafts."""
+    import time
+    return int(time.time() * 1000) % (2**31 - 1)
