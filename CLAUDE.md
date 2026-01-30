@@ -1,16 +1,17 @@
 # AI Telegram Bot
 
-An AI-powered Telegram bot with streaming responses, tool support (web search and webpage extraction), conversation persistence, and optional thinking traces.
+An AI-powered Telegram bot with streaming responses, tool support (web search and webpage extraction), conversation persistence, invite-based access control, multi-language support (EN/RU/UK), and optional thinking traces.
 
 ## Codebase Overview
 
 **Stack**: Python 3.12+, aiogram 3.24+, OpenAI SDK (via OpenRouter), SQLAlchemy 2.0, Tavily, Telegram Bot API 9.3
 
 **Structure**:
-- `main.py` - Entry point, starts aiogram polling
+- `main.py` - Entry point with multi-language command registration
 - `bot/ai/` - OpenRouter client with streaming, tool calling, and Tavily integration
-- `bot/database/` - SQLAlchemy models and repository
-- `bot/telegram/` - aiogram Bot, Dispatcher, and handlers
+- `bot/database/` - SQLAlchemy models (User, Conversation, Message, InviteCode) and repository
+- `bot/i18n/` - Multi-language translations (EN/RU/UK) with auto-detection
+- `bot/telegram/` - aiogram Bot, Dispatcher, filters, and handlers (admin, commands, callbacks, inline, messages)
 - `bot/utils/` - Formatting, token counting
 
 For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
@@ -31,6 +32,7 @@ Required in `.env`:
 - `TELEGRAM_BOT_TOKEN` - Bot token from @BotFather
 - `OPENROUTER_API_KEY` - API key from OpenRouter
 - `TAVILY_API_KEY` - API key from Tavily
+- `ADMIN_IDS` - Comma-separated admin Telegram IDs (e.g., `123456789,987654321`)
 
 Optional:
 - `OPENROUTER_MODEL` - Model ID (default: moonshotai/kimi-k2.5)
@@ -44,4 +46,6 @@ Optional:
 - Streaming responses with Telegram draft messages (Bot API 9.3)
 - Token-aware context window management
 - Multimodal support (images, PDFs converted to base64)
-- aiogram routers for handler organization
+- aiogram routers for handler organization with custom filters
+- Invite-based access control with admin commands
+- Multi-language UI with auto-detection and user preference
