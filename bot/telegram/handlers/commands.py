@@ -5,9 +5,10 @@ import logging
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.database.repository import repository
+from bot.i18n import Language, detect_language, get_text
 from bot.telegram.handlers.messages import _format_history, generate_and_stream_response
 from bot.utils import trim_messages_to_limit
 
@@ -16,11 +17,96 @@ logger = logging.getLogger(__name__)
 router = Router(name="commands")
 
 
+def _build_language_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for language selection."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="English", callback_data="lang:en"),
+                InlineKeyboardButton(text="Русский", callback_data="lang:ru"),
+                InlineKeyboardButton(text="Українська", callback_data="lang:uk"),
+            ]
+        ]
+    )
+
+
+async def _get_user_lang(telegram_id: int) -> Language:
+    """Get user's language preference."""
+    async with repository.session_factory() as session:
+        lang_code = await repository.get_user_language(session, telegram_id)
+    try:
+        return Language(lang_code)
+    except ValueError:
+        return Language.EN
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     """Handle /start command."""
+    if not message.from_user:
+        return
+
+    telegram_id = message.from_user.id
+
+    # Detect language from Telegram settings for new users
+    detected_lang = detect_language(message.from_user.language_code)
+
+    async with repository.session_factory() as session:
+        user = await repository.get_user_by_telegram_id(session, telegram_id)
+        is_new_user = user is None
+
+        await repository.get_or_create_user(
+            session,
+            telegram_id,
+            message.from_user.username,
+            message.from_user.first_name,
+        )
+
+        if is_new_user:
+            await repository.update_user_language(session, telegram_id, detected_lang.value)
+            lang = detected_lang
+        else:
+            lang = Language(user.language) if user else detected_lang
+
+        await session.commit()
+
+    welcome_text = get_text("start_welcome", lang)
+
+    if is_new_user:
+        # Show language selector for new users
+        lang_prompt = get_text("lang_select", lang)
+        await message.answer(
+            f"{welcome_text}\n\n{lang_prompt}",
+            parse_mode="MarkdownV2",
+            reply_markup=_build_language_keyboard(),
+        )
+    else:
+        await message.answer(welcome_text, parse_mode="MarkdownV2")
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Handle /help command."""
+    if not message.from_user:
+        return
+
+    lang = await _get_user_lang(message.from_user.id)
+    help_text = get_text("help_text", lang)
+    await message.answer(help_text, parse_mode="MarkdownV2")
+
+
+@router.message(Command("lang", "language"))
+async def cmd_lang(message: Message) -> None:
+    """Handle /lang command to change language."""
+    if not message.from_user:
+        return
+
+    lang = await _get_user_lang(message.from_user.id)
+    lang_prompt = get_text("lang_select", lang)
     await message.answer(
-        "Hello\\! I'm an AI assistant\\. Send me a message, image, or PDF and I'll respond\\.",
+        lang_prompt,
+        parse_mode="MarkdownV2",
+        reply_markup=_build_language_keyboard(),
     )
 
 
@@ -40,10 +126,16 @@ async def cmd_thinking(message: Message, bot: Bot) -> None:
             message.from_user.first_name,
         )
         new_value = await repository.toggle_show_thinking(session, telegram_id)
+        lang_code = await repository.get_user_language(session, telegram_id)
         await session.commit()
 
-    status = "enabled" if new_value else "disabled"
-    await message.answer(f"Thinking traces {status}\\.")
+    try:
+        lang = Language(lang_code)
+    except ValueError:
+        lang = Language.EN
+
+    key = "thinking_enabled" if new_value else "thinking_disabled"
+    await message.answer(get_text(key, lang), parse_mode="MarkdownV2")
 
 
 async def _delete_telegram_message(bot: Bot, chat_id: int, message_id: int) -> None:
@@ -74,7 +166,12 @@ async def _handle_redo_latest(
         # Get latest user message
         latest_user_msg = await repository.get_latest_user_message(session, conv.id)
         if not latest_user_msg:
-            await message.answer("No previous message to regenerate\\.")
+            lang_code = await repository.get_user_language(session, telegram_id)
+            try:
+                lang = Language(lang_code)
+            except ValueError:
+                lang = Language.EN
+            await message.answer(get_text("no_message_to_redo", lang), parse_mode="MarkdownV2")
             return
 
         # Delete latest assistant response from DB and get Telegram message ID
@@ -87,6 +184,7 @@ async def _handle_redo_latest(
         # Get updated conversation messages
         db_messages = await repository.get_conversation_messages(session, conv.id)
         show_thinking = user.show_thinking
+        lang = user.language
         await session.commit()
 
     # Delete from Telegram
@@ -98,7 +196,7 @@ async def _handle_redo_latest(
 
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
 
-    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking)
+    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking, lang)
 
     # Save new assistant response
     async with repository.session_factory() as session:
@@ -129,7 +227,8 @@ async def cmd_edit(message: Message, bot: Bot) -> None:
 
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Usage: /edit <new prompt>")
+        lang = await _get_user_lang(message.from_user.id)
+        await message.answer(get_text("edit_usage", lang), parse_mode="MarkdownV2")
         return
 
     new_prompt = parts[1]

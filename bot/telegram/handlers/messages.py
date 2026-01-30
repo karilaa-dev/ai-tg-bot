@@ -13,6 +13,7 @@ from aiogram.types import Message
 from bot.ai.openrouter import openrouter_client
 from bot.database.models import Message as DbMessage
 from bot.database.repository import repository
+from bot.i18n import Language, get_text
 from bot.telegram.files import download_and_encode_image, download_and_encode_pdf
 from bot.utils import (
     SAFE_MESSAGE_LENGTH,
@@ -49,10 +50,12 @@ class StreamingState:
     in_code_block: bool = False
     thinking_msg_replaced: bool = False
     pending_tool: str | None = None
-    current_status_text: str = "Thinking\\.\\.\\."
+    current_status_text: str = ""
     final_content_confirmed: bool = False
     last_update: float = 0.0
     draft_id: int = field(default_factory=generate_draft_id)
+    tool_counts: dict[str, int] = field(default_factory=dict)
+    lang: Language = Language.EN
 
     @property
     def sent_content_len(self) -> int:
@@ -85,13 +88,31 @@ logger = logging.getLogger(__name__)
 router = Router(name="messages")
 
 
-def _get_tool_status_text(tool_name: str) -> str:
-    """Get user-friendly status text for a tool."""
-    tool_display_map = {
-        "web_search": "Searching web\\.\\.\\.",
-        "extract_webpage": "Reading webpage\\.\\.\\.",
+def _get_tool_status_text(tool_name: str, count: int, lang: Language) -> str:
+    """Get user-friendly status text for a tool with emoji and counter."""
+    tool_key_map = {
+        "web_search": ("status_searching", "\U0001F50D"),  # magnifying glass
+        "extract_webpage": ("status_reading", "\U0001F4C4"),  # page
     }
-    return tool_display_map.get(tool_name, f"Using {tool_name}\\.\\.\\.")
+
+    if tool_name in tool_key_map:
+        key, emoji = tool_key_map[tool_name]
+        text = get_text(key, lang)
+    else:
+        emoji = "\U0001F527"  # wrench
+        text = f"Using {tool_name}\\.\\.\\."
+
+    result = f"{emoji} {text}"
+
+    if count > 1:
+        result += f" \\(x{count}\\)"
+
+    return result
+
+
+def _get_thinking_status_text(lang: Language) -> str:
+    """Get thinking status text with emoji."""
+    return f"\U0001F914 {get_text('status_thinking', lang)}"  # thinking face emoji
 
 
 # Minimum characters to confirm final response (tool planning is typically shorter)
@@ -191,15 +212,23 @@ async def generate_and_stream_response(
     thread_id: int | None,
     ai_messages: list[dict[str, Any]],
     show_thinking: bool,
+    lang: str = "en",
 ) -> StreamingResult:
     """Generate and stream an AI response to the chat.
 
     Returns StreamingResult with the final content and list of sent Telegram message IDs.
     """
-    state = StreamingState()
+    try:
+        user_lang = Language(lang)
+    except ValueError:
+        user_lang = Language.EN
+
+    state = StreamingState(lang=user_lang)
+    thinking_status = _get_thinking_status_text(user_lang)
+    state.current_status_text = thinking_status
 
     try:
-        await _send_draft_with_fallback(bot, chat_id, state.draft_id, "Thinking\\.\\.\\.", thread_id)
+        await _send_draft_with_fallback(bot, chat_id, state.draft_id, thinking_status, thread_id)
 
         async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
             await _handle_chunk(bot, chat_id, thread_id, chunk, state, show_thinking)
@@ -239,10 +268,11 @@ async def _handle_chunk(
         state.reasoning += f"(Used {state.pending_tool})\n"
         state.pending_tool = None
         # Restore "Thinking..." status after tool completes (non-thinking mode)
+        thinking_status = _get_thinking_status_text(state.lang)
         if not show_thinking and not state.thinking_msg_replaced:
-            if state.current_status_text != "Thinking\\.\\.\\.":
-                await _send_draft_with_fallback(bot, chat_id, state.draft_id, "Thinking\\.\\.\\.", thread_id)
-                state.current_status_text = "Thinking\\.\\.\\."
+            if state.current_status_text != thinking_status:
+                await _send_draft_with_fallback(bot, chat_id, state.draft_id, thinking_status, thread_id)
+                state.current_status_text = thinking_status
 
     state.reasoning += chunk.reasoning
     state.content += chunk.content
@@ -269,7 +299,11 @@ async def _handle_tool_use(
     state.final_content_confirmed = False
     state.thinking_msg_replaced = False
 
-    new_text = _get_tool_status_text(chunk.tool_name)
+    # Increment tool usage counter
+    state.tool_counts[chunk.tool_name] = state.tool_counts.get(chunk.tool_name, 0) + 1
+    count = state.tool_counts[chunk.tool_name]
+
+    new_text = _get_tool_status_text(chunk.tool_name, count, state.lang)
 
     if show_thinking and state.reasoning:
         current_thinking = state.current_thinking
@@ -504,6 +538,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
         )
         db_messages = await repository.get_conversation_messages(session, conv.id)
         show_thinking = user.show_thinking
+        lang = user.language
         await session.commit()
 
     # Prepare AI messages
@@ -513,7 +548,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
 
     # Generate and stream the response
-    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking)
+    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking, lang)
 
     # Save assistant response
     async with repository.session_factory() as session:

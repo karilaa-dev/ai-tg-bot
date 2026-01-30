@@ -136,6 +136,26 @@ class Repository:
             return user.show_thinking
         return False
 
+    async def update_user_language(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+        language: str,
+    ) -> None:
+        """Update user's language preference."""
+        user = await self.get_user_by_telegram_id(session, telegram_id)
+        if user:
+            user.language = language
+
+    async def get_user_language(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+    ) -> str:
+        """Get user's language preference, defaults to 'en'."""
+        user = await self.get_user_by_telegram_id(session, telegram_id)
+        return user.language if user else "en"
+
     async def _get_latest_message_by_role(
         self,
         session: AsyncSession,
