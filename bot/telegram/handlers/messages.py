@@ -91,40 +91,40 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="messages")
 
-# Cache for system prompt template
+# System prompt template path and cache
+_SYS_PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "SYS_PROMPT.md"
 _sys_prompt_template: str | None = None
 
+# Human-readable language names for system prompt
+_LANG_NAMES: dict[str, str] = {
+    Language.EN.value: "English",
+    Language.RU.value: "Russian",
+    Language.UK.value: "Ukrainian",
+}
 
-def _load_sys_prompt_template() -> str:
-    """Load system prompt template from SYS_PROMPT.md."""
+
+def _get_sys_prompt_template() -> str:
+    """Load and cache system prompt template from SYS_PROMPT.md."""
     global _sys_prompt_template
     if _sys_prompt_template is None:
-        prompt_path = Path(__file__).parent.parent.parent.parent / "SYS_PROMPT.md"
-        _sys_prompt_template = prompt_path.read_text(encoding="utf-8")
+        _sys_prompt_template = _SYS_PROMPT_PATH.read_text(encoding="utf-8")
     return _sys_prompt_template
-
-
-_LANG_NAMES = {
-    "en": "English",
-    "ru": "Russian",
-    "uk": "Ukrainian",
-}
 
 
 async def _build_system_prompt(user_name: str, user_lang: str, bot: Bot) -> str:
     """Build system prompt with runtime values."""
-    template = _load_sys_prompt_template()
     now = datetime.now(UTC)
     bot_info = await bot.get_me()
+    lang_name = _LANG_NAMES.get(user_lang, _LANG_NAMES[Language.EN.value])
 
-    return template.format(
+    return _get_sys_prompt_template().format(
         model_name=settings.openrouter_model,
         bot_name=bot_info.first_name,
         time=now.strftime("%H:%M"),
         timezone="UTC",
         date=now.strftime("%Y-%m-%d"),
         user_name=user_name,
-        user_lang=_LANG_NAMES.get(user_lang, "English"),
+        user_lang=lang_name,
     )
 
 
