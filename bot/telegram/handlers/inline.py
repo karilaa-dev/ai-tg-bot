@@ -50,7 +50,7 @@ async def _create_random_code(created_by: int) -> str:
 
 
 def _build_invite_result(
-    code: str, lang: Language, bot_username: str, bot_name: str
+    code: str, lang: Language, bot_username: str, bot_name: str, is_custom: bool = False
 ) -> InlineQueryResultArticle:
     """Build an inline query result for an invite code."""
     keyboard = InlineKeyboardMarkup(
@@ -64,10 +64,15 @@ def _build_invite_result(
         ]
     )
 
+    if is_custom:
+        description = get_text("inline_custom_invite_desc", lang, code=code)
+    else:
+        description = get_text("inline_new_invite_desc", lang)
+
     return InlineQueryResultArticle(
         id=f"{code}_{lang.value}",
         title=get_text("inline_new_invite_title", lang, lang_name=LANG_NAMES[lang]),
-        description=get_text("inline_new_invite_desc", lang),
+        description=description,
         input_message_content=InputTextMessageContent(
             message_text=get_text("invite_share_message", lang, bot_name=bot_name, code=code),
             parse_mode="MarkdownV2",
@@ -101,7 +106,7 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
     if custom_code:
         code = await _get_or_create_custom_code(custom_code, telegram_id)
         for lang in languages:
-            results.append(_build_invite_result(code, lang, bot_username, bot_name))
+            results.append(_build_invite_result(code, lang, bot_username, bot_name, is_custom=True))
     else:
         for lang in languages:
             code = await _create_random_code(telegram_id)

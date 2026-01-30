@@ -308,9 +308,14 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         Language.UK: "Надіслати запрошення ({lang_name})",
     },
     "inline_new_invite_desc": {
-        Language.EN: "Creates a new one\\-time invite code",
+        Language.EN: "Creates a new one-time invite code",
         Language.RU: "Создаёт новый одноразовый код",
-        Language.UK: "Створює новий одноразовый код",
+        Language.UK: "Створює новий одноразовий код",
+    },
+    "inline_custom_invite_desc": {
+        Language.EN: "Code: {code}",
+        Language.RU: "Код: {code}",
+        Language.UK: "Код: {code}",
     },
     "inline_join_button": {
         Language.EN: "Start Bot",
@@ -319,19 +324,19 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
     },
     "invite_share_message": {
         Language.EN: (
-            "🎉 *You're invited\\!*\n\n"
-            "You've been invited to use *{bot_name}* \\- an AI assistant that can help you with various tasks\\.\n\n"
-            "Your invite code: `{code}`"
+            "You've been invited to use *{bot_name}*\\.\n\n"
+            "`/code {code}`\n\n"
+            "_The button works on phone\\. On PC, send the command above to the bot\\._"
         ),
         Language.RU: (
-            "🎉 *Вас приглашают\\!*\n\n"
-            "Вы приглашены использовать *{bot_name}* \\- ИИ\\-ассистента, который поможет вам с различными задачами\\.\n\n"
-            "Ваш код приглашения: `{code}`"
+            "Вас приглашают использовать *{bot_name}*\\.\n\n"
+            "`/code {code}`\n\n"
+            "_Кнопка работает на телефоне\\. На ПК отправьте команду выше боту\\._"
         ),
         Language.UK: (
-            "🎉 *Вас запрошують\\!*\n\n"
-            "Вас запрошено використовувати *{bot_name}* \\- ШІ\\-асистента, який допоможе вам з різними завданнями\\.\n\n"
-            "Ваш код запрошення: `{code}`"
+            "Вас запрошують використовувати *{bot_name}*\\.\n\n"
+            "`/code {code}`\n\n"
+            "_Кнопка працює на телефоні\\. На ПК надішліть команду вище боту\\._"
         ),
     },
     # /code command
