@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -25,6 +26,14 @@ from bot.utils import (
     split_thinking,
     trim_messages_to_limit,
 )
+
+
+@dataclass
+class StreamingResult:
+    """Result of a streaming response generation."""
+
+    content: str
+    sent_message_ids: list[int] = field(default_factory=list)
 
 logger = logging.getLogger(__name__)
 
@@ -131,43 +140,17 @@ async def _send_draft_with_fallback(
             )
 
 
-@router.message(F.text & ~F.text.startswith("/") | F.photo | F.document)
-async def handle_message(message: Message, bot: Bot) -> None:
-    """Handle an incoming message."""
-    if not message.from_user:
-        return
+async def generate_and_stream_response(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    ai_messages: list[dict[str, Any]],
+    show_thinking: bool,
+) -> StreamingResult:
+    """Generate and stream an AI response to the chat.
 
-    chat_id = message.chat.id
-    user_data = message.from_user
-    thread_id = message.message_thread_id
-
-    text = message.text or message.caption or ""
-    image_id = message.photo[-1].file_id if message.photo else None
-    doc = message.document
-    pdf_id = doc.file_id if doc and doc.mime_type == "application/pdf" else None
-
-    if not text and not image_id and not pdf_id:
-        return
-
-    # Load user and save incoming message
-    async with repository.session_factory() as session:
-        user = await repository.get_or_create_user(
-            session, user_data.id, user_data.username, user_data.first_name
-        )
-        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
-        await repository.add_message(
-            session, conv.id, "user", text, message.message_id, image_id, pdf_id
-        )
-        db_messages = await repository.get_conversation_messages(session, conv.id)
-        show_thinking = user.show_thinking
-        await session.commit()
-
-    # Prepare AI messages
-    ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
-
-    # Send thinking indicator (only when not showing thinking blocks)
-    await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
-
+    Returns StreamingResult with the final content and list of sent Telegram message IDs.
+    """
     # Use a unified draft for all streaming (both show_thinking modes)
     unified_draft_id = generate_draft_id()
 
@@ -176,6 +159,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
     last_update = 0.0
     sent_parts: list[str] = []  # Content parts already sent as permanent messages
     sent_thinking_parts: list[str] = []  # Thinking parts sent as permanent (overflow)
+    sent_message_ids: list[int] = []  # Telegram message IDs of sent messages
     thinking_finalized = False
     in_code_block = False
     thinking_msg_replaced = False
@@ -255,9 +239,10 @@ async def handle_message(message: Message, bot: Bot) -> None:
                     )
                     if part_to_send:
                         collapsed = format_thinking_collapsed(part_to_send)
-                        await _send_with_markdown_fallback(
+                        sent_msg = await _send_with_markdown_fallback(
                             bot, chat_id, collapsed, thread_id, convert=False
                         )
+                        sent_message_ids.append(sent_msg.message_id)
                         sent_thinking_parts.append(part_to_send)
                         # Generate new draft ID for continued thinking
                         unified_draft_id = generate_draft_id()
@@ -295,24 +280,27 @@ async def handle_message(message: Message, bot: Bot) -> None:
                         remaining_thinking = reasoning[sent_thinking_len:]
                         if remaining_thinking:
                             collapsed = format_thinking_collapsed(remaining_thinking)
-                            await _send_with_markdown_fallback(
+                            sent_msg = await _send_with_markdown_fallback(
                                 bot, chat_id, collapsed, thread_id, convert=False
                             )
+                            sent_message_ids.append(sent_msg.message_id)
                         thinking_finalized = True
                         # Generate new draft for content
                         unified_draft_id = generate_draft_id()
 
                     # Send content part
                     try:
-                        await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+                        sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+                        sent_message_ids.append(sent_msg.message_id)
                     except TelegramRetryAfter as e:
                         await asyncio.sleep(e.retry_after)
-                        await bot.send_message(
+                        sent_msg = await bot.send_message(
                             chat_id=chat_id,
                             text=part,
                             message_thread_id=thread_id,
                             parse_mode=None,
                         )
+                        sent_message_ids.append(sent_msg.message_id)
                     in_code_block = ends_mid_block
                     sent_parts.append(part)
                     unified_draft_id = generate_draft_id()
@@ -370,17 +358,20 @@ async def handle_message(message: Message, bot: Bot) -> None:
                 await _send_draft_with_fallback(
                     bot, chat_id, unified_draft_id, combined, thread_id, combined
                 )
-                await _send_with_markdown_fallback(bot, chat_id, combined, thread_id, convert=False)
+                sent_msg = await _send_with_markdown_fallback(bot, chat_id, combined, thread_id, convert=False)
+                sent_message_ids.append(sent_msg.message_id)
                 remaining = ""  # Already sent
             else:
                 # Send thinking separately (collapsed)
                 collapsed = format_thinking_collapsed(remaining_thinking)
-                await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+                sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+                sent_message_ids.append(sent_msg.message_id)
                 await asyncio.sleep(0.1)
         else:
             # No content, just send thinking
             collapsed = format_thinking_collapsed(remaining_thinking)
-            await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+            sent_msg = await _send_with_markdown_fallback(bot, chat_id, collapsed, thread_id, convert=False)
+            sent_message_ids.append(sent_msg.message_id)
 
     # Send remaining content (if not already combined)
     if remaining.strip():
@@ -399,10 +390,60 @@ async def handle_message(message: Message, bot: Bot) -> None:
         for i, part in enumerate(parts):
             if i > 0 or sent_parts:
                 await asyncio.sleep(0.1)
-            await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+            sent_msg = await _send_with_markdown_fallback(bot, chat_id, part, thread_id)
+            sent_message_ids.append(sent_msg.message_id)
+
+    return StreamingResult(content=content, sent_message_ids=sent_message_ids)
+
+
+@router.message(F.text & ~F.text.startswith("/") | F.photo | F.document)
+async def handle_message(message: Message, bot: Bot) -> None:
+    """Handle an incoming message."""
+    if not message.from_user:
+        return
+
+    chat_id = message.chat.id
+    user_data = message.from_user
+    thread_id = message.message_thread_id
+
+    text = message.text or message.caption or ""
+    image_id = message.photo[-1].file_id if message.photo else None
+    doc = message.document
+    pdf_id = doc.file_id if doc and doc.mime_type == "application/pdf" else None
+
+    if not text and not image_id and not pdf_id:
+        return
+
+    # Load user and save incoming message
+    async with repository.session_factory() as session:
+        user = await repository.get_or_create_user(
+            session, user_data.id, user_data.username, user_data.first_name
+        )
+        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
+        await repository.add_message(
+            session, conv.id, "user", text, message.message_id, image_id, pdf_id
+        )
+        db_messages = await repository.get_conversation_messages(session, conv.id)
+        show_thinking = user.show_thinking
+        await session.commit()
+
+    # Prepare AI messages
+    ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
+
+    # Send thinking indicator
+    await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
+
+    # Generate and stream the response
+    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking)
 
     # Save assistant response
     async with repository.session_factory() as session:
         conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
-        await repository.add_message(session, conv.id, "assistant", content)
+        await repository.add_message(
+            session,
+            conv.id,
+            "assistant",
+            result.content,
+            message_id=result.sent_message_ids[0] if result.sent_message_ids else None,
+        )
         await session.commit()

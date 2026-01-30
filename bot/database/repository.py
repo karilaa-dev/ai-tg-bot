@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bot.config import settings
@@ -135,5 +135,50 @@ class Repository:
             user.show_thinking = not user.show_thinking
             return user.show_thinking
         return False
+
+    async def get_latest_assistant_response(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+    ) -> Message | None:
+        """Get the latest assistant message."""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id, Message.role == "assistant")
+            .order_by(desc(Message.created_at))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest_user_message(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+    ) -> Message | None:
+        """Get most recent user message."""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id, Message.role == "user")
+            .order_by(desc(Message.created_at))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete_latest_assistant_response(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+    ) -> int | None:
+        """Delete latest assistant message, return its Telegram message_id."""
+        message = await self.get_latest_assistant_response(session, conversation_id)
+        if not message:
+            return None
+
+        telegram_id = message.message_id
+        await session.delete(message)
+        return telegram_id
+
 
 repository = Repository()
