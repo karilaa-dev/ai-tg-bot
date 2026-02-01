@@ -25,8 +25,6 @@ class Repository:
         self,
         session: AsyncSession,
         telegram_id: int,
-        username: str | None = None,
-        first_name: str | None = None,
         invited_by_code: str | None = None,
     ) -> User:
         """Get existing user or create a new one."""
@@ -37,17 +35,10 @@ class Repository:
         if user is None:
             user = User(
                 telegram_id=telegram_id,
-                username=username,
-                first_name=first_name,
                 invited_by_code=invited_by_code,
             )
             session.add(user)
             await session.flush()
-        else:
-            if username is not None:
-                user.username = username
-            if first_name is not None:
-                user.first_name = first_name
 
         return user
 

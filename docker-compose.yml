@@ -1,6 +1,18 @@
 services:
+  bot:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bot:bot@postgres:5432/bot
+    env_file:
+      - .env
+    volumes:
+      - ./SYS_PROMPT.md:/app/SYS_PROMPT.md
+
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18
     environment:
       POSTGRES_USER: bot
       POSTGRES_PASSWORD: bot
@@ -12,16 +24,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  bot:
-    build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql+asyncpg://bot:bot@postgres:5432/bot
-    env_file:
-      - .env
 
 volumes:
   postgres_data:

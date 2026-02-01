@@ -574,9 +574,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
 
     # Load user and save incoming message
     async with repository.session_factory() as session:
-        user = await repository.get_or_create_user(
-            session, user_data.id, user_data.username, user_data.first_name
-        )
+        user = await repository.get_or_create_user(session, user_data.id)
         conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
         await repository.add_message(
             session, conv.id, "user", text, message.message_id, image_id, pdf_id

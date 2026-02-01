@@ -44,10 +44,10 @@ async def _send_welcome_with_lang_select(message: Message, lang: Language, prefi
 
 
 async def _create_user_with_language(
-    session, telegram_id: int, username: str | None, first_name: str | None, lang: Language, invite_code: str | None = None
+    session, telegram_id: int, lang: Language, invite_code: str | None = None
 ) -> None:
     """Create user and set language preference."""
-    await repository.get_or_create_user(session, telegram_id, username, first_name, invited_by_code=invite_code)
+    await repository.get_or_create_user(session, telegram_id, invited_by_code=invite_code)
     await repository.update_user_language(session, telegram_id, lang.value)
 
 
@@ -90,7 +90,7 @@ async def cmd_start_with_invite(message: Message) -> None:
 
         # Admin without user record - auto-create
         if telegram_id in settings.admin_ids:
-            await _create_user_with_language(session, telegram_id, message.from_user.username, message.from_user.first_name, detected_lang)
+            await _create_user_with_language(session, telegram_id, detected_lang)
             await session.commit()
             await _send_welcome_with_lang_select(message, detected_lang)
             return
@@ -100,7 +100,7 @@ async def cmd_start_with_invite(message: Message) -> None:
             if not await _validate_and_use_invite(session, invite_code, detected_lang, message):
                 return
 
-            await _create_user_with_language(session, telegram_id, message.from_user.username, message.from_user.first_name, detected_lang, invite_code)
+            await _create_user_with_language(session, telegram_id, detected_lang, invite_code)
             await session.commit()
 
             prefix = get_text("invite_success", detected_lang) + "\n\n"
@@ -131,7 +131,7 @@ async def cmd_start(message: Message) -> None:
 
         # Admin without user record - auto-create
         if telegram_id in settings.admin_ids:
-            await _create_user_with_language(session, telegram_id, message.from_user.username, message.from_user.first_name, detected_lang)
+            await _create_user_with_language(session, telegram_id, detected_lang)
             await session.commit()
             await _send_welcome_with_lang_select(message, detected_lang)
             return
@@ -173,9 +173,7 @@ async def cmd_thinking(message: Message, bot: Bot) -> None:
     telegram_id = message.from_user.id
 
     async with repository.session_factory() as session:
-        await repository.get_or_create_user(
-            session, telegram_id, message.from_user.username, message.from_user.first_name
-        )
+        await repository.get_or_create_user(session, telegram_id)
         new_value = await repository.toggle_show_thinking(session, telegram_id)
         await session.commit()
 
@@ -204,9 +202,7 @@ async def _handle_redo_latest(
     telegram_id = message.from_user.id
 
     async with repository.session_factory() as session:
-        user = await repository.get_or_create_user(
-            session, telegram_id, message.from_user.username, message.from_user.first_name
-        )
+        user = await repository.get_or_create_user(session, telegram_id)
         conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
 
         # Get latest user message
@@ -302,7 +298,7 @@ async def cmd_code(message: Message) -> None:
         if not await _validate_and_use_invite(session, invite_code, detected_lang, message):
             return
 
-        await _create_user_with_language(session, telegram_id, message.from_user.username, message.from_user.first_name, detected_lang, invite_code)
+        await _create_user_with_language(session, telegram_id, detected_lang, invite_code)
         await session.commit()
 
     prefix = get_text("invite_success", detected_lang) + "\n\n"

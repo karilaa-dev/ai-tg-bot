@@ -31,12 +31,7 @@ async def handle_language_selection(callback: CallbackQuery) -> None:
     telegram_id = callback.from_user.id
 
     async with repository.session_factory() as session:
-        await repository.get_or_create_user(
-            session,
-            telegram_id,
-            callback.from_user.username,
-            callback.from_user.first_name,
-        )
+        await repository.get_or_create_user(session, telegram_id)
         await repository.update_user_language(session, telegram_id, lang.value)
         await session.commit()
 
