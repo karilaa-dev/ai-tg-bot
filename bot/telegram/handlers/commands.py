@@ -1,6 +1,7 @@
 """Command handlers for the Telegram bot."""
 
 import logging
+from datetime import UTC, datetime
 
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -303,3 +304,104 @@ async def cmd_code(message: Message) -> None:
 
     prefix = get_text("invite_success", detected_lang) + "\n\n"
     await _send_welcome_with_lang_select(message, detected_lang, prefix)
+
+
+def _format_timezone_offset(offset_minutes: int) -> str:
+    """Format timezone offset as UTC+X or UTC-X string."""
+    if offset_minutes == 0:
+        return "UTC"
+
+    sign = "+" if offset_minutes > 0 else "-"
+    abs_minutes = abs(offset_minutes)
+    hours = abs_minutes // 60
+    minutes = abs_minutes % 60
+
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours}:{minutes:02d}"
+
+
+@router.message(Command("timezone"))
+async def cmd_timezone(message: Message) -> None:
+    """Handle /timezone command to set user's timezone."""
+    if not message.from_user:
+        return
+
+    telegram_id = message.from_user.id
+    lang = await get_user_language(telegram_id)
+
+    # Parse time argument
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        # Show current timezone and usage
+        async with repository.session_factory() as session:
+            offset = await repository.get_user_timezone(session, telegram_id)
+
+        timezone_str = _format_timezone_offset(offset)
+        # Escape special characters for MarkdownV2
+        timezone_escaped = timezone_str.replace("-", "\\-").replace("+", "\\+")
+        current_msg = get_text("timezone_current", lang, timezone=timezone_escaped)
+        usage_msg = get_text("timezone_usage", lang)
+        await message.answer(f"{current_msg}\n\n{usage_msg}", parse_mode="MarkdownV2")
+        return
+
+    time_arg = parts[1].strip().upper()
+
+    # Parse HH:MM or HH:MM AM/PM format
+    try:
+        if ":" not in time_arg:
+            raise ValueError("Invalid format")
+
+        # Check for AM/PM suffix
+        is_pm = "PM" in time_arg
+        is_am = "AM" in time_arg
+        time_part = time_arg.replace("AM", "").replace("PM", "").strip()
+
+        hour_str, minute_str = time_part.split(":", 1)
+        user_hour = int(hour_str)
+        user_minute = int(minute_str)
+
+        # Convert 12-hour to 24-hour format
+        if is_am or is_pm:
+            if not (1 <= user_hour <= 12 and 0 <= user_minute < 60):
+                raise ValueError("Invalid time range")
+            if is_am:
+                user_hour = 0 if user_hour == 12 else user_hour
+            else:  # PM
+                user_hour = 12 if user_hour == 12 else user_hour + 12
+        else:
+            if not (0 <= user_hour < 24 and 0 <= user_minute < 60):
+                raise ValueError("Invalid time range")
+    except ValueError:
+        await message.answer(get_text("timezone_invalid", lang), parse_mode="MarkdownV2")
+        return
+
+    # Calculate offset from UTC
+    now_utc = datetime.now(UTC)
+    utc_minutes = now_utc.hour * 60 + now_utc.minute
+    user_minutes = user_hour * 60 + user_minute
+
+    # Calculate raw offset
+    raw_offset = user_minutes - utc_minutes
+
+    # Handle day boundary (e.g., user at 02:00 when UTC is 23:00)
+    if raw_offset > 720:  # More than +12 hours
+        raw_offset -= 1440
+    elif raw_offset < -720:  # More than -12 hours
+        raw_offset += 1440
+
+    # Round to nearest 15 minutes for standard timezone alignment
+    offset_minutes = round(raw_offset / 15) * 15
+
+    # Save to database
+    async with repository.session_factory() as session:
+        await repository.update_user_timezone(session, telegram_id, offset_minutes)
+        await session.commit()
+
+    timezone_str = _format_timezone_offset(offset_minutes)
+    # Escape special characters for MarkdownV2
+    timezone_escaped = timezone_str.replace("-", "\\-").replace("+", "\\+")
+    await message.answer(
+        get_text("timezone_set", lang, timezone=timezone_escaped),
+        parse_mode="MarkdownV2",
+    )

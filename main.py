@@ -25,6 +25,7 @@ USER_COMMAND_KEYS = [
     ("redo", "cmd_redo_desc"),
     ("edit", "cmd_edit_desc"),
     ("lang", "cmd_lang_desc"),
+    ("timezone", "cmd_timezone_desc"),
     ("code", "cmd_code_desc"),
 ]
 

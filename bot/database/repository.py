@@ -149,6 +149,26 @@ class Repository:
         user = await self.get_user_by_telegram_id(session, telegram_id)
         return user.language if user else "en"
 
+    async def update_user_timezone(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+        offset_minutes: int,
+    ) -> None:
+        """Update user's timezone offset in minutes from UTC."""
+        user = await self.get_user_by_telegram_id(session, telegram_id)
+        if user:
+            user.timezone_offset = offset_minutes
+
+    async def get_user_timezone(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+    ) -> int:
+        """Get user's timezone offset in minutes, defaults to 0 (UTC)."""
+        user = await self.get_user_by_telegram_id(session, telegram_id)
+        return user.timezone_offset if user else 0
+
     async def _get_latest_message_by_role(
         self,
         session: AsyncSession,

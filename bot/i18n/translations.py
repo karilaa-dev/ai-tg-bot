@@ -68,6 +68,11 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         Language.RU: "Ввести код приглашения",
         Language.UK: "Ввести код запрошення",
     },
+    "cmd_timezone_desc": {
+        Language.EN: "Set your timezone",
+        Language.RU: "Установить часовой пояс",
+        Language.UK: "Встановити часовий пояс",
+    },
     # Welcome and help messages
     "start_welcome": {
         Language.EN: (
@@ -78,7 +83,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Toggle AI thinking traces\n"
             "/redo \\- Regenerate last response\n"
             "/edit \\<text\\> \\- Edit and regenerate\n"
-            "/lang \\- Change language"
+            "/lang \\- Change language\n"
+            "/timezone \\- Set your timezone"
         ),
         Language.RU: (
             "Привет\\! Я ИИ\\-ассистент\\.\n\n"
@@ -88,7 +94,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Показ размышлений ИИ\n"
             "/redo \\- Сгенерировать заново\n"
             "/edit \\<текст\\> \\- Изменить и сгенерировать\n"
-            "/lang \\- Сменить язык"
+            "/lang \\- Сменить язык\n"
+            "/timezone \\- Установить часовой пояс"
         ),
         Language.UK: (
             "Привіт\\! Я ШІ\\-асистент\\.\n\n"
@@ -98,7 +105,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Показ роздумів ШІ\n"
             "/redo \\- Згенерувати заново\n"
             "/edit \\<текст\\> \\- Змінити та згенерувати\n"
-            "/lang \\- Змінити мову"
+            "/lang \\- Змінити мову\n"
+            "/timezone \\- Встановити часовий пояс"
         ),
     },
     "help_text": {
@@ -112,7 +120,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Toggle AI thinking traces\n"
             "/redo \\- Regenerate the last response\n"
             "/edit \\<text\\> \\- Edit last message and regenerate\n"
-            "/lang \\- Change interface language\n\n"
+            "/lang \\- Change interface language\n"
+            "/timezone \\- Set your timezone\n\n"
             "*Tips:*\n"
             "• Send images or PDFs with a caption for analysis\n"
             "• Ask me to search the web for current information\n"
@@ -128,7 +137,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Показ размышлений ИИ\n"
             "/redo \\- Сгенерировать последний ответ заново\n"
             "/edit \\<текст\\> \\- Изменить сообщение и сгенерировать\n"
-            "/lang \\- Сменить язык интерфейса\n\n"
+            "/lang \\- Сменить язык интерфейса\n"
+            "/timezone \\- Установить часовой пояс\n\n"
             "*Советы:*\n"
             "• Отправляй изображения или PDF с подписью для анализа\n"
             "• Попроси меня поискать актуальную информацию в интернете\n"
@@ -144,7 +154,8 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/thinking \\- Показ роздумів ШІ\n"
             "/redo \\- Згенерувати останню відповідь заново\n"
             "/edit \\<текст\\> \\- Змінити повідомлення та згенерувати\n"
-            "/lang \\- Змінити мову інтерфейсу\n\n"
+            "/lang \\- Змінити мову інтерфейсу\n"
+            "/timezone \\- Встановити часовий пояс\n\n"
             "*Поради:*\n"
             "• Надсилай зображення або PDF з підписом для аналізу\n"
             "• Попроси мене пошукати актуальну інформацію в інтернеті\n"
@@ -349,6 +360,27 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         Language.EN: "You already have access to this bot\\!",
         Language.RU: "У вас уже есть доступ к этому боту\\!",
         Language.UK: "Ви вже маєте доступ до цього бота\\!",
+    },
+    # Timezone
+    "timezone_usage": {
+        Language.EN: "Usage: /timezone HH:MM \\- enter your current time \\(e\\.g\\., /timezone 15:30 or /timezone 3:30 PM\\)",
+        Language.RU: "Использование: /timezone ЧЧ:ММ \\- введите ваше текущее время \\(напр\\., /timezone 15:30 или /timezone 3:30 PM\\)",
+        Language.UK: "Використання: /timezone ГГ:ХХ \\- введіть ваш поточний час \\(напр\\., /timezone 15:30 або /timezone 3:30 PM\\)",
+    },
+    "timezone_current": {
+        Language.EN: "Your timezone: {timezone}",
+        Language.RU: "Ваш часовой пояс: {timezone}",
+        Language.UK: "Ваш часовий пояс: {timezone}",
+    },
+    "timezone_set": {
+        Language.EN: "Timezone set to {timezone}",
+        Language.RU: "Часовой пояс установлен: {timezone}",
+        Language.UK: "Часовий пояс встановлено: {timezone}",
+    },
+    "timezone_invalid": {
+        Language.EN: "Invalid format\\. Use: /timezone HH:MM \\(e\\.g\\., /timezone 15:30 or /timezone 3:30 PM\\)",
+        Language.RU: "Неверный формат\\. Используйте: /timezone ЧЧ:ММ \\(напр\\., /timezone 15:30 или /timezone 3:30 PM\\)",
+        Language.UK: "Невірний формат\\. Використовуйте: /timezone ГГ:ХХ \\(напр\\., /timezone 15:30 або /timezone 3:30 PM\\)",
     },
 }
 

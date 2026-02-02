@@ -25,6 +25,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     show_thinking: Mapped[bool] = mapped_column(Boolean, default=False)
     language: Mapped[str] = mapped_column(String(5), default="en")
+    timezone_offset: Mapped[int] = mapped_column(default=0)  # Offset in minutes from UTC
     invited_by_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     conversations: Mapped[list["Conversation"]] = relationship(

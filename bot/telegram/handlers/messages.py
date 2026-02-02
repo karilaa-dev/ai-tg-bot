@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -116,18 +116,38 @@ def _get_sys_prompt_template() -> str:
     return _sys_prompt_template
 
 
-async def _build_system_prompt(user_name: str, user_lang: str, bot: Bot) -> str:
+def _format_timezone_offset(offset_minutes: int) -> str:
+    """Format timezone offset as UTC+X or UTC-X string."""
+    if offset_minutes == 0:
+        return "UTC"
+
+    sign = "+" if offset_minutes > 0 else "-"
+    abs_minutes = abs(offset_minutes)
+    hours = abs_minutes // 60
+    minutes = abs_minutes % 60
+
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours}:{minutes:02d}"
+
+
+async def _build_system_prompt(
+    user_name: str, user_lang: str, bot: Bot, timezone_offset: int = 0
+) -> str:
     """Build system prompt with runtime values."""
-    now = datetime.now(UTC)
+    now_utc = datetime.now(UTC)
+    # Convert UTC to user's local time
+    user_time = now_utc + timedelta(minutes=timezone_offset)
     bot_info = await bot.get_me()
     lang_name = _LANG_NAMES.get(user_lang, _LANG_NAMES[Language.EN.value])
+    timezone_str = _format_timezone_offset(timezone_offset)
 
     return _get_sys_prompt_template().format(
         model_name=settings.openrouter_model,
         bot_name=bot_info.first_name,
-        time=now.strftime("%H:%M"),
-        timezone="UTC",
-        date=now.strftime("%Y-%m-%d"),
+        time=user_time.strftime("%H:%M"),
+        timezone=timezone_str,
+        date=user_time.strftime("%Y-%m-%d"),
         user_name=user_name,
         user_lang=lang_name,
     )
@@ -582,11 +602,14 @@ async def handle_message(message: Message, bot: Bot) -> None:
         db_messages = await repository.get_conversation_messages(session, conv.id)
         show_thinking = user.show_thinking
         lang = user.language
+        timezone_offset = user.timezone_offset
         await session.commit()
 
     # Prepare AI messages with system prompt
     ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
-    system_prompt = await _build_system_prompt(user_data.first_name or "User", lang, bot)
+    system_prompt = await _build_system_prompt(
+        user_data.first_name or "User", lang, bot, timezone_offset
+    )
     ai_messages.insert(0, {"role": "system", "content": system_prompt})
 
     # Send thinking indicator
