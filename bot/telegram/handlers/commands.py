@@ -12,7 +12,7 @@ from bot.config import settings
 from bot.database.repository import repository
 from bot.i18n import Language, detect_language, get_text, get_user_language
 from bot.telegram.handlers.messages import _format_history, generate_and_stream_response
-from bot.utils import trim_messages_to_limit
+from bot.utils import format_timezone_offset
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,7 @@ async def _handle_redo_latest(
         await _delete_telegram_message(bot, chat_id, tg_msg_id)
 
     # Prepare AI messages and regenerate
-    ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
+    ai_messages = await _format_history(db_messages, bot)
 
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
 
@@ -306,21 +306,6 @@ async def cmd_code(message: Message) -> None:
     await _send_welcome_with_lang_select(message, detected_lang, prefix)
 
 
-def _format_timezone_offset(offset_minutes: int) -> str:
-    """Format timezone offset as UTC+X or UTC-X string."""
-    if offset_minutes == 0:
-        return "UTC"
-
-    sign = "+" if offset_minutes > 0 else "-"
-    abs_minutes = abs(offset_minutes)
-    hours = abs_minutes // 60
-    minutes = abs_minutes % 60
-
-    if minutes == 0:
-        return f"UTC{sign}{hours}"
-    return f"UTC{sign}{hours}:{minutes:02d}"
-
-
 @router.message(Command("timezone"))
 async def cmd_timezone(message: Message) -> None:
     """Handle /timezone command to set user's timezone."""
@@ -337,7 +322,7 @@ async def cmd_timezone(message: Message) -> None:
         async with repository.session_factory() as session:
             offset = await repository.get_user_timezone(session, telegram_id)
 
-        timezone_str = _format_timezone_offset(offset)
+        timezone_str = format_timezone_offset(offset)
         # Escape special characters for MarkdownV2
         timezone_escaped = timezone_str.replace("-", "\\-").replace("+", "\\+")
         current_msg = get_text("timezone_current", lang, timezone=timezone_escaped)
@@ -398,7 +383,7 @@ async def cmd_timezone(message: Message) -> None:
         await repository.update_user_timezone(session, telegram_id, offset_minutes)
         await session.commit()
 
-    timezone_str = _format_timezone_offset(offset_minutes)
+    timezone_str = format_timezone_offset(offset_minutes)
     # Escape special characters for MarkdownV2
     timezone_escaped = timezone_str.replace("-", "\\-").replace("+", "\\+")
     await message.answer(

@@ -135,3 +135,18 @@ def generate_invite_code() -> str:
     """Generate a random 8-character alphanumeric invite code."""
     chars = string.ascii_lowercase + string.digits
     return "".join(random.choices(chars, k=8))
+
+
+def format_timezone_offset(offset_minutes: int) -> str:
+    """Format timezone offset as UTC+X or UTC-X string."""
+    if offset_minutes == 0:
+        return "UTC"
+
+    sign = "+" if offset_minutes > 0 else "-"
+    abs_minutes = abs(offset_minutes)
+    hours = abs_minutes // 60
+    minutes = abs_minutes % 60
+
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours}:{minutes:02d}"

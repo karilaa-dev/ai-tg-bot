@@ -16,7 +16,6 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "tavily-python" },
     { name = "telegramify-markdown" },
-    { name = "tiktoken" },
 ]
 
 [package.metadata]
@@ -30,7 +29,6 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.46" },
     { name = "tavily-python", specifier = ">=0.7.0" },
     { name = "telegramify-markdown", specifier = ">=0.5.4" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 
 [[package]]

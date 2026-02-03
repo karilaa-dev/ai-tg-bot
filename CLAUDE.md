@@ -12,7 +12,7 @@ An AI-powered Telegram bot with streaming responses, tool support (web search an
 - `bot/database/` - SQLAlchemy models (User, Conversation, Message, InviteCode) and repository
 - `bot/i18n/` - Multi-language translations (EN/RU/UK) with auto-detection
 - `bot/telegram/` - aiogram Bot, Dispatcher, filters, and handlers (admin, commands, callbacks, inline, messages)
-- `bot/utils/` - Formatting, token counting
+- `bot/utils/` - Formatting utilities
 
 For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
 
@@ -37,14 +37,12 @@ Required in `.env`:
 Optional:
 - `OPENROUTER_MODEL` - Model ID (default: moonshotai/kimi-k2.5)
 - `DATABASE_URL` - SQLAlchemy URL (default: sqlite+aiosqlite:///./bot.db)
-- `CONTEXT_TOKEN_LIMIT` - Max context tokens (default: 8000)
 
 ## Architecture Notes
 
 - All I/O is async (aiogram, aiosqlite, async OpenAI client)
 - Singleton pattern for all clients (`bot`, `dp`, `openrouter_client`, `repository`)
 - Streaming responses with Telegram draft messages (Bot API 9.3)
-- Token-aware context window management
 - Multimodal support (images, PDFs converted to base64)
 - aiogram routers for handler organization with custom filters
 - Invite-based access control with admin commands

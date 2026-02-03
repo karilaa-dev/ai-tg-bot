@@ -85,7 +85,6 @@ docker compose up -d
 |----------|---------|-------------|
 | `OPENROUTER_MODEL` | `moonshotai/kimi-k2.5` | Model ID from OpenRouter |
 | `DATABASE_URL` | `sqlite+aiosqlite:///bot.db` | Database connection URL |
-| `CONTEXT_TOKEN_LIMIT` | `8000` | Maximum tokens in conversation context |
 
 ### Database Options
 
@@ -152,7 +151,6 @@ The bot uses an invite-based access control system:
 - `openai` - OpenAI SDK (for OpenRouter)
 - `sqlalchemy` + `aiosqlite`/`asyncpg` - Async database ORM
 - `tavily-python` - Web search and extraction
-- `tiktoken` - Token counting
 - `pydantic-settings` - Configuration management
 - `telegramify-markdown` - Markdown conversion
 

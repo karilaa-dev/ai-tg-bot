@@ -26,10 +26,10 @@ from bot.utils import (
     format_thinking_collapsed,
     format_thinking_expanded,
     format_thinking_with_content,
+    format_timezone_offset,
     generate_draft_id,
     split_message,
     split_thinking,
-    trim_messages_to_limit,
 )
 
 
@@ -116,21 +116,6 @@ def _get_sys_prompt_template() -> str:
     return _sys_prompt_template
 
 
-def _format_timezone_offset(offset_minutes: int) -> str:
-    """Format timezone offset as UTC+X or UTC-X string."""
-    if offset_minutes == 0:
-        return "UTC"
-
-    sign = "+" if offset_minutes > 0 else "-"
-    abs_minutes = abs(offset_minutes)
-    hours = abs_minutes // 60
-    minutes = abs_minutes % 60
-
-    if minutes == 0:
-        return f"UTC{sign}{hours}"
-    return f"UTC{sign}{hours}:{minutes:02d}"
-
-
 async def _build_system_prompt(
     user_name: str, user_lang: str, bot: Bot, timezone_offset: int = 0
 ) -> str:
@@ -140,7 +125,7 @@ async def _build_system_prompt(
     user_time = now_utc + timedelta(minutes=timezone_offset)
     bot_info = await bot.get_me()
     lang_name = _LANG_NAMES.get(user_lang, _LANG_NAMES[Language.EN.value])
-    timezone_str = _format_timezone_offset(timezone_offset)
+    timezone_str = format_timezone_offset(timezone_offset)
 
     return _get_sys_prompt_template().format(
         model_name=settings.openrouter_model,
@@ -606,7 +591,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
         await session.commit()
 
     # Prepare AI messages with system prompt
-    ai_messages = trim_messages_to_limit(await _format_history(db_messages, bot))
+    ai_messages = await _format_history(db_messages, bot)
     system_prompt = await _build_system_prompt(
         user_data.first_name or "User", lang, bot, timezone_offset
     )

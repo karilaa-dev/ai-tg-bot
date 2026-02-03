@@ -13,6 +13,5 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "python-dotenv>=1.2.0",
     "tavily-python>=0.7.0",
-    "tiktoken>=0.12.0",
     "telegramify-markdown>=0.5.4",
 ]

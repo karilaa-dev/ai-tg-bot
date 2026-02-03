@@ -42,7 +42,6 @@ graph TB
 
     subgraph Utils
         Format[formatting.py]
-        Tokens[tokens.py]
     end
 
     subgraph i18n
@@ -61,7 +60,6 @@ graph TB
     Handlers --> Trans
     MsgH --> Files
     MsgH --> Format
-    MsgH --> Tokens
 ```
 
 ## Directory Structure
@@ -89,8 +87,7 @@ ai-tg-bot/
 │   │       ├── inline.py   # Inline query for sharing invites
 │   │       └── messages.py # Message handling with AI streaming
 │   └── utils/
-│       ├── formatting.py   # Telegram MarkdownV2 formatting
-│       └── tokens.py       # Token counting and context trimming
+│       └── formatting.py   # Telegram MarkdownV2 formatting
 ├── docs/
 │   └── CODEBASE_MAP.md     # This file
 ├── SYS_PROMPT.md           # AI system prompt template
@@ -130,7 +127,6 @@ ai-tg-bot/
 | `openrouter_model` | `moonshotai/kimi-k2.5` | Model ID |
 | `tavily_api_key` | required | Tavily API key |
 | `database_url` | `sqlite+aiosqlite:///bot.db` | SQLAlchemy URL |
-| `context_token_limit` | `8000` | Max context tokens |
 | `admin_ids` | `[]` | Admin Telegram IDs |
 
 ---
@@ -252,7 +248,6 @@ ai-tg-bot/
 | File | Exports |
 |------|---------|
 | `formatting.py` | `convert_to_telegram_markdown`, `format_thinking_*`, `split_message`, `generate_draft_id`, `generate_invite_code` |
-| `tokens.py` | `count_tokens`, `trim_messages_to_limit` |
 
 **Constants**:
 - `SAFE_MESSAGE_LENGTH = 3900` (safety margin below Telegram's 4096)
@@ -305,10 +300,8 @@ sequenceDiagram
 4. **Thinking Display**: Expanded (>) while streaming, collapsed (**>||) when finalized
 5. **Tool Loop**: AI can call tools multiple times, automatically executed and re-streamed
 6. **Draft Messages**: Require unique IDs, uses timestamp in milliseconds
-7. **Token Counting**: Images and PDFs count as ~85 tokens each
-8. **Context Trimming**: System message added AFTER trimming (not included in limit)
-9. **Timezone Storage**: Offset stored in minutes, rounded to 15-minute intervals
-10. **Database**: BigInteger used for Telegram IDs (supports very large user IDs)
+7. **Timezone Storage**: Offset stored in minutes, rounded to 15-minute intervals
+8. **Database**: BigInteger used for Telegram IDs (supports very large user IDs)
 
 ## Navigation Guide
 

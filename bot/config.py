@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     openrouter_model: str = "moonshotai/kimi-k2.5"
     tavily_api_key: str
     database_url: str = "sqlite+aiosqlite:///bot.db"
-    context_token_limit: int = 8000
     admin_ids: list[int] = []
 
     @field_validator("admin_ids", mode="before")
