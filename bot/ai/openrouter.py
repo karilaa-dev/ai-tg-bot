@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
 from tavily import AsyncTavilyClient
@@ -13,6 +14,14 @@ from tavily import AsyncTavilyClient
 from bot.config import settings
 
 logger = logging.getLogger(__name__)
+
+# HTTP timeout configuration for long-running requests
+OPENROUTER_TIMEOUT = httpx.Timeout(
+    connect=30.0,   # 30s to establish connection
+    read=300.0,     # 5 minutes between chunks (for thinking models)
+    write=30.0,     # 30s to send request
+    pool=30.0,      # 30s waiting for connection pool
+)
 
 # Tool definitions for function calling
 TOOLS = [
@@ -145,6 +154,7 @@ class OpenRouterClient:
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=settings.openrouter_api_key,
+            timeout=OPENROUTER_TIMEOUT,
         )
         self.model = settings.openrouter_model
 

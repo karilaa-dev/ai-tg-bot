@@ -32,6 +32,9 @@ from bot.utils import (
     split_thinking,
 )
 
+# Refresh "Thinking..." draft every 20 seconds when no chunks arrive
+THINKING_REFRESH_INTERVAL = 20.0
+
 
 @dataclass
 class StreamingResult:
@@ -169,6 +172,66 @@ def _get_thinking_status_text(lang: Language) -> str:
 FINAL_CONTENT_MIN_LENGTH = 100
 
 
+async def _iter_with_timeout(
+    stream: Any, timeout_seconds: float
+) -> Any:
+    """Iterate over stream, yielding timeout events when no chunks arrive.
+
+    Yields tuples of (chunk, is_timeout) where is_timeout is True when
+    the timeout was reached without receiving a chunk.
+
+    Uses asyncio.wait instead of wait_for to avoid cancelling the pending
+    task on timeout, which would disrupt the async generator's state.
+    """
+    aiter = stream.__aiter__()
+    pending_task: asyncio.Task[Any] | None = None
+
+    while True:
+        if pending_task is None:
+            pending_task = asyncio.create_task(aiter.__anext__())
+
+        done, _ = await asyncio.wait({pending_task}, timeout=timeout_seconds)
+
+        if done:
+            task = done.pop()
+            pending_task = None
+            try:
+                chunk = task.result()
+                yield (chunk, False)
+            except StopAsyncIteration:
+                return
+        else:
+            # Timeout - task still pending, will check again next iteration
+            yield (None, True)
+
+
+async def _refresh_thinking_draft(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    state: StreamingState,
+    show_thinking: bool,
+) -> None:
+    """Refresh the thinking draft to keep it from appearing stuck."""
+    if state.final_content_confirmed:
+        return  # Already showing content, no need to refresh
+
+    # Re-send current thinking or status text
+    if show_thinking and state.current_thinking and not state.thinking_finalized:
+        thinking_expanded = format_thinking_expanded(state.current_thinking)
+        await _send_draft_with_fallback(
+            bot, chat_id, state.draft_id,
+            thinking_expanded[:SAFE_MESSAGE_LENGTH], thread_id,
+            thinking_expanded[:SAFE_MESSAGE_LENGTH],
+        )
+    else:
+        await _send_draft_with_fallback(
+            bot, chat_id, state.draft_id, state.current_status_text, thread_id
+        )
+
+    state.last_update = time.time()
+
+
 async def _build_content(
     text: str, image_id: str | None, pdf_id: str | None, bot: Bot
 ) -> str | list[dict[str, Any]]:
@@ -280,7 +343,12 @@ async def generate_and_stream_response(
     try:
         await _send_draft_with_fallback(bot, chat_id, state.draft_id, thinking_status, thread_id)
 
-        async for chunk in openrouter_client.generate_response_stream(ai_messages, show_thinking):
+        stream = openrouter_client.generate_response_stream(ai_messages, show_thinking)
+        async for chunk, is_timeout in _iter_with_timeout(stream, THINKING_REFRESH_INTERVAL):
+            if is_timeout:
+                await _refresh_thinking_draft(bot, chat_id, thread_id, state, show_thinking)
+                continue
+
             await _handle_chunk(bot, chat_id, thread_id, chunk, state, show_thinking)
 
             if time.time() - state.last_update < 0.5:
