@@ -178,21 +178,6 @@ class Repository:
         result = await session.execute(stmt.order_by(ConversationFile.created_at))
         return list(result.scalars().all())
 
-    async def update_pdf_annotation(
-        self,
-        session: AsyncSession,
-        conversation_id: int,
-        file_id: str,
-        annotation_json: str,
-        annotation_hash: str | None = None,
-    ) -> None:
-        """Update PDF annotation data for a conversation file."""
-        file_row = await self.get_conversation_file(session, conversation_id, file_id, "pdf")
-        if not file_row:
-            return
-        file_row.pdf_annotation_json = annotation_json
-        if annotation_hash:
-            file_row.pdf_annotation_hash = annotation_hash
 
     async def get_conversation_messages(
         self,

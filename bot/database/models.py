@@ -90,8 +90,6 @@ class ConversationFile(Base):
     file_type: Mapped[str] = mapped_column(String(16))
     file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pdf_annotation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pdf_annotation_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="files")
