@@ -4,6 +4,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tika:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://bot:bot@postgres:5432/bot
     env_file:
@@ -24,6 +26,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  tika:
+    image: apache/tika:3.2.3.0
+    ports:
+      - "9998:9998"
 
 volumes:
   postgres_data:

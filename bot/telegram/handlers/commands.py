@@ -11,7 +11,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from bot.config import settings
 from bot.database.repository import repository
 from bot.i18n import Language, detect_language, get_text, get_user_language
-from bot.telegram.handlers.messages import _format_history, generate_and_stream_response
+from bot.telegram.handlers.messages import (
+    _build_ai_messages,
+    _build_system_prompt,
+    generate_and_stream_response,
+)
 from bot.utils import format_timezone_offset
 
 logger = logging.getLogger(__name__)
@@ -220,10 +224,12 @@ async def _handle_redo_latest(
         if new_prompt is not None:
             latest_user_msg.content = new_prompt
 
-        # Get updated conversation messages
+        # Get updated conversation messages and files
         db_messages = await repository.get_conversation_messages(session, conv.id)
+        conv_files = await repository.get_conversation_files(session, conv.id)
         show_thinking = user.show_thinking
         lang = user.language
+        timezone_offset = user.timezone_offset
         await session.commit()
 
     # Delete from Telegram
@@ -231,7 +237,18 @@ async def _handle_redo_latest(
         await _delete_telegram_message(bot, chat_id, tg_msg_id)
 
     # Prepare AI messages and regenerate
-    ai_messages = await _format_history(db_messages, bot)
+    system_prompt = await _build_system_prompt(
+        message.from_user.first_name or "User",
+        lang,
+        bot,
+        timezone_offset,
+    )
+    ai_messages, _ = await _build_ai_messages(
+        db_messages,
+        conv_files,
+        system_prompt,
+        bot,
+    )
 
     await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
 

@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     tavily_api_key: str
     database_url: str = "sqlite+aiosqlite:///bot.db"
     admin_ids: list[int] = []
+    tika_url: str = "http://tika:9998"
+    tika_token: str | None = None
+    tika_username: str | None = None
+    tika_password: str | None = None
+    tika_timeout_seconds: int = 60
+    pdf_text_char_limit: int = 200_000
 
     @field_validator("admin_ids", mode="before")
     @classmethod

@@ -14,10 +14,11 @@ from aiogram.types import Message
 
 from bot.ai.openrouter import openrouter_client
 from bot.config import settings
-from bot.database.models import Message as DbMessage
+from bot.database.models import ConversationFile, Message as DbMessage
 from bot.database.repository import repository
 from bot.i18n import Language, get_text
-from bot.telegram.files import download_and_encode_image, download_and_encode_pdf
+from bot.ai.tika import extract_pdf_text
+from bot.telegram.files import download_and_encode_image, download_file_bytes, download_text_file
 from bot.telegram.filters import ApprovedUserFilter
 from bot.utils import (
     SAFE_MESSAGE_LENGTH,
@@ -28,12 +29,31 @@ from bot.utils import (
     format_thinking_with_content,
     format_timezone_offset,
     generate_draft_id,
-    split_message,
     split_thinking,
 )
+from bot.utils.formatting import _escape_markdown_v2_full
 
 # Refresh "Thinking..." draft every 20 seconds when no chunks arrive
 THINKING_REFRESH_INTERVAL = 20.0
+MEDIA_GROUP_DELAY = 1.0
+TEXT_FILE_SIZE_LIMIT = 1_000_000
+
+
+@dataclass
+class MediaGroupBuffer:
+    """Buffered media group data for aggregation."""
+
+    chat_id: int
+    thread_id: int | None
+    media_group_id: str
+    user: Any
+    image_ids: list[str] = field(default_factory=list)
+    text: str = ""
+    message_id: int | None = None
+
+
+_MEDIA_GROUPS: dict[tuple[int, int | None, str], MediaGroupBuffer] = {}
+_MEDIA_GROUPS_LOCK = asyncio.Lock()
 
 
 @dataclass
@@ -232,35 +252,192 @@ async def _refresh_thinking_draft(
     state.last_update = time.time()
 
 
-async def _build_content(
-    text: str, image_id: str | None, pdf_id: str | None, bot: Bot
+def _get_last_user_message(messages: list[DbMessage]) -> DbMessage | None:
+    """Get the most recent user message from a list."""
+    for msg in reversed(messages):
+        if msg.role == "user":
+            return msg
+    return None
+
+
+def _format_history(messages: list[DbMessage]) -> list[dict[str, Any]]:
+    """Convert database messages to OpenRouter format (text-only)."""
+    return [{"role": m.role, "content": m.content or ""} for m in messages]
+
+
+def _collect_conversation_files(
+    files: list[ConversationFile],
+) -> tuple[list[ConversationFile], list[ConversationFile], list[ConversationFile]]:
+    """Collect files by type for request building."""
+    text_files: list[ConversationFile] = []
+    image_files: list[ConversationFile] = []
+    pdf_files: list[ConversationFile] = []
+
+    for file in files:
+        if file.file_type == "text" and file.text_content:
+            text_files.append(file)
+            continue
+        if file.file_type == "image":
+            image_files.append(file)
+            continue
+        if file.file_type == "pdf":
+            if file.text_content:
+                pdf_files.append(file)
+            else:
+                logger.debug("PDF file missing text content: %s", file.file_id)
+
+    return text_files, image_files, pdf_files
+
+
+def _fit_formatted_chunk(
+    text: str,
+    max_length: int,
+    formatter: Any,
+) -> tuple[str, str, str]:
+    """Find the largest prefix that fits within max_length after formatting."""
+    if not text:
+        return "", "", ""
+
+    low, high = 1, len(text)
+    best_raw = ""
+    best_formatted = ""
+
+    while low <= high:
+        mid = (low + high) // 2
+        raw = text[:mid]
+        formatted = formatter(raw)
+
+        if len(formatted) <= max_length:
+            best_raw = raw
+            best_formatted = formatted
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    if not best_raw:
+        raw = text[:1]
+        formatted = formatter(raw)
+        logger.debug(
+            "fit_chunk: fallback to single char, formatted_len=%d max=%d",
+            len(formatted),
+            max_length,
+        )
+        return raw, formatted, text[1:]
+
+    remaining = text[len(best_raw):]
+    logger.debug(
+        "fit_chunk: raw_len=%d formatted_len=%d remaining_len=%d max=%d",
+        len(best_raw),
+        len(best_formatted),
+        len(remaining),
+        max_length,
+    )
+    return best_raw, best_formatted, remaining
+
+
+def _split_message_for_markdown(text: str, max_length: int = SAFE_MESSAGE_LENGTH) -> list[str]:
+    """Split text into chunks that fit after Markdown conversion."""
+    if not text:
+        return []
+
+    parts: list[str] = []
+    remaining = text
+
+    while remaining:
+        raw, _formatted, rest = _fit_formatted_chunk(
+            remaining, max_length, convert_to_telegram_markdown
+        )
+        if not raw:
+            break
+        parts.append(raw.rstrip())
+        remaining = rest.lstrip()
+
+    logger.debug(
+        "split_markdown: raw_len=%d parts=%d max=%d",
+        len(text),
+        len(parts),
+        max_length,
+    )
+    return parts
+
+
+async def _build_user_content(
+    text: str,
+    text_files: list[ConversationFile],
+    image_files: list[ConversationFile],
+    pdf_files: list[ConversationFile],
+    bot: Bot,
 ) -> str | list[dict[str, Any]]:
-    """Build OpenRouter message content with optional image/PDF."""
+    """Build OpenRouter message content with persistent attachments."""
     parts: list[dict[str, Any]] = []
 
     if text:
         parts.append({"type": "text", "text": text})
 
-    if image_id:
-        if data := await download_and_encode_image(image_id, bot):
+    for file in text_files:
+        name = file.file_name or "file.txt"
+        parts.append({"type": "text", "text": f"File: {name}\n{file.text_content}"})
+
+    for file in image_files:
+        if data := await download_and_encode_image(file.file_id, bot):
             parts.append({"type": "image_url", "image_url": {"url": data}})
 
-    if pdf_id:
-        if result := await download_and_encode_pdf(pdf_id, bot):
-            parts.append({"type": "file", "file": {"filename": result[1], "file_data": result[0]}})
+    for file in pdf_files:
+        name = file.file_name or "document.pdf"
+        parts.append({"type": "text", "text": f"PDF: {name}\n{file.text_content}"})
 
-    # Return plain string if only text, otherwise return parts list
     if len(parts) == 1 and parts[0].get("type") == "text":
         return parts[0]["text"]
     return parts
 
 
-async def _format_history(messages: list[DbMessage], bot: Bot) -> list[dict[str, Any]]:
-    """Convert database messages to OpenRouter format."""
-    return [
-        {"role": m.role, "content": await _build_content(m.content, m.image_file_id, m.pdf_file_id, bot)}
-        for m in messages
-    ]
+async def _build_ai_messages(
+    db_messages: list[DbMessage],
+    files: list[ConversationFile],
+    system_prompt: str,
+    bot: Bot,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build OpenRouter messages including persistent attachments."""
+    last_user = _get_last_user_message(db_messages)
+    history_messages = [m for m in db_messages if not last_user or m.id != last_user.id]
+    ai_messages = _format_history(history_messages)
+
+    text_files, image_files, pdf_files = _collect_conversation_files(files)
+
+    if last_user:
+        user_content = await _build_user_content(
+            last_user.content,
+            text_files,
+            image_files,
+            pdf_files,
+            bot,
+        )
+        ai_messages.append({"role": "user", "content": user_content})
+
+    ai_messages.insert(0, {"role": "system", "content": system_prompt})
+    return ai_messages, []
+
+
+async def _flush_media_group(
+    key: tuple[int, int | None, str], bot: Bot
+) -> None:
+    """Flush a buffered media group after a short delay."""
+    await asyncio.sleep(MEDIA_GROUP_DELAY)
+    async with _MEDIA_GROUPS_LOCK:
+        buffer = _MEDIA_GROUPS.pop(key, None)
+    if not buffer:
+        return
+
+    await _handle_incoming_payload(
+        bot=bot,
+        chat_id=buffer.chat_id,
+        thread_id=buffer.thread_id,
+        user_data=buffer.user,
+        text=buffer.text,
+        image_ids=buffer.image_ids,
+        document=None,
+        message_id=buffer.message_id,
+    )
 
 
 async def _send_with_markdown_fallback(
@@ -270,8 +447,20 @@ async def _send_with_markdown_fallback(
     thread_id: int | None,
     convert: bool = True,
 ) -> Message:
-    """Send message with MarkdownV2, falling back to plain text on parse errors."""
-    formatted = convert_to_telegram_markdown(text) if convert else text
+    """Send message with MarkdownV2, ensuring formatting always succeeds."""
+    formatter = convert_to_telegram_markdown if convert else (lambda s: s)
+    raw_to_send = text
+    formatted = formatter(raw_to_send)
+
+    if len(formatted) > SAFE_MESSAGE_LENGTH:
+        logger.debug(
+            "send_markdown: formatted too long (%d), trimming",
+            len(formatted),
+        )
+        raw_to_send, formatted, _ = _fit_formatted_chunk(
+            raw_to_send, SAFE_MESSAGE_LENGTH, formatter
+        )
+
     try:
         return await bot.send_message(
             chat_id=chat_id,
@@ -280,13 +469,20 @@ async def _send_with_markdown_fallback(
             parse_mode="MarkdownV2",
         )
     except TelegramBadRequest as e:
-        if "parse" in str(e).lower():
-            logger.warning("MarkdownV2 failed, using plain text")
+        message = str(e).lower()
+        if "parse" in message or "too long" in message:
+            logger.debug(
+                "send_markdown: retry with escaped markdown due to error: %s",
+                message,
+            )
+            escaped_raw, escaped_formatted, _ = _fit_formatted_chunk(
+                raw_to_send, SAFE_MESSAGE_LENGTH, _escape_markdown_v2_full
+            )
             return await bot.send_message(
                 chat_id=chat_id,
-                text=text,
+                text=escaped_formatted,
                 message_thread_id=thread_id,
-                parse_mode=None,
+                parse_mode="MarkdownV2",
             )
         raise
 
@@ -299,24 +495,47 @@ async def _send_draft_with_fallback(
     thread_id: int | None,
     formatted: str | None = None,
 ) -> None:
-    """Send draft message with MarkdownV2, falling back to plain text on parse errors."""
+    """Send draft message with MarkdownV2, ensuring formatting always succeeds."""
+    formatter = (lambda s: s) if formatted is not None else convert_to_telegram_markdown
+    raw_to_send = text
+    formatted_text = formatted if formatted is not None else formatter(raw_to_send)
+
+    if len(formatted_text) > SAFE_MESSAGE_LENGTH:
+        logger.debug(
+            "send_draft: formatted too long (%d), trimming",
+            len(formatted_text),
+        )
+        raw_to_send, formatted_text, _ = _fit_formatted_chunk(
+            raw_to_send, SAFE_MESSAGE_LENGTH, formatter
+        )
+
     try:
         await bot.send_message_draft(
             chat_id=chat_id,
             draft_id=draft_id,
-            text=formatted or text,
+            text=formatted_text,
             message_thread_id=thread_id,
             parse_mode="MarkdownV2",
         )
     except TelegramBadRequest as e:
-        if "parse" in str(e).lower():
+        message = str(e).lower()
+        if "parse" in message or "too long" in message:
+            logger.debug(
+                "send_draft: retry with escaped markdown due to error: %s",
+                message,
+            )
+            _raw, escaped_formatted, _ = _fit_formatted_chunk(
+                raw_to_send, SAFE_MESSAGE_LENGTH, _escape_markdown_v2_full
+            )
             await bot.send_message_draft(
                 chat_id=chat_id,
                 draft_id=draft_id,
-                text=text,
+                text=escaped_formatted,
                 message_thread_id=thread_id,
-                parse_mode=None,
+                parse_mode="MarkdownV2",
             )
+        else:
+            raise
 
 
 async def generate_and_stream_response(
@@ -369,7 +588,10 @@ async def generate_and_stream_response(
 
     await _finalize_response(bot, chat_id, thread_id, state, show_thinking)
 
-    return StreamingResult(content=state.content, sent_message_ids=state.sent_message_ids)
+    return StreamingResult(
+        content=state.content,
+        sent_message_ids=state.sent_message_ids,
+    )
 
 
 async def _handle_chunk(
@@ -397,6 +619,7 @@ async def _handle_chunk(
 
     if chunk.is_tool_use:
         await _handle_tool_use(bot, chat_id, thread_id, chunk, state, show_thinking)
+
 
 
 async def _handle_tool_use(
@@ -613,7 +836,7 @@ async def _send_final_content(
     if state.in_code_block:
         remaining = "```\n" + remaining
 
-    parts = split_message(remaining)
+    parts = _split_message_for_markdown(remaining)
 
     # Update draft with final content before sending (smooth transition)
     if not state.sent_parts and not (show_thinking and remaining_thinking):
@@ -627,10 +850,211 @@ async def _send_final_content(
         state.sent_message_ids.append(sent_msg.message_id)
 
 
+async def _queue_media_group(message: Message, bot: Bot) -> None:
+    """Buffer a media group and process it after a short delay."""
+    if not message.media_group_id or not message.from_user:
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    key = (chat_id, thread_id, message.media_group_id)
+
+    async with _MEDIA_GROUPS_LOCK:
+        buffer = _MEDIA_GROUPS.get(key)
+        if not buffer:
+            buffer = MediaGroupBuffer(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                media_group_id=message.media_group_id,
+                user=message.from_user,
+            )
+            _MEDIA_GROUPS[key] = buffer
+            asyncio.create_task(_flush_media_group(key, bot))
+
+        if message.photo:
+            buffer.image_ids.append(message.photo[-1].file_id)
+
+        if message.caption and not buffer.text:
+            buffer.text = message.caption
+
+        if buffer.message_id is None:
+            buffer.message_id = message.message_id
+
+
+async def _handle_incoming_payload(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int | None,
+    user_data: Any,
+    text: str,
+    image_ids: list[str],
+    document: Any | None,
+    message_id: int | None,
+) -> None:
+    """Process a single incoming payload (message or media group)."""
+    if not user_data:
+        return
+
+    text = text or ""
+    image_ids = image_ids or []
+
+    pdf_id: str | None = None
+    pdf_name: str | None = None
+    text_file_id: str | None = None
+    text_file_name: str | None = None
+
+    if document:
+        file_name = document.file_name or ""
+        lower_name = file_name.lower()
+        mime_type = document.mime_type or ""
+
+        if mime_type == "application/pdf" or lower_name.endswith(".pdf"):
+            pdf_id = document.file_id
+            pdf_name = file_name or "document.pdf"
+        elif lower_name.endswith(".txt") or lower_name.endswith(".md"):
+            text_file_id = document.file_id
+            text_file_name = file_name or "document.txt"
+
+    if not text and not image_ids and not pdf_id and not text_file_id:
+        return
+
+    async with repository.session_factory() as session:
+        user = await repository.get_or_create_user(session, user_data.id)
+        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
+        lang = user.language
+        show_thinking = user.show_thinking
+        timezone_offset = user.timezone_offset
+
+        if text_file_id and document and document.file_size:
+            if document.file_size > TEXT_FILE_SIZE_LIMIT:
+                await session.commit()
+                await _send_with_markdown_fallback(
+                    bot,
+                    chat_id,
+                    get_text("text_file_too_large", lang),
+                    thread_id,
+                    convert=False,
+                )
+                return
+
+        for image_id in image_ids:
+            await repository.add_conversation_file(session, conv.id, image_id, "image")
+
+        if pdf_id:
+            existing_pdf = await repository.get_conversation_file(
+                session, conv.id, pdf_id, "pdf"
+            )
+            if not existing_pdf or not existing_pdf.text_content:
+                if data := await download_file_bytes(pdf_id, bot):
+                    pdf_bytes, filename = data
+                    try:
+                        extracted = await extract_pdf_text(pdf_bytes)
+                    except Exception as e:
+                        logger.error("PDF parse failed: %s", e)
+                        await session.commit()
+                        await _send_with_markdown_fallback(
+                            bot,
+                            chat_id,
+                            get_text("pdf_parse_failed", lang),
+                            thread_id,
+                        )
+                        return
+
+                    if len(extracted) > settings.pdf_text_char_limit:
+                        await session.commit()
+                        await _send_with_markdown_fallback(
+                            bot,
+                            chat_id,
+                            get_text("pdf_too_large", lang),
+                            thread_id,
+                        )
+                        return
+
+                    if existing_pdf:
+                        existing_pdf.text_content = extracted
+                        if not existing_pdf.file_name:
+                            existing_pdf.file_name = pdf_name or filename
+                    else:
+                        await repository.add_conversation_file(
+                            session,
+                            conv.id,
+                            pdf_id,
+                            "pdf",
+                            file_name=pdf_name or filename,
+                            text_content=extracted,
+                        )
+                else:
+                    await session.commit()
+                    await _send_with_markdown_fallback(
+                        bot,
+                        chat_id,
+                        get_text("pdf_parse_failed", lang),
+                        thread_id,
+                    )
+                    return
+
+        if text_file_id:
+            existing = await repository.get_conversation_file(
+                session, conv.id, text_file_id, "text"
+            )
+            if not existing:
+                if data := await download_text_file(text_file_id, bot):
+                    text_content, filename = data
+                    await repository.add_conversation_file(
+                        session,
+                        conv.id,
+                        text_file_id,
+                        "text",
+                        file_name=text_file_name or filename,
+                        text_content=text_content,
+                    )
+
+        await repository.add_message(
+            session,
+            conv.id,
+            "user",
+            text,
+            message_id,
+            image_ids[-1] if image_ids else None,
+            pdf_id,
+        )
+
+        db_messages = await repository.get_conversation_messages(session, conv.id)
+        conv_files = await repository.get_conversation_files(session, conv.id)
+        await session.commit()
+
+    system_prompt = await _build_system_prompt(
+        user_data.first_name or "User", lang, bot, timezone_offset
+    )
+    ai_messages, _ = await _build_ai_messages(
+        db_messages,
+        conv_files,
+        system_prompt,
+        bot,
+    )
+
+    await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
+
+    result = await generate_and_stream_response(
+        bot, chat_id, thread_id, ai_messages, show_thinking, lang
+    )
+
+    async with repository.session_factory() as session:
+        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
+        await repository.add_message(
+            session, conv.id, "assistant", result.content, message_id=result.first_message_id
+        )
+        await session.commit()
+
+
 @router.message(ApprovedUserFilter(), F.text & ~F.text.startswith("/") | F.photo | F.document)
 async def handle_message(message: Message, bot: Bot) -> None:
     """Handle an incoming message."""
     if not message.from_user:
+        return
+
+    if message.media_group_id and message.photo:
+        await _queue_media_group(message, bot)
         return
 
     chat_id = message.chat.id
@@ -638,43 +1062,14 @@ async def handle_message(message: Message, bot: Bot) -> None:
     thread_id = message.message_thread_id
 
     text = message.text or message.caption or ""
-    image_id = message.photo[-1].file_id if message.photo else None
-    doc = message.document
-    pdf_id = doc.file_id if doc and doc.mime_type == "application/pdf" else None
-
-    if not text and not image_id and not pdf_id:
-        return
-
-    # Load user and save incoming message
-    async with repository.session_factory() as session:
-        user = await repository.get_or_create_user(session, user_data.id)
-        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
-        await repository.add_message(
-            session, conv.id, "user", text, message.message_id, image_id, pdf_id
-        )
-        db_messages = await repository.get_conversation_messages(session, conv.id)
-        show_thinking = user.show_thinking
-        lang = user.language
-        timezone_offset = user.timezone_offset
-        await session.commit()
-
-    # Prepare AI messages with system prompt
-    ai_messages = await _format_history(db_messages, bot)
-    system_prompt = await _build_system_prompt(
-        user_data.first_name or "User", lang, bot, timezone_offset
+    image_ids = [message.photo[-1].file_id] if message.photo else []
+    await _handle_incoming_payload(
+        bot=bot,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_data=user_data,
+        text=text,
+        image_ids=image_ids,
+        document=message.document,
+        message_id=message.message_id,
     )
-    ai_messages.insert(0, {"role": "system", "content": system_prompt})
-
-    # Send thinking indicator
-    await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
-
-    # Generate and stream the response
-    result = await generate_and_stream_response(bot, chat_id, thread_id, ai_messages, show_thinking, lang)
-
-    # Save assistant response
-    async with repository.session_factory() as session:
-        conv = await repository.get_or_create_conversation(session, user.id, chat_id, thread_id)
-        await repository.add_message(
-            session, conv.id, "assistant", result.content, message_id=result.first_message_id
-        )
-        await session.commit()

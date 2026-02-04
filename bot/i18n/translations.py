@@ -77,7 +77,7 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
     "start_welcome": {
         Language.EN: (
             "Hello\\! I'm an AI assistant\\.\n\n"
-            "Send me a message, image, or PDF and I'll respond\\.\n\n"
+            "Send me a message, image, PDF, or text file and I'll respond\\.\n\n"
             "*Commands:*\n"
             "/help \\- Show help\n"
             "/thinking \\- Toggle AI thinking traces\n"
@@ -88,7 +88,7 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         ),
         Language.RU: (
             "Привет\\! Я ИИ\\-ассистент\\.\n\n"
-            "Отправь мне сообщение, изображение или PDF, и я отвечу\\.\n\n"
+            "Отправь мне сообщение, изображение, PDF или текстовый файл, и я отвечу\\.\n\n"
             "*Команды:*\n"
             "/help \\- Показать справку\n"
             "/thinking \\- Показ размышлений ИИ\n"
@@ -99,7 +99,7 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
         ),
         Language.UK: (
             "Привіт\\! Я ШІ\\-асистент\\.\n\n"
-            "Надішли мені повідомлення, зображення або PDF, і я відповім\\.\n\n"
+            "Надішли мені повідомлення, зображення, PDF або текстовий файл, і я відповім\\.\n\n"
             "*Команди:*\n"
             "/help \\- Показати довідку\n"
             "/thinking \\- Показ роздумів ШІ\n"
@@ -112,7 +112,7 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
     "help_text": {
         Language.EN: (
             "*AI Assistant Help*\n\n"
-            "I can understand text, images, and PDF files\\. "
+            "I can understand text, images, PDF files, and .txt/.md documents\\. "
             "I can also search the web and read webpages\\.\n\n"
             "*Commands:*\n"
             "/start \\- Start the bot\n"
@@ -123,13 +123,13 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/lang \\- Change interface language\n"
             "/timezone \\- Set your timezone\n\n"
             "*Tips:*\n"
-            "• Send images or PDFs with a caption for analysis\n"
+            "• Send images, PDFs, or text files with a caption for analysis\n"
             "• Ask me to search the web for current information\n"
             "• Enable thinking mode to see my reasoning process"
         ),
         Language.RU: (
             "*Справка по ИИ\\-ассистенту*\n\n"
-            "Я понимаю текст, изображения и PDF\\-файлы\\. "
+            "Я понимаю текст, изображения, PDF\\-файлы и документы .txt/.md\\. "
             "Также я могу искать в интернете и читать веб\\-страницы\\.\n\n"
             "*Команды:*\n"
             "/start \\- Запустить бота\n"
@@ -140,13 +140,13 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/lang \\- Сменить язык интерфейса\n"
             "/timezone \\- Установить часовой пояс\n\n"
             "*Советы:*\n"
-            "• Отправляй изображения или PDF с подписью для анализа\n"
+            "• Отправляй изображения, PDF или текстовые файлы с подписью для анализа\n"
             "• Попроси меня поискать актуальную информацию в интернете\n"
             "• Включи режим размышлений, чтобы видеть ход моих мыслей"
         ),
         Language.UK: (
             "*Довідка по ШІ\\-асистенту*\n\n"
-            "Я розумію текст, зображення та PDF\\-файли\\. "
+            "Я розумію текст, зображення, PDF\\-файли та документи .txt/.md\\. "
             "Також я можу шукати в інтернеті та читати веб\\-сторінки\\.\n\n"
             "*Команди:*\n"
             "/start \\- Запустити бота\n"
@@ -157,10 +157,25 @@ TRANSLATIONS: dict[str, dict[Language, str]] = {
             "/lang \\- Змінити мову інтерфейсу\n"
             "/timezone \\- Встановити часовий пояс\n\n"
             "*Поради:*\n"
-            "• Надсилай зображення або PDF з підписом для аналізу\n"
+            "• Надсилай зображення, PDF або текстові файли з підписом для аналізу\n"
             "• Попроси мене пошукати актуальну інформацію в інтернеті\n"
             "• Увімкни режим роздумів, щоб бачити хід моїх думок"
         ),
+    },
+    "text_file_too_large": {
+        Language.EN: "That text file is too large\\. Please send a file under 1 MB\\.",
+        Language.RU: "Этот текстовый файл слишком большой\\. Отправь файл меньше 1 МБ\\.",
+        Language.UK: "Цей текстовий файл занадто великий\\. Надішли файл менше 1 МБ\\.",
+    },
+    "pdf_parse_failed": {
+        Language.EN: "Couldn't parse that PDF\\. Please try again\\.",
+        Language.RU: "Не удалось разобрать PDF\\. Попробуйте снова\\.",
+        Language.UK: "Не вдалося розібрати PDF\\. Спробуйте ще раз\\.",
+    },
+    "pdf_too_large": {
+        Language.EN: "That PDF is too large\\. Please send a smaller file\\.",
+        Language.RU: "Этот PDF слишком большой\\. Отправь файл поменьше\\.",
+        Language.UK: "Цей PDF занадто великий\\. Надішли менший файл\\.",
     },
     # Language selection
     "lang_select": {

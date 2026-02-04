@@ -6,7 +6,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bot.config import settings
-from bot.database.models import Base, Conversation, InviteCode, Message, User
+from bot.database.models import Base, Conversation, ConversationFile, InviteCode, Message, User
 
 
 class Repository:
@@ -20,6 +20,35 @@ class Repository:
         """Initialize the database, creating tables if needed."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await self._backfill_conversation_files()
+
+    async def _backfill_conversation_files(self) -> None:
+        """Backfill conversation files from existing message attachments (idempotent)."""
+        async with self.session_factory() as session:
+            stmt = select(Message).where(
+                (Message.image_file_id.is_not(None)) | (Message.pdf_file_id.is_not(None))
+            )
+            result = await session.execute(stmt)
+            messages = list(result.scalars().all())
+
+            for msg in messages:
+                if msg.image_file_id:
+                    await self.add_conversation_file(
+                        session,
+                        msg.conversation_id,
+                        msg.image_file_id,
+                        "image",
+                    )
+                if msg.pdf_file_id:
+                    await self.add_conversation_file(
+                        session,
+                        msg.conversation_id,
+                        msg.pdf_file_id,
+                        "pdf",
+                        file_name="document.pdf",
+                    )
+
+            await session.commit()
 
     async def get_or_create_user(
         self,
@@ -92,6 +121,78 @@ class Repository:
         session.add(message)
         await session.flush()
         return message
+
+    async def get_conversation_file(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        file_id: str,
+        file_type: str,
+    ) -> ConversationFile | None:
+        """Get a conversation file by file_id and type."""
+        stmt = select(ConversationFile).where(
+            ConversationFile.conversation_id == conversation_id,
+            ConversationFile.file_id == file_id,
+            ConversationFile.file_type == file_type,
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def add_conversation_file(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        file_id: str,
+        file_type: str,
+        file_name: str | None = None,
+        text_content: str | None = None,
+    ) -> tuple[ConversationFile, bool]:
+        """Add a file to a conversation, return (file, created)."""
+        existing = await self.get_conversation_file(
+            session, conversation_id, file_id, file_type
+        )
+        if existing:
+            return existing, False
+
+        conversation_file = ConversationFile(
+            conversation_id=conversation_id,
+            file_id=file_id,
+            file_type=file_type,
+            file_name=file_name,
+            text_content=text_content,
+        )
+        session.add(conversation_file)
+        await session.flush()
+        return conversation_file, True
+
+    async def get_conversation_files(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        file_type: str | None = None,
+    ) -> list[ConversationFile]:
+        """Get all conversation files, optionally filtered by type."""
+        stmt = select(ConversationFile).where(ConversationFile.conversation_id == conversation_id)
+        if file_type:
+            stmt = stmt.where(ConversationFile.file_type == file_type)
+        result = await session.execute(stmt.order_by(ConversationFile.created_at))
+        return list(result.scalars().all())
+
+    async def update_pdf_annotation(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        file_id: str,
+        annotation_json: str,
+        annotation_hash: str | None = None,
+    ) -> None:
+        """Update PDF annotation data for a conversation file."""
+        file_row = await self.get_conversation_file(session, conversation_id, file_id, "pdf")
+        if not file_row:
+            return
+        file_row.pdf_annotation_json = annotation_json
+        if annotation_hash:
+            file_row.pdf_annotation_hash = annotation_hash
 
     async def get_conversation_messages(
         self,

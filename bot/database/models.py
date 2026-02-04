@@ -50,6 +50,9 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
     )
+    files: Mapped[list["ConversationFile"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", order_by="ConversationFile.created_at"
+    )
 
 
 class Message(Base):
@@ -69,6 +72,29 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class ConversationFile(Base):
+    """Conversation-level file storage."""
+
+    __tablename__ = "conversation_files"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "file_id", "file_type", name="uq_conversation_file"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[str] = mapped_column(String(255), index=True)
+    file_type: Mapped[str] = mapped_column(String(16))
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pdf_annotation_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pdf_annotation_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="files")
 
 
 class InviteCode(Base):

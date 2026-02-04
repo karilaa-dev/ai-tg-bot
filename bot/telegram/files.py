@@ -34,6 +34,17 @@ async def _download_file(file_id: str, bot: Bot) -> tuple[bytes, str] | None:
         return None
 
 
+async def download_file_bytes(file_id: str, bot: Bot) -> tuple[bytes, str] | None:
+    """Download a file from Telegram and return its bytes and filename."""
+    result = await _download_file(file_id, bot)
+    if not result:
+        return None
+
+    file_data, file_path = result
+    filename = file_path.split("/")[-1] if file_path else "document"
+    return file_data, filename
+
+
 async def download_and_encode_image(file_id: str, bot: Bot) -> str | None:
     """Download an image from Telegram and encode it as base64 data URL."""
     result = await _download_file(file_id, bot)
@@ -47,7 +58,21 @@ async def download_and_encode_image(file_id: str, bot: Bot) -> str | None:
     return f"data:{mime_type};base64,{base64_data}"
 
 
-async def download_and_encode_pdf(file_id: str, bot: Bot) -> tuple[str, str] | None:
+async def download_text_file(file_id: str, bot: Bot) -> tuple[str, str] | None:
+    """Download a text file from Telegram and decode as UTF-8."""
+    result = await _download_file(file_id, bot)
+    if not result:
+        return None
+
+    file_data, file_path = result
+    filename = file_path.split("/")[-1] if file_path else "document.txt"
+    text = file_data.decode("utf-8", errors="replace")
+    return text, filename
+
+
+async def download_and_encode_pdf(
+    file_id: str, bot: Bot, filename_override: str | None = None
+) -> tuple[str, str] | None:
     """Download a PDF from Telegram and encode it as base64 data URL.
 
     Returns:
@@ -58,9 +83,12 @@ async def download_and_encode_pdf(file_id: str, bot: Bot) -> tuple[str, str] | N
         return None
 
     file_data, file_path = result
-    filename = file_path.split("/")[-1]
-    if not filename.endswith(".pdf"):
-        filename = "document.pdf"
+    if filename_override:
+        filename = filename_override
+    else:
+        filename = file_path.split("/")[-1]
+        if not filename.endswith(".pdf"):
+            filename = "document.pdf"
 
     base64_data = base64.b64encode(file_data).decode("utf-8")
     data_url = f"data:application/pdf;base64,{base64_data}"
