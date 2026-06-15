@@ -1,0 +1,21 @@
+services:
+  docling:
+    image: quay.io/docling-project/docling-serve
+    ports:
+      - "5001:5001"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["pg"]
+    environment:
+      POSTGRES_DB: aibot
+      POSTGRES_USER: aibot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aibot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+volumes:
+  pg-data:
