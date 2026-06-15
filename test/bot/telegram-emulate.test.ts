@@ -131,20 +131,26 @@ describe("Telegram bot with grammy-emulate", () => {
   it("coalesces Telegram-split large text into one user turn", async () => {
     await onboard("SPLITTEXT");
     const firstChunk = "a".repeat(4096);
+    const secondChunk = "b".repeat(4096);
     const tail = "\nlast split chunk";
 
     await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createTextMessage(env.user, env.chat, firstChunk),
     ]);
+    await wait(750);
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, secondChunk),
+    ]);
+    await wait(750);
     await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createTextMessage(env.user, env.chat, tail),
     ]);
-    await wait(650);
+    await wait(1_150);
 
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const rows = await env.repos.messages.listThread(thread.id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
-    expect(rows[0]?.text_plain).toBe(`${firstChunk}${tail}`);
+    expect(rows[0]?.text_plain).toBe(`${firstChunk}\n\n${secondChunk}\n\n${tail}`);
     expect(rows[1]?.text_plain).toContain(tail);
   });
 
@@ -179,7 +185,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createTextMessage(env.user, env.chat, otherTopicText, { messageThreadId: 62 }),
     ]);
-    await wait(650);
+    await wait(1_150);
 
     const firstTopic = await env.repos.threads.activeForUserTopic(env.user.id, 61);
     const otherTopic = await env.repos.threads.activeForUserTopic(env.user.id, 62);

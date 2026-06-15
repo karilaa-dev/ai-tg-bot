@@ -42,8 +42,8 @@ const awaitingCode = new Map<number, true>();
 const busyThreads = new Set<number>();
 const activeFileJobs = new Map<string, ActiveFileJob>();
 const mediaGroupFlushMs = 250;
-const textBurstFlushMs = 500;
-const splitTextChunkMinChars = 4000;
+const textBurstFlushMs = 1_000;
+const splitTextChunkMinChars = 3_000;
 const inviteUseOptions = [1, 5, 10] as const;
 const inviteExpiryOptions = ["7d", "30d", "never"] as const;
 type InviteExpiry = typeof inviteExpiryOptions[number];
@@ -638,7 +638,7 @@ async function flushPendingTextBurst(key: string): Promise<void> {
   pendingTextBursts.delete(key);
   clearTimeout(pending.timer);
 
-  const text = pending.texts.join("");
+  const text = pending.texts.join("\n\n");
   if (!text) return;
   await handleUserText(pending.ctx, text);
 }
