@@ -16,6 +16,7 @@ export class FilesRepo {
     type: "txt" | "csv" | "pdf" | "docx" | "image";
     telegramFileId?: string | null;
     telegramFileUniqueId?: string | null;
+    contentSha256?: string | null;
     name: string;
     path: string;
     size: number;
@@ -27,7 +28,7 @@ export class FilesRepo {
     return (await queryOne<FileRow>(
       this.db,
       sql`
-        insert into files(user_id, thread_id, message_id, type, telegram_file_id, telegram_file_unique_id, name, path, size, content_md, summary, outline_json, is_inline, created_at)
+        insert into files(user_id, thread_id, message_id, type, telegram_file_id, telegram_file_unique_id, content_sha256, name, path, size, content_md, summary, outline_json, is_inline, created_at)
         values (
           ${input.userId},
           ${input.threadId},
@@ -35,6 +36,7 @@ export class FilesRepo {
           ${input.type},
           ${input.telegramFileId ?? null},
           ${input.telegramFileUniqueId ?? null},
+          ${input.contentSha256 ?? null},
           ${input.name},
           ${input.path},
           ${input.size},
@@ -69,7 +71,33 @@ export class FilesRepo {
   findByTelegramFileUniqueId(uniqueId: string): Promise<FileRow | undefined> {
     return queryOne<FileRow>(
       this.db,
-      sql`select * from files where telegram_file_unique_id = ${uniqueId} order by id asc limit 1`,
+      sql`
+        select distinct f.*
+        from files f
+        left join file_telegram_refs r on r.file_id = f.id
+        where f.telegram_file_unique_id = ${uniqueId}
+           or r.file_unique_id = ${uniqueId}
+        order by f.id asc
+        limit 1
+      `,
+    );
+  }
+
+  findByContentHash(
+    hash: string,
+    input: { type: "txt" | "csv" | "pdf" | "docx" | "image"; size: number },
+  ): Promise<FileRow | undefined> {
+    return queryOne<FileRow>(
+      this.db,
+      sql`
+        select *
+        from files
+        where content_sha256 = ${hash}
+          and type = ${input.type}
+          and size = ${input.size}
+        order by id asc
+        limit 1
+      `,
     );
   }
 
@@ -132,6 +160,34 @@ export class FilesRepo {
     await this.db.execute(sql`update files set telegram_file_id = ${telegramFileId} where id = ${fileId}`);
   }
 
+  async updateContentHash(fileId: number, hash: string): Promise<void> {
+    await this.db.execute(sql`update files set content_sha256 = ${hash} where id = ${fileId}`);
+  }
+
+  async updateSummary(fileId: number, summary: string | null): Promise<void> {
+    await this.db.execute(sql`update files set summary = ${summary} where id = ${fileId}`);
+  }
+
+  async rememberTelegramFileRef(
+    fileId: number,
+    input: { fileUniqueId?: string | null; telegramFileId?: string | null },
+  ): Promise<void> {
+    await this.db.execute(sql`
+      update files
+      set telegram_file_id = coalesce(${input.telegramFileId ?? null}, telegram_file_id),
+          telegram_file_unique_id = coalesce(telegram_file_unique_id, ${input.fileUniqueId ?? null})
+      where id = ${fileId}
+    `);
+    if (!input.fileUniqueId) return;
+    await this.db.execute(sql`
+      insert into file_telegram_refs(file_unique_id, file_id, telegram_file_id, created_at)
+      values (${input.fileUniqueId}, ${fileId}, ${input.telegramFileId ?? null}, ${Date.now()})
+      on conflict(file_unique_id) do update set
+        file_id = excluded.file_id,
+        telegram_file_id = excluded.telegram_file_id
+    `);
+  }
+
   async setOutline(fileId: number, outline: unknown): Promise<void> {
     await this.db.execute(sql`update files set outline_json = ${JSON.stringify(outline)} where id = ${fileId}`);
   }
@@ -144,6 +200,7 @@ export class FilesRepo {
     const chunks = await this.chunks(fileId);
     const chunkIds = chunks.map((chunk) => chunk.id);
     await this.search.removeChunksForFile(fileId);
+    await this.db.execute(sql`delete from file_telegram_refs where file_id = ${fileId}`);
     await this.db.execute(sql`delete from message_files where file_id = ${fileId}`);
     await this.db.execute(sql`delete from file_chunks where file_id = ${fileId}`);
     await this.db.execute(sql`delete from files where id = ${fileId}`);

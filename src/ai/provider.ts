@@ -67,7 +67,7 @@ export function createOpenRouterImageCaptioner(config: AppConfig, logger?: Logge
         });
         return result.text.trim() || `[image: ${name}]`;
       } catch (err) {
-        logger?.warn("image captioning failed", { err: String(err), name });
+        logger?.warn("image description failed", { err: String(err), name });
         return `[image, no vision model: ${name}]`;
       }
     },
@@ -80,7 +80,7 @@ export function createOpenRouterConversationSummarizer(config: AppConfig, logger
       const result = await generateText({
         model: compactionModel(config),
         system:
-          "Summarize this Telegram conversation segment. Keep decisions, facts, names, numbers, file references (#file-id), open questions, and image captions. Cite source message ids like [#123]. Stay under 300 words.",
+          "Summarize this Telegram conversation segment. Keep decisions, facts, names, numbers, file references (#file-id), open questions, and image descriptions. Cite source message ids like [#123]. Stay under 300 words.",
         prompt: messages.map(formatMessageForSummary).join("\n"),
         providerOptions: { openrouter: { reasoning: { effort: "none" } } },
         abortSignal: AbortSignal.timeout(120_000),
@@ -93,7 +93,7 @@ export function createOpenRouterConversationSummarizer(config: AppConfig, logger
       const result = await generateText({
         model: compactionModel(config),
         system:
-          "Merge conversation memory into one rolling summary, most-recent-relevant first. Keep durable facts, decisions, file references, image captions, and open questions. Stay under 400 words.",
+          "Merge conversation memory into one rolling summary, most-recent-relevant first. Keep durable facts, decisions, file references, image descriptions, and open questions. Stay under 400 words.",
         prompt: [
           previous ? `Previous memory:\n${previous}` : "Previous memory: none",
           `New segment summaries:\n${summaries.join("\n\n")}`,
@@ -138,8 +138,7 @@ function formatMessageForSummary(message: {
   kind: string;
   text_plain: string;
 }): string {
-  const imageCaption = message.kind === "image" ? `[image #${message.id}: ${message.text_plain.replace(/^\[image:\s*|\]$/g, "")}]` : "";
-  const text = imageCaption || message.text_plain.replace(/\s+/g, " ").slice(0, 1200);
+  const text = message.text_plain.replace(/\s+/g, " ").slice(0, 1200);
   return `[#${message.id} ${message.role}] ${text}`;
 }
 

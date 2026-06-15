@@ -7,7 +7,7 @@ export class Localizer {
   private readonly i18n: I18n;
 
   constructor(root = process.cwd()) {
-    this.i18n = new I18n({ defaultLocale: "en" });
+    this.i18n = new I18n({ defaultLocale: "en", fluentBundleOptions: { useIsolating: false } });
     this.i18n.loadLocalesDirSync(path.join(root, "locales"));
   }
 

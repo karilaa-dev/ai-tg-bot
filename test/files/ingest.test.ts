@@ -73,6 +73,35 @@ describe("file ingestion", () => {
     expect(embeddings).toHaveLength(chunks.length);
   });
 
+  it("reports chunk indexing separately from vector embedding", async () => {
+    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 223, firstName: "Progress", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const progress: Array<{ stage: string; completed?: number; total?: number }> = [];
+
+    const result = await ingestFileBytes({
+      config,
+      repo: repos.files,
+      embeddings: repos.embeddings,
+      embedder: { embed: async (texts) => texts.map((text) => new Float32Array([text.length, 5])) },
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "progress.txt",
+      mime: "text/plain",
+      bytes: Buffer.from("# Heading\n\n" + "progress content ".repeat(400)),
+      onStage: (stage) => {
+        progress.push(stage);
+      },
+    });
+
+    const chunks = await repos.files.chunks(result.fileId);
+    const indexing = progress.filter((entry) => entry.stage === "indexing");
+    const embedding = progress.filter((entry) => entry.stage === "embedding");
+    expect(indexing.at(-1)).toMatchObject({ completed: chunks.length, total: chunks.length });
+    expect(embedding[0]).toMatchObject({ completed: 0, total: chunks.length });
+    expect(embedding.at(-1)).toMatchObject({ completed: chunks.length, total: chunks.length });
+  });
+
   it("extracts searchable text PDFs natively before falling back to docling", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("docling should not be called for native text PDFs");

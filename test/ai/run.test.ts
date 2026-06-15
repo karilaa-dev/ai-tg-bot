@@ -242,6 +242,54 @@ describe("runTurn", () => {
     expect(latest?.thinking).not.toContain("query");
   });
 
+  it("flushes the complete streaming draft before sending the final rich message", async () => {
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
+    const user = await repos.users.ensure({ tgId: 94, firstName: "Stream", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    streamTextMock.mockReturnValue({
+      fullStream: fullStream([{ type: "text-delta", text: "First. Second. Third." }]),
+    });
+    const events: string[] = [];
+    const draftPayloads: unknown[] = [];
+    const api = {
+      raw: {
+        sendRichMessageDraft: async (payload: unknown) => {
+          draftPayloads.push(payload);
+          events.push(`draft:${richMarkdownOf(payload)}`);
+          return true;
+        },
+        sendRichMessage: async (payload: unknown) => {
+          events.push(`final:${richMarkdownOf(payload)}`);
+          return { message_id: 30, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user,
+      thread,
+      text: "stream answer",
+      t: testT,
+    });
+
+    expect(draftPayloads).toHaveLength(2);
+    expect(richMarkdownOf(draftPayloads[0])).toContain("First.");
+    expect(richMarkdownOf(draftPayloads[0])).not.toContain("Second.");
+    expect(richMarkdownOf(draftPayloads[1])).toContain("First. Second. Third.");
+    expect(events.at(-1)?.startsWith("final:")).toBe(true);
+    expect(events.findIndex((event) => event.startsWith("final:"))).toBeGreaterThan(
+      events.findLastIndex((event) => event.startsWith("draft:")),
+    );
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "First. Second. Third." });
+  });
+
   it("repairs and retries rich markdown parse errors before persisting", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 100, firstName: "Repair", lang: "en" });
@@ -457,6 +505,10 @@ function fullStream(parts: unknown[]) {
   return (async function* stream() {
     for (const part of parts) yield part;
   })();
+}
+
+function richMarkdownOf(payload: unknown): string {
+  return ((payload as Record<string, Record<string, string>>).rich_message).markdown ?? "";
 }
 
 function testT(key: string, params?: Record<string, string | number>): string {

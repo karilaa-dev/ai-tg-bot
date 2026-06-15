@@ -11,10 +11,11 @@ import type { TextEmbedder } from "../memory/embeddings.js";
 import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
 import { convertWithDocling } from "./docling.js";
+import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
 
 export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image";
-export type FileIngestStage = "extracting" | "indexing";
+export type FileIngestStage = "extracting" | "indexing" | "embedding";
 export interface FileIngestProgress {
   stage: FileIngestStage;
   completed?: number;
@@ -67,6 +68,7 @@ export async function ingestFileBytes(input: {
   messageId?: number | null;
   telegramFileId?: string | null;
   telegramFileUniqueId?: string | null;
+  contentSha256?: string | null;
   bytes: Buffer | Uint8Array;
   name: string;
   mime?: string;
@@ -98,22 +100,23 @@ export async function ingestFileBytes(input: {
     await fs.mkdir(outDir, { recursive: true });
     dest = path.join(outDir, `${nanoid()}${ext}`);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
+    const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
     await fs.writeFile(dest, bytes);
     throwIfAborted(input.signal);
 
     if (type === "image") {
-      await reportStage(input.onStage, { stage: "indexing", completed: 1, total: 1 }, input.signal);
       const file = await input.repo.insertFile({
         userId: input.userId,
         threadId: input.threadId,
         messageId: input.messageId ?? null,
         telegramFileId: input.telegramFileId ?? null,
         telegramFileUniqueId: input.telegramFileUniqueId ?? null,
+        contentSha256,
         type,
         name: input.name,
         path: dest,
         size: bytes.length,
-        summary: input.imageSummary ?? `[image: ${input.name}]`,
+        summary: input.imageSummary ?? null,
         isInline: true,
       });
       fileId = file.id;
@@ -142,6 +145,7 @@ export async function ingestFileBytes(input: {
       messageId: input.messageId ?? null,
       telegramFileId: input.telegramFileId ?? null,
       telegramFileUniqueId: input.telegramFileUniqueId ?? null,
+      contentSha256,
       type,
       name: input.name,
       path: dest,
@@ -154,7 +158,7 @@ export async function ingestFileBytes(input: {
     if (!inline) {
       const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
       const insertedChunks: Array<{ id: number; content: string }> = [];
-      const totalIndexingSteps = chunks.length + (input.embeddings && input.embedder ? chunks.length : 0);
+      const totalIndexingSteps = Math.max(1, chunks.length);
       let completedIndexingSteps = 0;
       for (let index = 0; index < chunks.length; index += 1) {
         const chunk = chunks[index]!;
@@ -171,6 +175,11 @@ export async function ingestFileBytes(input: {
         }, input.signal);
       }
       if (input.embeddings && input.embedder && insertedChunks.length) {
+        await reportStage(input.onStage, {
+          stage: "embedding",
+          completed: 0,
+          total: insertedChunks.length,
+        }, input.signal);
         await persistChunkEmbeddings({
           embeddings: input.embeddings,
           chunks: insertedChunks,
@@ -178,13 +187,12 @@ export async function ingestFileBytes(input: {
           embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
           logger: input.logger,
           signal: input.signal,
+          onProgress: (completed, total) => reportStage(input.onStage, {
+            stage: "embedding",
+            completed,
+            total,
+          }, input.signal),
         });
-        completedIndexingSteps += insertedChunks.length;
-        await reportStage(input.onStage, {
-          stage: "indexing",
-          completed: completedIndexingSteps,
-          total: totalIndexingSteps,
-        }, input.signal);
       }
       throwIfAborted(input.signal);
       await input.repo.setOutline(file.id, outline);
@@ -233,15 +241,23 @@ async function persistChunkEmbeddings(input: {
   embeddingModel: string;
   logger?: Logger;
   signal?: AbortSignal;
+  onProgress?: (completed: number, total: number) => void | Promise<void>;
 }): Promise<void> {
   throwIfAborted(input.signal);
   try {
-    const vectors = await input.embedder.embed(input.chunks.map((chunk) => chunk.content));
-    throwIfAborted(input.signal);
-    for (let i = 0; i < input.chunks.length; i += 1) {
-      const chunk = input.chunks[i]!;
-      const vector = vectors[i];
-      if (vector) await input.embeddings.upsert("chunk", chunk.id, vector, input.embeddingModel);
+    const batchSize = 96;
+    let completed = 0;
+    for (let start = 0; start < input.chunks.length; start += batchSize) {
+      const batch = input.chunks.slice(start, start + batchSize);
+      const vectors = await input.embedder.embed(batch.map((chunk) => chunk.content));
+      throwIfAborted(input.signal);
+      for (let i = 0; i < batch.length; i += 1) {
+        const chunk = batch[i]!;
+        const vector = vectors[i];
+        if (vector) await input.embeddings.upsert("chunk", chunk.id, vector, input.embeddingModel);
+        completed += 1;
+        await input.onProgress?.(completed, input.chunks.length);
+      }
     }
   } catch (err) {
     if (isAbortError(err)) throw err;

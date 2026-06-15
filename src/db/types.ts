@@ -55,6 +55,7 @@ export interface FilesTable {
   type: "txt" | "csv" | "pdf" | "docx" | "image";
   telegram_file_id: string | null;
   telegram_file_unique_id: string | null;
+  content_sha256: string | null;
   name: string;
   path: string;
   size: number;
@@ -62,6 +63,13 @@ export interface FilesTable {
   summary: string | null;
   outline_json: string | null;
   is_inline: number;
+  created_at: number;
+}
+
+export interface FileTelegramRefsTable {
+  file_unique_id: string;
+  file_id: number;
+  telegram_file_id: string | null;
   created_at: number;
 }
 
@@ -108,6 +116,7 @@ export interface DB {
   threads: ThreadsTable;
   messages: MessagesTable;
   files: FilesTable;
+  file_telegram_refs: FileTelegramRefsTable;
   message_files: MessageFilesTable;
   file_chunks: FileChunksTable;
   summaries: SummariesTable;
@@ -119,6 +128,7 @@ export type InviteRow = InvitesTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
+export type FileTelegramRefRow = FileTelegramRefsTable;
 export type MessageFileRow = MessageFilesTable;
 export type FileChunkRow = FileChunksTable;
 export type SummaryRow = SummariesTable;

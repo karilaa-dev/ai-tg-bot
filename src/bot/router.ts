@@ -19,6 +19,7 @@ import { localizedCommands } from "./commands.js";
 import { languageKeyboard } from "./keyboards.js";
 import { Localizer } from "./i18n.js";
 import { cardForFile, classifyFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
+import { sha256Hex } from "../files/hash.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
@@ -41,6 +42,8 @@ const awaitingCode = new Map<number, true>();
 const busyThreads = new Set<number>();
 const activeFileJobs = new Map<string, ActiveFileJob>();
 const mediaGroupFlushMs = 250;
+const textBurstFlushMs = 500;
+const splitTextChunkMinChars = 4000;
 const inviteUseOptions = [1, 5, 10] as const;
 const inviteExpiryOptions = ["7d", "30d", "never"] as const;
 type InviteExpiry = typeof inviteExpiryOptions[number];
@@ -86,7 +89,14 @@ interface PendingMediaGroup {
   items: PendingMediaGroupItem[];
 }
 
+interface PendingTextBurst {
+  ctx: BotContext;
+  timer: NodeJS.Timeout;
+  texts: string[];
+}
+
 const pendingMediaGroups = new Map<string, PendingMediaGroup>();
+const pendingTextBursts = new Map<string, PendingTextBurst>();
 
 export function createBot(options: InstallOptions): Bot<BotContext> {
   const bot = new Bot<BotContext>(options.config.BOT_TOKEN);
@@ -120,6 +130,12 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.use(authAndThread);
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
+  bot.use(async (ctx, next) => {
+    if (!isPlainUserText(ctx)) {
+      await flushPendingTextBurstForContext(ctx);
+    }
+    await next();
+  });
 
   bot.command("start", async (ctx) => {
     await sendWelcome(ctx);
@@ -165,6 +181,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       recentWindowMessages: ctx.services.config.RECENT_WINDOW_MESSAGES,
       embedder: ctx.services.embedder,
       summarizer: ctx.services.summarizer,
+      imageCaptioner: ctx.services.imageCaptioner,
       logger: ctx.services.logger,
     });
     ctx.thread = (await ctx.services.repos.threads.get(ctx.thread.id)) ?? ctx.thread;
@@ -288,6 +305,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       recentWindowMessages: ctx.services.config.RECENT_WINDOW_MESSAGES,
       embedder: ctx.services.embedder,
       summarizer: ctx.services.summarizer,
+      imageCaptioner: ctx.services.imageCaptioner,
       logger: ctx.services.logger,
     });
     ctx.thread = (await ctx.services.repos.threads.get(ctx.thread.id)) ?? ctx.thread;
@@ -345,7 +363,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("unknown-command"), threadExtra(ctx.thread));
       return;
     }
-    await handleUserText(ctx, ctx.message.text);
+    await enqueueUserText(ctx, ctx.message.text);
   });
   bot.on("message", async (ctx) => {
     if (isIgnoredServiceMessage(ctx.message)) return;
@@ -572,6 +590,69 @@ async function handleUserText(
   }
 }
 
+async function enqueueUserText(ctx: BotContext, text: string): Promise<void> {
+  const key = textBurstKey(ctx);
+  if (!key) {
+    await handleUserText(ctx, text);
+    return;
+  }
+
+  const existing = pendingTextBursts.get(key);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.ctx = ctx;
+    existing.texts.push(text);
+    existing.timer = scheduleTextBurstFlush(key, ctx);
+    return;
+  }
+
+  if (text.length < splitTextChunkMinChars) {
+    await handleUserText(ctx, text);
+    return;
+  }
+
+  pendingTextBursts.set(key, {
+    ctx,
+    texts: [text],
+    timer: scheduleTextBurstFlush(key, ctx),
+  });
+}
+
+function scheduleTextBurstFlush(key: string, ctx: BotContext): NodeJS.Timeout {
+  return setTimeout(() => {
+    void flushPendingTextBurst(key).catch((err) => {
+      ctx.services.logger.error("text burst flush failed", { err: String(err) });
+    });
+  }, textBurstFlushMs);
+}
+
+async function flushPendingTextBurstForContext(ctx: BotContext): Promise<void> {
+  const key = textBurstKey(ctx);
+  if (!key) return;
+  await flushPendingTextBurst(key);
+}
+
+async function flushPendingTextBurst(key: string): Promise<void> {
+  const pending = pendingTextBursts.get(key);
+  if (!pending) return;
+  pendingTextBursts.delete(key);
+  clearTimeout(pending.timer);
+
+  const text = pending.texts.join("");
+  if (!text) return;
+  await handleUserText(pending.ctx, text);
+}
+
+function textBurstKey(ctx: BotContext): string | undefined {
+  if (!ctx.chat || !ctx.user || !ctx.thread) return undefined;
+  return `${ctx.chat.id}:${ctx.user.tg_id}:${ctx.thread.id}`;
+}
+
+function isPlainUserText(ctx: BotContext): boolean {
+  const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
+  return typeof text === "string" && !text.startsWith("/");
+}
+
 async function retryLatestUnansweredTurn(ctx: BotContext): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
   const messages = await ctx.services.repos.messages.listThread(ctx.thread.id);
@@ -579,6 +660,7 @@ async function retryLatestUnansweredTurn(ctx: BotContext): Promise<void> {
     const message = messages[i]!;
     if (message.role === "assistant" && message.text_plain.trim()) return;
     if (message.role === "user") {
+      if (message.kind === "image") return;
       await handleUserText(ctx, message.text_plain);
       return;
     }
@@ -601,18 +683,22 @@ class FileProcessingStatus {
 
   updateIngestStage(progress: FileIngestProgress): Promise<void> {
     if (progress.stage === "extracting") return this.updateKey("file-processing-extracting");
+    if (progress.stage === "embedding") return this.updateKey("file-processing-embedding", { percent: indexingPercent(progress) });
     return this.updateKey("file-processing-indexing", { percent: indexingPercent(progress) });
   }
 
   async updateKey(key: string, params: Record<string, string | number> = {}): Promise<void> {
-    await this.updateText(this.ctx.t(key, { name: this.name, ...params }));
+    await this.updateText(this.ctx.t(key, { name: escapeHtml(this.name), ...params }));
   }
 
   async updateText(text: string): Promise<void> {
     if (text === this.lastText) return;
     if (!this.messageId) {
       try {
-        const sent = await replyWithThreadFallback(this.ctx, text, threadExtra(this.ctx.thread));
+        const sent = await replyWithThreadFallback(this.ctx, text, {
+          ...threadExtra(this.ctx.thread),
+          parse_mode: "HTML",
+        });
         this.messageId = sent.message_id;
         this.lastText = text;
       } catch (err) {
@@ -622,7 +708,7 @@ class FileProcessingStatus {
     }
     if (!this.ctx.chat) return;
     try {
-      await this.ctx.api.editMessageText(this.ctx.chat.id, this.messageId, text);
+      await this.ctx.api.editMessageText(this.ctx.chat.id, this.messageId, text, { parse_mode: "HTML" });
       this.lastText = text;
     } catch (err) {
       this.ctx.services.logger.warn("failed to edit file status message", { err: String(err), name: this.name });
@@ -638,6 +724,10 @@ function indexingPercent(progress: FileIngestProgress): number {
 
 async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
+  if (input.type === "image") {
+    await handleTelegramImage(ctx, input);
+    return;
+  }
   const jobKey = activeFileJobKey(ctx);
   if (!jobKey) return;
   if (activeFileJobs.has(jobKey)) {
@@ -660,7 +750,7 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
       : undefined;
     if (reused === "too-big") return;
     if (reused) {
-      await status.updateKey("file-reused", { id: reused.fileId });
+      await status.updateKey("file-reused");
       clearJob();
       await handlePreparedTelegramFile(ctx, input, reused);
       return;
@@ -674,25 +764,37 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
       signal: controller.signal,
     });
     throwIfAborted(controller.signal);
-    if ((input.size ?? downloaded.bytes.length) > 20 * 1024 * 1024) {
+    const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
+    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
       await status.updateText(ctx.t("file-too-big"));
       return;
     }
-    const imageSummary = input.type === "image"
-      ? await captionImage(ctx, downloaded.bytes, input.name, input.mime, controller.signal, status)
-      : null;
-    throwIfAborted(controller.signal);
+    const contentSha256 = sha256Hex(bytes);
+    const cachedByHash = await ctx.services.repos.files.findByContentHash(contentSha256, {
+      type: input.type,
+      size: bytes.length,
+    });
+    if (cachedByHash) {
+      const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, controller.signal, status, bytes);
+      if (hashReused === "too-big") return;
+      if (hashReused) {
+        await status.updateKey("file-reused");
+        clearJob();
+        await handlePreparedTelegramFile(ctx, input, hashReused);
+        return;
+      }
+    }
     const ingested = await ingestFileBytes({
       config: ctx.services.config,
       repo: ctx.services.repos.files,
       userId: ctx.user.tg_id,
       threadId: ctx.thread.id,
-      bytes: downloaded.bytes,
+      bytes,
       name: input.name,
       mime: input.mime,
       telegramFileId: input.fileId,
       telegramFileUniqueId: input.fileUniqueId ?? null,
-      imageSummary,
+      contentSha256,
       embeddings: ctx.services.repos.embeddings,
       embedder: ctx.services.embedder,
       logger: ctx.services.logger,
@@ -700,7 +802,11 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
       onStage: (stage) => status.updateIngestStage(stage),
     });
     throwIfAborted(controller.signal);
-    await status.updateKey("file-processed", { id: ingested.fileId });
+    await ctx.services.repos.files.rememberTelegramFileRef(ingested.fileId, {
+      fileUniqueId: input.fileUniqueId ?? null,
+      telegramFileId: input.fileId,
+    });
+    await status.updateKey("file-processed");
     clearJob();
     await handlePreparedTelegramFile(ctx, input, ingested);
   } catch (err) {
@@ -716,31 +822,108 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
   }
 }
 
+async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): Promise<void> {
+  if (!ctx.user || !ctx.thread || !ctx.chat) return;
+  const controller = new AbortController();
+  try {
+    const cached = input.fileUniqueId
+      ? await ctx.services.repos.files.findByTelegramFileUniqueId(input.fileUniqueId)
+      : undefined;
+    const reused = cached?.type === "image"
+      ? await prepareCachedTelegramFile(ctx, input, cached, controller.signal)
+      : undefined;
+    if (reused === "too-big") return;
+    if (reused) {
+      await handlePreparedTelegramFile(ctx, input, reused);
+      return;
+    }
+
+    const downloaded = await ctx.services.downloadFile({
+      api: ctx.api,
+      config: ctx.services.config,
+      fileId: input.fileId,
+      signal: controller.signal,
+    });
+    throwIfAborted(controller.signal);
+    const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
+    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+      await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
+      return;
+    }
+    const contentSha256 = sha256Hex(bytes);
+    const cachedByHash = await ctx.services.repos.files.findByContentHash(contentSha256, {
+      type: "image",
+      size: bytes.length,
+    });
+    if (cachedByHash) {
+      const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, controller.signal, undefined, bytes);
+      if (hashReused === "too-big") return;
+      if (hashReused) {
+        await handlePreparedTelegramFile(ctx, input, hashReused);
+        return;
+      }
+    }
+    const ingested = await ingestFileBytes({
+      config: ctx.services.config,
+      repo: ctx.services.repos.files,
+      userId: ctx.user.tg_id,
+      threadId: ctx.thread.id,
+      bytes,
+      name: input.name,
+      mime: input.mime,
+      telegramFileId: input.fileId,
+      telegramFileUniqueId: input.fileUniqueId ?? null,
+      contentSha256,
+      logger: ctx.services.logger,
+      signal: controller.signal,
+    });
+    throwIfAborted(controller.signal);
+    await ctx.services.repos.files.rememberTelegramFileRef(ingested.fileId, {
+      fileUniqueId: input.fileUniqueId ?? null,
+      telegramFileId: input.fileId,
+    });
+    await handlePreparedTelegramFile(ctx, input, ingested);
+  } catch (err) {
+    if (isAbortError(err) || controller.signal.aborted) return;
+    ctx.services.logger.warn("image ingest failed", { err: String(err), name: input.name });
+    await replyWithThreadFallback(ctx, ctx.t("error-generic"), threadExtra(ctx.thread));
+  }
+}
+
 async function prepareCachedTelegramFile(
   ctx: BotContext,
   input: TelegramFileInput,
   cached: FileRow,
   signal: AbortSignal,
-  status: FileProcessingStatus,
+  status?: FileProcessingStatus,
+  restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
   if (!(await fileExists(cached.path))) {
-    await status.updateKey("file-processing-downloading");
-    const downloaded = await ctx.services.downloadFile({
-      api: ctx.api,
-      config: ctx.services.config,
-      fileId: input.fileId,
-      signal,
-    });
+    let bytes = restoreBytes;
+    if (!bytes) {
+      await status?.updateKey("file-processing-downloading");
+      const downloaded = await ctx.services.downloadFile({
+        api: ctx.api,
+        config: ctx.services.config,
+        fileId: input.fileId,
+        signal,
+      });
+      bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
+    }
     throwIfAborted(signal);
-    if ((input.size ?? downloaded.bytes.length) > 20 * 1024 * 1024) {
-      await status.updateText(ctx.t("file-too-big"));
+    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+      if (status) await status.updateText(ctx.t("file-too-big"));
+      else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return "too-big";
     }
     await fs.mkdir(path.dirname(cached.path), { recursive: true });
-    await fs.writeFile(cached.path, downloaded.bytes);
+    await fs.writeFile(cached.path, bytes);
   }
   throwIfAborted(signal);
-  await ctx.services.repos.files.updateTelegramFileId(cached.id, input.fileId);
+  await ctx.services.repos.files.rememberTelegramFileRef(cached.id, {
+    fileUniqueId: input.fileUniqueId ?? null,
+    telegramFileId: input.fileId,
+  });
   const chunks = cached.is_inline ? [] : await ctx.services.repos.files.chunks(cached.id);
   return {
     fileId: cached.id,
@@ -764,9 +947,14 @@ async function handlePreparedTelegramFile(
     return;
   }
 
+  if (input.type === "image") {
+    await persistPreparedImageMessage(ctx, input, prepared);
+    return;
+  }
+
   const text = [input.caption, prepared.card].filter((part) => part?.trim()).join("\n\n");
   await handleUserText(ctx, text, {
-    userMessageKind: input.type === "image" ? "image" : "file",
+    userMessageKind: "file",
     userMessageContent: {
       text,
       caption: input.caption ?? null,
@@ -778,6 +966,30 @@ async function handlePreparedTelegramFile(
         caption: input.caption ?? null,
       });
     },
+  });
+}
+
+async function persistPreparedImageMessage(
+  ctx: BotContext,
+  input: TelegramFileInput,
+  prepared: PreparedTelegramFile,
+): Promise<void> {
+  if (!ctx.user || !ctx.thread) return;
+  const text = [input.caption, prepared.card].filter((part) => part?.trim()).join("\n\n");
+  const message = await ctx.services.repos.messages.insert({
+    threadId: ctx.thread.id,
+    role: "user",
+    kind: "image",
+    content: {
+      text,
+      caption: input.caption ?? null,
+      files: [{ id: prepared.fileId, type: prepared.type, name: input.name, inline: prepared.inline }],
+    },
+    textPlain: text,
+  });
+  await ctx.services.repos.files.setMessageId(prepared.fileId, message.id, {
+    displayName: input.name,
+    caption: input.caption ?? null,
   });
 }
 
@@ -829,6 +1041,26 @@ async function flushMediaGroup(key: string): Promise<void> {
   const captions = uniqueNonEmpty(items.map((item) => item.caption));
   const text = [...captions, ...items.map((item) => item.card)].join("\n\n");
   const hasNonImage = items.some((item) => item.file.type !== "image");
+  if (!hasNonImage) {
+    const message = await ctx.services.repos.messages.insert({
+      threadId: ctx.thread.id,
+      role: "user",
+      kind: "image",
+      content: {
+        text,
+        captions,
+        files: items.map((item) => item.file),
+      },
+      textPlain: text,
+    });
+    for (const item of items) {
+      await ctx.services.repos.files.setMessageId(item.file.id, message.id, {
+        displayName: item.file.name,
+        caption: item.caption ?? null,
+      });
+    }
+    return;
+  }
   await handleUserText(ctx, text, {
     userMessageKind: hasNonImage ? "file" : "image",
     userMessageContent: {
@@ -886,29 +1118,6 @@ function prefixPlainForThreadFallback(title: string, text: string): string {
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-async function captionImage(
-  ctx: BotContext,
-  bytes: Buffer,
-  name: string,
-  mime: string | undefined,
-  signal: AbortSignal,
-  status: FileProcessingStatus,
-): Promise<string | null> {
-  await status.updateKey("file-processing-captioning");
-  throwIfAborted(signal);
-  if (!ctx.services.imageCaptioner) return null;
-  let vision: string;
-  try {
-    vision = await ctx.services.imageCaptioner.caption({ bytes, name, mime });
-    throwIfAborted(signal);
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    ctx.services.logger.warn("image captioner failed", { err: String(err), name });
-    return null;
-  }
-  return vision || null;
 }
 
 function threadExtra(thread: ThreadRow | undefined) {

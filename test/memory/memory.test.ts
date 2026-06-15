@@ -156,6 +156,63 @@ describe("memory subsystem", () => {
     expect(ctx.tokensEst).toBeGreaterThan(1100);
   });
 
+  it("creates short image descriptions only when compacting", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-"));
+    tempDirs.push(dir);
+    const imagePath = path.join(dir, "sketch.jpg");
+    const imageBytes = Buffer.from([7, 8, 9, 10]);
+    await fs.writeFile(imagePath, imageBytes);
+    const user = await repos.users.ensure({ tgId: 211, firstName: "CompactionImage", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "image",
+      name: "sketch.jpg",
+      path: imagePath,
+      size: imageBytes.length,
+      summary: null,
+      isInline: true,
+    });
+    const imageMessage = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      kind: "image",
+      content: { text: `[image #${file.id}: sketch.jpg]` },
+      textPlain: `[image #${file.id}: sketch.jpg]`,
+    });
+    await repos.files.setMessageId(file.id, imageMessage.id);
+    for (let i = 0; i < 10; i += 1) {
+      await repos.messages.insert({
+        threadId: thread.id,
+        role: i % 2 ? "assistant" : "user",
+        content: { text: `Compaction filler ${i}` },
+        textPlain: `Compaction filler ${i}`,
+      });
+    }
+    const seenNames: string[] = [];
+
+    const result = await compactThread(repos, thread, {
+      recentWindowMessages: 1,
+      imageCaptioner: {
+        caption: async ({ bytes, name }) => {
+          seenNames.push(name);
+          expect(bytes).toEqual(imageBytes);
+          return "a short compaction-only sketch description";
+        },
+      },
+    });
+
+    expect(result.count).toBe(10);
+    expect(seenNames).toEqual(["sketch.jpg"]);
+    await expect(repos.files.get(file.id)).resolves.toMatchObject({
+      summary: "a short compaction-only sketch description",
+    });
+    const summaries = await repos.summaries.listForThreads([thread.id], 0);
+    expect(summaries.map((summary) => summary.content).join("\n")).toContain("[image #");
+    expect(summaries.map((summary) => summary.content).join("\n")).toContain("a short compaction-only sketch description");
+  });
+
   it("caps parent context at the fork point while keeping fork-local messages", async () => {
     const user = await repos.users.ensure({ tgId: 22, firstName: "Fork", lang: "en" });
     const parent = await repos.threads.activeForUserTopic(user.tg_id, null);

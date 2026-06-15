@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
@@ -125,6 +126,71 @@ describe("Telegram bot with grammy-emulate", () => {
     expectRichCall(res, "Echo: Hello bot");
     const rows = await env.repos.messages.listThread((await env.repos.threads.activeForUserTopic(env.user.id, null)).id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("coalesces Telegram-split large text into one user turn", async () => {
+    await onboard("SPLITTEXT");
+    const firstChunk = "a".repeat(4096);
+    const tail = "\nlast split chunk";
+
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, firstChunk),
+    ]);
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, tail),
+    ]);
+    await wait(650);
+
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const rows = await env.repos.messages.listThread(thread.id);
+    expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
+    expect(rows[0]?.text_plain).toBe(`${firstChunk}${tail}`);
+    expect(rows[1]?.text_plain).toContain(tail);
+  });
+
+  it("does not coalesce quick short text messages", async () => {
+    await onboard("SHORTTEXTS");
+
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, "first quick text"),
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, "second quick text"),
+    ]);
+
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const rows = await env.repos.messages.listThread(thread.id);
+    expect(rows.map((row) => [row.role, row.text_plain])).toEqual([
+      ["user", "first quick text"],
+      ["assistant", "Echo: first quick text"],
+      ["user", "second quick text"],
+      ["assistant", "Echo: second quick text"],
+    ]);
+  });
+
+  it("keeps split text bursts scoped to Telegram topics", async () => {
+    await env.dispose();
+    env = await createGrammyEmulator({ privateTopics: true });
+    await onboard("SPLITTOPICS");
+    const firstChunk = "t".repeat(4096);
+    const otherTopicText = "other topic text";
+
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, firstChunk, { messageThreadId: 61 }),
+    ]);
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, otherTopicText, { messageThreadId: 62 }),
+    ]);
+    await wait(650);
+
+    const firstTopic = await env.repos.threads.activeForUserTopic(env.user.id, 61);
+    const otherTopic = await env.repos.threads.activeForUserTopic(env.user.id, 62);
+    expect((await env.repos.messages.listThread(firstTopic.id)).map((row) => [row.role, row.text_plain])).toEqual([
+      ["user", firstChunk],
+      ["assistant", `Echo: ${firstChunk}`],
+    ]);
+    expect((await env.repos.messages.listThread(otherTopic.id)).map((row) => [row.role, row.text_plain])).toEqual([
+      ["user", otherTopicText],
+      ["assistant", `Echo: ${otherTopicText}`],
+    ]);
   });
 
   it("handles the context compaction callback", async () => {
@@ -380,8 +446,8 @@ describe("Telegram bot with grammy-emulate", () => {
     ]);
 
     expect(downloads).toBe(1);
-    expect(expectResponseSurface(second!)).toContain("Reused cached file #");
-    expect(expectResponseSurface(second!)).not.toContain("Extracting reuse-again.txt");
+    expect(expectResponseSurface(second!)).toContain("Reused cached file <code>reuse-again.txt</code>.");
+    expect(expectResponseSurface(second!)).not.toContain("Extracting <code>reuse-again.txt</code>");
     expectRichCall(second!, "shared cached file content");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const rows = await env.repos.messages.listThread(thread.id);
@@ -390,6 +456,127 @@ describe("Telegram bot with grammy-emulate", () => {
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
     await expect(env.repos.files.listForMessage(userMessages[1]!.id)).resolves.toMatchObject([{ id: files[0]!.id }]);
+  });
+
+  it("reuses indexed content by hash when Telegram sends a different unique id", async () => {
+    await env.dispose();
+    let downloads = 0;
+    env = await createGrammyEmulator({
+      downloadFile: async ({ fileId }) => {
+        downloads += 1;
+        const content = env.bot.server.fileState.getFileContent(fileId);
+        if (!content) throw new Error(`test file content not found: ${fileId}`);
+        return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
+      },
+    });
+    await onboard("HASHREUSE");
+
+    const bytes = Buffer.from("hash fallback content");
+    const firstDoc = env.bot.server.fileState.storeDocument("hash-a.txt", "text/plain", { content: bytes });
+    const [first] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, firstDoc),
+    ]);
+    expectRichCall(first!, "hash fallback content");
+
+    const secondDoc = env.bot.server.fileState.storeDocument("hash-b.txt", "text/plain", { content: bytes });
+    expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
+    const [second] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, secondDoc),
+    ]);
+
+    expect(downloads).toBe(2);
+    expect(expectResponseSurface(second!)).toContain("Downloading <code>hash-b.txt</code>");
+    expect(expectResponseSurface(second!)).toContain("Reused cached file <code>hash-b.txt</code>.");
+    expect(expectResponseSurface(second!)).not.toContain("Extracting <code>hash-b.txt</code>");
+    expectRichCall(second!, "hash fallback content");
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const files = await env.repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+  });
+
+  it("does not extract a repeated docx when the content hash already exists", async () => {
+    await env.dispose();
+    env = await createGrammyEmulator({ config: { FILE_INLINE_TOKENS: 1 } });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      document: {
+        md_content: "# Report\n\nhash cached docx content ".repeat(20),
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await onboard("HASHDOCX");
+
+    const bytes = Buffer.from("same fake docx bytes");
+    const firstDoc = env.bot.server.fileState.storeDocument(
+      "hash-report-a.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      { content: bytes },
+    );
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, firstDoc),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const secondDoc = env.bot.server.fileState.storeDocument(
+      "hash-report-b.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      { content: bytes },
+    );
+    expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
+    const [second] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, secondDoc),
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(expectResponseSurface(second!)).toContain("Reused cached file <code>hash-report-b.docx</code>.");
+    expect(expectResponseSurface(second!)).not.toContain("Extracting <code>hash-report-b.docx</code>");
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const files = await env.repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    const chunks = await env.repos.files.chunks(files[0]!.id);
+    expect(chunks.length).toBeGreaterThan(0);
+  });
+
+  it("restores a missing cached path on a hash hit without duplicating chunks", async () => {
+    await env.dispose();
+    let downloads = 0;
+    env = await createGrammyEmulator({
+      config: { FILE_INLINE_TOKENS: 1 },
+      downloadFile: async ({ fileId }) => {
+        downloads += 1;
+        const content = env.bot.server.fileState.getFileContent(fileId);
+        if (!content) throw new Error(`test file content not found: ${fileId}`);
+        return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
+      },
+    });
+    await onboard("HASHMISS");
+
+    const bytes = Buffer.from("# Heading\n" + "restored cached path content ".repeat(40));
+    const firstDoc = env.bot.server.fileState.storeDocument("restore-a.txt", "text/plain", { content: bytes });
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, firstDoc),
+    ]);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    const chunksBefore = await env.repos.files.chunks(file!.id);
+    expect(chunksBefore.length).toBeGreaterThan(0);
+    await fs.rm(file!.path, { force: true });
+
+    const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
+    expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
+    const [second] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, secondDoc),
+    ]);
+
+    expect(downloads).toBe(2);
+    expect(expectResponseSurface(second!)).toContain("Reused cached file <code>restore-b.txt</code>.");
+    await expect(fs.readFile(file!.path)).resolves.toEqual(bytes);
+    const files = await env.repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    const chunksAfter = await env.repos.files.chunks(file!.id);
+    expect(chunksAfter.map((chunk) => chunk.id)).toEqual(chunksBefore.map((chunk) => chunk.id));
   });
 
   it("reuses cached documents across users only after each user attaches the file", async () => {
@@ -426,7 +613,7 @@ describe("Telegram bot with grammy-emulate", () => {
     ]);
 
     expect(downloads).toBe(1);
-    expect(expectResponseSurface(second!)).toContain("Reused cached file #");
+    expect(expectResponseSurface(second!)).toContain("Reused cached file <code>global-copy.txt</code>.");
     const ownerThread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const otherThread = await env.repos.threads.activeForUserTopic(other.id, null);
     const ownerFiles = await env.repos.files.listForThreads([ownerThread.id]);
@@ -458,7 +645,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
   });
 
-  it("ingests photos as image records with caption summaries", async () => {
+  it("stores photos as image context without sending a processing response", async () => {
     await onboard("IMAGECODE");
     const res = await env.bot.sendPhoto(
       env.user,
@@ -467,19 +654,22 @@ describe("Telegram bot with grammy-emulate", () => {
       { caption: "whiteboard diagram" },
     );
 
-    expectRichCall(res, "[image #");
-    expectRichCall(res, "whiteboard diagram");
+    expect(res.getLastApiCall("sendRichMessage")).toBeUndefined();
+    expect(expectResponseSurface(res)).not.toContain("processed");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
-    expect(files[0]?.summary).not.toContain("whiteboard diagram");
+    expect(files[0]?.summary).toBeNull();
     const rows = await env.repos.messages.listThread(thread.id);
+    expect(rows.map((row) => row.role)).toEqual(["user"]);
     const userMessage = rows.find((row) => row.role === "user");
     expect(userMessage).toMatchObject({ kind: "image" });
+    expect(userMessage?.text_plain).toContain("whiteboard diagram");
+    expect(userMessage?.text_plain).toContain("[image #");
     expect(files[0]?.message_id).toBe(userMessage?.id);
   });
 
-  it("uses the image captioner for photos without Telegram captions", async () => {
+  it("does not use the image captioner when photos are uploaded", async () => {
     await env.dispose();
     const seenSizes: number[] = [];
     env = await createGrammyEmulator({
@@ -497,11 +687,11 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from([5, 6, 7, 8, 9]),
     });
 
-    expect(seenSizes).toEqual([5]);
-    expectRichCall(res, "a sketched system diagram");
+    expect(seenSizes).toEqual([]);
+    expect(res.getLastApiCall("sendRichMessage")).toBeUndefined();
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
-    expect(file?.summary).toBe("a sketched system diagram");
+    expect(file?.summary).toBeNull();
   });
 
   it("does not expose one user's image caption when another user reuses the cached image", async () => {
@@ -521,7 +711,7 @@ describe("Telegram bot with grammy-emulate", () => {
     ]);
     const ownerThread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [ownerFile] = await env.repos.files.listForThreads([ownerThread.id]);
-    expect(ownerFile?.summary).not.toContain("private caption alpha");
+    expect(ownerFile?.summary).toBeNull();
 
     const secondPhotos = env.bot.server.fileState.storePhoto(640, 480, {
       content: Buffer.from([9, 8, 7, 6]),
@@ -534,14 +724,14 @@ describe("Telegram bot with grammy-emulate", () => {
       }),
     ]);
 
-    const secondSurface = expectResponseSurface(second!);
-    expect(secondSurface).toContain("Reused cached file #");
-    expectRichCall(second!, "bob caption beta");
+    expect(second?.getLastApiCall("sendRichMessage")).toBeUndefined();
     expect(JSON.stringify(second!.apiCalls)).not.toContain("private caption alpha");
     const otherThread = await env.repos.threads.activeForUserTopic(other.id, null);
+    const otherRows = await env.repos.messages.listThread(otherThread.id);
+    expect(otherRows.find((row) => row.kind === "image")?.text_plain).toContain("bob caption beta");
     const [otherFile] = await env.repos.files.listForThreads([otherThread.id]);
     expect(otherFile?.id).toBe(ownerFile?.id);
-    expect(otherFile?.summary).not.toContain("private caption alpha");
+    expect(otherFile?.summary).toBeNull();
   });
 
   it("chunks large text files into searchable file chunks", async () => {
@@ -573,17 +763,20 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from("status file content"),
     });
 
-    expect(expectResponseSurface(res)).toContain("Downloading status.txt");
-    expect(expectResponseSurface(res)).toContain("Extracting status.txt");
-    expect(expectResponseSurface(res)).toContain("Indexing status.txt");
-    expect(expectResponseSurface(res)).toContain("100%");
-    expect(expectResponseSurface(res)).toContain("File #");
-    expect(expectResponseSurface(res)).toContain("processed");
+    expect(expectResponseSurface(res)).toContain("Downloading <code>status.txt</code>");
+    expect(expectResponseSurface(res)).toContain("Extracting <code>status.txt</code>");
+    expect(expectResponseSurface(res)).toContain("Indexing <code>status.txt</code>...\n100%");
+    expect(expectResponseSurface(res)).toContain("File <code>status.txt</code> processed");
+    expect(rawResponseSurface(res)).not.toMatch(/[\u2068\u2069]/u);
+    expect(res.apiCalls.some((call) => call.payload.parse_mode === "HTML" && typeof call.payload.text === "string" && call.payload.text.includes("<code>status.txt</code>"))).toBe(true);
   });
 
   it("shows extraction and indexing status for docx-style long files", async () => {
     await env.dispose();
-    env = await createGrammyEmulator({ config: { FILE_INLINE_TOKENS: 1 } });
+    env = await createGrammyEmulator({
+      config: { FILE_INLINE_TOKENS: 1 },
+      embedder: { embed: async (texts) => texts.map((text) => new Float32Array([text.length, 7])) },
+    });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       document: {
         md_content: "# Report\n\nsearchable docx content ".repeat(20),
@@ -600,12 +793,11 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from("fake docx bytes"),
     });
 
-    expect(expectResponseSurface(res)).toContain("Downloading report.docx");
-    expect(expectResponseSurface(res)).toContain("Extracting report.docx");
-    expect(expectResponseSurface(res)).toContain("Indexing report.docx");
-    expect(expectResponseSurface(res)).toContain("100%");
-    expect(expectResponseSurface(res)).toContain("File #");
-    expect(expectResponseSurface(res)).toContain("processed");
+    expect(expectResponseSurface(res)).toContain("Downloading <code>report.docx</code>");
+    expect(expectResponseSurface(res)).toContain("Extracting <code>report.docx</code>");
+    expect(expectResponseSurface(res)).toContain("Indexing <code>report.docx</code>...\n100%");
+    expect(expectResponseSurface(res)).toContain("Building vector index for <code>report.docx</code>...\n100%");
+    expect(expectResponseSurface(res)).toContain("File <code>report.docx</code> processed");
   });
 
   it("keeps another user's thread responsive while a file is processing", async () => {
@@ -781,6 +973,10 @@ function deferred<T>(): { promise: Promise<T>; resolve(value?: T | PromiseLike<T
   };
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function waitForRelease(release: Promise<void>, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw abortError();
   await new Promise<void>((resolve, reject) => {
@@ -813,11 +1009,15 @@ function expectRichCall(res: BotResponse, text: string): void {
 }
 
 function expectResponseSurface(res: BotResponse): string {
-  return normalizeFluent([
+  return normalizeFluent(rawResponseSurface(res));
+}
+
+function rawResponseSurface(res: BotResponse): string {
+  return [
     ...res.texts,
     ...res.editedMessages.map((message) => "text" in message ? message.text ?? "" : ""),
     ...res.apiCalls.map((call) => typeof call.payload.text === "string" ? call.payload.text : ""),
-  ].join("\n"));
+  ].join("\n");
 }
 
 function normalizeFluent(text: string): string {

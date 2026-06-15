@@ -10,6 +10,7 @@ import type { ImageCaptioner } from "../../src/ai/provider.js";
 import { sendFinal, type TurnRunner } from "../../src/ai/run.js";
 import type { ConversationSummarizer } from "../../src/memory/compactor.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
+import type { TextEmbedder } from "../../src/memory/embeddings.js";
 
 export interface GrammyEmulator {
   bot: TestBot<BotContext>;
@@ -29,6 +30,7 @@ export async function createGrammyEmulator(options: {
   imageCaptioner?: ImageCaptioner;
   summarizer?: ConversationSummarizer;
   downloadFile?: TelegramFileDownloader;
+  embedder?: TextEmbedder;
 } = {}): Promise<GrammyEmulator> {
   const config = loadTestConfig(options.config);
   const logger = createLogger(config);
@@ -75,6 +77,7 @@ export async function createGrammyEmulator(options: {
     turnRunner,
     imageCaptioner: options.imageCaptioner,
     summarizer: options.summarizer,
+    embedder: options.embedder,
     downloadFile: options.downloadFile ?? (async ({ fileId }) => {
       const content = bot.server.fileState.getFileContent(fileId);
       if (!content) throw new Error(`test file content not found: ${fileId}`);

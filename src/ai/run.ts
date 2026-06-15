@@ -125,26 +125,29 @@ export const runTurn: TurnRunner = async (input) => {
       }
     }
     const answer = shaper.finalAnswer();
+    let finalAnswer = answer;
     if (!answer.trim()) {
       input.logger.warn("turn produced empty final answer", {
         threadId: input.thread.id,
         userId: input.user.tg_id,
         toolStatus: shaper.toolStatusMd(),
       });
-      await sendFinal(input, shaper.thinkingMd(), input.t("empty-answer"));
-    } else {
-      await sendFinal(input, shaper.thinkingMd(), answer);
+      finalAnswer = input.t("empty-answer");
     }
+    await streamer?.finish({ thinkingMd: shaper.thinkingMd(), answerMd: finalAnswer });
+    await sendFinal(input, shaper.thinkingMd(), finalAnswer);
     await status?.finish(shaper.toolStatusMd());
   } catch (err) {
     if (isContextLengthError(err)) {
       input.logger.warn("provider context limit hit", { err: String(err) });
       await status?.finish(shaper.toolStatusMd());
+      await streamer?.finish();
       await sendContextLimitNotice(input);
       return;
     }
     input.logger.error("turn failed", { err: String(err) });
     await status?.finish(shaper.toolStatusMd());
+    await streamer?.finish();
     await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
   } finally {
     streamer?.stop();

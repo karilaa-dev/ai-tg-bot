@@ -11,6 +11,7 @@ export async function down(db: SqlExecutor, dialect: DialectName): Promise<void>
   const tables = [
     "embeddings",
     "summaries",
+    "file_telegram_refs",
     "message_files",
     "file_chunks",
     "files",
@@ -154,6 +155,7 @@ async function commonTables(
       type text not null,
       telegram_file_id text,
       telegram_file_unique_id text,
+      content_sha256 text,
       name text not null,
       path text not null,
       size integer not null,
@@ -164,6 +166,15 @@ async function commonTables(
       created_at ${intType} not null
     )
   `));
+  await db.execute(sql.raw(`
+    create table if not exists file_telegram_refs (
+      file_unique_id text primary key,
+      file_id ${intType} not null references files(id) on delete cascade,
+      telegram_file_id text,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists file_telegram_refs_file_id_idx on file_telegram_refs(file_id)`));
   await db.execute(sql.raw(`
     create table if not exists file_chunks (
       id ${idType},
@@ -211,7 +222,19 @@ async function commonTables(
   await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
   await addColumnIfMissing(db, "files", "telegram_file_id", "text");
   await addColumnIfMissing(db, "files", "telegram_file_unique_id", "text");
+  await addColumnIfMissing(db, "files", "content_sha256", "text");
   await db.execute(sql.raw(`create unique index if not exists files_telegram_file_unique_id_idx on files(telegram_file_unique_id)`));
+  await db.execute(sql.raw(`create index if not exists files_content_sha256_idx on files(content_sha256, type, size)`));
+  await db.execute(sql`
+    insert into file_telegram_refs(file_unique_id, file_id, telegram_file_id, created_at)
+    select f.telegram_file_unique_id, f.id, f.telegram_file_id, f.created_at
+    from files f
+    where f.telegram_file_unique_id is not null
+      and not exists (
+        select 1 from file_telegram_refs r
+        where r.file_unique_id = f.telegram_file_unique_id
+      )
+  `);
   await db.execute(sql`
     insert into message_files(message_id, file_id, display_name, caption, created_at)
     select f.message_id, f.id, f.name, null, f.created_at

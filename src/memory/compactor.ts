@@ -1,5 +1,7 @@
+import fs from "node:fs/promises";
 import type { Repos } from "../db/repos/index.js";
-import type { ThreadRow } from "../db/types.js";
+import type { FileRow, ThreadRow } from "../db/types.js";
+import type { ImageCaptioner } from "../ai/provider.js";
 import type { Logger } from "../logger.js";
 import { persistEmbedding, type TextEmbedder } from "./embeddings.js";
 import { estimateTokens } from "./tokens.js";
@@ -12,13 +14,20 @@ export interface ConversationSummarizer {
 export async function compactThread(
   repos: Repos,
   thread: ThreadRow,
-  options: { recentWindowMessages?: number; embedder?: TextEmbedder; summarizer?: ConversationSummarizer; logger?: Logger } = {},
+  options: {
+    recentWindowMessages?: number;
+    embedder?: TextEmbedder;
+    summarizer?: ConversationSummarizer;
+    imageCaptioner?: ImageCaptioner;
+    logger?: Logger;
+  } = {},
 ): Promise<{ count: number; summary: string }> {
   const chain = await repos.threads.chain(thread);
   const messages = await repos.messages.listForThreadChain(chain);
   const keep = options.recentWindowMessages ?? 20;
-  const compactable = messages.slice(0, Math.max(0, messages.length - keep));
-  if (compactable.length < 10) return { count: 0, summary: thread.meta_summary ?? "" };
+  const rawCompactable = messages.slice(0, Math.max(0, messages.length - keep));
+  if (rawCompactable.length < 10) return { count: 0, summary: thread.meta_summary ?? "" };
+  const compactable = await prepareMessagesForCompaction(repos, rawCompactable, options);
 
   const groups = groupByTokenBudget(compactable, 3500);
   const l0Summaries = [];
@@ -48,6 +57,101 @@ export async function compactThread(
 }
 
 type CompactableMessage = Awaited<ReturnType<Repos["messages"]["listThread"]>>[number];
+
+async function prepareMessagesForCompaction(
+  repos: Repos,
+  messages: CompactableMessage[],
+  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+): Promise<CompactableMessage[]> {
+  const prepared: CompactableMessage[] = [];
+  for (const message of messages) {
+    if (message.kind !== "image") {
+      prepared.push(message);
+      continue;
+    }
+    prepared.push(await prepareImageMessageForCompaction(repos, message, options));
+  }
+  return prepared;
+}
+
+async function prepareImageMessageForCompaction(
+  repos: Repos,
+  message: CompactableMessage,
+  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+): Promise<CompactableMessage> {
+  const images = (await repos.files.listForMessage(message.id)).filter((file) => file.type === "image");
+  if (!images.length) return message;
+  const descriptions: string[] = [];
+  for (const image of images) {
+    const description = await ensureImageDescription(repos, image, options);
+    descriptions.push(`[image #${message.id}: ${description}]`);
+  }
+  const text = stripImageCards(message.text_plain);
+  return {
+    ...message,
+    text_plain: [text, ...descriptions].filter(Boolean).join("\n"),
+  };
+}
+
+async function ensureImageDescription(
+  repos: Repos,
+  image: FileRow,
+  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+): Promise<string> {
+  const existing = usableImageSummary(image);
+  if (existing) return existing;
+  if (!options.imageCaptioner) return image.name;
+  try {
+    const bytes = await fs.readFile(image.path);
+    const caption = await options.imageCaptioner.caption({
+      bytes,
+      name: image.name,
+      mime: imageMediaType(image.name),
+    });
+    const generated = usableImageDescription(shortImageDescription(caption), image.name);
+    if (!generated) return image.name;
+    const description = generated;
+    await repos.files.updateSummary(image.id, description);
+    return description;
+  } catch (err) {
+    options.logger?.warn("image description during compaction failed", { err: String(err), fileId: image.id, path: image.path });
+    return image.name;
+  }
+}
+
+function usableImageSummary(image: FileRow): string | undefined {
+  return usableImageDescription(image.summary, image.name);
+}
+
+function usableImageDescription(text: string | null | undefined, imageName: string): string | undefined {
+  const summary = text?.replace(/\s+/g, " ").trim();
+  if (!summary) return undefined;
+  if (/^\[image,\s*no vision model:/i.test(summary)) return undefined;
+  const wrapped = summary.match(/^\[image:\s*(.+)]$/i)?.[1]?.trim();
+  if (wrapped && wrapped === imageName) return undefined;
+  return wrapped || summary;
+}
+
+function shortImageDescription(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (!oneLine) return "image";
+  return oneLine.length > 300 ? `${oneLine.slice(0, 297)}...` : oneLine;
+}
+
+function stripImageCards(text: string): string {
+  return text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^\[image #\d+:.+\]$/i.test(line))
+    .join("\n");
+}
+
+function imageMediaType(name: string): string | undefined {
+  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
+  if (/\.png$/i.test(name)) return "image/png";
+  if (/\.webp$/i.test(name)) return "image/webp";
+  return undefined;
+}
 
 function groupByTokenBudget(messages: CompactableMessage[], tokenBudget: number): CompactableMessage[][] {
   const groups: CompactableMessage[][] = [];
@@ -81,8 +185,7 @@ async function summarizeGroup(messages: CompactableMessage[], summarizer?: Conve
 function fallbackSummarizeGroup(messages: CompactableMessage[]): string {
   const body = messages
     .map((message) => {
-      const imageCaption = message.kind === "image" ? `[image #${message.id}: ${message.text_plain.replace(/^\[image:\s*|\]$/g, "")}]` : "";
-      const text = imageCaption || message.text_plain.replace(/\s+/g, " ").slice(0, 500);
+      const text = message.text_plain.replace(/\s+/g, " ").slice(0, 500);
       return `[#${message.id} ${message.role}] ${text}`;
     })
     .join("\n");

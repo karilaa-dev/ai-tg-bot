@@ -28,8 +28,8 @@ Personal AI assistant Telegram bot built with TypeScript, grammY, AI SDK v6, Ope
 
 6. Enable Topics for the bot in BotFather before using `/fork`.
 
-`OPENROUTER_MODEL` controls normal chat and image captioning. `OPENROUTER_COMPACTION_MODEL`
-controls only conversation summarization/rolling memory and defaults to
+`OPENROUTER_MODEL` controls normal chat, uncompacted image-in-context turns, and image descriptions generated during compaction. `OPENROUTER_COMPACTION_MODEL`
+controls conversation summarization/rolling memory and defaults to
 `openai/gpt-5.4-mini`.
 `OPENROUTER_EMBEDDING_MODEL` controls file/thread indexing and defaults to
 `perplexity/pplx-embed-v1-0.6b`, a low-latency dense retrieval model.
