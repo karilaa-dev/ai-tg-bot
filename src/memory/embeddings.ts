@@ -9,10 +9,10 @@ export interface TextEmbedder {
   model?: string;
 }
 
-export function createOpenRouterTextEmbedder(config: AppConfig): TextEmbedder {
+export function createOpenRouterTextEmbedder(config: AppConfig, logger?: Logger): TextEmbedder {
   return {
     model: config.OPENROUTER_EMBEDDING_MODEL,
-    embed: (texts) => openRouterEmbed(texts, config),
+    embed: (texts) => openRouterEmbed(texts, config, logger),
   };
 }
 
@@ -45,10 +45,33 @@ export async function persistEmbeddingWithRepo(input: {
   embeddingModel?: string;
   logger?: Logger;
 }): Promise<void> {
-  if (!input.embedder || !input.text.trim()) return;
+  if (!input.embedder || !input.text.trim()) {
+    input.logger?.debug("embedding persistence skipped", {
+      kind: input.kind,
+      refId: input.refId,
+      hasEmbedder: Boolean(input.embedder),
+      hasText: Boolean(input.text.trim()),
+    });
+    return;
+  }
   try {
+    input.logger?.debug("embedding persistence starting", {
+      kind: input.kind,
+      refId: input.refId,
+      chars: input.text.length,
+      model: input.embeddingModel ?? input.embedder.model ?? null,
+    });
     const [vector] = await input.embedder.embed([input.text]);
-    if (vector) await input.embeddings.upsert(input.kind, input.refId, vector, input.embeddingModel ?? input.embedder.model ?? null);
+    if (vector) {
+      await input.embeddings.upsert(input.kind, input.refId, vector, input.embeddingModel ?? input.embedder.model ?? null);
+      input.logger?.debug("embedding persistence complete", {
+        kind: input.kind,
+        refId: input.refId,
+        dimensions: vector.length,
+      });
+    } else {
+      input.logger?.warn("embedding provider returned no vector", { kind: input.kind, refId: input.refId });
+    }
   } catch (err) {
     input.logger?.warn("embedding persistence failed", {
       kind: input.kind,

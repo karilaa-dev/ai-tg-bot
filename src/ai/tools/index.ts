@@ -7,6 +7,7 @@ import type { AppConfig } from "../../config.js";
 import type { AppDatabase } from "../../db/index.js";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../../db/types.js";
+import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
 import { embed } from "../provider.js";
 import { hybridSearch, threadChainScope } from "../../memory/retrieval.js";
@@ -17,18 +18,24 @@ export function buildTools(input: {
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
+  logger?: Logger;
   embedder?: TextEmbedder;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
 }) {
   const embedder = input.embedder ?? {
     model: input.config.OPENROUTER_EMBEDDING_MODEL,
-    embed: (texts: string[]) => embed(texts, input.config),
+    embed: (texts: string[]) => embed(texts, input.config, input.logger),
   };
   return {
     search_thread: tool({
       description: "Search this Telegram thread memory.",
       inputSchema: z.object({ query: z.string(), limit: z.number().max(20).default(8) }),
       execute: async ({ query, limit }) => {
+        input.logger?.debug("tool search_thread starting", {
+          threadId: input.thread.id,
+          limit,
+          queryChars: query.length,
+        });
         const scope = await threadChainScope(input.repos, input.thread);
         const hits = await hybridSearch({
           search: input.db.search,
@@ -41,18 +48,33 @@ export function buildTools(input: {
           k: limit,
           embedder,
           embeddingModel: embedder.model,
+          logger: input.logger,
         });
-        return { results: await enrichThreadHits(input.repos, scope.fileIds, hits) };
+        const results = await enrichThreadHits(input.repos, scope.fileIds, hits);
+        input.logger?.info("tool search_thread complete", {
+          threadId: input.thread.id,
+          results: results.length,
+        });
+        return { results };
       },
     }),
     load_message: tool({
       description: "Load one previous message by numeric id.",
       inputSchema: z.object({ message_id: z.number() }),
       execute: async ({ message_id }) => {
+        input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
         const row = await input.repos.messages.get(message_id);
         const scope = await threadChainScope(input.repos, input.thread);
-        if (!row || !scope.messageIds.includes(row.id)) return { error: "message not found in this thread" };
+        if (!row || !scope.messageIds.includes(row.id)) {
+          input.logger?.debug("tool load_message not found", { threadId: input.thread.id, messageId: message_id });
+          return { error: "message not found in this thread" };
+        }
         const files = await input.repos.files.listForMessage(row.id);
+        input.logger?.info("tool load_message complete", {
+          threadId: input.thread.id,
+          messageId: row.id,
+          files: files.length,
+        });
         return {
           message_id: row.id,
           role: row.role,
@@ -98,6 +120,10 @@ export function buildTools(input: {
             const data = await readCachedOrRedownloadImage(input, image);
             imageParts.push({ type: "image-data" as const, data: data.toString("base64"), mediaType: imageMediaType(image.name) });
           } catch (err) {
+            input.logger?.warn("tool load_message image reload failed", {
+              fileId: image.file_id,
+              err: String(err),
+            });
             imageParts.push({
               type: "text" as const,
               text: `[image #${image.file_id} could not be reloaded: ${String(err)}]`,
@@ -137,9 +163,16 @@ export function buildTools(input: {
         limit: z.number().max(20).default(8),
       }),
       execute: async ({ file_id, query, limit }) => {
+        input.logger?.debug("tool search_in_file starting", {
+          threadId: input.thread.id,
+          fileId: file_id,
+          limit,
+          queryChars: query.length,
+        });
         const file = await input.repos.files.get(file_id);
         const scope = await threadChainScope(input.repos, input.thread);
         if (!file || !scope.fileIds.includes(file.id)) {
+          input.logger?.debug("tool search_in_file not found", { threadId: input.thread.id, fileId: file_id });
           return { error: "file not found in this thread" };
         }
         const hits = await hybridSearch({
@@ -153,12 +186,12 @@ export function buildTools(input: {
           k: limit,
           embedder,
           embeddingModel: embedder.model,
+          logger: input.logger,
         });
         const chunks = await input.repos.files.chunks(file_id);
         const indexById = new Map(chunks.map((chunk) => [chunk.id, chunk.idx]));
         const headingById = new Map(chunks.map((chunk) => [chunk.id, chunk.heading_path]));
-        return {
-          results: hits
+        const results = hits
             .filter((hit) => hit.kind === "chunk")
             .map((hit) => ({
               chunk_id: hit.ref_id,
@@ -166,8 +199,13 @@ export function buildTools(input: {
               heading_path: headingById.get(hit.ref_id),
               snippet: hit.snippet,
               score: hit.score,
-            })),
-        };
+            }));
+        input.logger?.info("tool search_in_file complete", {
+          threadId: input.thread.id,
+          fileId: file_id,
+          results: results.length,
+        });
+        return { results };
       },
     }),
     read_file_section: tool({
@@ -178,27 +216,42 @@ export function buildTools(input: {
         count: z.number().max(8).default(1),
       }),
       execute: async ({ file_id, chunk_index, count }) => {
+        input.logger?.debug("tool read_file_section starting", {
+          threadId: input.thread.id,
+          fileId: file_id,
+          chunkIndex: chunk_index,
+          count,
+        });
         const file = await input.repos.files.get(file_id);
         const scope = await threadChainScope(input.repos, input.thread);
         if (!file || !scope.fileIds.includes(file.id)) {
+          input.logger?.debug("tool read_file_section not found", { threadId: input.thread.id, fileId: file_id });
           return { error: "file not found in this thread" };
         }
         const chunks = await input.repos.files.chunks(file_id);
         if (chunk_index === -1) {
-          return {
-            outline: decodeOutline(file.outline_json) ??
+          const outline = decodeOutline(file.outline_json) ??
               chunks.map((chunk) => ({
                 chunk_index: chunk.idx,
                 heading_path: chunk.heading_path,
-              })),
-          };
+              }));
+          input.logger?.info("tool read_file_section outline complete", {
+            threadId: input.thread.id,
+            fileId: file_id,
+            headings: outline.length,
+          });
+          return { outline };
         }
-        return {
-          content: chunks
+        const content = chunks
             .filter((chunk) => chunk.idx >= chunk_index && chunk.idx < chunk_index + count)
             .map((chunk) => `# chunk ${chunk.idx}${chunk.heading_path ? ` - ${chunk.heading_path}` : ""}\n${chunk.content}`)
-            .join("\n\n"),
-        };
+            .join("\n\n");
+        input.logger?.info("tool read_file_section complete", {
+          threadId: input.thread.id,
+          fileId: file_id,
+          chars: content.length,
+        });
+        return { content };
       },
     }),
     web_search: tool({
@@ -206,21 +259,23 @@ export function buildTools(input: {
       inputSchema: z.object({ query: z.string(), max_results: z.number().max(10).default(5) }),
       execute: async ({ query, max_results }) => {
         try {
+          input.logger?.info("tool web_search starting", { maxResults: max_results, queryChars: query.length });
           const client = tavily({ apiKey: input.config.TAVILY_API_KEY });
           const res = await client.search(query, {
             maxResults: max_results,
             searchDepth: "basic",
             includeAnswer: false,
           });
-          return {
-            results: res.results?.map((r) => ({
+          const results = res.results?.map((r) => ({
               title: r.title,
               url: r.url,
               snippet: r.content,
               published_date: "publishedDate" in r ? r.publishedDate : undefined,
-            })),
-          };
+            })) ?? [];
+          input.logger?.info("tool web_search complete", { results: results.length });
+          return { results };
         } catch (err) {
+          input.logger?.warn("tool web_search failed", { err: String(err), queryChars: query.length });
           return { error: String(err) };
         }
       },
@@ -231,6 +286,7 @@ export function buildTools(input: {
 async function readCachedOrRedownloadImage(
   input: {
     repos: Repos;
+    logger?: Logger;
     redownloadFile?: (file: FileRow) => Promise<Buffer>;
   },
   image: { file_id: number; path: string },
@@ -238,11 +294,16 @@ async function readCachedOrRedownloadImage(
   try {
     return await fs.readFile(image.path);
   } catch (err) {
+    input.logger?.debug("cached image missing; attempting Telegram redownload", {
+      fileId: image.file_id,
+      err: String(err),
+    });
     const file = await input.repos.files.get(image.file_id);
     if (!file || !input.redownloadFile) throw err;
     const bytes = await input.redownloadFile(file);
     await fs.mkdir(path.dirname(image.path), { recursive: true });
     await fs.writeFile(image.path, bytes);
+    input.logger?.info("cached image restored from Telegram", { fileId: image.file_id, bytes: bytes.length });
     return bytes;
   }
 }

@@ -105,6 +105,14 @@ export function createBot(options: InstallOptions): Bot<BotContext> {
 }
 
 export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotServices {
+  options.logger.info("installing bot handlers", {
+    hasCustomRepos: Boolean(options.repos),
+    hasCustomLocalizer: Boolean(options.localizer),
+    hasCustomTurnRunner: Boolean(options.turnRunner),
+    hasEmbedder: Boolean(options.embedder),
+    hasImageCaptioner: Boolean(options.imageCaptioner),
+    hasSummarizer: Boolean(options.summarizer),
+  });
   const repos = options.repos ?? createRepos(options.db.db, options.db.search);
   const localizer = options.localizer ?? new Localizer();
   const services: BotServices = {
@@ -138,15 +146,19 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
 
   bot.command("start", async (ctx) => {
+    logCommand(ctx, "start");
     await sendWelcome(ctx);
   });
   bot.command("help", async (ctx) => {
+    logCommand(ctx, "help");
     await replyWithThreadFallback(ctx, ctx.t("help"), threadExtra(ctx.thread));
   });
   bot.command("stop", async (ctx) => {
+    logCommand(ctx, "stop");
     await stopActiveFileProcessing(ctx);
   });
   bot.command("lang", async (ctx) => {
+    logCommand(ctx, "lang");
     await replyWithThreadFallback(ctx, ctx.t("lang-pick", { lang: ctx.user?.lang ?? "en" }), {
       ...threadExtra(ctx.thread),
       reply_markup: languageKeyboard(),
@@ -154,6 +166,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.callbackQuery(/^lang:(en|ru)$/, async (ctx) => {
     const lang = ctx.match[1] as "en" | "ru";
+    logCallback(ctx, "lang:set", { lang });
     if (ctx.user) {
       await ctx.services.repos.users.setLang(ctx.user.tg_id, lang);
       ctx.user = { ...ctx.user, lang };
@@ -165,16 +178,20 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     await ctx.editMessageText(ctx.t("lang-set")).catch(() => replyWithThreadFallback(ctx, ctx.t("lang-set"), threadExtra(ctx.thread)));
   });
   bot.command("stream", async (ctx) => {
+    logCommand(ctx, "stream");
     if (!ctx.user) return;
     const updated = await ctx.services.repos.users.toggleStream(ctx.user.tg_id);
     ctx.user = updated;
+    ctx.services.logger.info("stream mode toggled", ctxLogMeta(ctx, { enabled: updated.stream_mode }));
     await replyWithThreadFallback(ctx, ctx.t(updated.stream_mode ? "stream-on" : "stream-off"), threadExtra(ctx.thread));
   });
   bot.command("timezone", async (ctx) => {
+    logCommand(ctx, "timezone");
     if (!ctx.from) return;
     await ctx.conversation.enter("timezone");
   });
   bot.command("compact", async (ctx) => {
+    logCommand(ctx, "compact");
     if (!ctx.thread) return;
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(ctx.thread));
     const result = await compactThread(ctx.services.repos, ctx.thread, {
@@ -191,6 +208,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     await retryLatestUnansweredTurn(ctx);
   });
   bot.command("fork", async (ctx) => {
+    logCommand(ctx, "fork");
     if (!ctx.thread || !ctx.user || !ctx.chat) return;
     const me = await ctx.api.getMe();
     if (!(me as { has_topics_enabled?: boolean }).has_topics_enabled) {
@@ -209,9 +227,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       parentThreadId: ctx.thread.id,
       forkPointMessageId: latest?.id ?? null,
     });
+    ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
+      forkThreadId: fork.id,
+      parentThreadId: ctx.thread.id,
+      topicId: fork.topic_id,
+    }));
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
   });
   bot.command("invite", async (ctx) => {
+    logCommand(ctx, "invite");
     if (!isAdmin(ctx)) return;
     await replyWithThreadFallback(ctx, inviteDraftText(ctx, 1, "30d"), {
       ...threadExtra(ctx.thread),
@@ -219,8 +243,10 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     });
   });
   bot.command("invites", async (ctx) => {
+    logCommand(ctx, "invites");
     if (!isAdmin(ctx)) return;
     const invites = await ctx.services.repos.invites.list();
+    ctx.services.logger.debug("invites listed", ctxLogMeta(ctx, { invites: invites.length }));
     if (!invites.length) {
       await replyWithThreadFallback(ctx, ctx.t("invites-empty"), threadExtra(ctx.thread));
       return;
@@ -248,12 +274,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     );
   });
   bot.callbackQuery(/^inv:revoke:(.+)$/, async (ctx) => {
+    logCallback(ctx, "invite:revoke");
     if (!isAdmin(ctx)) return;
     await ctx.services.repos.invites.revoke(ctx.match[1]!);
+    ctx.services.logger.info("invite revoked", ctxLogMeta(ctx));
     await ctx.answerCallbackQuery({ text: ctx.t("invite-revoked-toast") });
     await ctx.editMessageText(ctx.t("invite-revoked")).catch(() => undefined);
   });
   bot.callbackQuery(/^inv:set:(\d+):(7d|30d|never)$/, async (ctx) => {
+    logCallback(ctx, "invite:set");
     if (!isAdmin(ctx)) return;
     const uses = normalizeInviteUses(ctx.match[1]);
     const expiry = ctx.match[2] as InviteExpiry;
@@ -266,6 +295,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     }));
   });
   bot.callbackQuery(/^inv:create:(\d+):(7d|30d|never)$/, async (ctx) => {
+    logCallback(ctx, "invite:create");
     if (!isAdmin(ctx)) return;
     const uses = normalizeInviteUses(ctx.match[1]);
     const expiry = ctx.match[2] as InviteExpiry;
@@ -277,6 +307,10 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       expiresAt,
       createdBy: ctx.from!.id,
     });
+    ctx.services.logger.info("invite created", ctxLogMeta(ctx, {
+      maxUses: row.max_uses,
+      expiresAt: row.expires_at ?? null,
+    }));
     const username = ctx.me.username ?? "your_bot";
     const link = `https://t.me/${username}?start=${row.code}`;
     const html = ctx.t("invite-created", {
@@ -299,6 +333,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     }));
   });
   bot.callbackQuery("ctx:compact", async (ctx) => {
+    logCallback(ctx, "ctx:compact");
     if (!ctx.thread) return;
     await ctx.answerCallbackQuery();
     const result = await compactThread(ctx.services.repos, ctx.thread, {
@@ -315,17 +350,28 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
 
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
+    ctx.services.logger.debug("document message received", ctxLogMeta(ctx, {
+      name: doc.file_name ?? "file",
+      mime: doc.mime_type ?? null,
+      size: doc.file_size ?? null,
+    }));
     if ((doc.file_size ?? 0) > 20 * 1024 * 1024) {
+      ctx.services.logger.warn("document rejected; too large", ctxLogMeta(ctx, {
+        name: doc.file_name ?? "file",
+        size: doc.file_size ?? null,
+      }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
     const name = doc.file_name ?? "file";
     const type = classifyFile(name, doc.mime_type ?? "");
     if (type === "legacy-doc") {
+      ctx.services.logger.info("document rejected; legacy doc unsupported", ctxLogMeta(ctx, { name }));
       await replyWithThreadFallback(ctx, ctx.t("file-doc-legacy"), threadExtra(ctx.thread));
       return;
     }
     if (!type) {
+      ctx.services.logger.info("document rejected; unsupported type", ctxLogMeta(ctx, { name, mime: doc.mime_type ?? null }));
       await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
       return;
     }
@@ -343,7 +389,13 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.on("message:photo", async (ctx) => {
     const photo = [...ctx.message.photo].sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
     if (!photo) return;
+    ctx.services.logger.debug("photo message received", ctxLogMeta(ctx, {
+      size: photo.file_size ?? null,
+      width: photo.width,
+      height: photo.height,
+    }));
     if ((photo.file_size ?? 0) > 20 * 1024 * 1024) {
+      ctx.services.logger.warn("photo rejected; too large", ctxLogMeta(ctx, { size: photo.file_size ?? null }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
@@ -360,24 +412,31 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.on("message:text", async (ctx) => {
     if (ctx.message.text.startsWith("/")) {
+      ctx.services.logger.info("unknown command received", ctxLogMeta(ctx));
       await replyWithThreadFallback(ctx, ctx.t("unknown-command"), threadExtra(ctx.thread));
       return;
     }
+    ctx.services.logger.debug("text message received", ctxLogMeta(ctx, { chars: ctx.message.text.length }));
     await enqueueUserText(ctx, ctx.message.text);
   });
   bot.on("message", async (ctx) => {
-    if (isIgnoredServiceMessage(ctx.message)) return;
+    if (isIgnoredServiceMessage(ctx.message)) {
+      ctx.services.logger.debug("service message ignored", ctxLogMeta(ctx));
+      return;
+    }
+    ctx.services.logger.info("unsupported message received", ctxLogMeta(ctx));
     await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
   });
 
   bot.catch((err) => {
     const ctx = err.ctx as BotContext;
     const e = err.error;
-    if (e instanceof GrammyError) ctx.services?.logger.error("telegram api error", { description: e.description });
-    else if (e instanceof HttpError) ctx.services?.logger.error("telegram http error", { error: String(e) });
-    else ctx.services?.logger.error("bot error", { error: String(e) });
+    if (e instanceof GrammyError) ctx.services?.logger.error("telegram api error", ctxLogMeta(ctx, { description: e.description }));
+    else if (e instanceof HttpError) ctx.services?.logger.error("telegram http error", ctxLogMeta(ctx, { error: String(e) }));
+    else ctx.services?.logger.error("bot error", ctxLogMeta(ctx, { error: String(e) }));
   });
 
+  options.logger.info("bot handlers installed");
   return services;
 }
 
@@ -396,19 +455,45 @@ function messageThreadId(ctx: BotContext): number | null {
   return (ctx.msg as { message_thread_id?: number } | undefined)?.message_thread_id ?? null;
 }
 
+function ctxLogMeta(ctx: BotContext, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    updateId: ctx.update.update_id,
+    userId: ctx.from?.id ?? null,
+    chatId: ctx.chat?.id ?? null,
+    threadId: ctx.thread?.id ?? null,
+    topicId: ctx.thread?.topic_id ?? messageThreadId(ctx),
+    ...extra,
+  };
+}
+
+function logCommand(ctx: BotContext, command: string): void {
+  ctx.services.logger.info("bot command received", ctxLogMeta(ctx, { command }));
+}
+
+function logCallback(ctx: BotContext, action: string, extra: Record<string, unknown> = {}): void {
+  ctx.services.logger.debug("callback received", ctxLogMeta(ctx, { action, ...extra }));
+}
+
+function optionalLogger(ctx: BotContext): Logger | undefined {
+  return (ctx as Partial<BotContext>).services?.logger;
+}
+
 async function stopActiveFileProcessing(ctx: BotContext): Promise<void> {
   const key = activeFileJobKey(ctx);
   const job = key ? activeFileJobs.get(key) : undefined;
   if (!job) {
+    ctx.services.logger.info("file stop requested with no active job", ctxLogMeta(ctx));
     await replyWithThreadFallback(ctx, ctx.t("file-stop-none"), threadExtra(ctx.thread));
     return;
   }
+  ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
   await job.status.updateKey("file-processing-stopping");
   job.controller.abort();
 }
 
 async function privateOnly(ctx: BotContext, next: NextFunction): Promise<void> {
   if (ctx.chat && ctx.chat.type !== "private") {
+    ctx.services.logger.warn("non-private chat rejected", ctxLogMeta(ctx, { chatType: ctx.chat.type }));
     await replyWithThreadFallback(ctx, ctx.t("private-only")).catch(() => undefined);
     await ctx.leaveChat().catch(() => undefined);
     return;
@@ -418,6 +503,7 @@ async function privateOnly(ctx: BotContext, next: NextFunction): Promise<void> {
 
 async function authAndThread(ctx: BotContext, next: NextFunction): Promise<void> {
   if (!ctx.from) {
+    ctx.services.logger.debug("update has no sender; skipping auth", ctxLogMeta(ctx));
     await next();
     return;
   }
@@ -430,11 +516,13 @@ async function authAndThread(ctx: BotContext, next: NextFunction): Promise<void>
       username: ctx.from.username,
       lang,
     });
+    ctx.services.logger.info("admin user created", ctxLogMeta(ctx, { lang }));
   }
   if (!user) {
     const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
     const code = text?.startsWith("/start ") ? text.slice(7).trim() : awaitingCode.has(ctx.from.id) ? text?.trim() : undefined;
     if (code) {
+      ctx.services.logger.debug("invite code submitted", ctxLogMeta(ctx));
       const ok = await redeemInvite(ctx, code, lang);
       if (ok) {
         user = await ctx.services.repos.users.get(ctx.from.id);
@@ -443,9 +531,11 @@ async function authAndThread(ctx: BotContext, next: NextFunction): Promise<void>
       }
     } else if (text === "/start" || text) {
       awaitingCode.set(ctx.from.id, true);
+      ctx.services.logger.info("unknown user asked for invite code", ctxLogMeta(ctx, { lang }));
       await replyWithThreadFallback(ctx, ctx.t("invite-ask"));
       return;
     } else {
+      ctx.services.logger.debug("unauthorized non-text update ignored", ctxLogMeta(ctx));
       return;
     }
   }
@@ -455,6 +545,10 @@ async function authAndThread(ctx: BotContext, next: NextFunction): Promise<void>
   if (ctx.chat) {
     const topicId = ctx.msg?.message_thread_id ?? null;
     ctx.thread = await ctx.services.repos.threads.activeForUserTopic(knownUser.tg_id, topicId, topicId ? `Topic ${topicId}` : "General");
+    ctx.services.logger.debug("thread resolved for update", ctxLogMeta(ctx, {
+      topicId,
+      activeThreadId: ctx.thread.id,
+    }));
   }
   await next();
 }
@@ -462,6 +556,7 @@ async function authAndThread(ctx: BotContext, next: NextFunction): Promise<void>
 async function redeemInvite(ctx: BotContext, code: string, lang: "en" | "ru"): Promise<boolean> {
   const result = await ctx.services.repos.invites.validate(code);
   if (!result.ok) {
+    ctx.services.logger.warn("invite redemption rejected", ctxLogMeta(ctx, { reason: result.reason }));
     await replyWithThreadFallback(ctx, ctx.t(`invite-invalid-${result.reason}`));
     awaitingCode.set(ctx.from!.id, true);
     return false;
@@ -475,6 +570,7 @@ async function redeemInvite(ctx: BotContext, code: string, lang: "en" | "ru"): P
   });
   await ctx.services.repos.invites.consume(code);
   awaitingCode.delete(ctx.from!.id);
+  ctx.services.logger.info("invite redeemed", ctxLogMeta(ctx, { lang }));
   return true;
 }
 
@@ -488,12 +584,14 @@ async function sendWelcome(ctx: BotContext): Promise<void> {
 }
 
 async function timezoneConversation(conversation: BotConversation, ctx: BotContext): Promise<void> {
+  optionalLogger(ctx)?.debug("timezone conversation started", ctxLogMeta(ctx));
   await conversationReply(conversation, ctx, (ctx) => replyData(ctx, ctx.t("tz-ask")));
   for (let attempts = 0; attempts < 3; attempts += 1) {
     const answer = await conversation.waitFor("message:text");
     const text = answer.message.text;
     const offset = offsetFromLocalTime(text);
     if (offset === null) {
+      optionalLogger(answer)?.debug("timezone input rejected", ctxLogMeta(answer, { attempt: attempts + 1 }));
       await conversationReply(conversation, answer, (ctx) => replyData(ctx, ctx.t("tz-bad-format")));
       continue;
     }
@@ -501,9 +599,11 @@ async function timezoneConversation(conversation: BotConversation, ctx: BotConte
       await ctx.services.repos.users.setTimezone(ctx.from!.id, offset);
       return replyData(ctx, ctx.t("tz-set", { offset: formatUtcOffset(offset), time: text }));
     });
+    optionalLogger(answer)?.info("timezone set", ctxLogMeta(answer, { offset }));
     await replyWithCapturedThreadFallback(answer, data);
     return;
   }
+  optionalLogger(ctx)?.info("timezone conversation ended after invalid attempts", ctxLogMeta(ctx));
 }
 
 async function conversationReply(
@@ -547,6 +647,10 @@ async function handleUserText(
 ): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
   if (busyThreads.has(ctx.thread.id)) {
+    ctx.services.logger.info("turn queued while thread busy", ctxLogMeta(ctx, {
+      kind: options.userMessageKind ?? "text",
+      textChars: text.length,
+    }));
     const message = await ctx.services.repos.messages.insert({
       threadId: ctx.thread.id,
       role: "user",
@@ -559,6 +663,11 @@ async function handleUserText(
     return;
   }
   busyThreads.add(ctx.thread.id);
+  const startedAt = Date.now();
+  ctx.services.logger.info("turn dispatch starting", ctxLogMeta(ctx, {
+    kind: options.userMessageKind ?? "text",
+    textChars: text.length,
+  }));
   try {
     await ctx.services.turnRunner({
       api: ctx.api,
@@ -587,12 +696,17 @@ async function handleUserText(
     });
   } finally {
     busyThreads.delete(ctx.thread.id);
+    ctx.services.logger.info("turn dispatch finished", ctxLogMeta(ctx, {
+      kind: options.userMessageKind ?? "text",
+      ms: Date.now() - startedAt,
+    }));
   }
 }
 
 async function enqueueUserText(ctx: BotContext, text: string): Promise<void> {
   const key = textBurstKey(ctx);
   if (!key) {
+    ctx.services.logger.debug("text burst unavailable; dispatching immediately", ctxLogMeta(ctx, { chars: text.length }));
     await handleUserText(ctx, text);
     return;
   }
@@ -603,10 +717,15 @@ async function enqueueUserText(ctx: BotContext, text: string): Promise<void> {
     existing.ctx = ctx;
     existing.texts.push(text);
     existing.timer = scheduleTextBurstFlush(key, ctx);
+    ctx.services.logger.debug("text burst appended", ctxLogMeta(ctx, {
+      parts: existing.texts.length,
+      chars: existing.texts.reduce((sum, part) => sum + part.length, 0),
+    }));
     return;
   }
 
   if (text.length < splitTextChunkMinChars) {
+    ctx.services.logger.debug("text below burst threshold; dispatching immediately", ctxLogMeta(ctx, { chars: text.length }));
     await handleUserText(ctx, text);
     return;
   }
@@ -616,6 +735,7 @@ async function enqueueUserText(ctx: BotContext, text: string): Promise<void> {
     texts: [text],
     timer: scheduleTextBurstFlush(key, ctx),
   });
+  ctx.services.logger.debug("text burst queued", ctxLogMeta(ctx, { chars: text.length }));
 }
 
 function scheduleTextBurstFlush(key: string, ctx: BotContext): NodeJS.Timeout {
@@ -629,6 +749,7 @@ function scheduleTextBurstFlush(key: string, ctx: BotContext): NodeJS.Timeout {
 async function flushPendingTextBurstForContext(ctx: BotContext): Promise<void> {
   const key = textBurstKey(ctx);
   if (!key) return;
+  ctx.services.logger.debug("flushing text burst before non-text update", ctxLogMeta(ctx));
   await flushPendingTextBurst(key);
 }
 
@@ -640,6 +761,10 @@ async function flushPendingTextBurst(key: string): Promise<void> {
 
   const text = pending.texts.join("\n\n");
   if (!text) return;
+  pending.ctx.services.logger.info("text burst flushed", ctxLogMeta(pending.ctx, {
+    parts: pending.texts.length,
+    chars: text.length,
+  }));
   await handleUserText(pending.ctx, text);
 }
 
@@ -655,12 +780,14 @@ function isPlainUserText(ctx: BotContext): boolean {
 
 async function retryLatestUnansweredTurn(ctx: BotContext): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
+  ctx.services.logger.debug("looking for latest unanswered turn", ctxLogMeta(ctx));
   const messages = await ctx.services.repos.messages.listThread(ctx.thread.id);
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]!;
     if (message.role === "assistant" && message.text_plain.trim()) return;
     if (message.role === "user") {
       if (message.kind === "image") return;
+      ctx.services.logger.info("retrying latest unanswered turn", ctxLogMeta(ctx, { messageId: message.id }));
       await handleUserText(ctx, message.text_plain);
       return;
     }
@@ -731,12 +858,23 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
   const jobKey = activeFileJobKey(ctx);
   if (!jobKey) return;
   if (activeFileJobs.has(jobKey)) {
+    ctx.services.logger.info("file job rejected; thread already processing", ctxLogMeta(ctx, {
+      name: input.name,
+      type: input.type,
+    }));
     await replyWithThreadFallback(ctx, ctx.t("busy"), threadExtra(ctx.thread));
     return;
   }
   const controller = new AbortController();
   const status = new FileProcessingStatus(ctx, input.name);
   activeFileJobs.set(jobKey, { controller, status });
+  const startedAt = Date.now();
+  ctx.services.logger.info("file job starting", ctxLogMeta(ctx, {
+    name: input.name,
+    type: input.type,
+    size: input.size ?? null,
+    mediaGroupId: input.mediaGroupId ?? null,
+  }));
   const clearJob = () => {
     const current = activeFileJobs.get(jobKey);
     if (current?.controller === controller) activeFileJobs.delete(jobKey);
@@ -745,6 +883,13 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
     const cached = input.fileUniqueId
       ? await ctx.services.repos.files.findByTelegramFileUniqueId(input.fileUniqueId)
       : undefined;
+    if (cached) {
+      ctx.services.logger.debug("telegram file cache hit by unique id", ctxLogMeta(ctx, {
+        fileId: cached.id,
+        name: input.name,
+        type: cached.type,
+      }));
+    }
     const reused = cached?.type === input.type
       ? await prepareCachedTelegramFile(ctx, input, cached, controller.signal, status)
       : undefined;
@@ -752,11 +897,17 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
     if (reused) {
       await status.updateKey("file-reused");
       clearJob();
+      ctx.services.logger.info("file job reused cached file", ctxLogMeta(ctx, {
+        fileId: reused.fileId,
+        name: input.name,
+        ms: Date.now() - startedAt,
+      }));
       await handlePreparedTelegramFile(ctx, input, reused);
       return;
     }
 
     await status.updateKey("file-processing-downloading");
+    ctx.services.logger.debug("telegram file download starting", ctxLogMeta(ctx, { name: input.name, type: input.type }));
     const downloaded = await ctx.services.downloadFile({
       api: ctx.api,
       config: ctx.services.config,
@@ -765,7 +916,17 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
     });
     throwIfAborted(controller.signal);
     const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
+    ctx.services.logger.debug("telegram file download complete", ctxLogMeta(ctx, {
+      name: input.name,
+      type: input.type,
+      bytes: bytes.length,
+    }));
     if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+      ctx.services.logger.warn("downloaded file rejected; too large", ctxLogMeta(ctx, {
+        name: input.name,
+        type: input.type,
+        bytes: bytes.length,
+      }));
       await status.updateText(ctx.t("file-too-big"));
       return;
     }
@@ -775,11 +936,21 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
       size: bytes.length,
     });
     if (cachedByHash) {
+      ctx.services.logger.debug("file cache hit by content hash", ctxLogMeta(ctx, {
+        fileId: cachedByHash.id,
+        name: input.name,
+        type: cachedByHash.type,
+      }));
       const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, controller.signal, status, bytes);
       if (hashReused === "too-big") return;
       if (hashReused) {
         await status.updateKey("file-reused");
         clearJob();
+        ctx.services.logger.info("file job reused content hash", ctxLogMeta(ctx, {
+          fileId: hashReused.fileId,
+          name: input.name,
+          ms: Date.now() - startedAt,
+        }));
         await handlePreparedTelegramFile(ctx, input, hashReused);
         return;
       }
@@ -808,9 +979,17 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
     });
     await status.updateKey("file-processed");
     clearJob();
+    ctx.services.logger.info("file job complete", ctxLogMeta(ctx, {
+      fileId: ingested.fileId,
+      name: input.name,
+      type: input.type,
+      inline: ingested.inline,
+      ms: Date.now() - startedAt,
+    }));
     await handlePreparedTelegramFile(ctx, input, ingested);
   } catch (err) {
     if (isAbortError(err) || controller.signal.aborted) {
+      ctx.services.logger.info("file job cancelled", ctxLogMeta(ctx, { name: input.name, type: input.type }));
       await status.updateKey("file-processing-cancelled");
       return;
     }
@@ -825,19 +1004,32 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
 async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
   const controller = new AbortController();
+  const startedAt = Date.now();
+  ctx.services.logger.info("image ingest job starting", ctxLogMeta(ctx, {
+    name: input.name,
+    size: input.size ?? null,
+    mediaGroupId: input.mediaGroupId ?? null,
+  }));
   try {
     const cached = input.fileUniqueId
       ? await ctx.services.repos.files.findByTelegramFileUniqueId(input.fileUniqueId)
       : undefined;
+    if (cached) ctx.services.logger.debug("image cache hit by unique id", ctxLogMeta(ctx, { fileId: cached.id, name: input.name }));
     const reused = cached?.type === "image"
       ? await prepareCachedTelegramFile(ctx, input, cached, controller.signal)
       : undefined;
     if (reused === "too-big") return;
     if (reused) {
+      ctx.services.logger.info("image ingest job reused cached image", ctxLogMeta(ctx, {
+        fileId: reused.fileId,
+        name: input.name,
+        ms: Date.now() - startedAt,
+      }));
       await handlePreparedTelegramFile(ctx, input, reused);
       return;
     }
 
+    ctx.services.logger.debug("telegram image download starting", ctxLogMeta(ctx, { name: input.name }));
     const downloaded = await ctx.services.downloadFile({
       api: ctx.api,
       config: ctx.services.config,
@@ -846,7 +1038,9 @@ async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): P
     });
     throwIfAborted(controller.signal);
     const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
+    ctx.services.logger.debug("telegram image download complete", ctxLogMeta(ctx, { name: input.name, bytes: bytes.length }));
     if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+      ctx.services.logger.warn("downloaded image rejected; too large", ctxLogMeta(ctx, { name: input.name, bytes: bytes.length }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
@@ -856,9 +1050,15 @@ async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): P
       size: bytes.length,
     });
     if (cachedByHash) {
+      ctx.services.logger.debug("image cache hit by content hash", ctxLogMeta(ctx, { fileId: cachedByHash.id, name: input.name }));
       const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, controller.signal, undefined, bytes);
       if (hashReused === "too-big") return;
       if (hashReused) {
+        ctx.services.logger.info("image ingest job reused content hash", ctxLogMeta(ctx, {
+          fileId: hashReused.fileId,
+          name: input.name,
+          ms: Date.now() - startedAt,
+        }));
         await handlePreparedTelegramFile(ctx, input, hashReused);
         return;
       }
@@ -882,9 +1082,17 @@ async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): P
       fileUniqueId: input.fileUniqueId ?? null,
       telegramFileId: input.fileId,
     });
+    ctx.services.logger.info("image ingest job complete", ctxLogMeta(ctx, {
+      fileId: ingested.fileId,
+      name: input.name,
+      ms: Date.now() - startedAt,
+    }));
     await handlePreparedTelegramFile(ctx, input, ingested);
   } catch (err) {
-    if (isAbortError(err) || controller.signal.aborted) return;
+    if (isAbortError(err) || controller.signal.aborted) {
+      ctx.services.logger.info("image ingest job cancelled", ctxLogMeta(ctx, { name: input.name }));
+      return;
+    }
     ctx.services.logger.warn("image ingest failed", { err: String(err), name: input.name });
     await replyWithThreadFallback(ctx, ctx.t("error-generic"), threadExtra(ctx.thread));
   }
@@ -899,6 +1107,11 @@ async function prepareCachedTelegramFile(
   restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
   if (!(await fileExists(cached.path))) {
+    ctx.services.logger.warn("cached file missing on disk; restoring", ctxLogMeta(ctx, {
+      fileId: cached.id,
+      path: cached.path,
+      name: input.name,
+    }));
     let bytes = restoreBytes;
     if (!bytes) {
       await status?.updateKey("file-processing-downloading");
@@ -912,12 +1125,20 @@ async function prepareCachedTelegramFile(
     }
     throwIfAborted(signal);
     if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+      ctx.services.logger.warn("restored cached file rejected; too large", ctxLogMeta(ctx, {
+        fileId: cached.id,
+        bytes: bytes.length,
+      }));
       if (status) await status.updateText(ctx.t("file-too-big"));
       else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return "too-big";
     }
     await fs.mkdir(path.dirname(cached.path), { recursive: true });
     await fs.writeFile(cached.path, bytes);
+    ctx.services.logger.info("cached file restored on disk", ctxLogMeta(ctx, {
+      fileId: cached.id,
+      bytes: bytes.length,
+    }));
   }
   throwIfAborted(signal);
   await ctx.services.repos.files.rememberTelegramFileRef(cached.id, {
@@ -925,6 +1146,11 @@ async function prepareCachedTelegramFile(
     telegramFileId: input.fileId,
   });
   const chunks = cached.is_inline ? [] : await ctx.services.repos.files.chunks(cached.id);
+  ctx.services.logger.debug("prepared cached telegram file", ctxLogMeta(ctx, {
+    fileId: cached.id,
+    inline: Boolean(cached.is_inline),
+    chunks: chunks.length,
+  }));
   return {
     fileId: cached.id,
     card: cardForFile(cached, chunks, input.name),
@@ -939,6 +1165,11 @@ async function handlePreparedTelegramFile(
   prepared: PreparedTelegramFile,
 ): Promise<void> {
   if (input.mediaGroupId) {
+    ctx.services.logger.debug("prepared file queued for media group", ctxLogMeta(ctx, {
+      groupId: input.mediaGroupId,
+      fileId: prepared.fileId,
+      type: prepared.type,
+    }));
     enqueueMediaGroup(ctx, input.mediaGroupId, {
       caption: input.caption,
       card: prepared.card,
@@ -948,11 +1179,17 @@ async function handlePreparedTelegramFile(
   }
 
   if (input.type === "image") {
+    ctx.services.logger.debug("persisting prepared image message", ctxLogMeta(ctx, { fileId: prepared.fileId }));
     await persistPreparedImageMessage(ctx, input, prepared);
     return;
   }
 
   const text = [input.caption, prepared.card].filter((part) => part?.trim()).join("\n\n");
+  ctx.services.logger.debug("dispatching prepared file as user turn", ctxLogMeta(ctx, {
+    fileId: prepared.fileId,
+    type: prepared.type,
+    textChars: text.length,
+  }));
   await handleUserText(ctx, text, {
     userMessageKind: "file",
     userMessageContent: {
@@ -991,6 +1228,10 @@ async function persistPreparedImageMessage(
     displayName: input.name,
     caption: input.caption ?? null,
   });
+  ctx.services.logger.info("prepared image message persisted", ctxLogMeta(ctx, {
+    fileId: prepared.fileId,
+    messageId: message.id,
+  }));
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -1010,6 +1251,10 @@ function enqueueMediaGroup(ctx: BotContext, groupId: string, item: PendingMediaG
     clearTimeout(existing.timer);
     existing.ctx = ctx;
     existing.items.push(item);
+    ctx.services.logger.debug("media group item appended", ctxLogMeta(ctx, {
+      groupId,
+      items: existing.items.length,
+    }));
     existing.timer = setTimeout(() => {
       void flushMediaGroup(key).catch((err) => {
         ctx.services.logger.error("media group flush failed", { err: String(err), groupId });
@@ -1028,6 +1273,7 @@ function enqueueMediaGroup(ctx: BotContext, groupId: string, item: PendingMediaG
     }, mediaGroupFlushMs),
   };
   pendingMediaGroups.set(key, pending);
+  ctx.services.logger.debug("media group queued", ctxLogMeta(ctx, { groupId, items: 1 }));
 }
 
 async function flushMediaGroup(key: string): Promise<void> {
@@ -1037,6 +1283,10 @@ async function flushMediaGroup(key: string): Promise<void> {
 
   const { ctx, items } = pending;
   if (!ctx.user || !ctx.thread || !ctx.chat || items.length === 0) return;
+  ctx.services.logger.info("media group flushing", ctxLogMeta(ctx, {
+    items: items.length,
+    imageItems: items.filter((item) => item.file.type === "image").length,
+  }));
 
   const captions = uniqueNonEmpty(items.map((item) => item.caption));
   const text = [...captions, ...items.map((item) => item.card)].join("\n\n");
@@ -1059,6 +1309,10 @@ async function flushMediaGroup(key: string): Promise<void> {
         caption: item.caption ?? null,
       });
     }
+    ctx.services.logger.info("media group image message persisted", ctxLogMeta(ctx, {
+      messageId: message.id,
+      files: items.length,
+    }));
     return;
   }
   await handleUserText(ctx, text, {
@@ -1075,6 +1329,10 @@ async function flushMediaGroup(key: string): Promise<void> {
           caption: item.caption ?? null,
         });
       }
+      ctx.services.logger.info("media group file message persisted", ctxLogMeta(ctx, {
+        messageId: message.id,
+        files: items.length,
+      }));
     },
   });
 }

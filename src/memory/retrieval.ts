@@ -2,6 +2,7 @@ import type { Repos } from "../db/repos/index.js";
 import { cosine, type EmbeddingKind } from "../db/repos/embeddings.js";
 import type { TextSearch } from "../db/search.js";
 import type { FileRow, ThreadRow } from "../db/types.js";
+import type { Logger } from "../logger.js";
 
 const vectorCacheMax = 10_000;
 const vectorCache = new Map<string, Float32Array>();
@@ -27,7 +28,17 @@ export async function hybridSearch(input: {
   k: number;
   embedder?: Embedder;
   embeddingModel?: string;
+  logger?: Logger;
 }): Promise<RetrievalHit[]> {
+  input.logger?.debug("hybrid search starting", {
+    threadIds: input.threadIds.length,
+    messageScope: input.messageIds?.length ?? null,
+    summaryScope: input.summaryIds?.length ?? null,
+    fileScope: input.fileIds?.length ?? null,
+    queryChars: input.query.length,
+    limit: input.k,
+    hasEmbedder: Boolean(input.embedder && input.repos),
+  });
   const ranked = new Map<string, RetrievalHit>();
   const allowedMessages = input.messageIds ? new Set(input.messageIds) : undefined;
   const allowedSummaries = input.summaryIds ? new Set(input.summaryIds) : undefined;
@@ -44,6 +55,11 @@ export async function hybridSearch(input: {
     input.search.searchSummaries(input.threadIds, input.query, allowedSummaries ? scopedLimit : input.k),
     input.fileIds?.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
   ]);
+  input.logger?.debug("hybrid lexical search complete", {
+    messages: messages.length,
+    summaries: summaries.length,
+    chunks: chunks.length,
+  });
   messages
     .filter((hit) => !allowedMessages || allowedMessages.has(hit.id))
     .slice(0, input.k)
@@ -55,6 +71,9 @@ export async function hybridSearch(input: {
   chunks.forEach((hit, idx) => add("chunk", hit.id, hit.snippet, idx));
 
   if (input.embedder && input.repos) {
+    input.logger?.debug("hybrid vector search starting", {
+      model: input.embeddingModel ?? input.embedder.model ?? null,
+    });
     const [queryVector] = await input.embedder.embed([input.query]);
     if (queryVector) {
       await addEmbeddingHits({
@@ -67,10 +86,14 @@ export async function hybridSearch(input: {
         embeddingModel: input.embeddingModel ?? input.embedder.model,
         add,
       });
+    } else {
+      input.logger?.warn("hybrid vector search skipped; embedder returned no query vector");
     }
   }
 
-  return [...ranked.values()].sort((a, b) => b.score - a.score).slice(0, input.k);
+  const results = [...ranked.values()].sort((a, b) => b.score - a.score).slice(0, input.k);
+  input.logger?.debug("hybrid search complete", { results: results.length });
+  return results;
 }
 
 export async function threadChainIds(repos: Repos, thread: ThreadRow): Promise<number[]> {

@@ -22,16 +22,41 @@ export async function compactThread(
     logger?: Logger;
   } = {},
 ): Promise<{ count: number; summary: string }> {
+  options.logger?.info("thread compaction starting", { threadId: thread.id, title: thread.title });
   const chain = await repos.threads.chain(thread);
   const messages = await repos.messages.listForThreadChain(chain);
   const keep = options.recentWindowMessages ?? 20;
   const rawCompactable = messages.slice(0, Math.max(0, messages.length - keep));
-  if (rawCompactable.length < 10) return { count: 0, summary: thread.meta_summary ?? "" };
+  options.logger?.debug("thread compaction scope loaded", {
+    threadId: thread.id,
+    chain: chain.length,
+    messages: messages.length,
+    keep,
+    compactable: rawCompactable.length,
+  });
+  if (rawCompactable.length < 10) {
+    options.logger?.info("thread compaction skipped; not enough old messages", {
+      threadId: thread.id,
+      compactable: rawCompactable.length,
+    });
+    return { count: 0, summary: thread.meta_summary ?? "" };
+  }
   const compactable = await prepareMessagesForCompaction(repos, rawCompactable, options);
 
   const groups = groupByTokenBudget(compactable, 3500);
+  options.logger?.debug("thread compaction groups prepared", {
+    threadId: thread.id,
+    groups: groups.length,
+    compactable: compactable.length,
+  });
   const l0Summaries = [];
   for (const group of groups) {
+    options.logger?.debug("thread compaction summarizing group", {
+      threadId: thread.id,
+      messages: group.length,
+      fromMessageId: group[0]!.id,
+      toMessageId: group.at(-1)!.id,
+    });
     const summary = await summarizeGroup(group, options.summarizer, options.logger);
     const inserted = await repos.summaries.insert({
       threadId: thread.id,
@@ -53,6 +78,12 @@ export async function compactThread(
   }
   const summary = await mergeMeta(thread.meta_summary, l0Summaries.map((row) => row.content), options.summarizer, options.logger);
   await repos.threads.setCompacted(thread.id, compactable.at(-1)!.id, summary);
+  options.logger?.info("thread compaction complete", {
+    threadId: thread.id,
+    compactedMessages: compactable.length,
+    summaries: l0Summaries.length,
+    summaryChars: summary.length,
+  });
   return { count: compactable.length, summary };
 }
 
@@ -99,9 +130,16 @@ async function ensureImageDescription(
   options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
 ): Promise<string> {
   const existing = usableImageSummary(image);
-  if (existing) return existing;
-  if (!options.imageCaptioner) return image.name;
+  if (existing) {
+    options.logger?.debug("image compaction using existing description", { fileId: image.id });
+    return existing;
+  }
+  if (!options.imageCaptioner) {
+    options.logger?.debug("image compaction skipped; no captioner", { fileId: image.id });
+    return image.name;
+  }
   try {
+    options.logger?.debug("image compaction description starting", { fileId: image.id, path: image.path });
     const bytes = await fs.readFile(image.path);
     const caption = await options.imageCaptioner.caption({
       bytes,
@@ -112,6 +150,7 @@ async function ensureImageDescription(
     if (!generated) return image.name;
     const description = generated;
     await repos.files.updateSummary(image.id, description);
+    options.logger?.info("image compaction description stored", { fileId: image.id, chars: description.length });
     return description;
   } catch (err) {
     options.logger?.warn("image description during compaction failed", { err: String(err), fileId: image.id, path: image.path });

@@ -24,12 +24,14 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
   const dialect = config.DB_URL.startsWith("postgres://") || config.DB_URL.startsWith("postgresql://")
     ? "postgres"
     : "sqlite";
+  logger?.debug("creating database connection", { dialect });
 
   let db: SqlExecutor;
   if (dialect === "sqlite") {
     const target = config.DB_URL.replace(/^sqlite:/, "");
     const sqlitePath = target === ":memory:" ? ":memory:" : path.resolve(target);
     if (sqlitePath !== ":memory:") fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
+    logger?.debug("opening sqlite database", { path: sqlitePath });
     const sqlite = drizzleSqlite({ client: new DatabaseSync(sqlitePath) });
     db = {
       dialect,
@@ -38,11 +40,13 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
         sqlite.run(statement);
       },
       destroy: async () => {
+        logger?.debug("closing sqlite database");
         sqlite.$client.close();
       },
     };
   } else {
     pg.types.setTypeParser(20, (value) => Number(value));
+    logger?.debug("opening postgres database");
     const postgres = drizzlePg(config.DB_URL);
     db = {
       dialect,
@@ -54,6 +58,7 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
         await postgres.execute(statement);
       },
       destroy: async () => {
+        logger?.debug("closing postgres database");
         await postgres.$client.end();
       },
     };
@@ -64,11 +69,14 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     dialect,
     search: createTextSearch(db, dialect),
     migrate: async () => {
+      logger?.debug("migration starting", { dialect });
       await up(db, dialect);
       logger?.info("migrated", { dialect });
     },
     destroy: async () => {
+      logger?.debug("database destroy starting", { dialect });
       await db.destroy();
+      logger?.debug("database destroy complete", { dialect });
     },
   };
 }

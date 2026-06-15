@@ -26,8 +26,20 @@ export async function buildContext(input: {
   newUserText: string;
   logger?: Logger;
 }): Promise<BuiltContext> {
+  input.logger?.debug("context build starting", {
+    threadId: input.thread.id,
+    userId: input.user.tg_id,
+    textChars: input.newUserText.length,
+  });
   const threadChain = await input.repos.threads.chain(input.thread);
   const scope = await threadChainScope(input.repos, input.thread);
+  input.logger?.debug("context scope loaded", {
+    threadId: input.thread.id,
+    chain: threadChain.length,
+    messages: scope.messageIds.length,
+    summaries: scope.summaryIds.length,
+    files: scope.fileIds.length,
+  });
   const filesOverview = await buildFilesOverview(input.repos, scope.threadIds, scope.fileIds);
   const memoryBlocks = await buildMemoryBlocks(input, threadChain, scope);
   const systemBase = await renderSystemPrompt({
@@ -49,6 +61,23 @@ export async function buildContext(input: {
   const tokensEst = estimate.tokens + estimate.images * 1100;
   const budget = await getContextBudget(input.config, input.logger);
   const usable = (budget - input.config.RESERVE_OUTPUT_TOKENS) * input.config.CONTEXT_WARN_RATIO;
+  input.logger?.debug("context build complete", {
+    threadId: input.thread.id,
+    messages: messages.length,
+    memoryBlocks: memoryBlocks.length,
+    tokensEst,
+    images: estimate.images,
+    budget,
+    usable,
+  });
+  if (tokensEst > usable) {
+    input.logger?.warn("context exceeds usable budget", {
+      threadId: input.thread.id,
+      tokensEst,
+      usable,
+      budget,
+    });
+  }
   return { system, messages, tokensEst, overBudget: tokensEst > usable };
 }
 
@@ -147,10 +176,12 @@ async function buildMemoryBlocks(input: {
         fileIds: scope.fileIds,
         query: input.newUserText,
         k: 6,
-        embedder: { embed: (texts) => embed(texts, input.config) },
+        embedder: { embed: (texts) => embed(texts, input.config, input.logger) },
         embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
+        logger: input.logger,
       });
       if (hits.length) {
+        input.logger?.debug("auto-rag recalled context", { hits: hits.length });
         blocks.push(
           `Recalled context (verify with load_message/read_file_section):\n${hits
             .map((hit) => `- [${hit.kind} #${hit.ref_id}] ${hit.snippet}`)

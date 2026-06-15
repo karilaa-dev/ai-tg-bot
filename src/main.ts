@@ -10,23 +10,34 @@ import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
+logger.info("bot process starting", {
+  logLevel: logger.level,
+  db: config.DB_URL.startsWith("postgres") ? "postgres" : "sqlite",
+  model: config.OPENROUTER_MODEL,
+  compactionModel: config.OPENROUTER_COMPACTION_MODEL,
+});
 const db = createDatabase(config, logger);
 
 try {
+  logger.debug("running database migrations");
   await db.migrate();
+  logger.debug("checking docling health", { url: config.DOCLING_URL });
   if (!(await checkDocling(config))) {
     logger.warn("docling healthcheck failed; pdf/docx ingestion will show the docling-down hint", {
       url: config.DOCLING_URL,
     });
+  } else {
+    logger.info("docling healthcheck passed", { url: config.DOCLING_URL });
   }
   const bot = createBot({
     config,
     db,
     logger,
-    embedder: createOpenRouterTextEmbedder(config),
+    embedder: createOpenRouterTextEmbedder(config, logger),
     imageCaptioner: createOpenRouterImageCaptioner(config, logger),
     summarizer: createOpenRouterConversationSummarizer(config, logger),
   });
+  logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });
   logger.info("migrated, runner polling started");
@@ -45,5 +56,6 @@ try {
   logger.error("bot stopped", { err: String(err) });
   process.exitCode = 1;
 } finally {
-  await db.destroy().catch(() => undefined);
+  logger.debug("destroying database connection");
+  await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
 }

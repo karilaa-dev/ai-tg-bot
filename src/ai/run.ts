@@ -37,6 +37,14 @@ export interface TurnInput {
 export type TurnRunner = (input: TurnInput) => Promise<void>;
 
 export const runTurn: TurnRunner = async (input) => {
+  const startedAt = Date.now();
+  input.logger.info("turn starting", {
+    threadId: input.thread.id,
+    userId: input.user.tg_id,
+    kind: input.userMessageKind ?? "text",
+    textChars: input.text.length,
+    streamMode: input.user.stream_mode,
+  });
   const latest = await input.repos.messages.latest(input.thread.id);
   let userMessage = await latestRetryableUserMessage(input, latest);
   if (!(latest?.role === "user" && latest.text_plain === input.text)) {
@@ -48,7 +56,22 @@ export const runTurn: TurnRunner = async (input) => {
         content: input.userMessageContent ?? { text: input.text },
         textPlain: input.text,
       });
+      input.logger.debug("user message persisted for turn", {
+        threadId: input.thread.id,
+        messageId: userMessage.id,
+        kind: userMessage.kind,
+      });
+    } else {
+      input.logger.debug("reusing retryable user message for turn", {
+        threadId: input.thread.id,
+        messageId: userMessage.id,
+      });
     }
+  } else {
+    input.logger.debug("latest user message already matches turn text", {
+      threadId: input.thread.id,
+      messageId: latest.id,
+    });
   }
   if (userMessage?.role === "user") {
     await input.onUserMessagePersisted?.(userMessage);
@@ -72,9 +95,18 @@ export const runTurn: TurnRunner = async (input) => {
     logger: input.logger,
   });
   if (context.overBudget) {
+    input.logger.info("turn stopped; context over budget", {
+      threadId: input.thread.id,
+      tokensEst: context.tokensEst,
+    });
     await sendContextLimitNotice(input);
     return;
   }
+  input.logger.debug("turn context ready", {
+    threadId: input.thread.id,
+    messages: context.messages.length,
+    tokensEst: context.tokensEst,
+  });
 
   const shaper = new StreamShaper();
   const streamer = input.user.stream_mode
@@ -88,6 +120,11 @@ export const runTurn: TurnRunner = async (input) => {
       })
     : undefined;
   const status = streamer ? undefined : new TurnStatusMessage(input);
+  input.logger.debug("turn response mode selected", {
+    threadId: input.thread.id,
+    streamMode: Boolean(streamer),
+    statusMessage: Boolean(status),
+  });
   let typingThreadId = input.messageThreadId;
   let typing: NodeJS.Timeout | undefined;
   if (!streamer) {
@@ -104,8 +141,17 @@ export const runTurn: TurnRunner = async (input) => {
     }, 5000);
   }
 
+  let contentEvents = 0;
+  let toolCalls = 0;
+  let toolResults = 0;
   try {
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
+    input.logger.info("provider stream starting", {
+      threadId: input.thread.id,
+      model: input.config.OPENROUTER_MODEL,
+      maxToolSteps: input.config.MAX_TOOL_STEPS,
+      reasoningEffort: input.config.OPENROUTER_REASONING_EFFORT,
+    });
     const result = streamText({
       model: chatModel(input.config),
       system: context.system,
@@ -116,14 +162,36 @@ export const runTurn: TurnRunner = async (input) => {
       abortSignal: AbortSignal.timeout(300_000),
     });
     for await (const part of result.fullStream) {
+      const normalized = normalizeStreamPart(part);
       const event = handleStreamPart(shaper, part);
-      if (event === "tool-call") streamer?.startKeepalive();
+      if (event === "content") contentEvents += 1;
+      if (event === "tool-call") {
+        toolCalls += 1;
+        input.logger.info("tool call started", {
+          threadId: input.thread.id,
+          toolName: normalized?.kind === "tool-call" ? normalized.toolName : "tool",
+        });
+        streamer?.startKeepalive();
+      }
+      if (event === "tool-result") {
+        toolResults += 1;
+        input.logger.info("tool call finished", {
+          threadId: input.thread.id,
+          toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
+        });
+      }
       if (event === "tool-result" || event === "content") streamer?.stopKeepalive();
       streamer?.update({ thinkingMd: shaper.thinkingMd(), answerMd: shaper.visibleAnswer() });
       if (event === "tool-call" || event === "tool-result") {
         await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
       }
     }
+    input.logger.debug("provider stream complete", {
+      threadId: input.thread.id,
+      contentEvents,
+      toolCalls,
+      toolResults,
+    });
     const answer = shaper.finalAnswer();
     let finalAnswer = answer;
     if (!answer.trim()) {
@@ -137,15 +205,21 @@ export const runTurn: TurnRunner = async (input) => {
     await streamer?.finish({ thinkingMd: shaper.thinkingMd(), answerMd: finalAnswer });
     await sendFinal(input, shaper.thinkingMd(), finalAnswer);
     await status?.finish(shaper.toolStatusMd());
+    input.logger.info("turn complete", {
+      threadId: input.thread.id,
+      answerChars: finalAnswer.length,
+      thinkingChars: shaper.thinkingMd().length,
+      ms: Date.now() - startedAt,
+    });
   } catch (err) {
     if (isContextLengthError(err)) {
-      input.logger.warn("provider context limit hit", { err: String(err) });
+      input.logger.warn("provider context limit hit", { threadId: input.thread.id, err: String(err) });
       await status?.finish(shaper.toolStatusMd());
       await streamer?.finish();
       await sendContextLimitNotice(input);
       return;
     }
-    input.logger.error("turn failed", { err: String(err) });
+    input.logger.error("turn failed", { threadId: input.thread.id, err: String(err), ms: Date.now() - startedAt });
     await status?.finish(shaper.toolStatusMd());
     await streamer?.finish();
     await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
@@ -157,6 +231,10 @@ export const runTurn: TurnRunner = async (input) => {
 
 async function latestRetryableUserMessage(input: TurnInput, latest: MessageRow | undefined): Promise<MessageRow | undefined> {
   if (!(latest?.role === "assistant" && !latest.text_plain.trim())) return latest;
+  input.logger.debug("latest assistant message is empty; looking for retryable user message", {
+    threadId: input.thread.id,
+    latestMessageId: latest.id,
+  });
   const messages = await input.repos.messages.listThread(input.thread.id);
   for (let i = messages.length - 2; i >= 0; i -= 1) {
     const message = messages[i]!;
@@ -167,6 +245,7 @@ async function latestRetryableUserMessage(input: TurnInput, latest: MessageRow |
 }
 
 async function sendContextLimitNotice(input: TurnInput): Promise<void> {
+  input.logger.info("sending context limit notice", { threadId: input.thread.id });
   await sendPlainWithThreadFallback(input, input.t("ctx-limit"), {
     reply_markup: {
       inline_keyboard: [[{ text: input.t("btn-compact"), callback_data: "ctx:compact" }]],
@@ -185,6 +264,10 @@ class TurnStatusMessage {
       const sent = await sendPlainWithThreadFallback(this.input, text);
       this.messageId = sent.message_id;
       this.lastText = text;
+      this.input.logger.debug("thinking status message sent", {
+        threadId: this.input.thread.id,
+        telegramMessageId: sent.message_id,
+      });
     } catch (err) {
       this.input.logger.warn("failed to send thinking status message", { err: String(err) });
     }
@@ -195,12 +278,17 @@ class TurnStatusMessage {
     try {
       await this.input.api.editMessageText(this.input.chatId, this.messageId, text);
       this.lastText = text;
+      this.input.logger.debug("thinking status message edited", {
+        threadId: this.input.thread.id,
+        telegramMessageId: this.messageId,
+      });
     } catch (err) {
       this.input.logger.warn("failed to edit thinking status message", { err: String(err) });
     }
   }
 
   async finish(toolStatusMd: string): Promise<void> {
+    this.input.logger.debug("thinking status message finishing", { threadId: this.input.thread.id });
     await this.update(buildThinkingStatus(this.input.t("thinking-done"), toolStatusMd));
   }
 }
@@ -217,6 +305,12 @@ export async function sendFinal(input: TurnInput, thinking: string, answer: stri
     t: input.t,
     config: input.config,
   });
+  input.logger.debug("sending final answer", {
+    threadId: input.thread.id,
+    parts: messages.length,
+    answerChars: answer.length,
+    thinkingChars: thinking.length,
+  });
   const ids: number[] = [];
   for (const rich of messages) {
     ids.push(...(await sendRichWithFallback(input, rich)));
@@ -228,6 +322,11 @@ export async function sendFinal(input: TurnInput, thinking: string, answer: stri
     textPlain: answer,
     thinking,
     tgMessageId: ids.find((id) => id > 0) ?? null,
+  });
+  input.logger.info("assistant message persisted", {
+    threadId: input.thread.id,
+    messageId: assistantMessage.id,
+    telegramMessages: ids.length,
   });
   await persistEmbedding({
     repos: input.repos,
@@ -247,6 +346,10 @@ async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string;
     return [sent.message_id];
   } catch (err) {
     if (!isRichParseError(err)) throw err;
+    input.logger.debug("rich message parse failed; trying repaired variants", {
+      threadId: input.thread.id,
+      err: String(err),
+    });
   }
 
   for (const variant of variantsForRichRetry(markdown)) {
@@ -255,15 +358,23 @@ async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string;
       return [sent.message_id];
     } catch (err) {
       if (!isRichParseError(err)) throw err;
+      input.logger.debug("rich message repaired variant failed", {
+        threadId: input.thread.id,
+        err: String(err),
+      });
     }
   }
 
-  input.logger.error("all rich message repair attempts failed; falling back to plain sendMessage");
+  input.logger.error("all rich message repair attempts failed; falling back to plain sendMessage", {
+    threadId: input.thread.id,
+    chars: markdown.length,
+  });
   const ids: number[] = [];
   for (const chunk of splitPlainText(markdown)) {
     const sent = await sendPlainWithThreadFallback(input, chunk);
     ids.push(sent.message_id);
   }
+  input.logger.info("plain fallback messages sent", { threadId: input.thread.id, messages: ids.length });
   return ids;
 }
 

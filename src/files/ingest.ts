@@ -81,6 +81,14 @@ export async function ingestFileBytes(input: {
 }): Promise<{ fileId: number; card: string; inline: boolean; type: AcceptedFileType }> {
   const type = classifyFile(input.name, input.mime);
   if (!type || type === "legacy-doc") throw new Error(`unsupported file type: ${type ?? "unknown"}`);
+  const startedAt = Date.now();
+  input.logger?.info("file ingest starting", {
+    name: input.name,
+    type,
+    bytes: input.bytes.byteLength,
+    userId: input.userId,
+    threadId: input.threadId,
+  });
   const ext = path.extname(input.name).toLowerCase() || `.${type}`;
   const outDir = path.resolve("data/files");
   let dest: string | undefined;
@@ -102,6 +110,7 @@ export async function ingestFileBytes(input: {
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
     const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
     await fs.writeFile(dest, bytes);
+    input.logger?.debug("file bytes stored", { name: input.name, type, path: dest, bytes: bytes.length });
     throwIfAborted(input.signal);
 
     if (type === "image") {
@@ -121,6 +130,12 @@ export async function ingestFileBytes(input: {
       });
       fileId = file.id;
       completed = true;
+      input.logger?.info("image ingest complete", {
+        fileId: file.id,
+        name: input.name,
+        bytes: bytes.length,
+        ms: Date.now() - startedAt,
+      });
       return {
         fileId: file.id,
         card: cardForFile(file, [], input.name),
@@ -134,6 +149,13 @@ export async function ingestFileBytes(input: {
     throwIfAborted(input.signal);
     const inline = content.length <= input.config.FILE_INLINE_TOKENS * 4;
     const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
+    input.logger?.debug("file content extracted", {
+      name: input.name,
+      type,
+      chars: content.length,
+      inline,
+      chunks: chunks.length,
+    });
     await reportStage(input.onStage, {
       stage: "indexing",
       completed: inline ? 1 : 0,
@@ -155,6 +177,7 @@ export async function ingestFileBytes(input: {
       isInline: inline,
     });
     fileId = file.id;
+    input.logger?.debug("file row inserted", { fileId: file.id, name: input.name, inline });
     if (!inline) {
       const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
       const insertedChunks: Array<{ id: number; content: string }> = [];
@@ -175,6 +198,11 @@ export async function ingestFileBytes(input: {
         }, input.signal);
       }
       if (input.embeddings && input.embedder && insertedChunks.length) {
+        input.logger?.debug("file chunk embedding starting", {
+          fileId: file.id,
+          chunks: insertedChunks.length,
+          model: input.config.OPENROUTER_EMBEDDING_MODEL,
+        });
         await reportStage(input.onStage, {
           stage: "embedding",
           completed: 0,
@@ -197,6 +225,14 @@ export async function ingestFileBytes(input: {
       throwIfAborted(input.signal);
       await input.repo.setOutline(file.id, outline);
       completed = true;
+      input.logger?.info("file ingest complete", {
+        fileId: file.id,
+        name: input.name,
+        type,
+        inline: false,
+        chunks: chunks.length,
+        ms: Date.now() - startedAt,
+      });
       return {
         fileId: file.id,
         card: cardForFile(
@@ -209,9 +245,29 @@ export async function ingestFileBytes(input: {
       };
     }
     completed = true;
+    input.logger?.info("file ingest complete", {
+      fileId: file.id,
+      name: input.name,
+      type,
+      inline: true,
+      chars: content.length,
+      ms: Date.now() - startedAt,
+    });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   } catch (err) {
-    if (!completed) await cleanup();
+    if (!completed) {
+      if (isAbortError(err) || input.signal?.aborted) {
+        input.logger?.info("file ingest cancelled", { name: input.name, type, fileId: fileId ?? null });
+      } else {
+        input.logger?.warn("file ingest failed; cleaning up", {
+          name: input.name,
+          type,
+          fileId: fileId ?? null,
+          err: String(err),
+        });
+      }
+      await cleanup();
+    }
     throw err;
   }
 }
@@ -247,8 +303,18 @@ async function persistChunkEmbeddings(input: {
   try {
     const batchSize = 96;
     let completed = 0;
+    input.logger?.debug("chunk embedding persistence starting", {
+      chunks: input.chunks.length,
+      batchSize,
+      model: input.embeddingModel,
+    });
     for (let start = 0; start < input.chunks.length; start += batchSize) {
       const batch = input.chunks.slice(start, start + batchSize);
+      input.logger?.debug("chunk embedding batch starting", {
+        start,
+        count: batch.length,
+        total: input.chunks.length,
+      });
       const vectors = await input.embedder.embed(batch.map((chunk) => chunk.content));
       throwIfAborted(input.signal);
       for (let i = 0; i < batch.length; i += 1) {
@@ -259,6 +325,7 @@ async function persistChunkEmbeddings(input: {
         await input.onProgress?.(completed, input.chunks.length);
       }
     }
+    input.logger?.debug("chunk embedding persistence complete", { chunks: input.chunks.length });
   } catch (err) {
     if (isAbortError(err)) throw err;
     input.logger?.warn("chunk embedding persistence failed", {
@@ -277,17 +344,28 @@ async function contentFor(
   signal?: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
-  if (type === "txt") return bytes.toString("utf8").replace(/^\uFEFF/, "");
+  if (type === "txt") {
+    logger?.debug("extracting text file content", { name, bytes: bytes.length });
+    return bytes.toString("utf8").replace(/^\uFEFF/, "");
+  }
   if (type === "csv") {
+    logger?.debug("extracting csv file content", { name, bytes: bytes.length });
     const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
     const rows = parse(raw, { relax_column_count: true, relax_quotes: true, skip_empty_lines: true }) as string[][];
     const columns = rows[0]?.join(", ") ?? "";
+    logger?.debug("csv file content extracted", { name, rows: Math.max(0, rows.length - 1), columns: rows[0]?.length ?? 0 });
     return `columns: ${columns} · ${Math.max(0, rows.length - 1)} rows\n\n${raw}`;
   }
   if (type === "pdf") {
     try {
+      logger?.debug("native PDF text extraction starting", { name, bytes: bytes.length });
       const native = await extractPdfText({ bytes, signal });
       if (native.textChars >= 500) {
+        logger?.info("native PDF text extraction complete", {
+          name,
+          pages: native.pages,
+          textChars: native.textChars,
+        });
         return [
           `# ${name}`,
           `Extracted with native PDF text extraction (${native.pages} pages, ${native.textChars} text characters).`,
@@ -304,7 +382,10 @@ async function contentFor(
       logger?.warn("native PDF text extraction failed; falling back to docling", { err: String(err), name });
     }
   }
-  return convertWithDocling({ config, filename: name, bytes, signal });
+  logger?.info("docling conversion starting", { name, type, bytes: bytes.length });
+  const converted = await convertWithDocling({ config, filename: name, bytes, signal });
+  logger?.info("docling conversion complete", { name, type, chars: converted.length });
+  return converted;
 }
 
 async function reportStage(
