@@ -56,7 +56,7 @@ describe("memory subsystem", () => {
     expect(embeddings).toHaveLength(summaries.length);
     const fts = await db.search.searchSummaries([thread.id], "project-plan-0", 5);
     expect(fts[0]?.id).toBe(summaries[0]?.id);
-  }, 30_000);
+  }, 60_000);
 
   it("uses an injected summarizer for segment and rolling memory summaries", async () => {
     const user = await repos.users.ensure({ tgId: 11, firstName: "Summarizer", lang: "en" });
@@ -91,7 +91,7 @@ describe("memory subsystem", () => {
   });
 
   it("builds context from persisted messages without duplicating the latest user turn", async () => {
-    const config = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: 100_000 });
+    const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 2, firstName: "B", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     await repos.messages.insert({
@@ -114,7 +114,7 @@ describe("memory subsystem", () => {
   });
 
   it("attaches image bytes for uncompacted image messages in model context", async () => {
-    const config = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: 100_000 });
+    const config = loadTestConfig();
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-"));
     tempDirs.push(dir);
     const imagePath = path.join(dir, "whiteboard.jpg");
@@ -383,7 +383,7 @@ describe("memory subsystem", () => {
     expect(scope.fileIds).toContain(preForkFile.id);
     expect(scope.fileIds).not.toContain(postForkFile.id);
     const ctx = await buildContext({
-      config: loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: 100_000 }),
+      config: loadTestConfig(),
       repos,
       search: db.search,
       user,

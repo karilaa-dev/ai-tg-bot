@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -11,12 +11,27 @@ import { ingestFileBytes } from "../../src/files/ingest.js";
 import { compactThread } from "../../src/memory/compactor.js";
 import { clearRetrievalVectorCacheForTests, threadChainScope } from "../../src/memory/retrieval.js";
 
+const tavilyMock = vi.hoisted(() => {
+  const search = vi.fn();
+  const extract = vi.fn();
+  return {
+    search,
+    extract,
+    tavily: vi.fn(() => ({ search, extract })),
+  };
+});
+
+vi.mock("@tavily/core", () => ({ tavily: tavilyMock.tavily }));
+
 describe("AI tools", () => {
   let db: AppDatabase;
   let repos: Repos;
   let tempDirs: string[] = [];
 
   beforeEach(async () => {
+    tavilyMock.tavily.mockClear();
+    tavilyMock.search.mockReset();
+    tavilyMock.extract.mockReset();
     const config = loadTestConfig();
     clearRetrievalVectorCacheForTests();
     db = createDatabase(config, createLogger(config));
@@ -29,6 +44,105 @@ describe("AI tools", () => {
     clearRetrievalVectorCacheForTests();
     await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
     tempDirs = [];
+  });
+
+  it("extracts known web pages through Tavily with normalized model output", async () => {
+    tavilyMock.extract.mockResolvedValue({
+      results: [
+        {
+          url: "https://example.com/a",
+          rawContent: "abcdef",
+          images: ["https://example.com/a.png"],
+          favicon: "https://example.com/favicon.ico",
+        },
+        {
+          url: "https://example.com/b",
+          raw_content: "rest",
+        },
+      ],
+      failedResults: [{ url: "https://bad.example/", error: "blocked" }],
+      response_time: 1.5,
+      request_id: "req-1",
+    });
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 70, firstName: "ExtractTool", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const tools = buildTools({ config, db, repos, user, thread });
+    const webExtract = tools.web_extract as unknown as {
+      execute(input: unknown): Promise<{
+        results: Array<{ url: string; content: string; truncated: boolean; chars: number; images?: string[]; favicon?: string }>;
+        failed_results: Array<{ url: string; error: string }>;
+        response_time?: number;
+        request_id?: string;
+      }>;
+    };
+
+    const result = await webExtract.execute({
+      urls: ["https://example.com/a", "https://example.com/b"],
+      query: "release notes",
+      chunks_per_source: 2,
+      extract_depth: "advanced",
+      format: "text",
+      include_images: true,
+      include_favicon: true,
+      timeout: 12,
+      max_chars_per_url: 4,
+    });
+
+    expect(tavilyMock.tavily).toHaveBeenCalledWith({ apiKey: "test-tavily" });
+    expect(tavilyMock.extract).toHaveBeenCalledWith(["https://example.com/a", "https://example.com/b"], {
+      query: "release notes",
+      chunksPerSource: 2,
+      extractDepth: "advanced",
+      format: "text",
+      includeImages: true,
+      includeFavicon: true,
+      timeout: 12,
+    });
+    expect(result).toEqual({
+      results: [
+        {
+          url: "https://example.com/a",
+          content: "abcd",
+          truncated: true,
+          chars: 6,
+          images: ["https://example.com/a.png"],
+          favicon: "https://example.com/favicon.ico",
+        },
+        {
+          url: "https://example.com/b",
+          content: "rest",
+          truncated: false,
+          chars: 4,
+        },
+      ],
+      failed_results: [{ url: "https://bad.example/", error: "blocked" }],
+      response_time: 1.5,
+      request_id: "req-1",
+    });
+  });
+
+  it("returns Tavily extraction errors as tool errors", async () => {
+    tavilyMock.extract.mockRejectedValue(new Error("network down"));
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 76, firstName: "ExtractError", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const tools = buildTools({ config, db, repos, user, thread });
+    const webExtract = tools.web_extract as unknown as {
+      execute(input: unknown): Promise<{ error?: string }>;
+    };
+
+    const result = await webExtract.execute({
+      urls: ["https://example.com/a"],
+      chunks_per_source: 3,
+      extract_depth: "basic",
+      format: "markdown",
+      include_images: false,
+      include_favicon: false,
+      max_chars_per_url: 12_000,
+    });
+
+    expect(result).toEqual({ error: "Error: network down" });
   });
 
   it("searches file chunks with stored embeddings when FTS has no lexical match", async () => {

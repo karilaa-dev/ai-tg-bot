@@ -1,31 +1,59 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadTestConfig } from "../../src/config.js";
-import { getContextBudget } from "../../src/ai/provider.js";
+import { loadConfig, loadTestConfig } from "../../src/config.js";
+import { embed, getContextBudget } from "../../src/ai/provider.js";
 
-describe("OpenRouter provider helpers", () => {
+describe("Codex provider helpers", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("caches resolved model context length by model id", async () => {
-    let fetches = 0;
-    vi.stubGlobal("fetch", vi.fn(async () => {
-      fetches += 1;
-      return new Response(JSON.stringify({
-        data: [
-          { id: "cache-model-a", context_length: 12345 },
-          { id: "cache-model-b", top_provider: { context_length: 67890 } },
-        ],
-      }), { status: 200 });
-    }));
+  it("uses a fixed Codex context default without fetching model metadata", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getContextBudget(loadTestConfig())).resolves.toBe(128000);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
-    const a = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: undefined, OPENROUTER_MODEL: "cache-model-a" });
-    const b = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: undefined, OPENROUTER_MODEL: "cache-model-b" });
+  it("posts embedding requests to OpenRouter only for vectors", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      data: [
+        { embedding: [1, 2, 3] },
+        { embedding: [4, 5, 6] },
+      ],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const config = loadTestConfig({ OPENROUTER_EMBEDDING_MODEL: "embedding-model" });
 
-    await expect(getContextBudget(a)).resolves.toBe(12345);
-    await expect(getContextBudget(a)).resolves.toBe(12345);
-    expect(fetches).toBe(1);
-    await expect(getContextBudget(b)).resolves.toBe(67890);
-    expect(fetches).toBe(2);
+    const vectors = await embed(["a", "b"], config);
+
+    expect(fetchMock).toHaveBeenCalledWith("https://openrouter.ai/api/v1/embeddings", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ model: "embedding-model", input: ["a", "b"] }),
+    }),);
+    expect(vectors.map((vector) => Array.from(vector))).toEqual([[1, 2, 3], [4, 5, 6]]);
+  });
+
+  it("loads Codex env fields", () => {
+    const config = loadConfig({
+      BOT_TOKEN: "TEST:TOKEN",
+      TELEGRAM_ADMIN_ID: "1000",
+      DB_URL: "sqlite::memory:",
+      CODEX_MODEL: "gpt-5.5",
+      CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
+      CODEX_SPEED_MODE: "fast",
+      CODEX_VERBOSITY: "high",
+      REASONING_SUMMARY: "detailed",
+      STREAM_DELTA_CHARS: "24",
+      OPENROUTER_API_KEY: "test-openrouter",
+      OPENROUTER_EMBEDDING_MODEL: "perplexity/pplx-embed-v1-0.6b",
+      TAVILY_API_KEY: "test-tavily",
+    });
+
+    expect(config.CODEX_MODEL).toBe("gpt-5.5");
+    expect(config.CODEX_COMPACTION_MODEL).toBe("gpt-5.4-mini");
+    expect(config.CODEX_SPEED_MODE).toBe("fast");
+    expect(config.CODEX_VERBOSITY).toBe("high");
+    expect(config.REASONING_SUMMARY).toBe("detailed");
+    expect(config.STREAM_DELTA_CHARS).toBe(24);
   });
 });

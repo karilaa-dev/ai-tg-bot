@@ -651,7 +651,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
   });
 
-  it("stores photos as image context without sending a processing response", async () => {
+  it("answers photos as image context without sending a processing response", async () => {
     await onboard("IMAGECODE");
     const res = await env.bot.sendPhoto(
       env.user,
@@ -660,14 +660,15 @@ describe("Telegram bot with grammy-emulate", () => {
       { caption: "whiteboard diagram" },
     );
 
-    expect(res.getLastApiCall("sendRichMessage")).toBeUndefined();
     expect(expectResponseSurface(res)).not.toContain("processed");
+    expectRichCall(res, "Echo:");
+    expectRichCall(res, "whiteboard diagram");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
     expect(files[0]?.summary).toBeNull();
     const rows = await env.repos.messages.listThread(thread.id);
-    expect(rows.map((row) => row.role)).toEqual(["user"]);
+    expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     const userMessage = rows.find((row) => row.role === "user");
     expect(userMessage).toMatchObject({ kind: "image" });
     expect(userMessage?.text_plain).toContain("whiteboard diagram");
@@ -694,7 +695,7 @@ describe("Telegram bot with grammy-emulate", () => {
     });
 
     expect(seenSizes).toEqual([]);
-    expect(res.getLastApiCall("sendRichMessage")).toBeUndefined();
+    expectRichCall(res, "Echo:");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
     expect(file?.summary).toBeNull();
@@ -730,7 +731,7 @@ describe("Telegram bot with grammy-emulate", () => {
       }),
     ]);
 
-    expect(second?.getLastApiCall("sendRichMessage")).toBeUndefined();
+    expectRichCall(second!, "bob caption beta");
     expect(JSON.stringify(second!.apiCalls)).not.toContain("private caption alpha");
     const otherThread = await env.repos.threads.activeForUserTopic(other.id, null);
     const otherRows = await env.repos.messages.listThread(otherThread.id);

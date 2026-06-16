@@ -1,6 +1,7 @@
-import type { AppConfig } from "../config.js";
 import type { InputRichMessage } from "./richApi.js";
 import { repairLadder, sanitize } from "./mdRepair.js";
+
+const SHOW_MORE_THRESHOLD = 3500;
 
 export type RenderT = (key: string, params?: Record<string, string | number>) => string;
 
@@ -8,7 +9,6 @@ export interface RenderFinalInput {
   thinkingLog?: string;
   answerMd: string;
   t: RenderT;
-  config: Pick<AppConfig, "SHOW_MORE_THRESHOLD_CHARS">;
 }
 
 export interface RenderDraftInput {
@@ -19,7 +19,7 @@ export interface RenderDraftInput {
 
 export function renderFinal(input: RenderFinalInput): InputRichMessage[] {
   const thinking = renderThinkingDetails(input.thinkingLog, input.t, 8000);
-  const answer = withShowMore(sanitize(input.answerMd, { enforceLimit: false }), input.config.SHOW_MORE_THRESHOLD_CHARS, input.t);
+  const answer = withShowMore(sanitize(input.answerMd, { enforceLimit: false }), SHOW_MORE_THRESHOLD, input.t);
   return splitRich(`${thinking}${answer}`).map((markdown) => ({ markdown: sanitize(markdown) }));
 }
 
@@ -43,7 +43,7 @@ function withShowMore(md: string, threshold: number, t: (key: string) => string)
 function renderThinkingDetails(thinkingLog: string | undefined, t: RenderT, chars: number): string {
   const trimmed = thinkingLog?.trim();
   if (!trimmed) return "";
-  return `<details><summary>${t("thinking-summary", { steps: countLines(trimmed) })}</summary>\n\n${tail(trimmed, chars)}\n\n</details>\n\n`;
+  return `<details>\n<summary>${t("thinking-summary", { steps: countLines(trimmed) })}</summary>\n\n${tail(trimmed, chars)}\n\n</details>\n\n`;
 }
 
 function findBlockBoundary(md: string, threshold: number): number {

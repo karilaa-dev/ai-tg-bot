@@ -4,7 +4,7 @@ import { createLogger } from "./logger.js";
 import { createDatabase } from "./db/index.js";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { createOpenRouterConversationSummarizer, createOpenRouterImageCaptioner } from "./ai/provider.js";
+import { createConversationSummarizer, createImageCaptioner } from "./ai/inference.js";
 import { checkDocling } from "./files/docling.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 
@@ -13,8 +13,9 @@ const logger = createLogger(config);
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: config.DB_URL.startsWith("postgres") ? "postgres" : "sqlite",
-  model: config.OPENROUTER_MODEL,
-  compactionModel: config.OPENROUTER_COMPACTION_MODEL,
+  inferenceProvider: "codex",
+  model: config.CODEX_MODEL,
+  compactionModel: config.CODEX_COMPACTION_MODEL,
 });
 const db = createDatabase(config, logger);
 
@@ -34,8 +35,8 @@ try {
     db,
     logger,
     embedder: createOpenRouterTextEmbedder(config, logger),
-    imageCaptioner: createOpenRouterImageCaptioner(config, logger),
-    summarizer: createOpenRouterConversationSummarizer(config, logger),
+    imageCaptioner: createImageCaptioner(config, logger),
+    summarizer: createConversationSummarizer(config, logger),
   });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));

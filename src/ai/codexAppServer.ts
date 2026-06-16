@@ -1,0 +1,599 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline";
+import type { ModelMessage } from "ai";
+import type { AppConfig } from "../config.js";
+import type { Logger } from "../logger.js";
+import type { ConversationSummarizer } from "../memory/compactor.js";
+import type { ImageCaptioner } from "./provider.js";
+import {
+  buildCodexToolSpecs,
+  executeBotTool,
+  formatBotToolResultForCodex,
+  type BotToolRegistry,
+  type CodexToolContentItem,
+} from "./tools/index.js";
+
+export interface CodexTransport {
+  incoming: AsyncIterable<JsonRpcMessage>;
+  send(message: JsonRpcMessage): void;
+  close(): void;
+}
+
+export type CodexTransportFactory = (logger?: Logger) => CodexTransport;
+
+export interface CodexTurnInput {
+  config: AppConfig;
+  model?: string;
+  system?: string;
+  messages?: ModelMessage[];
+  prompt?: string;
+  userInputs?: CodexUserInput[];
+  tools?: BotToolRegistry;
+  logger?: Logger;
+  abortSignal?: AbortSignal;
+  cwd?: string;
+}
+
+type CodexUserInput =
+  | { type: "text"; text: string; text_elements: [] }
+  | { type: "localImage"; path: string; detail?: "auto" | "low" | "high" };
+
+export type JsonRpcMessage = {
+  id?: number | string;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: unknown;
+};
+
+let transportFactoryForTests: CodexTransportFactory | undefined;
+
+export function setCodexTransportFactoryForTests(factory?: CodexTransportFactory): void {
+  transportFactoryForTests = factory;
+}
+
+export function codexServiceTier(config: AppConfig): string | null {
+  return config.CODEX_SPEED_MODE === "fast" ? "fast" : null;
+}
+
+export function codexAppServerConfigArgs(config: AppConfig): string[] {
+  return [
+    "-c",
+    `model_verbosity=${tomlString(config.CODEX_VERBOSITY)}`,
+    "-c",
+    `model_reasoning_summary=${tomlString(config.REASONING_SUMMARY)}`,
+  ];
+}
+
+export function streamCodexTurn(input: CodexTurnInput): { fullStream: AsyncIterable<unknown> } {
+  return { fullStream: runCodexTurn(input) };
+}
+
+export async function generateCodexText(input: CodexTurnInput): Promise<string> {
+  let text = "";
+  for await (const part of runCodexTurn({ ...input, tools: input.tools ?? {} })) {
+    const record = asRecord(part);
+    if (record?.type === "text-delta") text += String(record.text ?? record.delta ?? "");
+  }
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("empty Codex response");
+  return trimmed;
+}
+
+export function createCodexConversationSummarizer(config: AppConfig, logger?: Logger): ConversationSummarizer {
+  return {
+    summarizeSegment: async ({ messages }) => {
+      logger?.debug("Codex segment summarization starting", {
+        messages: messages.length,
+        model: config.CODEX_COMPACTION_MODEL,
+      });
+      const text = await generateCodexText({
+        config,
+        model: config.CODEX_COMPACTION_MODEL,
+        system:
+          "Summarize this Telegram conversation segment. Keep decisions, facts, names, numbers, file references (#file-id), open questions, and image descriptions. Cite source message ids like [#123]. Stay under 300 words.",
+        prompt: messages.map(formatMessageForSummary).join("\n"),
+        logger,
+        abortSignal: AbortSignal.timeout(120_000),
+      });
+      logger?.debug("Codex segment summarization complete", { messages: messages.length, chars: text.length });
+      return text;
+    },
+    mergeMeta: async ({ previous, summaries }) => {
+      logger?.debug("Codex meta summary merge starting", {
+        summaries: summaries.length,
+        previousChars: previous?.length ?? 0,
+        model: config.CODEX_COMPACTION_MODEL,
+      });
+      const text = await generateCodexText({
+        config,
+        model: config.CODEX_COMPACTION_MODEL,
+        system:
+          "Merge conversation memory into one rolling summary, most-recent-relevant first. Keep durable facts, decisions, file references, image descriptions, and open questions. Stay under 400 words.",
+        prompt: [
+          previous ? `Previous memory:\n${previous}` : "Previous memory: none",
+          `New segment summaries:\n${summaries.join("\n\n")}`,
+        ].join("\n\n"),
+        logger,
+        abortSignal: AbortSignal.timeout(120_000),
+      });
+      logger?.info("Codex conversation memory summarized", { summaries: summaries.length, chars: text.length });
+      return text;
+    },
+  };
+}
+
+export function createCodexImageCaptioner(config: AppConfig, logger?: Logger): ImageCaptioner {
+  return {
+    caption: async ({ bytes, name, mime }) => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-codex-image-"));
+      const filePath = path.join(dir, safeFileName(name));
+      try {
+        logger?.debug("Codex image description starting", { name, bytes: bytes.length, mime });
+        await fs.writeFile(filePath, bytes);
+        const text = await generateCodexText({
+          config,
+          model: config.CODEX_COMPACTION_MODEL,
+          system: "Describe the supplied image in 1-2 concise sentences for later recall.",
+          userInputs: [
+            { type: "text", text: "Describe this image in 1-2 concise sentences for later recall.", text_elements: [] },
+            { type: "localImage", path: filePath },
+          ],
+          logger,
+          abortSignal: AbortSignal.timeout(60_000),
+        });
+        logger?.debug("Codex image description complete", { name, chars: text.length });
+        return text || `[image: ${name}]`;
+      } catch (err) {
+        logger?.warn("Codex image description failed", { err: String(err), name });
+        return `[image, no vision model: ${name}]`;
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    },
+  };
+}
+
+async function* runCodexTurn(input: CodexTurnInput): AsyncIterable<unknown> {
+  const transport = transportFactoryForTests?.(input.logger) ?? new ProcessCodexTransport(input.config, input.logger);
+  const session = new CodexRpcSession(transport, input.config, input.tools ?? {}, input.logger, input.abortSignal);
+  try {
+    await session.initialize();
+    const thread = await session.startThread(input);
+    session.startTurn(thread, input);
+    for await (const part of session.stream) yield part;
+  } finally {
+    session.close();
+  }
+}
+
+class CodexRpcSession {
+  private nextId = 1;
+  private readonly pending = new Map<string | number, {
+    resolve: (value: unknown) => void;
+    reject: (err: unknown) => void;
+  }>();
+  readonly stream = new AsyncQueue<unknown>();
+  private readonly seenToolCalls = new Set<string>();
+  private readonly seenToolResults = new Set<string>();
+
+  constructor(
+    private readonly transport: CodexTransport,
+    private readonly config: AppConfig,
+    private readonly tools: BotToolRegistry,
+    private readonly logger?: Logger,
+    abortSignal?: AbortSignal,
+  ) {
+    void this.pump();
+    if (abortSignal) {
+      if (abortSignal.aborted) this.abort();
+      abortSignal.addEventListener("abort", () => this.abort(), { once: true });
+    }
+  }
+
+  async initialize(): Promise<void> {
+    await this.request("initialize", {
+      clientInfo: {
+        name: "ai-tg-bot",
+        title: "AI Telegram Bot",
+        version: "0.1.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+      },
+    });
+    this.notify("initialized", {});
+  }
+
+  async startThread(input: CodexTurnInput): Promise<string> {
+    const toolSpecs = await buildCodexToolSpecs(this.tools);
+    const config: Record<string, unknown> = {
+      model_verbosity: input.config.CODEX_VERBOSITY,
+      model_reasoning_summary: input.config.REASONING_SUMMARY,
+    };
+    const result = await this.request("thread/start", {
+      model: input.model ?? input.config.CODEX_MODEL,
+      serviceTier: codexServiceTier(input.config),
+      cwd: input.cwd ?? process.cwd(),
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config,
+      dynamicTools: toolSpecs,
+      baseInstructions: input.system ?? null,
+      developerInstructions: null,
+      ephemeral: true,
+    });
+    const threadId = readThreadId(result);
+    if (!threadId) throw new Error(`Codex thread/start returned no thread id: ${safeJson(result)}`);
+    return threadId;
+  }
+
+  startTurn(threadId: string, input: CodexTurnInput): void {
+    const userInputs = input.userInputs ?? [{ type: "text" as const, text: promptText(input), text_elements: [] as [] }];
+    const params: Record<string, unknown> = {
+      threadId,
+      input: userInputs,
+      cwd: input.cwd ?? process.cwd(),
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      model: input.model ?? input.config.CODEX_MODEL,
+      serviceTier: codexServiceTier(input.config),
+    };
+    if (input.config.REASONING_SUMMARY !== "none") params.summary = input.config.REASONING_SUMMARY;
+    void this.request("turn/start", params).catch((err) => this.stream.fail(err));
+  }
+
+  close(): void {
+    for (const [, pending] of this.pending) pending.reject(new Error("Codex app-server session closed"));
+    this.pending.clear();
+    this.transport.close();
+    this.stream.close();
+  }
+
+  private request(method: string, params: unknown): Promise<unknown> {
+    const id = this.nextId;
+    this.nextId += 1;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.transport.send({ id, method, params });
+    });
+  }
+
+  private notify(method: string, params?: unknown): void {
+    this.transport.send(params === undefined ? { method } : { method, params });
+  }
+
+  private async pump(): Promise<void> {
+    try {
+      for await (const message of this.transport.incoming) {
+        await this.handleMessage(message);
+      }
+    } catch (err) {
+      this.fail(err);
+    }
+  }
+
+  private async handleMessage(message: JsonRpcMessage): Promise<void> {
+    if (message.id !== undefined && !message.method) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      if (message.error !== undefined) pending.reject(new Error(errorMessage(message.error)));
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.id !== undefined && message.method) {
+      await this.handleServerRequest(message);
+      return;
+    }
+    if (message.method) this.handleNotification(message.method, message.params);
+  }
+
+  private async handleServerRequest(message: JsonRpcMessage): Promise<void> {
+    if (message.method !== "item/tool/call") {
+      this.transport.send({
+        id: message.id,
+        error: { code: -32601, message: `unsupported server request: ${message.method}` },
+      });
+      return;
+    }
+    const params = asRecord(message.params);
+    const callId = String(params?.callId ?? message.id ?? this.nextId);
+    const toolName = String(params?.tool ?? "");
+    const toolInput = params?.arguments ?? {};
+    this.emitToolCall(callId, toolName, toolInput);
+    try {
+      const output = await executeBotTool(this.tools, toolName, toolInput);
+      this.emitToolResult(callId, toolName, output);
+      this.transport.send({
+        id: message.id,
+        result: {
+          contentItems: await formatBotToolResultForCodex(this.tools, toolName, toolInput, output, callId),
+          success: true,
+        },
+      });
+    } catch (err) {
+      const output = { error: String(err) };
+      this.emitToolResult(callId, toolName || "tool", output);
+      this.transport.send({
+        id: message.id,
+        result: {
+          contentItems: [{ type: "inputText", text: safeJson(output) }],
+          success: false,
+        },
+      });
+    }
+  }
+
+  private handleNotification(method: string, params: unknown): void {
+    const record = asRecord(params);
+    switch (method) {
+      case "item/agentMessage/delta":
+        this.pushTextDeltas("text-delta", String(record?.delta ?? ""));
+        break;
+      case "item/reasoning/summaryTextDelta":
+        if (this.config.REASONING_SUMMARY !== "none") this.pushTextDeltas("reasoning-delta", String(record?.delta ?? ""));
+        break;
+      case "item/started":
+        this.handleItemStarted(record);
+        break;
+      case "item/completed":
+        this.handleItemCompleted(record);
+        break;
+      case "turn/completed":
+        this.handleTurnCompleted(record);
+        break;
+      case "error":
+        if (isRetryNotice(params)) {
+          this.logger?.warn("Codex app-server retrying stream", { message: errorMessage(params) });
+          return;
+        }
+        this.fail(new Error(errorMessage(params)));
+        break;
+    }
+  }
+
+  private handleItemStarted(params: Record<string, unknown> | undefined): void {
+    const item = asRecord(params?.item);
+    if (item?.type !== "dynamicToolCall") return;
+    this.emitToolCall(String(item.id), String(item.tool ?? "tool"), item.arguments);
+  }
+
+  private handleItemCompleted(params: Record<string, unknown> | undefined): void {
+    const item = asRecord(params?.item);
+    if (item?.type !== "dynamicToolCall") return;
+    const contentItems = Array.isArray(item.contentItems) ? item.contentItems as CodexToolContentItem[] : [];
+    this.emitToolResult(String(item.id), String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
+  }
+
+  private handleTurnCompleted(params: Record<string, unknown> | undefined): void {
+    const turn = asRecord(params?.turn);
+    if (turn?.status === "failed" || turn?.status === "interrupted") {
+      const err = asRecord(turn.error);
+      this.fail(new Error(String(err?.message ?? `Codex turn ${turn.status}`)));
+      return;
+    }
+    this.stream.close();
+  }
+
+  private emitToolCall(callId: string, toolName: string, input: unknown): void {
+    if (this.seenToolCalls.has(callId)) return;
+    this.seenToolCalls.add(callId);
+    this.stream.push({ type: "tool-call", toolName, input });
+  }
+
+  private emitToolResult(callId: string, toolName: string, output: unknown): void {
+    if (this.seenToolResults.has(callId)) return;
+    this.seenToolResults.add(callId);
+    this.stream.push({ type: "tool-result", toolName, output });
+  }
+
+  private pushTextDeltas(type: "text-delta" | "reasoning-delta", text: string): void {
+    for (const chunk of splitTextDelta(text, this.deltaChunkChars())) {
+      this.stream.push({ type, text: chunk });
+    }
+  }
+
+  private deltaChunkChars(): number {
+    return Math.max(1, this.config.STREAM_DELTA_CHARS);
+  }
+
+  private abort(): void {
+    this.fail(new Error("Codex turn aborted"));
+    this.transport.close();
+  }
+
+  private fail(err: unknown): void {
+    this.logger?.warn("Codex app-server stream failed", { err: String(err) });
+    for (const [, pending] of this.pending) pending.reject(err);
+    this.pending.clear();
+    this.stream.fail(err);
+  }
+}
+
+class ProcessCodexTransport implements CodexTransport {
+  readonly incoming = new AsyncQueue<JsonRpcMessage>();
+  private readonly process: ChildProcessWithoutNullStreams;
+
+  constructor(config: AppConfig, private readonly logger?: Logger) {
+    this.process = spawn("codex", ["app-server", ...codexAppServerConfigArgs(config)], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    });
+    readline.createInterface({ input: this.process.stdout }).on("line", (line) => this.onStdoutLine(line));
+    readline.createInterface({ input: this.process.stderr }).on("line", (line) => {
+      this.logger?.debug("Codex app-server stderr", { line });
+    });
+    this.process.once("error", (err) => this.incoming.fail(err));
+    this.process.once("exit", (code, signal) => {
+      if (code && code !== 0) this.incoming.fail(new Error(`codex app-server exited with code ${code}`));
+      else if (signal) this.incoming.fail(new Error(`codex app-server exited with signal ${signal}`));
+      else this.incoming.close();
+    });
+  }
+
+  send(message: JsonRpcMessage): void {
+    this.process.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  close(): void {
+    if (!this.process.killed) this.process.kill();
+    this.incoming.close();
+  }
+
+  private onStdoutLine(line: string): void {
+    if (!line.trim()) return;
+    try {
+      this.incoming.push(JSON.parse(line) as JsonRpcMessage);
+    } catch (err) {
+      this.incoming.fail(new Error(`invalid Codex app-server JSON: ${String(err)}: ${line}`));
+    }
+  }
+}
+
+class AsyncQueue<T> implements AsyncIterable<T> {
+  private values: T[] = [];
+  private waiters: Array<{
+    resolve: (result: IteratorResult<T>) => void;
+    reject: (err: unknown) => void;
+  }> = [];
+  private ended = false;
+  private failure: unknown;
+
+  push(value: T): void {
+    if (this.ended || this.failure) return;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.resolve({ value, done: false });
+    else this.values.push(value);
+  }
+
+  close(): void {
+    if (this.ended) return;
+    this.ended = true;
+    for (const waiter of this.waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
+  }
+
+  fail(err: unknown): void {
+    if (this.ended || this.failure) return;
+    this.failure = err;
+    for (const waiter of this.waiters.splice(0)) waiter.reject(err);
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<T> {
+    while (true) {
+      const result = await this.next();
+      if (result.done) return;
+      yield result.value;
+    }
+  }
+
+  private next(): Promise<IteratorResult<T>> {
+    if (this.values.length) return Promise.resolve({ value: this.values.shift()!, done: false });
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.ended) return Promise.resolve({ value: undefined, done: true });
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
+  }
+}
+
+function promptText(input: CodexTurnInput): string {
+  if (input.prompt !== undefined) return input.prompt;
+  return [
+    "Conversation transcript:",
+    ...(input.messages ?? []).map(formatModelMessage),
+    "",
+    "Answer the latest user message.",
+  ].join("\n");
+}
+
+function formatModelMessage(message: ModelMessage): string {
+  return `[${message.role}] ${contentText(message.content)}`;
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return safeJson(content);
+  return content
+    .map((part) => {
+      const record = asRecord(part);
+      if (record?.type === "text") return String(record.text ?? "");
+      if (record?.type === "image") return "[image attached]";
+      if (record?.type === "file") return `[file attached: ${String(record.filename ?? "file")}]`;
+      return safeJson(part);
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function splitTextDelta(text: string, maxChars: number): string[] {
+  if (!text) return [];
+  const chars = Array.from(text);
+  const size = Math.max(1, maxChars);
+  const chunks: string[] = [];
+  for (let index = 0; index < chars.length; index += size) {
+    chunks.push(chars.slice(index, index + size).join(""));
+  }
+  return chunks;
+}
+
+function readThreadId(result: unknown): string | undefined {
+  const record = asRecord(result);
+  const thread = asRecord(record?.thread);
+  const id = thread?.id ?? record?.threadId ?? record?.id;
+  return typeof id === "string" && id ? id : undefined;
+}
+
+function outputFromCodexContentItems(items: CodexToolContentItem[]): unknown {
+  if (items.length === 1 && items[0]?.type === "inputText") {
+    try {
+      return JSON.parse(items[0].text);
+    } catch {
+      return items[0].text;
+    }
+  }
+  return { contentItems: items };
+}
+
+function formatMessageForSummary(message: {
+  id: number;
+  role: string;
+  kind: string;
+  text_plain: string;
+}): string {
+  const text = message.text_plain.replace(/\s+/g, " ").slice(0, 1200);
+  return `[#${message.id} ${message.role}] ${text}`;
+}
+
+function safeFileName(name: string): string {
+  return name.replace(/[^\w.-]+/g, "_") || "image";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function errorMessage(value: unknown): string {
+  const record = asRecord(value);
+  if (typeof record?.message === "string") return record.message;
+  if (record?.error !== undefined) return errorMessage(record.error);
+  return safeJson(value);
+}
+
+function isRetryNotice(value: unknown): boolean {
+  return errorMessage(value).startsWith("Reconnecting...");
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}

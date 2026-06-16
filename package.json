@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
-    "dev:streamdump": "tsx scripts/dump-stream-parts.ts"
+    "dev:streamdump": "tsx scripts/dump-stream-parts.ts",
+    "live:codex-check": "tsx scripts/live-codex-check.ts"
   },
   "engines": {
     "node": ">=22.13"
@@ -20,7 +21,6 @@
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",
     "@grammyjs/runner": "^2.0.3",
-    "@openrouter/ai-sdk-provider": "^2.9.1",
     "@tavily/core": "^0.7.6",
     "ai": "^6.0.204",
     "csv-parse": "^6.2.1",

@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { tool } from "ai";
+import { tool, zodSchema, type Tool } from "ai";
 import { z } from "zod";
-import { tavily } from "@tavily/core";
+import { tavily, type TavilyExtractOptions } from "@tavily/core";
 import type { AppConfig } from "../../config.js";
 import type { AppDatabase } from "../../db/index.js";
 import type { Repos } from "../../db/repos/index.js";
@@ -12,7 +12,7 @@ import type { TextEmbedder } from "../../memory/embeddings.js";
 import { embed } from "../provider.js";
 import { hybridSearch, threadChainScope } from "../../memory/retrieval.js";
 
-export function buildTools(input: {
+export interface ToolBuildInput {
   config: AppConfig;
   db: AppDatabase;
   repos: Repos;
@@ -21,13 +21,43 @@ export function buildTools(input: {
   logger?: Logger;
   embedder?: TextEmbedder;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
-}) {
+}
+
+export interface BotToolDefinition<Input = unknown, Output = unknown> {
+  description: string;
+  inputSchema: z.ZodType<Input>;
+  execute: (input: Input) => Promise<Output>;
+  toModelOutput?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
+}
+
+export type BotToolRegistry = Record<string, BotToolDefinition<any, unknown>>;
+
+export interface CodexDynamicToolSpec {
+  namespace?: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  deferLoading?: boolean;
+  exposeToContext?: boolean;
+}
+
+export type CodexToolContentItem =
+  | { type: "inputText"; text: string }
+  | { type: "inputImage"; imageUrl: string };
+
+export function buildTools(input: ToolBuildInput): Record<string, Tool<any, unknown>> {
+  return Object.fromEntries(
+    Object.entries(buildToolRegistry(input)).map(([name, definition]) => [name, tool(definition as any) as Tool<any, unknown>]),
+  );
+}
+
+export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
   const embedder = input.embedder ?? {
     model: input.config.OPENROUTER_EMBEDDING_MODEL,
     embed: (texts: string[]) => embed(texts, input.config, input.logger),
   };
   return {
-    search_thread: tool({
+    search_thread: {
       description: "Search this Telegram thread memory.",
       inputSchema: z.object({ query: z.string(), limit: z.number().max(20).default(8) }),
       execute: async ({ query, limit }) => {
@@ -57,8 +87,8 @@ export function buildTools(input: {
         });
         return { results };
       },
-    }),
-    load_message: tool({
+    },
+    load_message: {
       description: "Load one previous message by numeric id.",
       inputSchema: z.object({ message_id: z.number() }),
       execute: async ({ message_id }) => {
@@ -154,8 +184,8 @@ export function buildTools(input: {
           ],
         } as never;
       },
-    }),
-    search_in_file: tool({
+    },
+    search_in_file: {
       description: "Search chunks of an attached large file.",
       inputSchema: z.object({
         file_id: z.number(),
@@ -207,8 +237,8 @@ export function buildTools(input: {
         });
         return { results };
       },
-    }),
-    read_file_section: tool({
+    },
+    read_file_section: {
       description: "Read one or more chunks from an attached file.",
       inputSchema: z.object({
         file_id: z.number(),
@@ -253,8 +283,8 @@ export function buildTools(input: {
         });
         return { content };
       },
-    }),
-    web_search: tool({
+    },
+    web_search: {
       description: "Search the web for current information.",
       inputSchema: z.object({ query: z.string(), max_results: z.number().max(10).default(5) }),
       execute: async ({ query, max_results }) => {
@@ -279,8 +309,139 @@ export function buildTools(input: {
           return { error: String(err) };
         }
       },
-    }),
+    },
+    web_extract: {
+      description: "Extract readable content from one or more known web page URLs.",
+      inputSchema: z.object({
+        urls: z.array(z.string().url()).min(1).max(5),
+        query: z.string().optional(),
+        chunks_per_source: z.number().int().min(1).max(5).default(3),
+        extract_depth: z.enum(["basic", "advanced"]).default("basic"),
+        format: z.enum(["markdown", "text"]).default("markdown"),
+        include_images: z.boolean().default(false),
+        include_favicon: z.boolean().default(false),
+        timeout: z.number().min(1).max(60).optional(),
+        max_chars_per_url: z.number().int().positive().max(20_000).default(12_000),
+      }),
+      execute: async ({
+        urls,
+        query,
+        chunks_per_source,
+        extract_depth,
+        format,
+        include_images,
+        include_favicon,
+        timeout,
+        max_chars_per_url,
+      }) => {
+        try {
+          const trimmedQuery = query?.trim();
+          const options: TavilyExtractOptions = {
+            extractDepth: extract_depth,
+            format,
+            includeImages: include_images,
+            includeFavicon: include_favicon,
+          };
+          if (timeout !== undefined) options.timeout = timeout;
+          if (trimmedQuery) {
+            options.query = trimmedQuery;
+            options.chunksPerSource = chunks_per_source;
+          }
+
+          input.logger?.info("tool web_extract starting", {
+            urls: urls.length,
+            queryChars: trimmedQuery?.length ?? 0,
+            extractDepth: extract_depth,
+          });
+          const client = tavily({ apiKey: input.config.TAVILY_API_KEY });
+          const res = await client.extract(urls, options);
+          const normalized = normalizeTavilyExtractResponse(res, max_chars_per_url);
+          input.logger?.info("tool web_extract complete", {
+            results: normalized.results.length,
+            failedResults: normalized.failed_results.length,
+          });
+          return normalized;
+        } catch (err) {
+          input.logger?.warn("tool web_extract failed", { err: String(err), urls: urls.length });
+          return { error: String(err) };
+        }
+      },
+    },
   };
+}
+
+export async function buildCodexToolSpecs(
+  registry: BotToolRegistry,
+  namespace = "telegram",
+): Promise<CodexDynamicToolSpec[]> {
+  return Promise.all(
+    Object.entries(registry).map(async ([name, definition]) => ({
+      namespace,
+      name,
+      description: definition.description,
+      inputSchema: await zodSchema(definition.inputSchema).jsonSchema,
+      exposeToContext: true,
+    })),
+  );
+}
+
+export async function executeBotTool(registry: BotToolRegistry, name: string, input: unknown): Promise<unknown> {
+  const definition = registry[name];
+  if (!definition) throw new Error(`unknown tool: ${name}`);
+  const parsed = await definition.inputSchema.safeParseAsync(input);
+  if (!parsed.success) throw new Error(`invalid ${name} input: ${parsed.error.message}`);
+  return definition.execute(parsed.data);
+}
+
+export async function formatBotToolResultForCodex(
+  registry: BotToolRegistry,
+  name: string,
+  input: unknown,
+  output: unknown,
+  toolCallId: string,
+): Promise<CodexToolContentItem[]> {
+  const definition = registry[name];
+  if (definition?.toModelOutput) {
+    try {
+      const parsed = await definition.inputSchema.safeParseAsync(input);
+      const modelOutput = await definition.toModelOutput({
+        toolCallId,
+        input: parsed.success ? parsed.data : input,
+        output,
+      });
+      const converted = codexContentFromModelOutput(modelOutput);
+      if (converted.length) return converted;
+    } catch {
+      return [{ type: "inputText", text: safeJson(output) }];
+    }
+  }
+  return [{ type: "inputText", text: safeJson(output) }];
+}
+
+function codexContentFromModelOutput(modelOutput: unknown): CodexToolContentItem[] {
+  const output = asRecord(modelOutput);
+  if (!output) return [];
+  if (output.type === "json" || output.type === "error-json") {
+    return [{ type: "inputText", text: safeJson(output.value) }];
+  }
+  if (output.type === "text" || output.type === "error-text") {
+    return [{ type: "inputText", text: String(output.value ?? "") }];
+  }
+  if (output.type !== "content" || !Array.isArray(output.value)) return [];
+  const items: CodexToolContentItem[] = [];
+  for (const part of output.value) {
+    const record = asRecord(part);
+    if (!record) continue;
+    if (record.type === "text") {
+      items.push({ type: "inputText", text: String(record.text ?? "") });
+    } else if (record.type === "image-data" && typeof record.data === "string") {
+      const mediaType = typeof record.mediaType === "string" ? record.mediaType : "image/*";
+      items.push({ type: "inputImage", imageUrl: `data:${mediaType};base64,${record.data}` });
+    } else {
+      items.push({ type: "inputText", text: safeJson(record) });
+    }
+  }
+  return items;
 }
 
 async function readCachedOrRedownloadImage(
@@ -355,9 +516,85 @@ function decodeOutline(value: unknown): unknown[] | undefined {
   }
 }
 
+function normalizeTavilyExtractResponse(value: unknown, maxCharsPerUrl: number): {
+  results: Array<Record<string, unknown>>;
+  failed_results: Array<Record<string, unknown>>;
+  response_time?: number;
+  request_id?: string;
+} {
+  const record = asRecord(value);
+  const rawResults = arrayField(record, "results") ?? [];
+  const rawFailed = arrayField(record, "failedResults") ?? arrayField(record, "failed_results") ?? [];
+  return {
+    results: rawResults.map((item) => normalizeTavilyExtractResult(item, maxCharsPerUrl)).filter(Boolean) as Array<Record<string, unknown>>,
+    failed_results: rawFailed.map(normalizeTavilyExtractFailedResult).filter(Boolean) as Array<Record<string, unknown>>,
+    response_time: numberField(record, "responseTime") ?? numberField(record, "response_time"),
+    request_id: stringField(record, "requestId") ?? stringField(record, "request_id"),
+  };
+}
+
+function normalizeTavilyExtractResult(value: unknown, maxCharsPerUrl: number): Record<string, unknown> | undefined {
+  const record = asRecord(value);
+  const url = stringField(record, "url");
+  if (!url) return undefined;
+  const rawContent = stringField(record, "rawContent") ?? stringField(record, "raw_content") ?? "";
+  const result: Record<string, unknown> = {
+    url,
+    content: rawContent.slice(0, maxCharsPerUrl),
+    truncated: rawContent.length > maxCharsPerUrl,
+    chars: rawContent.length,
+  };
+  const images = stringArrayField(record, "images");
+  if (images.length) result.images = images;
+  const favicon = stringField(record, "favicon");
+  if (favicon) result.favicon = favicon;
+  return result;
+}
+
+function normalizeTavilyExtractFailedResult(value: unknown): Record<string, unknown> | undefined {
+  const record = asRecord(value);
+  const url = stringField(record, "url");
+  if (!url) return undefined;
+  return {
+    url,
+    error: stringField(record, "error") ?? "extraction failed",
+  };
+}
+
 function imageMediaType(name: string): string {
   if (/\.jpe?g$/i.test(name)) return "image/jpeg";
   if (/\.png$/i.test(name)) return "image/png";
   if (/\.webp$/i.test(name)) return "image/webp";
   return "image/*";
+}
+
+function arrayField(record: Record<string, unknown> | undefined, key: string): unknown[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
+function stringArrayField(record: Record<string, unknown> | undefined, key: string): string[] {
+  return (arrayField(record, key) ?? []).filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }

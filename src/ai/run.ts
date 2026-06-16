@@ -1,4 +1,3 @@
-import { streamText, stepCountIs } from "ai";
 import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
@@ -10,9 +9,8 @@ import { persistEmbedding, type TextEmbedder } from "../memory/embeddings.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
 import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
-import { buildTools } from "./tools/index.js";
-import { chatModel, providerOptions } from "./provider.js";
-import { StreamShaper } from "./shaper.js";
+import { streamInference } from "./inference.js";
+import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
 
 export interface TurnInput {
@@ -148,22 +146,21 @@ export const runTurn: TurnRunner = async (input) => {
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("provider stream starting", {
       threadId: input.thread.id,
-      model: input.config.OPENROUTER_MODEL,
-      maxToolSteps: input.config.MAX_TOOL_STEPS,
-      reasoningEffort: input.config.OPENROUTER_REASONING_EFFORT,
+      provider: "codex",
+      model: input.config.CODEX_MODEL,
+      reasoningSummary: input.config.REASONING_SUMMARY,
     });
-    const result = streamText({
-      model: chatModel(input.config),
-      system: context.system,
-      messages: context.messages,
-      tools: buildTools(input),
-      stopWhen: stepCountIs(input.config.MAX_TOOL_STEPS),
-      providerOptions: providerOptions(input.config),
+    const result = streamInference({
+      ...input,
+      context,
       abortSignal: AbortSignal.timeout(300_000),
     });
+    streamer?.update({ thinkingMd: input.t("thinking-placeholder"), answerMd: "" });
+    streamer?.startKeepalive();
     for await (const part of result.fullStream) {
       const normalized = normalizeStreamPart(part);
-      const event = handleStreamPart(shaper, part);
+      const metadata = normalized?.kind === "tool-call" ? await toolCallMetadata(input, normalized) : undefined;
+      const event = handleStreamPart(shaper, part, metadata);
       if (event === "content") contentEvents += 1;
       if (event === "tool-call") {
         toolCalls += 1;
@@ -171,7 +168,6 @@ export const runTurn: TurnRunner = async (input) => {
           threadId: input.thread.id,
           toolName: normalized?.kind === "tool-call" ? normalized.toolName : "tool",
         });
-        streamer?.startKeepalive();
       }
       if (event === "tool-result") {
         toolResults += 1;
@@ -180,7 +176,6 @@ export const runTurn: TurnRunner = async (input) => {
           toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
         });
       }
-      if (event === "tool-result" || event === "content") streamer?.stopKeepalive();
       streamer?.update({ thinkingMd: shaper.thinkingMd(), answerMd: shaper.visibleAnswer() });
       if (event === "tool-call" || event === "tool-result") {
         await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
@@ -261,7 +256,7 @@ class TurnStatusMessage {
 
   async start(text: string): Promise<void> {
     try {
-      const sent = await sendPlainWithThreadFallback(this.input, text);
+      const sent = await sendPlainWithThreadFallback(this.input, text, { parse_mode: "HTML" });
       this.messageId = sent.message_id;
       this.lastText = text;
       this.input.logger.debug("thinking status message sent", {
@@ -276,7 +271,7 @@ class TurnStatusMessage {
   async update(text: string): Promise<void> {
     if (!this.messageId || text === this.lastText) return;
     try {
-      await this.input.api.editMessageText(this.input.chatId, this.messageId, text);
+      await this.input.api.editMessageText(this.input.chatId, this.messageId, text, { parse_mode: "HTML" });
       this.lastText = text;
       this.input.logger.debug("thinking status message edited", {
         threadId: this.input.thread.id,
@@ -303,7 +298,6 @@ export async function sendFinal(input: TurnInput, thinking: string, answer: stri
     thinkingLog: thinking,
     answerMd: answer,
     t: input.t,
-    config: input.config,
   });
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
@@ -417,7 +411,7 @@ async function sendPlainWithThreadFallback(
       threadId: input.thread.id,
       topicId: input.messageThreadId,
     });
-    return input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text), other);
+    return input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text, other.parse_mode === "HTML"), other);
   }
 }
 
@@ -426,8 +420,8 @@ function prefixRichForThreadFallback(title: string, rich: { markdown?: string; h
   return { ...rich, html: `<p><strong>${escapeHtml(title)}</strong></p>\n\n${rich.html ?? ""}` };
 }
 
-function prefixPlainForThreadFallback(title: string, text: string): string {
-  return `[${title}]\n\n${text}`;
+function prefixPlainForThreadFallback(title: string, text: string, html = false): string {
+  return `[${html ? escapeHtml(title) : title}]\n\n${text}`;
 }
 
 function escapeMarkdownTitle(title: string): string {
@@ -454,9 +448,37 @@ function splitPlainText(text: string): string[] {
   return chunks;
 }
 
+async function toolCallMetadata(
+  input: TurnInput,
+  part: Extract<NormalizedStreamPart, { kind: "tool-call" }>,
+): Promise<ToolCallMetadata | undefined> {
+  if (part.toolName !== "search_in_file" && part.toolName !== "read_file_section") return undefined;
+  const fileId = fileIdFromToolInput(part.input);
+  if (fileId === undefined) return undefined;
+  try {
+    const file = await input.repos.files.get(fileId);
+    return { fileName: file?.name ?? `#${fileId}` };
+  } catch (err) {
+    input.logger.warn("failed to resolve tool file name", {
+      threadId: input.thread.id,
+      fileId,
+      toolName: part.toolName,
+      err: String(err),
+    });
+    return { fileName: `#${fileId}` };
+  }
+}
+
+function fileIdFromToolInput(input: unknown): number | undefined {
+  const value = asRecord(input)?.file_id;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return undefined;
+}
+
 type StreamEvent = "content" | "tool-call" | "tool-result";
 
-export function handleStreamPart(shaper: StreamShaper, part: unknown): StreamEvent | undefined {
+export function handleStreamPart(shaper: StreamShaper, part: unknown, metadata?: ToolCallMetadata): StreamEvent | undefined {
   const normalized = normalizeStreamPart(part);
   switch (normalized?.kind) {
     case "text":
@@ -466,7 +488,7 @@ export function handleStreamPart(shaper: StreamShaper, part: unknown): StreamEve
       shaper.onReasoningDelta(normalized.text);
       return "content";
     case "tool-call":
-      shaper.onToolCall(normalized.toolName);
+      shaper.onToolCall(normalized.toolName, normalized.input, metadata);
       return "tool-call";
     case "tool-result":
       shaper.onToolResult(normalized.toolName, summarizeToolOutput(normalized.toolName, normalized.output));
@@ -506,26 +528,20 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   const results = Array.isArray(record?.results) ? record.results : undefined;
   if (results) {
-    if (toolName === "web_search") return formatCount(results.length, "website");
-    if (toolName === "search_thread") return formatCount(results.length, "chat match", "chat matches");
-    if (toolName === "search_in_file") return formatCount(results.length, "file match", "file matches");
     return formatCount(results.length, "result");
   }
 
   if (toolName === "load_message" && record) {
-    const files = Array.isArray(record.files) ? record.files.length : 0;
-    const images = Array.isArray(record.images) ? record.images.length : 0;
-    const extras = [files ? formatCount(files, "file") : "", images ? formatCount(images, "image") : ""].filter(Boolean);
-    return extras.length ? `message loaded, ${extras.join(", ")}` : "message loaded";
+    return formatCount(1, "result");
   }
 
   if (toolName === "read_file_section" && record) {
-    if (Array.isArray(record.outline)) return formatCount(record.outline.length, "heading");
-    if (typeof record.content === "string") return formatCount(countLoadedFileSections(record.content), "file section");
+    if (Array.isArray(record.outline)) return formatCount(record.outline.length, "result");
+    if (typeof record.content === "string") return formatCount(countLoadedFileSections(record.content), "result");
   }
 
   const text = typeof value === "string" ? value : safeJson(value);
-  return text && text !== "{}" ? "details returned" : "done";
+  return text && text !== "{}" ? formatCount(1, "result") : "done";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

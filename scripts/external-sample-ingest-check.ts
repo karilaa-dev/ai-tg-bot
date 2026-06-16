@@ -7,7 +7,7 @@ import { createLogger } from "../src/logger.js";
 import { buildTools } from "../src/ai/tools/index.js";
 import { ingestFileBytes } from "../src/files/ingest.js";
 
-const sampleDir = process.env.EXTERNAL_SAMPLE_DIR ?? "/tmp/ai-tg-bot-samples";
+const sampleDir = process.argv[2] ?? "/tmp/ai-tg-bot-samples";
 const dbPath = path.resolve("data", `external-samples-${Date.now()}.sqlite`);
 const config = loadConfig({
   ...process.env,

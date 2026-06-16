@@ -25,12 +25,12 @@ describe("DraftStreamer", () => {
       t: testT,
     });
 
-    streamer.update({ thinkingMd: "🔎Searching web(5)", answerMd: "" });
+    streamer.update({ thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)", answerMd: "" });
     await flushPromises();
     expect(payloads).toHaveLength(1);
     const markdown = markdownOf(payloads[0]);
-    expect(markdown).toContain("<details><summary>🧠 Thinking (1 steps)</summary>");
-    expect(markdown).toContain("🔎Searching web(5)");
+    expect(markdown).toContain("<details>\n<summary>🧠 Thinking (1 steps)</summary>");
+    expect(markdown).toContain("🔎 Searching web <code>alpha</code> (5 results)");
     expect(markdown).not.toContain("<tg-thinking>");
 
     streamer.startKeepalive();

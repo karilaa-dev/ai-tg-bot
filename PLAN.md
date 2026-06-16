@@ -1,4 +1,4 @@
-# AI Telegram Bot — Implementation Spec (TypeScript + grammY + AI SDK/OpenRouter)
+# AI Telegram Bot — Implementation Spec (TypeScript + grammY + Codex App Server)
 
 This document is a complete implementation spec, written to be executed by an AI agent without further research. All Telegram Bot API 10.1 facts below were verified against core.telegram.org on 2026-06-11/12 (they are newer than typical model knowledge — trust this doc over memory).
 
@@ -28,14 +28,14 @@ Build a personal AI assistant Telegram bot:
 7. **Rich limits**: 32,768 UTF-8 chars total, ≤500 blocks, ≤16 nesting levels, ≤50 media, ≤20 table columns. Plain `sendMessage` remains 4,096 chars.
 8. **Topics in private bot chats** (9.3/9.4): enable "topic mode" for the bot in **@BotFather** (verify via `getMe().has_topics_enabled`; also `allows_users_to_create_topics`). `createForumTopic(chat_id=<user id>, name, icon_color?, icon_custom_emoji_id?)` works in the private chat and returns `ForumTopic{message_thread_id}`. All send methods + `sendChatAction` accept `message_thread_id` in private chats. Incoming `Message.message_thread_id` (absent = General) and `is_topic_message`. Community-reported 10.0 regression ("message thread not found" 400 in private chats) — wrap thread sends in defensive handling and verify live during E2E.
 9. **grammY 1.43.0** targets Bot API 10.0: `sendMessageDraft` is in `@grammyjs/types` 3.27.3; `sendRichMessage*` are NOT (10.1). Call 10.1 methods via `bot.api.raw.<method>(payload as any)` behind our own typed wrapper (`src/telegram/richApi.ts`). When grammY ships 10.1 types, the wrapper body shrinks. Deep-link payload (`/start CODE`): charset `[A-Za-z0-9_-]`, ≤64 chars.
-10. **AI SDK v6** (`ai@^6`, latest ~6.0.2xx) + **`@openrouter/ai-sdk-provider@^2.9`** (peer: ai ^6, zod ^3.25 || ^4): `streamText({model, system, messages, tools, stopWhen: stepCountIs(N), providerOptions})`. `result.fullStream` is an async iterable of parts incl. text deltas, reasoning deltas, `tool-call`, `tool-result`, step boundaries, `finish`, `error`. **Exact part type/field names must be confirmed against the installed version at implementation time** (one dev script that dumps part shapes); isolate in `normalizeStreamPart()`. Reasoning effort: `providerOptions: { openrouter: { reasoning: { effort: 'low' } } }`. OpenRouter REST embeddings: `POST https://openrouter.ai/api/v1/embeddings` `{model, input: string[]}` → `{data: [{embedding: number[]}]}` (provider pkg may not expose embeddings — call REST directly with fetch).
+10. **Codex app-server inference**: the bot starts ephemeral Codex app-server threads, sends the rendered system prompt plus conversation transcript, and exposes bot-local tools as dynamic tools. Stream notifications are normalized into text/reasoning/tool events in `normalizeStreamPart()`. OpenRouter REST is used only for embeddings: `POST https://openrouter.ai/api/v1/embeddings` `{model, input: string[]}` → `{data: [{embedding: number[]}]}`.
 11. **docling-serve**: Docker `quay.io/docling-project/docling-serve`, port 5001. `POST /v1/convert/source` JSON `{sources:[{kind:'base64', value, filename?} | {kind:'http', url}], options:{to_formats:['md'], table_mode:'accurate', image_export_mode:'placeholder'}}` → JSON containing markdown output (`document.md_content` — confirm exact response field via one curl at implementation time; Swagger at `/docs`). First conversion is slow (model download) — healthcheck + friendly notice.
 
 ## 3. Stack, dependencies, scripts
 
 - Node ≥ 22, TypeScript strict (`"type": "module"`, NodeNext), npm.
-- **Always install the LATEST available versions** — run `npm install <pkg>@latest` for every dependency at implementation time; do NOT copy version numbers from this document (they only record what was current during research: grammy 1.43 / ai 6.0.2xx / provider 2.9 / types 3.27). After install: (a) verify `@openrouter/ai-sdk-provider`'s peer range matches the installed `ai` major; (b) grep installed `@grammyjs/types` for `sendRichMessage` — if grammY now targets Bot API ≥10.1, use the native typed methods and shrink `richApi.ts` to thin re-exports; (c) re-run `dev:streamdump` to pin the installed AI SDK's stream part names.
-- Runtime: `grammy`, `@grammyjs/conversations`, `@grammyjs/i18n`, `@grammyjs/auto-retry`, `ai`, `@openrouter/ai-sdk-provider`, `@tavily/core`, `zod`, `drizzle-orm`, `pg`, `js-tiktoken`, `csv-parse`, `nanoid`, `date-fns`, `dotenv`.
+- **Always install the LATEST available versions** — run `npm install <pkg>@latest` for every dependency at implementation time; do NOT copy version numbers from this document. After install, grep installed `@grammyjs/types` for `sendRichMessage`; if grammY now targets Bot API ≥10.1, use the native typed methods and shrink `richApi.ts` to thin re-exports. Re-run `dev:streamdump` when the Codex app-server event shape changes.
+- Runtime: `grammy`, `@grammyjs/conversations`, `@grammyjs/i18n`, `@grammyjs/auto-retry`, `ai` (tool/schema helpers), `@tavily/core`, `zod`, `drizzle-orm`, `pg`, `js-tiktoken`, `csv-parse`, `nanoid`, `date-fns`, `dotenv`.
 - Dev: `typescript`, `tsx`, `vitest`, `@types/pg`, `@types/node`.
 - `package.json` scripts: `dev` = `tsx watch src/main.ts`; `start` = `node dist/main.js`; `build` = `tsc -p tsconfig.json`; `typecheck` = `tsc --noEmit`; `test` = `vitest run`; `migrate` = `tsx src/db/migrate-cli.ts`; `dev:streamdump` = `tsx scripts/dump-stream-parts.ts` (dev aid for §2.10).
 - `docker-compose.yml`: service `docling` (`quay.io/docling-project/docling-serve`, ports 5001:5001, restart unless-stopped) + service `postgres` (image `postgres:17-alpine`, env POSTGRES_DB=aibot/POSTGRES_USER=aibot/POSTGRES_PASSWORD from env, port 5432, named volume) under profile `pg` so SQLite-dev users run only docling: `docker compose up -d docling`.
@@ -72,20 +72,19 @@ ai-tele-bot/
 | `BOT_TOKEN` | required | BotFather token |
 | `TELEGRAM_ADMIN_ID` | required | **single** admin user id (number) |
 | `DB_URL` | `sqlite:./data/bot.db` | or `postgres://user:pass@host:5432/db` |
-| `OPENROUTER_API_KEY` | required | |
-| `OPENROUTER_MODEL` | `openai/gpt-5.5` | chat model |
-| `OPENROUTER_REASONING_EFFORT` | `low` | `none|minimal|low|medium|high|xhigh` |
-| `OPENROUTER_EMBEDDING_MODEL` | `openai/text-embedding-3-small` | |
+| `CODEX_MODEL` | `gpt-5.5` | normal chat model |
+| `CODEX_COMPACTION_MODEL` | `gpt-5.4-mini` | compaction summaries and image descriptions |
+| `CODEX_SPEED_MODE` | `standard` | `standard|fast`; `fast` maps to Codex service tier |
+| `REASONING_EFFORT` | `low` | Codex effort: `none|minimal|low|medium|high|xhigh` |
+| `OPENROUTER_API_KEY` | required | embeddings only |
+| `OPENROUTER_EMBEDDING_MODEL` | `perplexity/pplx-embed-v1-0.6b` | retrieval vectors |
 | `TAVILY_API_KEY` | required | web search tool |
-| `MODEL_CONTEXT_TOKENS_OVERRIDE` | unset | optional manual override; normally the context size is fetched from OpenRouter at runtime (§8.1) |
-| `RESERVE_OUTPUT_TOKENS` | `8000` | subtracted from budget |
 | `CONTEXT_WARN_RATIO` | `0.85` | limit-UX trigger |
-| `DOCLING_URL` | `http://localhost:5001` | |
+| `DOCLING_URL` | `http://localhost:5001` | Docling server base URL |
+| `DOCLING_TIMEOUT_MS` | `300000` | Docling conversion timeout |
 | `FILE_INLINE_TOKENS` | `6000` | inline-vs-search threshold |
-| `SHOW_MORE_THRESHOLD_CHARS` | `3500` | visible head size |
-| `DRAFT_UPDATE_MS` | `1500` | draft frame min interval |
+| `DRAFT_UPDATE_MS` | `0` | draft frame min interval; `0` disables throttling |
 | `RECENT_WINDOW_MESSAGES` | `20` | verbatim tail kept after compaction |
-| `MAX_TOOL_STEPS` | `8` | stopWhen(stepCountIs) |
 | `LOG_LEVEL` | `info` | |
 
 ## 6. Database — dual dialect (Postgres prod / SQLite dev)
@@ -133,7 +132,7 @@ Pure functions, heavily unit-tested:
 ### 7.3 `render.ts` — final message composition
 `renderFinal({thinkingLog, answerMd, i18n}): InputRichMessage[]`:
 1. Build thinking section if `thinkingLog` non-empty: `<details><summary>🧠 {t('thinking-summary', {steps, tools})}</summary>\n\n{thinkingLog (keep the LAST ~8000 chars, '…'-prefixed when truncated)}\n\n</details>\n\n`.
-2. Answer: `sanitize(answerMd)`. If `answerMd.length > SHOW_MORE_THRESHOLD_CHARS`: cut at the last paragraph/block boundary (never inside a fence/table — scan with the same block parser as the chunker) before the threshold; visible head + `\n\n<details><summary>{t('show-more')}</summary>\n\n{tail}\n\n</details>`.
+2. Answer: `sanitize(answerMd)`. If `answerMd.length > 3500 chars`: cut at the last paragraph/block boundary (never inside a fence/table — scan with the same block parser as the chunker) before the threshold; visible head + `\n\n<details><summary>{t('show-more')}</summary>\n\n{tail}\n\n</details>`.
 3. If combined doc > 32,768 chars: split into multiple `InputRichMessage`s at top-level block boundaries (each part re-runs step 2's Show-more logic only for the last part; code fences re-opened with same language across parts).
 4. Send each part via `sendRich`; on `isRichParseError` walk `repairLadder`; record the final `tg_message_id`(s).
 
@@ -161,13 +160,11 @@ One instance per in-flight response. State: `draftId` (allocated once: `(Date.no
 ## 8. AI layer
 
 ### 8.1 `provider.ts`
-`createOpenRouter({apiKey})`; export `chatModel()` = `openrouter(config.OPENROUTER_MODEL)`; default `providerOptions = {openrouter: {reasoning: {effort: config.OPENROUTER_REASONING_EFFORT}}}` (skip the key when effort=`none`). Export `embed(texts: string[]): Promise<Float32Array[]>` — direct `fetch` to OpenRouter `/api/v1/embeddings`, batched ≤96 inputs, retry 429/5xx ×3 with backoff.
+Export `embed(texts: string[]): Promise<Float32Array[]>` — direct `fetch` to OpenRouter `/api/v1/embeddings`, batched ≤96 inputs, retry 429/5xx ×3 with backoff. OpenRouter is not used for chat, image captioning, or compaction.
 
-**Dynamic model context size** — `getContextBudget(): Promise<number>`: resolution order (cached in-memory, refreshed on boot and every 24 h):
-1. `MODEL_CONTEXT_TOKENS_OVERRIDE` env if set;
-2. `GET https://openrouter.ai/api/v1/models` (Authorization header) → find entry with `id === OPENROUTER_MODEL` → use `context_length` (fall back to `top_provider.context_length` if the top-level field is null);
-3. on API failure or model not found: warn + default `128000`.
-Fetched lazily on first turn (don't block boot), then cached; a model change via env restart re-resolves. All token budgeting (§9.1) calls this instead of reading config directly.
+**Context size** — `getContextBudget(): Promise<number>` resolution order:
+fixed Codex default `128000`.
+All token budgeting (§9.1) calls this instead of reading config directly.
 
 ### 8.2 `shaper.ts` — the 2-sentence delay state machine (pure; the spec's core)
 ```ts
@@ -201,15 +198,15 @@ Spec rules → behavior mapping: (a) draft answer lags 2 sentences (`visibleAnsw
 `runTurn({user, thread, userMessage, attachments}): Promise<void>`
 1. Persist incoming user message (+files) via repos; index FTS; embed `text_plain` (fire-and-forget batch).
 2. `contextBuilder.build()` (§9.1). If over budget → context-limit UX (§9.3) and return.
-3. Create `StreamShaper` + `DraftStreamer` (or typing loop). `streamText({model, system, messages, tools: buildTools(ctx), stopWhen: stepCountIs(MAX_TOOL_STEPS), providerOptions, onStepFinish, abortSignal: AbortSignal.timeout(300_000)})`.
+3. Create `StreamShaper` + `DraftStreamer` (or typing loop). `streamCodexTurn({config, system, messages, tools: buildToolRegistry(ctx), abortSignal: AbortSignal.timeout(300_000)})`.
 4. Iterate `fullStream` through `normalizeStreamPart()` → shaper events; after each event call `draft.update({thinkingMd: shaper.thinkingMd(), answerMd: shaper.visibleAnswer()})`.
 5. On `finish`: `render.renderFinal({thinkingLog: shaper.thinkingMd(), answerMd: shaper.finalAnswer()})`, send (thread-scoped), persist assistant message `{content_json: finalAnswer, thinking, tokens_est, tg_message_id}`, index + embed.
 6. Usage from finish event → log; if provider threw context-length error (APICallError whose body matches `/context|maximum.*tokens|too (many|long)/i`) → limit UX.
 7. Errors: localized `error-generic` message with the description in a `<details>`; always `draft.stop()` in `finally`.
 - **Concurrency**: per-thread in-memory mutex; if busy, store the message in DB anyway and reply localized `busy` notice (it will be in context next turn); do not queue runs.
-- **Image reload flow** (used by `load_message` on image messages): preferred — tool result with multi-modal `toModelOutput` returning an image part if the installed ai version + OpenRouter accept it; fallback (implement first, it always works): tool returns `{caption, note: 'image attached next step'}`, run loop sets `pendingImages[]`, lets current `streamText` finish, then issues ONE follow-up `streamText` whose messages = prior `response.messages` + synthetic user message `[{type:'text', text:'[image <id> re-attached]'}, {type:'image', image: <bytes>}]`, reusing the same shaper/draft so the user sees one continuous response.
+- **Image reload flow** (used by `load_message` on image messages): tool results can include Codex `inputImage` content items built from cached bytes or Telegram redownload, so compacted images remain reloadable.
 
-### 8.4 Tools (`ai/tools/*`, all via `tool({description, inputSchema: z…, execute})`; every execute returns compact JSON-able data + a one-line `summaryForThinking` the run loop feeds to `shaper.onToolResult`)
+### 8.4 Tools (`ai/tools/*`; each tool has a zod input schema, execute handler, AI SDK helper wrapper for local checks, and Codex dynamic-tool spec conversion)
 - `search_thread({query: z.string(), limit: z.number().max(20).default(8)})` → hybrid retrieval (§9.4) over the thread chain's messages + L0 summaries + chunks of files attached in the chain → `[{message_id, role, date_iso, snippet}]`.
 - `load_message({message_id: z.number()})` → full `text_plain` (cap 8,000 chars with a note) + metadata; image messages → image-reload flow (§8.3). Validates the message belongs to this user's thread chain.
 - `search_in_file({file_id: z.number(), query: z.string(), limit: z.number().max(20).default(8)})` → FTS+embeddings over that file's chunks → `[{chunk_index, heading_path, snippet}]`.
@@ -229,7 +226,7 @@ Assembly order:
 3. Auto-RAG: embed the new user text; hybrid-retrieve top 6 snippets from compacted-range messages/summaries/file chunks (skip if the chain was never compacted and all files are inline); append system block `«Recalled context (verify with load_message): - [msg #id, date] snippet …»`.
 4. Verbatim window: the chain's messages (ancestors capped at their `fork_point_message_id`) with `id > compacted_upto_message_id`; **if never compacted, ALL chain messages are included** (`RECENT_WINDOW_MESSAGES` is only the tail that compaction PRESERVES, not a standing window). Oldest-first, proper ModelMessages from `content_json`. Image messages: include actual image parts (read file from disk → base64) only if not compacted; compacted images appear inside summaries as short descriptions.
 5. New user message: text + inline file blocks (§10) + image parts.
-Token estimate: js-tiktoken `o200k_base` over text + 1,100/image; if `> (await getContextBudget() − RESERVE_OUTPUT_TOKENS) × CONTEXT_WARN_RATIO` → signal over-budget (caller shows limit UX; the message is already persisted, so post-compaction auto-retry needs no extra state — see §9.2).
+Token estimate: js-tiktoken `o200k_base` over text + 1,100/image; if `> (await getContextBudget() − 10000) × CONTEXT_WARN_RATIO` → signal over-budget (caller shows limit UX; the message is already persisted, so post-compaction auto-retry needs no extra state — see §9.2).
 
 ### 9.2 Context-limit UX
 Localized message `ctx-limit` + inline keyboard `[🗜 {t('btn-compact')}]`, callback_data `ctx:compact`. The message should also say that a clean thread can be started by creating a new Telegram topic.
@@ -254,17 +251,17 @@ Accept matrix (else localized `file-unsupported`; >20 MB → `file-too-big`, Tel
 Pipeline (`ingest.ts`): `getFile` → download `https://api.telegram.org/file/bot<token>/<file_path>` → `data/files/<uuid>.<ext>` → branch:
 - **txt**: read utf-8 (strip BOM) → `content_md` = raw text.
 - **csv**: `csv-parse` (relax_quotes) → header row, row/col count; `content_md` = raw CSV; schema line = `columns: a, b, c · 1,234 rows`.
-- **pdf/docx**: `docling.ts` → `POST {DOCLING_URL}/v1/convert/source` `{sources:[{kind:'base64', value, filename}], options:{to_formats:['md'], table_mode:'accurate'}}`, 120 s timeout → markdown. Boot healthcheck `GET /docs` (warn-only); per-file failure → localized `docling-down` with compose hint. First-call notice `processing-file` status message (edited to ✅/❌).
+- **pdf/docx**: `docling.ts` → `POST {DOCLING_URL}/v1/convert/source` `{sources:[{kind:'base64', value, filename}], options:{to_formats:['md'], table_mode:'accurate'}}`, `DOCLING_TIMEOUT_MS` timeout → markdown. Boot healthcheck `GET /docs` (warn-only); per-file failure → localized `docling-down` with compose hint. First-call notice `processing-file` status message (edited to ✅/❌).
 - **image**: store only; do not send an image-processed status and do not call vision at upload time. Persist a `kind='image'` user message so the image bytes are available in live context. When that message is later compacted, make one short vision description and store it in `files.summary`.
 Size policy for text-bearing files (tokens of `content_md`):
 - ≤ `FILE_INLINE_TOKENS`: `is_inline=1`; the user message gets a fenced block: ` ```{type} name=<name>\n<content>\n``` ` (CSV keeps the schema line above the fence).
 - bigger: `is_inline=0`; `chunker.ts` — split by markdown headings (build `heading_path` like `H1 > H2`), then recursively split oversized sections to ~450 tokens with 15% overlap; CSV: schema + first 20 rows as the "head" chunk, then row-range chunks `rows 21–520` etc.; insert `file_chunks`, FTS-index + embed each; generate outline (`outline_json` = heading tree with chunk indexes) + ≤150-token auto-summary (LLM) → the user message gets a **file card** instead of content: `📎 name (type, size, N chunks) · summary · «Use search_in_file(file_id=…) / read_file_section» · outline (top 2 levels)`.
-Caption text on the file message is kept as the user's text part. Image-only media groups are persisted as context without an assistant turn; mixed media groups process the non-image files and include images as context.
+Caption text on the file message is kept as the user's text part. Image-only media groups are stored as context and still run an assistant turn; mixed media groups process the non-image files and include images as context.
 
 ## 11. Bot UX — commands, flows, routing
 
 ### 11.1 Router (`bot/router.ts`)
-Only `chat.type === 'private'` (others: one-time localized notice + `leaveChat` for groups). Resolve `(user.tg_id, msg.message_thread_id ?? null)` → active (non-archived) `threads` row, lazy-create (`title` = topic name or "General"). Handlers: text → `runTurn`; non-image documents → ingest then `runTurn` (caption as text); photos/image documents → store as image context without an assistant turn; edited messages ignored; unsupported media → notice. Global `bot.catch` logs GrammyError/HttpError. `bot.api.config.use(autoRetry())`. Conversations plugin registered for the flows below; callbacks in `callbacks.ts` (`lang:*`, `ctx:*`, `inv:revoke:*`) always `answerCallbackQuery`.
+Only `chat.type === 'private'` (others: one-time localized notice + `leaveChat` for groups). Resolve `(user.tg_id, msg.message_thread_id ?? null)` → active (non-archived) `threads` row, lazy-create (`title` = topic name or "General"). Handlers: text → `runTurn`; non-image documents → ingest then `runTurn` (caption as text); photos/image documents → store as image context then run an assistant turn without upload-time vision processing; edited messages ignored; unsupported media → notice. Global `bot.catch` logs GrammyError/HttpError. `bot.api.config.use(autoRetry())`. Conversations plugin registered for the flows below; callbacks in `callbacks.ts` (`lang:*`, `ctx:*`, `inv:revoke:*`) always `answerCallbackQuery`.
 
 ### 11.2 Onboarding & invites (single admin = `TELEGRAM_ADMIN_ID`)
 - `auth.ts` middleware: admin → ensure user row exists (auto-provision, lang from `language_code`). Known user → attach to ctx. Unknown user → only the invite flow is reachable.
@@ -293,7 +290,7 @@ Only `chat.type === 'private'` (others: one-time localized notice + `leaveChat` 
 2. **Onboarding**: auth middleware, invites (create/redeem/list/revoke), `/start` deep link, i18n en/ru, `/lang`, `/help`, setMyCommands. ✓: non-invited user blocked; deep link onboards; language switch persists.
 3. **AI core (non-streamed)**: provider, system_prompt.md + prompt.ts, contextBuilder (recent-only), run.ts without draft (typing loop), richApi + mdRepair + render (thinking details omitted when empty, Show-more, 32k split, repair ladder). ✓: chat works; long answer arrives as rich message with collapsed "Show more"; markdown torture prompt renders.
 4. **Streaming**: sentences.ts, shaper (TDD against §8.2 mapping), draftStreamer, `/stream` toggle, stream-part normalizer (+ `dev:streamdump` script run once to pin part names). ✓: live tg-thinking draft visible; 2-sentence lag; demotion on tool call (use a stub tool); ≤2-sentence answer appears directly as result.
-5. **Memory & tools**: search abstraction (both dialects), embeddings client + storage, search_thread/load_message/web_search, auto-RAG injection, token budgeting, limit UX, compactor, `/compact`, unanswered-turn auto-retry after compaction, dynamic context size from OpenRouter `/api/v1/models`. ✓: force `MODEL_CONTEXT_TOKENS_OVERRIDE=2000` → compact button appears; compact → old content findable via search_thread, answer cites loaded message.
+5. **Memory & tools**: search abstraction (both dialects), embeddings client + storage, search_thread/load_message/web_search, auto-RAG injection, token budgeting, limit UX, compactor, `/compact`, unanswered-turn auto-retry after compaction. ✓: oversized context shows compact button; compact → old content findable via search_thread, answer cites loaded message.
 6. **Files**: ingest, docling client + compose service, chunker, file card, search_in_file/read_file_section, image context storage + compaction-time descriptions + post-compaction reload. ✓: each accepted type round-trips; big PDF answered via in-file search; image recalled after compaction via load_message.
 7. **Topics/fork + timezone**: §11.4, `/timezone`. ✓: fork inherits context (ask "what did we discuss?" in fork); parallel topics isolated; timezone reflected in `{{local_time}}` answers.
 8. **Hardening**: vitest suites green; README (setup: BotFather topics ON, compose, .env, npm run dev); final E2E checklist pass.
@@ -301,17 +298,17 @@ Only `chat.type === 'private'` (others: one-time localized notice + `leaveChat` 
 ## 14. Verification
 
 - **Unit (vitest)**: sentences (fences, `3.14`, `e.g.`, `т.д.`, blank-line breaks); shaper — (a) 1-sentence answer → finalAnswer intact, thinking empty; (b) 5 sentences then tool-call → all 5 demoted, visibleAnswer empty after reset; (c) reasoning+2 tools ordering in thinkingMd; (d) promotion lag exactly 2; (e) text→tool→3-sentence final → final = last segment only; mdRepair — unclosed fence, unknown tag escaped-not-dropped, ragged table normalized, ladder order, 16-deep nesting flattened; render — show-more boundary not inside fence/table, 32k split, summary counts; timezone parser (24h/12h/AM-PM edges/wrap); invite validation (expired/exhausted/revoked/charset); chunker (heading paths, overlap, CSV row ranges); RRF merge determinism.
-- **Integration**: scripted fake fullStream (fixture part sequences incl. tool calls) through run loop with a mock Api recording calls → assert exact draft frame sequence (payloads, ≥DRAFT_UPDATE_MS spacing logic via fake timers, keepalive frame) and final message markdown; repos round-trip on sqlite; the same repo test suite re-run on pg when `TEST_PG_URL` set; compactor with stubbed LLM; tavily tool with mocked client.
-- **Manual E2E checklist** (real token; topics enabled; `docker compose up -d docling`; sqlite first, then once with `--profile pg` + pg `DB_URL`): invite → deep-link start → lang picker (auto-ru note) → `/timezone` 12h and 24h → streamed reply (tg-thinking visible, answer lags, final has collapsed 🧠 Thinking) → web-search prompt ("what happened in tech news today?") showing 🔧 lines + demotion → `/stream` off mode → markdown torture prompt → long answer "Show more" → txt/csv/docx/pdf small+large (search_in_file used) → `.doc` refused with hint → image upload stores context without an image-processed response → `/compact` → "what was in the image?" (short description) → "show me the image details again" (load_message reload) → `MODEL_CONTEXT_TOKENS_OVERRIDE=2000` limit buttons both paths (also verify boot log shows the real context_length fetched from OpenRouter when override unset) → `/fork` context carry-over + isolation → `search_thread` finds pre-compaction facts → kill docling mid-file → friendly error.
+- **Integration**: scripted fake fullStream (fixture part sequences incl. tool calls) through run loop with a mock Api recording calls → assert exact draft frame sequence (payloads, ≥DRAFT_UPDATE_MS spacing logic via fake timers, keepalive frame) and final message markdown; repos round-trip on sqlite; compactor with stubbed LLM; tavily tool with mocked client.
+- **Manual E2E checklist** (real token; topics enabled; `docker compose up -d docling`; sqlite first, then once with `--profile pg` + pg `DB_URL`): invite → deep-link start → lang picker (auto-ru note) → `/timezone` 12h and 24h → streamed reply (tg-thinking visible, answer lags, final has collapsed 🧠 Thinking) → web-search prompt ("what happened in tech news today?") showing 🔧 lines + demotion → `/stream` off mode → markdown torture prompt → long answer "Show more" → txt/csv/docx/pdf small+large (search_in_file used) → `.doc` refused with hint → image upload stores context and answers → `/compact` → "what was in the image?" (short description) → "show me the image details again" (load_message reload) → oversized context limit buttons both paths → `/fork` context carry-over + isolation → `search_thread` finds pre-compaction facts → kill docling mid-file → friendly error.
 
 ## 15. Risks & notes for the implementer
 
 - All deps are installed `@latest` (§3). If the installed grammY still lacks Bot API 10.1 types, all rich calls live behind `richApi.ts` via `api.raw`; if it has them, use native methods. `sendMessageDraft` is typed since types 3.27 (unused — we use rich drafts everywhere).
-- AI SDK v6 stream part names drift between minors — pin exact names once via `dev:streamdump`, keep `normalizeStreamPart()` as the only place that knows them.
-- `openai/gpt-5.5` may not emit reasoning deltas through OpenRouter; the thinking block still fills with tool lines + demoted text (design works without reasoning tokens).
-- `OPENROUTER_MODEL` must support **vision** for image-in-context and compaction-time image descriptions. Upload-time image storage does not call vision; if compaction cannot describe an image, the summary falls back to the file name and logs a warning.
+- Codex app-server event shapes may drift — pin exact names once via `dev:streamdump`, keep `normalizeStreamPart()` as the only place that knows them.
+- Codex may not emit reasoning deltas for every model; the thinking block still fills with tool lines + demoted text.
+- `CODEX_COMPACTION_MODEL` must support image input for compaction-time image descriptions. If compaction cannot describe an image, the summary falls back to the file name and logs a warning.
 - Draft cadence: 1.5 s + autoRetry handles flood control; drafts expire ~30 s → 20 s keepalive during long tool runs; a failed draft frame is non-fatal by design.
 - Private-chat `message_thread_id` 10.0 regression report → defensive retry path in §11.4; verify live early in phase 7.
-- Docling cold start downloads models on first convert → status message + 120 s timeout; document `docker compose up -d docling` prominently in README.
+- Docling cold start downloads models on first convert → status message + `DOCLING_TIMEOUT_MS` timeout; document `docker compose up -d docling` prominently in README.
 - pg specifics: int8 parser at boot; `websearch_to_tsquery('simple', …)` keeps ru/en symmetric with the FTS5 behavior; no pgvector dependency (JS cosine).
 - Never let `<tg-thinking>` reach a final message; never let unknown HTML reach Telegram unescaped (mdRepair owns both invariants).

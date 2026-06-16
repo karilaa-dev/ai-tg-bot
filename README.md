@@ -1,6 +1,6 @@
 # AI Telegram Bot
 
-Personal AI assistant Telegram bot built with TypeScript, grammY, AI SDK v6, OpenRouter, Drizzle ORM, SQLite/Postgres, and Telegram Bot API 10.1 rich-message wrappers.
+Personal AI assistant Telegram bot built with TypeScript, grammY, Codex app-server inference, OpenRouter embeddings, Drizzle ORM, SQLite/Postgres, and Telegram Bot API 10.1 rich-message wrappers.
 
 ## Setup
 
@@ -28,11 +28,25 @@ Personal AI assistant Telegram bot built with TypeScript, grammY, AI SDK v6, Ope
 
 6. Enable Topics for the bot in BotFather before using `/fork`.
 
-`OPENROUTER_MODEL` controls normal chat, uncompacted image-in-context turns, and image descriptions generated during compaction. `OPENROUTER_COMPACTION_MODEL`
-controls conversation summarization/rolling memory and defaults to
-`openai/gpt-5.4-mini`.
+All chat inference runs through `codex app-server`. `CODEX_MODEL` controls
+normal generation, `CODEX_COMPACTION_MODEL` controls conversation
+summarization/rolling memory and compaction-time image descriptions.
+`CODEX_SPEED_MODE=fast` maps to Codex `serviceTier: "fast"`.
+`CODEX_VERBOSITY` defaults to `high` and is sent as Codex `model_verbosity`.
+`REASONING_SUMMARY` defaults to `none` and is the only reasoning-display
+environment setting; set it to `auto`, `concise`, or `detailed` to stream Codex
+reasoning summaries into the thinking block.
+`STREAM_DELTA_CHARS` defaults to `48`, splitting large Codex answer/reasoning
+deltas into smaller draft-rendering chunks. The rendered `system_prompt.md` is
+sent as Codex `baseInstructions`, replacing the default Codex base prompt for
+each ephemeral chat thread.
+
 `OPENROUTER_EMBEDDING_MODEL` controls file/thread indexing and defaults to
-`perplexity/pplx-embed-v1-0.6b`, a low-latency dense retrieval model.
+`perplexity/pplx-embed-v1-0.6b`, a low-latency dense retrieval model. Embedding,
+file indexing, auto-RAG, and retrieval vectors remain OpenRouter-backed.
+
+`TAVILY_API_KEY` powers the `web_search` and `web_extract` tools for current web
+discovery and known-page content extraction.
 
 PDFs use native text extraction through `unpdf` first, which is much faster for
 large book-style documents. If a PDF has little extractable text, or for DOCX
@@ -46,19 +60,18 @@ npm run dev
 npm run build
 npm test
 npm run dev:streamdump
+npm run live:codex-check
 ```
 
-With the Postgres compose service running, the repository round-trip test can be exercised against both dialects:
+To exercise real Codex app-server inference, local tool use, and OpenRouter
+embeddings against one temporary scenario, run:
 
 ```bash
-TEST_PG_URL=postgres://aibot:aibot@localhost:5432/aibot npm test -- --run test/db/repos.test.ts
+npm run live:codex-check
 ```
 
-With Docling running, the live conversion smoke can be exercised explicitly:
-
-```bash
-TEST_DOCLING_URL=http://localhost:5001 npm test -- --run test/files/docling.test.ts
-```
+This uses a temporary SQLite database and fake Telegram API, but real Codex
+inference and real OpenRouter embeddings.
 
 ## Testing Telegram Behavior
 

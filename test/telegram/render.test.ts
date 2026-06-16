@@ -9,7 +9,6 @@ describe("renderFinal", () => {
     const parts = renderFinal({
       answerMd: answer,
       t,
-      config: { SHOW_MORE_THRESHOLD_CHARS: 100_000 },
     });
 
     expect(parts.length).toBeGreaterThan(1);
@@ -18,11 +17,10 @@ describe("renderFinal", () => {
   });
 
   it("places Show More after a closing code fence when the threshold falls inside the fence", () => {
-    const answer = `Intro\n\n\`\`\`ts\n${"const value = 1;\n".repeat(20)}\`\`\`\n\nTail`;
+    const answer = `Intro\n\n\`\`\`ts\n${"const value = 1;\n".repeat(300)}\`\`\`\n\nTail`;
     const [part] = renderFinal({
       answerMd: answer,
       t,
-      config: { SHOW_MORE_THRESHOLD_CHARS: 40 },
     });
     const markdown = part?.markdown ?? "";
 
@@ -34,7 +32,6 @@ describe("renderFinal", () => {
     const parts = renderFinal({
       answerMd: answer,
       t,
-      config: { SHOW_MORE_THRESHOLD_CHARS: 100_000 },
     });
 
     expect(parts.length).toBeGreaterThan(1);
@@ -49,14 +46,14 @@ describe("renderFinal", () => {
 
   it("renders draft thinking in the same closed details block as final answers", () => {
     const payload = renderDraft({
-      thinkingMd: "🔎Searching web(5)",
+      thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)",
       answerMd: "Answer.",
       t,
     });
     const markdown = payload.markdown ?? "";
 
-    expect(markdown).toContain("<details><summary>Thinking (1 steps)</summary>");
-    expect(markdown).toContain("🔎Searching web(5)");
+    expect(markdown).toContain("<details>\n<summary>Thinking (1 steps)</summary>");
+    expect(markdown).toContain("🔎 Searching web <code>alpha</code> (5 results)");
     expect(markdown).toContain("</details>");
     expect(markdown).toContain("Answer.");
     expect(markdown).not.toContain("<tg-thinking>");

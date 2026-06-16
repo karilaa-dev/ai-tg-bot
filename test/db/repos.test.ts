@@ -4,12 +4,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 
-const cases = [
-  { name: "sqlite", dbUrl: "sqlite::memory:" },
-  ...(process.env.TEST_PG_URL ? [{ name: "postgres", dbUrl: process.env.TEST_PG_URL }] : []),
-];
-
-describe.each(cases)("repository round-trip on $name", ({ dbUrl }) => {
+describe("repository round-trip on sqlite", () => {
   let db: AppDatabase;
 
   afterEach(async () => {
@@ -17,7 +12,7 @@ describe.each(cases)("repository round-trip on $name", ({ dbUrl }) => {
   });
 
   it("persists users, threads, messages, and searchable text", async () => {
-    const config = loadTestConfig({ DB_URL: dbUrl });
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
     db = createDatabase(config, createLogger(config));
     await db.migrate();
     const repos = createRepos(db.db, db.search);

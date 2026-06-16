@@ -1179,8 +1179,7 @@ async function handlePreparedTelegramFile(
   }
 
   if (input.type === "image") {
-    ctx.services.logger.debug("persisting prepared image message", ctxLogMeta(ctx, { fileId: prepared.fileId }));
-    await persistPreparedImageMessage(ctx, input, prepared);
+    await dispatchPreparedImageTurn(ctx, input, prepared);
     return;
   }
 
@@ -1206,32 +1205,30 @@ async function handlePreparedTelegramFile(
   });
 }
 
-async function persistPreparedImageMessage(
+async function dispatchPreparedImageTurn(
   ctx: BotContext,
   input: TelegramFileInput,
   prepared: PreparedTelegramFile,
 ): Promise<void> {
-  if (!ctx.user || !ctx.thread) return;
   const text = [input.caption, prepared.card].filter((part) => part?.trim()).join("\n\n");
-  const message = await ctx.services.repos.messages.insert({
-    threadId: ctx.thread.id,
-    role: "user",
-    kind: "image",
-    content: {
+  ctx.services.logger.debug("dispatching prepared image as user turn", ctxLogMeta(ctx, {
+    fileId: prepared.fileId,
+    textChars: text.length,
+  }));
+  await handleUserText(ctx, text, {
+    userMessageKind: "image",
+    userMessageContent: {
       text,
       caption: input.caption ?? null,
       files: [{ id: prepared.fileId, type: prepared.type, name: input.name, inline: prepared.inline }],
     },
-    textPlain: text,
+    onUserMessagePersisted: async (message) => {
+      await ctx.services.repos.files.setMessageId(prepared.fileId, message.id, {
+        displayName: input.name,
+        caption: input.caption ?? null,
+      });
+    },
   });
-  await ctx.services.repos.files.setMessageId(prepared.fileId, message.id, {
-    displayName: input.name,
-    caption: input.caption ?? null,
-  });
-  ctx.services.logger.info("prepared image message persisted", ctxLogMeta(ctx, {
-    fileId: prepared.fileId,
-    messageId: message.id,
-  }));
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -1291,30 +1288,6 @@ async function flushMediaGroup(key: string): Promise<void> {
   const captions = uniqueNonEmpty(items.map((item) => item.caption));
   const text = [...captions, ...items.map((item) => item.card)].join("\n\n");
   const hasNonImage = items.some((item) => item.file.type !== "image");
-  if (!hasNonImage) {
-    const message = await ctx.services.repos.messages.insert({
-      threadId: ctx.thread.id,
-      role: "user",
-      kind: "image",
-      content: {
-        text,
-        captions,
-        files: items.map((item) => item.file),
-      },
-      textPlain: text,
-    });
-    for (const item of items) {
-      await ctx.services.repos.files.setMessageId(item.file.id, message.id, {
-        displayName: item.file.name,
-        caption: item.caption ?? null,
-      });
-    }
-    ctx.services.logger.info("media group image message persisted", ctxLogMeta(ctx, {
-      messageId: message.id,
-      files: items.length,
-    }));
-    return;
-  }
   await handleUserText(ctx, text, {
     userMessageKind: hasNonImage ? "file" : "image",
     userMessageContent: {

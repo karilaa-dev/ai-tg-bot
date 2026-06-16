@@ -1,20 +1,29 @@
-import { SentenceAssembler, insideOpenFence } from "../telegram/sentences.js";
+import { SentenceAssembler } from "../telegram/sentences.js";
 
-export type ThinkingItem = {
+type ReasoningThinkingItem = {
   kind: "reasoning" | "demoted";
   text: string;
-} | {
+};
+
+type ToolThinkingItem = {
   kind: "tool";
   name: string;
-  count: number;
+  key: string;
+  label: string;
   summary?: string;
+};
+
+export type ThinkingItem = ReasoningThinkingItem | ToolThinkingItem;
+
+export type ToolCallMetadata = {
+  fileName?: string;
 };
 
 export class StreamShaper {
   thinking: ThinkingItem[] = [];
   private seg = new SentenceAssembler();
-  private toolCounts = new Map<string, number>();
   private toolSummaries = new Map<string, string>();
+  private toolLabels = new Map<string, string>();
   private toolOrder: string[] = [];
 
   onReasoningDelta(text: string): void {
@@ -27,37 +36,39 @@ export class StreamShaper {
     this.seg.push(text);
   }
 
-  onToolCall(name: string): void {
+  onToolCall(name: string, input?: unknown, metadata: ToolCallMetadata = {}): void {
     const text = this.seg.completed.join("") + this.seg.remainder;
     if (text.trim()) this.thinking.push({ kind: "demoted", text });
-    const count = (this.toolCounts.get(name) ?? 0) + 1;
-    this.toolCounts.set(name, count);
-    if (count === 1) this.toolOrder.push(name);
-    this.thinking.push({ kind: "tool", name, count });
+    const display = toolDisplay(name, input, metadata);
+    if (!this.toolOrder.includes(display.key)) this.toolOrder.push(display.key);
+    this.toolLabels.set(display.key, display.label);
+    this.toolSummaries.delete(display.key);
+    const existing = this.thinking.find((item): item is ToolThinkingItem => item.kind === "tool" && item.key === display.key);
+    if (existing) {
+      existing.label = display.label;
+      existing.summary = undefined;
+    } else {
+      this.thinking.push({ kind: "tool", name, key: display.key, label: display.label });
+    }
     this.seg = new SentenceAssembler();
   }
 
   onToolResult(name: string, summary: string): void {
-    this.toolSummaries.set(name, summary);
     const tool = [...this.thinking].reverse().find((item) => item.kind === "tool" && item.name === name && !item.summary);
     if (tool?.kind === "tool") {
       tool.summary = summary;
+      this.toolSummaries.set(tool.key, summary);
       return;
     }
-    let count = this.toolCounts.get(name);
-    if (!count) {
-      count = 1;
-      this.toolCounts.set(name, count);
-      if (!this.toolOrder.includes(name)) this.toolOrder.push(name);
-    }
-    this.thinking.push({ kind: "tool", name, count, summary });
+    const display = toolDisplay(name);
+    if (!this.toolOrder.includes(display.key)) this.toolOrder.push(display.key);
+    this.toolLabels.set(display.key, display.label);
+    this.toolSummaries.set(display.key, summary);
+    this.thinking.push({ kind: "tool", name, key: display.key, label: display.label, summary });
   }
 
   visibleAnswer(): string {
-    const complete = this.seg.completed;
-    let out = complete.slice(0, Math.max(0, complete.length - 2)).join("");
-    if (insideOpenFence(this.seg.remainder)) out += this.seg.remainder;
-    return out;
+    return this.seg.completed.join("") + this.seg.remainder;
   }
 
   finalAnswer(): string {
@@ -73,7 +84,7 @@ export class StreamShaper {
             .map((line) => `> ${line}`)
             .join("\n");
         }
-        if (item.kind === "tool") return formatToolLine(item.name, item.count, item.summary);
+        if (item.kind === "tool") return formatToolLine(item.label, item.summary);
         return item.text;
       })
       .filter(Boolean)
@@ -81,41 +92,93 @@ export class StreamShaper {
   }
 
   toolStatusMd(): string {
-    return this.toolOrder
-      .map((name) => {
-        const count = this.toolCounts.get(name) ?? 0;
-        const summary = this.toolSummaries.get(name);
-        return formatToolLine(name, count, summary);
-      })
-      .join("\n");
+    return this.toolOrder.map((key) => formatToolLine(this.toolLabels.get(key) ?? key, this.toolSummaries.get(key))).join("\n");
   }
 }
 
 function toolLabel(name: string): string {
   switch (name) {
     case "web_search":
-      return "🔎Searching web";
+      return "🔎 Searching web";
+    case "web_extract":
+      return "🌐 Reading page";
     case "search_thread":
-      return "💬Searching chat";
+      return "💬 Searching chat";
     case "load_message":
-      return "📨Loading message";
+      return "📨 Loading message";
     case "search_in_file":
-      return "📄Searching file";
+      return "📄 Searching file";
     case "read_file_section":
-      return "📖Reading file";
+      return "📖 Reading file";
     default:
-      return `🛠️Using ${name.replaceAll("_", " ")}`;
+      return `🛠️ Using ${name.replaceAll("_", " ")}`;
   }
 }
 
-function formatToolLine(name: string, count: number, summary?: string): string {
-  const label = `${toolLabel(name)}${count > 1 ? ` x${count}` : ""}`;
-  const compact = compactSummary(summary);
-  return compact ? `${label}(${compact})` : label;
+function formatToolLine(label: string, summary?: string): string {
+  const compact = summary?.trim();
+  return compact ? `${label} (${compact})` : label;
 }
 
-function compactSummary(summary?: string): string {
-  const trimmed = summary?.trim();
-  if (!trimmed) return "";
-  return trimmed.match(/^(\d+)\b/)?.[1] ?? trimmed;
+function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata = {}): { key: string; label: string } {
+  const subject = toolSubject(name, input, metadata);
+  const label = subject ? `${toolLabel(name)} <code>${escapeHtml(subject)}</code>` : toolLabel(name);
+  return { key: `${name}:${subject ?? ""}`, label };
+}
+
+function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata = {}): string | undefined {
+  const record = asRecord(input);
+  switch (name) {
+    case "web_search":
+    case "search_thread":
+      return truncateSubject(stringField(record, "query"), 64);
+    case "web_extract":
+      return urlsSubject(record);
+    case "search_in_file":
+    case "read_file_section":
+      return metadata.fileName ?? fileIdSubject(record);
+    case "load_message": {
+      const messageId = numberField(record, "message_id");
+      return messageId === undefined ? undefined : `#${messageId}`;
+    }
+    default:
+      return undefined;
+  }
+}
+
+function urlsSubject(record: Record<string, unknown> | undefined): string | undefined {
+  const value = record?.urls;
+  if (!Array.isArray(value)) return undefined;
+  const urls = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (!urls.length) return undefined;
+  const suffix = urls.length > 1 ? ` +${urls.length - 1}` : "";
+  return truncateSubject(`${urls[0].trim()}${suffix}`, 64);
+}
+
+function fileIdSubject(record: Record<string, unknown> | undefined): string | undefined {
+  const fileId = numberField(record, "file_id");
+  return fileId === undefined ? undefined : `#${fileId}`;
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function truncateSubject(value: string | undefined, max: number): string | undefined {
+  if (!value || value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

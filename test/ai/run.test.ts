@@ -5,20 +5,20 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { isContextLengthError, runTurn, sendFinal } from "../../src/ai/run.js";
-
-const streamTextMock = vi.hoisted(() => vi.fn());
-
-vi.mock("ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("ai")>();
-  return { ...actual, streamText: streamTextMock };
-});
+import {
+  setCodexTransportFactoryForTests,
+  type CodexTransport,
+  type JsonRpcMessage,
+} from "../../src/ai/codexAppServer.js";
 
 describe("runTurn", () => {
   let db: AppDatabase;
   let repos: Repos;
+  let codexParts: unknown[];
 
   beforeEach(async () => {
-    streamTextMock.mockReset();
+    codexParts = [];
+    setCodexTransportFactoryForTests(() => new ScriptedCodexTransport(codexParts));
     const config = loadTestConfig();
     db = createDatabase(config, createLogger(config));
     await db.migrate();
@@ -26,11 +26,13 @@ describe("runTurn", () => {
   });
 
   afterEach(async () => {
+    setCodexTransportFactoryForTests(undefined);
+    vi.useRealTimers();
     await db.destroy();
   });
 
   it("does not duplicate an already persisted latest user message on retry", async () => {
-    const config = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: 10 });
+    const config = loadTestConfig({ CONTEXT_WARN_RATIO: 0.000001 });
     const user = await repos.users.ensure({ tgId: 99, firstName: "Retry", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const api = {
@@ -84,9 +86,7 @@ describe("runTurn", () => {
       textPlain: "",
       thinking: "tool work",
     });
-    streamTextMock.mockReturnValue({
-      fullStream: fullStream([{ type: "text-delta", text: "Recovered answer." }]),
-    });
+    codexParts = [{ type: "text-delta", text: "Recovered answer." }];
     const api = {
       sendMessage: async () => ({ message_id: 1, date: 1, chat: { id: user.tg_id, type: "private" } }),
       editMessageText: async () => ({ message_id: 1, date: 1, chat: { id: user.tg_id, type: "private" } }),
@@ -115,7 +115,7 @@ describe("runTurn", () => {
   });
 
   it("persists user message embeddings on over-budget turns when an embedder is provided", async () => {
-    const config = loadTestConfig({ MODEL_CONTEXT_TOKENS_OVERRIDE: 10 });
+    const config = loadTestConfig({ CONTEXT_WARN_RATIO: 0.000001 });
     const user = await repos.users.ensure({ tgId: 98, firstName: "Embed", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const api = {
@@ -146,12 +146,20 @@ describe("runTurn", () => {
     const user = await repos.users.ensure({ tgId: 95, firstName: "EmptyFinal", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const streamOffUser = await repos.users.toggleStream(user.tg_id);
-    streamTextMock.mockReturnValue({
-      fullStream: fullStream([
-        { type: "tool-call", toolName: "search_in_file", input: { query: "chapter 5" } },
-        { type: "tool-result", toolName: "search_in_file", output: { results: [] } },
-      ]),
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "chapter-notes.txt",
+      path: "data/files/chapter-notes.txt",
+      size: 12,
+      summary: "chapter notes",
+      isInline: false,
     });
+    codexParts = [
+      { type: "tool-call", toolName: "search_in_file", input: { file_id: file.id, query: "chapter 5" } },
+      { type: "tool-result", toolName: "search_in_file", output: { results: [] } },
+    ];
     const richPayloads: unknown[] = [];
     const api = {
       sendMessage: async () => ({ message_id: 1, date: 1, chat: { id: user.tg_id, type: "private" } }),
@@ -181,32 +189,30 @@ describe("runTurn", () => {
     expect(JSON.stringify(richPayloads)).toContain("No final answer returned.");
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "⚠️ No final answer returned." });
-    expect(latest?.thinking).toContain("📄Searching file(0)");
+    expect(latest?.thinking).toContain("📄 Searching file <code>chapter-notes.txt</code> (0 results)");
   });
 
-  it("edits a regular status message with compact tool counts when streaming is off", async () => {
+  it("edits a regular HTML status message with readable tool subjects when streaming is off", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 97, firstName: "Status", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const streamOffUser = await repos.users.toggleStream(user.tg_id);
-    streamTextMock.mockReturnValue({
-      fullStream: fullStream([
-        { type: "tool-call", toolName: "web_search", input: { query: "alpha" } },
-        { type: "tool-result", toolName: "web_search", output: { results: [{}, {}, {}, {}, {}] } },
-        { type: "tool-call", toolName: "web_search", input: { query: "beta" } },
-        { type: "tool-result", toolName: "web_search", output: { results: [{}, {}] } },
-        { type: "text-delta", text: "Final answer." },
-      ]),
-    });
-    const sentTexts: string[] = [];
-    const editedTexts: string[] = [];
+    codexParts = [
+      { type: "tool-call", toolName: "web_search", input: { query: "alpha" } },
+      { type: "tool-result", toolName: "web_search", output: { results: [{}, {}, {}, {}, {}] } },
+      { type: "tool-call", toolName: "web_search", input: { query: "beta" } },
+      { type: "tool-result", toolName: "web_search", output: { results: [{}, {}] } },
+      { type: "text-delta", text: "Final answer." },
+    ];
+    const sentMessages: Array<{ text: string; other?: Record<string, unknown> }> = [];
+    const editedMessages: Array<{ text: string; other?: Record<string, unknown> }> = [];
     const api = {
-      sendMessage: async (_chatId: number, text: string) => {
-        sentTexts.push(text);
+      sendMessage: async (_chatId: number, text: string, other?: Record<string, unknown>) => {
+        sentMessages.push({ text, other });
         return { message_id: 10, date: 1, chat: { id: user.tg_id, type: "private" } };
       },
-      editMessageText: async (_chatId: number, _messageId: number, text: string) => {
-        editedTexts.push(text);
+      editMessageText: async (_chatId: number, _messageId: number, text: string, other?: Record<string, unknown>) => {
+        editedMessages.push({ text, other });
         return { message_id: 10, date: 1, chat: { id: user.tg_id, type: "private" } };
       },
       sendChatAction: async () => true,
@@ -228,27 +234,45 @@ describe("runTurn", () => {
       t: testT,
     });
 
+    const sentTexts = sentMessages.map((message) => message.text);
+    const editedTexts = editedMessages.map((message) => message.text);
     expect(sentTexts).toEqual(["💭 Thinking..."]);
-    expect(editedTexts).toContain("💭 Thinking...\n\n🔎Searching web");
-    expect(editedTexts).toContain("💭 Thinking...\n\n🔎Searching web(5)");
-    expect(editedTexts).toContain("💭 Thinking...\n\n🔎Searching web x2(5)");
-    expect(editedTexts).toContain("💭 Thinking...\n\n🔎Searching web x2(2)");
-    expect(editedTexts.at(-1)).toBe("✅ Done.\n\n🔎Searching web x2(2)");
+    expect(sentMessages[0]?.other?.parse_mode).toBe("HTML");
+    expect(editedMessages.every((message) => message.other?.parse_mode === "HTML")).toBe(true);
+    expect(editedTexts).toContain("💭 Thinking...\n\n🔎 Searching web <code>alpha</code>");
+    expect(editedTexts).toContain("💭 Thinking...\n\n🔎 Searching web <code>alpha</code> (5 results)");
+    expect(editedTexts).toContain([
+      "💭 Thinking...",
+      "",
+      "🔎 Searching web <code>alpha</code> (5 results)",
+      "🔎 Searching web <code>beta</code>",
+    ].join("\n"));
+    expect(editedTexts).toContain([
+      "💭 Thinking...",
+      "",
+      "🔎 Searching web <code>alpha</code> (5 results)",
+      "🔎 Searching web <code>beta</code> (2 results)",
+    ].join("\n"));
+    expect(editedTexts.at(-1)).toBe([
+      "✅ Done.",
+      "",
+      "🔎 Searching web <code>alpha</code> (5 results)",
+      "🔎 Searching web <code>beta</code> (2 results)",
+    ].join("\n"));
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Final answer." });
-    expect(latest?.thinking).toContain("🔎Searching web x2(2)");
+    expect(latest?.thinking).toContain("🔎 Searching web <code>alpha</code> (5 results)");
+    expect(latest?.thinking).toContain("🔎 Searching web <code>beta</code> (2 results)");
+    expect(latest?.thinking).not.toContain("x2");
     expect(latest?.thinking).not.toContain("↳");
     expect(latest?.thinking).not.toContain("web_search");
-    expect(latest?.thinking).not.toContain("query");
   });
 
-  it("flushes the complete streaming draft before sending the final rich message", async () => {
+  it("sends an immediate thinking draft and streams raw partial text before the final rich message", async () => {
     const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
     const user = await repos.users.ensure({ tgId: 94, firstName: "Stream", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    streamTextMock.mockReturnValue({
-      fullStream: fullStream([{ type: "text-delta", text: "First. Second. Third." }]),
-    });
+    codexParts = [{ type: "text-delta", text: "First partial" }];
     const events: string[] = [];
     const draftPayloads: unknown[] = [];
     const api = {
@@ -279,15 +303,73 @@ describe("runTurn", () => {
     });
 
     expect(draftPayloads).toHaveLength(2);
-    expect(richMarkdownOf(draftPayloads[0])).toContain("First.");
-    expect(richMarkdownOf(draftPayloads[0])).not.toContain("Second.");
-    expect(richMarkdownOf(draftPayloads[1])).toContain("First. Second. Third.");
+    expect(richMarkdownOf(draftPayloads[0])).toContain("💭 Thinking...");
+    expect(richMarkdownOf(draftPayloads[0])).not.toContain("First partial");
+    expect(richMarkdownOf(draftPayloads[1])).toContain("First partial");
     expect(events.at(-1)?.startsWith("final:")).toBe(true);
     expect(events.findIndex((event) => event.startsWith("final:"))).toBeGreaterThan(
       events.findLastIndex((event) => event.startsWith("draft:")),
     );
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "First. Second. Third." });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "First partial" });
+  });
+
+  it("keeps the streaming draft alive during quiet provider pauses without tool calls", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T12:00:00Z"));
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
+    const user = await repos.users.ensure({ tgId: 95, firstName: "Keepalive", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    codexParts = [{ type: "delay", ms: 21_000 }, { type: "text-delta", text: "After quiet wait." }];
+    const draftPayloads: string[] = [];
+    let resolveFirstDraft: () => void = () => {};
+    const firstDraft = new Promise<void>((resolve) => {
+      resolveFirstDraft = resolve;
+    });
+    const api = {
+      raw: {
+        sendRichMessageDraft: async (payload: unknown) => {
+          draftPayloads.push(richMarkdownOf(payload));
+          if (draftPayloads.length === 1) resolveFirstDraft();
+          return true;
+        },
+        sendRichMessage: async () => ({ message_id: 31, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      },
+    };
+
+    const turn = runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user,
+      thread,
+      text: "wait before answer",
+      t: testT,
+    });
+    let completed = false;
+    try {
+      await firstDraft;
+      expect(draftPayloads).toHaveLength(1);
+      expect(draftPayloads[0]).toContain("💭 Thinking...");
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(draftPayloads.length).toBeGreaterThanOrEqual(2);
+      expect(draftPayloads[1]).toContain("💭 Thinking...");
+      expect(draftPayloads[1]).not.toContain("After quiet wait.");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await turn;
+      completed = true;
+      expect(draftPayloads.some((markdown) => markdown.includes("After quiet wait."))).toBe(true);
+    } finally {
+      if (!completed) {
+        await vi.advanceTimersByTimeAsync(21_000);
+        await turn.catch(() => undefined);
+      }
+    }
   });
 
   it("repairs and retries rich markdown parse errors before persisting", async () => {
@@ -501,12 +583,6 @@ function fakeEmbedder() {
   };
 }
 
-function fullStream(parts: unknown[]) {
-  return (async function* stream() {
-    for (const part of parts) yield part;
-  })();
-}
-
 function richMarkdownOf(payload: unknown): string {
   return ((payload as Record<string, Record<string, string>>).rich_message).markdown ?? "";
 }
@@ -531,5 +607,131 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return "🗜 Compact";
     default:
       return key;
+  }
+}
+
+class ScriptedCodexTransport implements CodexTransport {
+  readonly incoming = new AsyncQueue<JsonRpcMessage>();
+  readonly sent: JsonRpcMessage[] = [];
+
+  constructor(private readonly parts: unknown[]) {}
+
+  send(message: JsonRpcMessage): void {
+    this.sent.push(message);
+    if (message.method === "initialize") {
+      queueMicrotask(() => this.emit({ id: message.id, result: {} }));
+    } else if (message.method === "thread/start") {
+      queueMicrotask(() => this.emit({ id: message.id, result: { thread: { id: "thread-1" } } }));
+    } else if (message.method === "turn/start") {
+      queueMicrotask(() => {
+        this.emit({ id: message.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+        void this.emitParts().then(() => {
+          this.emit({
+            method: "turn/completed",
+            params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+          });
+        });
+      });
+    }
+  }
+
+  emit(message: JsonRpcMessage): void {
+    this.incoming.push(message);
+  }
+
+  close(): void {
+    this.incoming.close();
+  }
+
+  private async emitParts(): Promise<void> {
+    let toolId = 0;
+    for (const part of this.parts) {
+      const record = part as Record<string, unknown> & { type?: string };
+      if (record.type === "delay") {
+        await delay(Number(record.ms ?? 0));
+      } else if (record.type === "text-delta") {
+        this.emit({
+          method: "item/agentMessage/delta",
+          params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: String(record.text ?? record.delta ?? "") },
+        });
+      } else if (record.type === "reasoning-delta") {
+        this.emit({
+          method: "item/reasoning/summaryTextDelta",
+          params: { threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", delta: String(record.text ?? record.delta ?? ""), summaryIndex: 0 },
+        });
+      } else if (record.type === "tool-call") {
+        toolId += 1;
+        this.emit({
+          method: "item/started",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: `tool-${toolId}`,
+              type: "dynamicToolCall",
+              tool: String(record.toolName ?? "tool"),
+              arguments: record.input ?? record.args ?? {},
+            },
+          },
+        });
+      } else if (record.type === "tool-result") {
+        toolId += 1;
+        this.emit({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: `tool-${toolId}`,
+              type: "dynamicToolCall",
+              tool: String(record.toolName ?? "tool"),
+              contentItems: [{ type: "inputText", text: safeJson(record.output ?? record.result ?? {}) }],
+            },
+          },
+        });
+      }
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class AsyncQueue<T> implements AsyncIterable<T> {
+  private values: T[] = [];
+  private waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private ended = false;
+
+  push(value: T): void {
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ value, done: false });
+    else this.values.push(value);
+  }
+
+  close(): void {
+    this.ended = true;
+    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<T> {
+    while (true) {
+      if (this.values.length) {
+        yield this.values.shift()!;
+        continue;
+      }
+      if (this.ended) return;
+      const result = await new Promise<IteratorResult<T>>((resolve) => this.waiters.push(resolve));
+      if (result.done) return;
+      yield result.value;
+    }
+  }
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }

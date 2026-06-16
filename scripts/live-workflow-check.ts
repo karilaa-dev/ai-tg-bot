@@ -5,7 +5,8 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
 import { buildTools } from "../src/ai/tools/index.js";
-import { createOpenRouterConversationSummarizer, createOpenRouterImageCaptioner, embed, getContextBudget } from "../src/ai/provider.js";
+import { createConversationSummarizer, createImageCaptioner } from "../src/ai/inference.js";
+import { embed, getContextBudget } from "../src/ai/provider.js";
 import { runTurn } from "../src/ai/run.js";
 import { Localizer } from "../src/bot/i18n.js";
 import { compactThread } from "../src/memory/compactor.js";
@@ -13,9 +14,8 @@ import { buildContext } from "../src/memory/contextBuilder.js";
 import { ingestFileBytes } from "../src/files/ingest.js";
 import type { MessageRow } from "../src/db/types.js";
 
-const kotlinPdfPath = process.env.LIVE_KOTLIN_PDF ??
-  "/Users/karilaa/Downloads/How to Build Android Applications with Kotlin.pdf";
-const imagePath = process.env.LIVE_IMAGE_PATH ?? "/Users/karilaa/Desktop/Build.png";
+const kotlinPdfPath = process.argv[2] ?? "/Users/karilaa/Downloads/How to Build Android Applications with Kotlin.pdf";
+const imagePath = process.argv[3] ?? "/Users/karilaa/Desktop/Build.png";
 const dbPath = path.resolve("data", `live-workflow-${Date.now()}.sqlite`);
 
 const config = loadConfig({
@@ -81,7 +81,7 @@ try {
   const budget = await getContextBudget(config, logger);
   const cachedBudget = await getContextBudget(config, logger);
   const [smokeEmbedding] = await embed(["live workflow embedding smoke"], config);
-  check("openrouter-context-cache-and-embedding", budget > 0 && cachedBudget === budget && (smokeEmbedding?.length ?? 0) > 0, {
+  check("codex-context-budget-and-openrouter-embedding", budget > 0 && cachedBudget === budget && (smokeEmbedding?.length ?? 0) > 0, {
     budget,
     cachedBudget,
     embeddingDim: smokeEmbedding?.length ?? 0,
@@ -119,7 +119,7 @@ try {
     bytes: Buffer.from([
       "id,name,detail",
       ...Array.from({ length: 60 }, (_, index) =>
-        `${index},row-${index},${index === 42 ? "CSV_LIVE_TARGET_SPROCKET requires retrieval after compaction" : "ordinary row"}`,
+        `${index},row-${index},${index === 42 ? "CSV_CHECK_TARGET_SPROCKET requires retrieval after compaction" : "ordinary row"}`,
       ),
     ].join("\n")),
     name: "live-large-table.csv",
@@ -147,7 +147,7 @@ try {
     const imageBytes = await fs.readFile(imagePath);
     imageBytesForRedownload = imageBytes;
     const imageName = path.basename(imagePath);
-    const caption = await createOpenRouterImageCaptioner(config, logger).caption({
+    const caption = await createImageCaptioner(config, logger).caption({
       bytes: imageBytes,
       name: imageName,
       mime: imageMediaType(imageName),
@@ -174,13 +174,13 @@ try {
     imageMessageId = imageMessage.id;
     imageFileId = image.fileId;
     imageCachePath = (await repos.files.get(image.fileId))?.path;
-    check("openrouter-image-caption-and-storage", image.inline && !caption.startsWith("[image, no vision model"), {
+    check("codex-image-caption-and-storage", image.inline && !caption.startsWith("[image, no vision model"), {
       fileId: image.fileId,
       messageId: imageMessage.id,
       captionPreview: caption.slice(0, 160),
     });
   } catch (err) {
-    check("openrouter-image-caption-and-storage", false, { error: String(err), imagePath });
+    check("codex-image-caption-and-storage", false, { error: String(err), imagePath });
   }
 
   const pdfBytes = await fs.readFile(kotlinPdfPath);
@@ -212,7 +212,7 @@ try {
 
   let tools = buildTools({ config, db, repos, user, thread });
   const webResult = await execTool<{ error?: string; results?: Array<{ title?: string; url?: string }> }>(tools.web_search, {
-    query: "OpenRouter API models endpoint context_length",
+    query: "Codex app-server JSON-RPC dynamic tools",
     max_results: 3,
   });
   check("tavily-web-search-tool", !webResult.error && (webResult.results?.length ?? 0) > 0, {
@@ -250,7 +250,7 @@ try {
     }));
   }
   const preCompactionContext = await buildContext({
-    config: { ...config, MODEL_CONTEXT_TOKENS_OVERRIDE: 18_000 },
+    config: { ...config, CONTEXT_WARN_RATIO: 0.01 },
     repos,
     search: db.search,
     user,
@@ -264,12 +264,12 @@ try {
   const compaction = await compactThread(repos, thread, {
     recentWindowMessages: 1,
     embedder: { embed: (texts) => embed(texts, config) },
-    summarizer: createOpenRouterConversationSummarizer(config, logger),
+    summarizer: createConversationSummarizer(config, logger),
     logger,
   });
   thread = (await repos.threads.get(thread.id)) ?? thread;
-  check("openrouter-compaction-summary", compaction.count >= 10 && Boolean(thread.meta_summary?.trim()), {
-    compactionModel: config.OPENROUTER_COMPACTION_MODEL,
+  check("codex-compaction-summary", compaction.count >= 10 && Boolean(thread.meta_summary?.trim()), {
+    compactionModel: config.CODEX_COMPACTION_MODEL,
     compactedCount: compaction.count,
     compactedUpto: thread.compacted_upto_message_id,
     summaryPreview: thread.meta_summary?.slice(0, 180),
@@ -339,7 +339,7 @@ try {
 
   const forkCsvSearch = await execTool<{ results?: Array<{ chunk_index?: number; snippet?: string }> }>(forkTools.search_in_file, {
     file_id: csv.fileId,
-    query: "CSV_LIVE_TARGET_SPROCKET",
+    query: "CSV_CHECK_TARGET_SPROCKET",
     limit: 5,
   });
   const forkCsvSection = await execTool<{ content?: string }>(forkTools.read_file_section, {
@@ -347,7 +347,7 @@ try {
     chunk_index: forkCsvSearch.results?.[0]?.chunk_index ?? 0,
     count: 1,
   });
-  check("fork-compacted-csv-retrieval", Boolean(forkCsvSection.content?.includes("CSV_LIVE_TARGET_SPROCKET")), {
+  check("fork-compacted-csv-retrieval", Boolean(forkCsvSection.content?.includes("CSV_CHECK_TARGET_SPROCKET")), {
     first: forkCsvSearch.results?.[0],
   });
 
@@ -381,7 +381,7 @@ try {
   }
 
   const context = await buildContext({
-    config: { ...config, MODEL_CONTEXT_TOKENS_OVERRIDE: 18_000 },
+    config,
     repos,
     search: db.search,
     user,
@@ -432,7 +432,7 @@ try {
       "Use tools before answering.",
       `1. search_thread for live-compaction-sentinel-0.`,
       `2. search_in_file file_id ${pdf.fileId} for Kotlin activity.`,
-      "3. web_search for OpenRouter models API context_length.",
+      "3. web_search for Codex app-server dynamic tools.",
       "Reply with one short status line for each tool.",
     ].join("\n"),
     embedder: { embed: (texts) => embed(texts, config) },

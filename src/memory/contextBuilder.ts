@@ -10,6 +10,8 @@ import { embed, getContextBudget } from "../ai/provider.js";
 import { hybridSearch, threadChainScope } from "./retrieval.js";
 import { estimateTokens } from "./tokens.js";
 
+const RESERVED_OUTPUT_TOKEN_BUDGET = 10_000;
+
 export interface BuiltContext {
   system: string;
   messages: ModelMessage[];
@@ -60,7 +62,7 @@ export async function buildContext(input: {
   const estimate = estimateMessageTokens(system, messages);
   const tokensEst = estimate.tokens + estimate.images * 1100;
   const budget = await getContextBudget(input.config, input.logger);
-  const usable = (budget - input.config.RESERVE_OUTPUT_TOKENS) * input.config.CONTEXT_WARN_RATIO;
+  const usable = (budget - RESERVED_OUTPUT_TOKEN_BUDGET) * input.config.CONTEXT_WARN_RATIO;
   input.logger?.debug("context build complete", {
     threadId: input.thread.id,
     messages: messages.length,

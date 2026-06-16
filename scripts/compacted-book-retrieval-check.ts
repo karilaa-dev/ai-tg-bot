@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../src/config.js";
 import { runTurn } from "../src/ai/run.js";
-import { createOpenRouterConversationSummarizer, embed } from "../src/ai/provider.js";
+import { createConversationSummarizer } from "../src/ai/inference.js";
+import { embed } from "../src/ai/provider.js";
 import { Localizer } from "../src/bot/i18n.js";
 import { createDatabase } from "../src/db/index.js";
 import { createRepos, type Repos } from "../src/db/repos/index.js";
@@ -12,8 +13,7 @@ import { createLogger } from "../src/logger.js";
 import { compactThread } from "../src/memory/compactor.js";
 import { buildContext } from "../src/memory/contextBuilder.js";
 
-const kotlinPdfPath = process.env.LIVE_KOTLIN_PDF ??
-  "/Users/karilaa/Downloads/How to Build Android Applications with Kotlin.pdf";
+const kotlinPdfPath = process.argv[2] ?? "/Users/karilaa/Downloads/How to Build Android Applications with Kotlin.pdf";
 const dbPath = path.resolve("data", `live-compacted-book-${Date.now()}.sqlite`);
 
 const config = loadConfig({
@@ -174,7 +174,7 @@ async function setupCompactedParent(repos: Repos, user: UserRow): Promise<Thread
   const compaction = await compactThread(repos, thread, {
     recentWindowMessages: 1,
     embedder: { embed: (texts) => embed(texts, config) },
-    summarizer: createOpenRouterConversationSummarizer(config, logger),
+    summarizer: createConversationSummarizer(config, logger),
     logger,
   });
   const compacted = (await repos.threads.get(thread.id)) ?? thread;
