@@ -10,10 +10,17 @@ import { createOpenRouterTextEmbedder, persistEmbedding, type TextEmbedder } fro
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-live-codex-"));
 const marker = `CODEX_CHECK_MARKER_${Date.now()}_SAPPHIRE`;
+const bashMarker = `BASH_CHECK_MARKER_${Date.now()}_TOPAZ`;
 const question = [
   `Use the search_in_file tool on the attached file to find this exact marker: ${marker}.`,
   "Do not answer from the file list or memory alone.",
   `Final answer format: ${marker}`,
+].join("\n");
+const bashQuestion = [
+  "Use the bash tool before answering.",
+  "Run exactly this bash script:",
+  "js-exec -c 'console.log(42)'; python3 -c 'print(42)'; curl -s https://api.pi.delivery/v1/pi?start=0\\&numberOfDigits=2",
+  `If the JavaScript output is 42, the Python output is 42, and curl returns digits starting with 31, reply exactly: ${bashMarker}`,
 ].join("\n");
 
 const baseConfig = loadConfig({
@@ -24,13 +31,6 @@ const baseConfig = loadConfig({
   DRAFT_UPDATE_MS: process.env.DRAFT_UPDATE_MS || "0",
   FILE_INLINE_TOKENS: "1",
 });
-
-try {
-  const result = await runCodex();
-  console.log(JSON.stringify({ ok: true, marker, result }, null, 2));
-} finally {
-  await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
-}
 
 async function runCodex(): Promise<CodexResult> {
   const dbPath = path.join(root, "codex.sqlite");
@@ -77,6 +77,37 @@ async function runCodex(): Promise<CodexResult> {
     check("codex-file-tool-used", result.usedFileTool, result);
     check("codex-status-edited-for-tool", result.statusShowsTool, result);
     check("chunk-embedding-persisted-openrouter", result.chunkEmbeddingRows > 0, result);
+
+    await runTurn({
+      api: api as never,
+      chatId: setup.user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user: setup.user,
+      thread: setup.thread,
+      text: bashQuestion,
+      embedder,
+      t,
+    });
+    const bashAssistant = await repos.messages.latest(setup.thread.id);
+    const bashThinking = bashAssistant?.thinking ?? "";
+    const bashAnswer = bashAssistant?.text_plain ?? "";
+    result.bashFinalHasMarker = bashAnswer.includes(bashMarker);
+    result.bashUsedTool = bashThinking.includes("🐚 Running bash");
+    result.bashThinkingShowsScript = ["js-exec", "python3", "curl"].every((token) => bashThinking.includes(token));
+    result.bashStatusShowsScript = ["js-exec", "python3", "curl"].every((token) =>
+      api.editedTexts.some((text) => text.includes("🐚 Running bash") && text.includes(token)),
+    );
+    result.bashAnswerPreview = bashAnswer.slice(0, 500);
+    result.bashThinking = bashThinking;
+    result.statusEdits = api.editedTexts;
+    result.richMessages = api.richMessages.length;
+    check("codex-bash-final-marker", result.bashFinalHasMarker, result);
+    check("codex-bash-tool-used", result.bashUsedTool, result);
+    check("codex-bash-thinking-shows-js-python-curl", result.bashThinkingShowsScript, result);
+    check("codex-bash-status-shows-js-python-curl", result.bashStatusShowsScript, result);
     return result;
   } finally {
     await db.destroy().catch((err) => logger.warn("live codex database destroy failed", { err: String(err) }));
@@ -189,6 +220,12 @@ interface CodexResult {
   finalHasMarker: boolean;
   usedFileTool: boolean;
   statusShowsTool: boolean;
+  bashFinalHasMarker?: boolean;
+  bashUsedTool?: boolean;
+  bashThinkingShowsScript?: boolean;
+  bashStatusShowsScript?: boolean;
+  bashAnswerPreview?: string;
+  bashThinking?: string;
   answerPreview: string;
   thinking: string;
   statusEdits: string[];
@@ -218,4 +255,11 @@ function t(key: string, params?: Record<string, string | number>): string {
     default:
       return key;
   }
+}
+
+try {
+  const result = await runCodex();
+  console.log(JSON.stringify({ ok: true, marker, bashMarker, result }, null, 2));
+} finally {
+  await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
 }

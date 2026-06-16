@@ -74,11 +74,13 @@ export function streamCodexTurn(input: CodexTurnInput): { fullStream: AsyncItera
 
 export async function generateCodexText(input: CodexTurnInput): Promise<string> {
   let text = "";
+  let finalText: string | undefined;
   for await (const part of runCodexTurn({ ...input, tools: input.tools ?? {} })) {
     const record = asRecord(part);
     if (record?.type === "text-delta") text += String(record.text ?? record.delta ?? "");
+    if (record?.type === "text-final") finalText = String(record.text ?? "");
   }
-  const trimmed = text.trim();
+  const trimmed = (finalText ?? text).trim();
   if (!trimmed) throw new Error("empty Codex response");
   return trimmed;
 }
@@ -179,6 +181,9 @@ class CodexRpcSession {
   readonly stream = new AsyncQueue<unknown>();
   private readonly seenToolCalls = new Set<string>();
   private readonly seenToolResults = new Set<string>();
+  private readonly seenCompletedItems = new Set<string>();
+  private readonly agentMessageDeltas = new Map<string, string>();
+  private readonly reasoningSummaryDeltas = new Map<string, string>();
 
   constructor(
     private readonly transport: CodexTransport,
@@ -333,10 +338,10 @@ class CodexRpcSession {
     const record = asRecord(params);
     switch (method) {
       case "item/agentMessage/delta":
-        this.pushTextDeltas("text-delta", String(record?.delta ?? ""));
+        this.handleAgentMessageDelta(record);
         break;
       case "item/reasoning/summaryTextDelta":
-        if (this.config.REASONING_SUMMARY !== "none") this.pushTextDeltas("reasoning-delta", String(record?.delta ?? ""));
+        this.handleReasoningSummaryDelta(record);
         break;
       case "item/started":
         this.handleItemStarted(record);
@@ -365,9 +370,7 @@ class CodexRpcSession {
 
   private handleItemCompleted(params: Record<string, unknown> | undefined): void {
     const item = asRecord(params?.item);
-    if (item?.type !== "dynamicToolCall") return;
-    const contentItems = Array.isArray(item.contentItems) ? item.contentItems as CodexToolContentItem[] : [];
-    this.emitToolResult(String(item.id), String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
+    this.handleCompletedItem(item);
   }
 
   private handleTurnCompleted(params: Record<string, unknown> | undefined): void {
@@ -377,7 +380,57 @@ class CodexRpcSession {
       this.fail(new Error(String(err?.message ?? `Codex turn ${turn.status}`)));
       return;
     }
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    for (const item of items) this.handleCompletedItem(asRecord(item));
     this.stream.close();
+  }
+
+  private handleAgentMessageDelta(params: Record<string, unknown> | undefined): void {
+    const text = String(params?.delta ?? "");
+    const itemId = stringValue(params, "itemId");
+    if (itemId) this.agentMessageDeltas.set(itemId, `${this.agentMessageDeltas.get(itemId) ?? ""}${text}`);
+    this.pushTextDeltas("text-delta", text);
+  }
+
+  private handleReasoningSummaryDelta(params: Record<string, unknown> | undefined): void {
+    if (this.config.REASONING_SUMMARY === "none") return;
+    const text = String(params?.delta ?? "");
+    const itemId = stringValue(params, "itemId");
+    if (itemId) this.reasoningSummaryDeltas.set(itemId, `${this.reasoningSummaryDeltas.get(itemId) ?? ""}${text}`);
+    this.pushTextDeltas("reasoning-delta", text);
+  }
+
+  private handleCompletedItem(item: Record<string, unknown> | undefined): void {
+    if (!item) return;
+    const itemType = stringValue(item, "type");
+    if (!itemType) return;
+    const itemId = stringValue(item, "id");
+    if (itemId) {
+      if (this.seenCompletedItems.has(itemId)) return;
+      this.seenCompletedItems.add(itemId);
+    }
+    if (itemType === "agentMessage") {
+      const text = agentMessageText(item, itemId ? this.agentMessageDeltas.get(itemId) : undefined);
+      if (text !== undefined) this.stream.push({ type: "text-final", text });
+      return;
+    }
+    if (itemType === "reasoning") {
+      this.emitCompletedReasoning(item, itemId);
+      return;
+    }
+    if (itemType === "dynamicToolCall") {
+      const contentItems = Array.isArray(item.contentItems) ? item.contentItems as CodexToolContentItem[] : [];
+      this.emitToolResult(itemId ?? String(item.tool ?? "tool"), String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
+    }
+  }
+
+  private emitCompletedReasoning(item: Record<string, unknown>, itemId: string | undefined): void {
+    if (this.config.REASONING_SUMMARY === "none") return;
+    const text = reasoningSummaryText(item);
+    if (!text.trim()) return;
+    const streamed = itemId ? this.reasoningSummaryDeltas.get(itemId) : undefined;
+    if (streamed?.trim() === text.trim()) return;
+    this.pushTextDeltas("reasoning-delta", text);
   }
 
   private emitToolCall(callId: string, toolName: string, input: unknown): void {
@@ -555,6 +608,39 @@ function outputFromCodexContentItems(items: CodexToolContentItem[]): unknown {
     }
   }
   return { contentItems: items };
+}
+
+function agentMessageText(item: Record<string, unknown>, deltaFallback?: string): string | undefined {
+  const direct = stringValue(item, "text") ?? stringValue(item, "content");
+  if (direct !== undefined) return direct;
+  const content = item.content;
+  if (Array.isArray(content)) {
+    const text = content.map(textPart).filter((part) => part !== undefined).join("");
+    if (text || content.length) return text;
+  }
+  return deltaFallback;
+}
+
+function reasoningSummaryText(item: Record<string, unknown>): string {
+  const summary = item.summary;
+  if (Array.isArray(summary)) return summary.map(textPart).filter((part) => part !== undefined).join("\n");
+  if (typeof summary === "string") return summary;
+  const content = item.content;
+  if (Array.isArray(content)) return content.map(textPart).filter((part) => part !== undefined).join("\n");
+  if (typeof content === "string") return content;
+  return "";
+}
+
+function textPart(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  const record = asRecord(value);
+  if (!record) return undefined;
+  return stringValue(record, "text") ?? stringValue(record, "content");
+}
+
+function stringValue(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 function formatMessageForSummary(message: {

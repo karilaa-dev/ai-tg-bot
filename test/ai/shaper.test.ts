@@ -18,6 +18,15 @@ describe("StreamShaper", () => {
     expect(s.finalAnswer()).toBe("One. Two. Three. Four");
   });
 
+  it("uses completed agent messages as the final answer replacement", () => {
+    const s = new StreamShaper();
+    expect(handleStreamPart(s, { type: "text-delta", text: "Partial answer" })).toBe("content");
+    expect(s.visibleAnswer()).toBe("Partial answer");
+    expect(handleStreamPart(s, { type: "text-final", text: "Complete final answer." })).toBe("content");
+    expect(s.visibleAnswer()).toBe("Complete final answer.");
+    expect(s.finalAnswer()).toBe("Complete final answer.");
+  });
+
   it("demotes all text before a tool call", () => {
     const s = new StreamShaper();
     s.onTextDelta("One. Two. Three. Four. Five.");
@@ -26,6 +35,17 @@ describe("StreamShaper", () => {
     expect(s.visibleAnswer()).toBe("");
     expect(s.thinkingMd()).toContain("> One. Two. Three. Four. Five.");
     expect(s.thinkingMd()).toContain("💬 Searching chat <code>alpha</code>");
+  });
+
+  it("keeps demoted provisional text out of the completed final answer", () => {
+    const s = new StreamShaper();
+    expect(handleStreamPart(s, { type: "text-delta", text: "I will check this first." })).toBe("content");
+    expect(handleStreamPart(s, { type: "tool-call", toolName: "bash", input: { script: "printf ok" } })).toBe("tool-call");
+    expect(handleStreamPart(s, { type: "tool-result", toolName: "bash", output: { exit_code: 0, timed_out: false } })).toBe("tool-result");
+    expect(handleStreamPart(s, { type: "text-final", text: "Final checked answer." })).toBe("content");
+    expect(s.thinkingMd()).toContain("> I will check this first.");
+    expect(s.thinkingMd()).toContain("🐚 Running bash <code>printf ok</code> (exit 0)");
+    expect(s.finalAnswer()).toBe("Final checked answer.");
   });
 
   it("reports stream event kinds used by the draft keepalive loop", () => {
@@ -72,6 +92,7 @@ describe("StreamShaper", () => {
     s.onToolCall("load_message", { message_id: 42 });
     s.onToolCall("search_in_file", { file_id: 7 }, { fileName: "book.pdf" });
     s.onToolCall("read_file_section", { file_id: 7 }, { fileName: "book.pdf" });
+    s.onToolCall("bash", { script: "printf hello" });
     const status = s.toolStatusMd();
 
     expect(status).toContain("🔎 Searching web <code>current info</code>");
@@ -80,12 +101,24 @@ describe("StreamShaper", () => {
     expect(status).toContain("📨 Loading message <code>#42</code>");
     expect(status).toContain("📄 Searching file <code>book.pdf</code>");
     expect(status).toContain("📖 Reading file <code>book.pdf</code>");
+    expect(status).toContain("🐚 Running bash <code>printf hello</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
     expect(status).not.toContain("search_thread");
     expect(status).not.toContain("load_message");
     expect(status).not.toContain("search_in_file");
     expect(status).not.toContain("read_file_section");
+  });
+
+  it("summarizes bash results with exit status and timeout", () => {
+    const s = new StreamShaper();
+    expect(handleStreamPart(s, { type: "tool-call", toolName: "bash", input: { script: "printf hello" } })).toBe("tool-call");
+    expect(handleStreamPart(s, { type: "tool-result", toolName: "bash", output: { stdout: "hello", exit_code: 0, timed_out: false } })).toBe("tool-result");
+    expect(s.thinkingMd()).toContain("🐚 Running bash <code>printf hello</code> (exit 0)");
+
+    expect(handleStreamPart(s, { type: "tool-call", toolName: "bash", input: { script: "while true; do sleep 1; done" } })).toBe("tool-call");
+    expect(handleStreamPart(s, { type: "tool-result", toolName: "bash", output: { exit_code: null, timed_out: true } })).toBe("tool-result");
+    expect(s.thinkingMd()).toContain("🐚 Running bash <code>while true; do sleep 1; done</code> (timed out)");
   });
 
   it("normalizes installed AI SDK v6 fullStream tool part names", () => {
@@ -98,6 +131,10 @@ describe("StreamShaper", () => {
       kind: "tool-result",
       toolName: "search_thread",
       output: { results: [] },
+    });
+    expect(normalizeStreamPart({ type: "text-final", text: "done" })).toEqual({
+      kind: "text-final",
+      text: "done",
     });
   });
 });

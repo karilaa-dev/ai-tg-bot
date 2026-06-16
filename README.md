@@ -48,6 +48,19 @@ file indexing, auto-RAG, and retrieval vectors remain OpenRouter-backed.
 `TAVILY_API_KEY` powers the `web_search` and `web_extract` tools for current web
 discovery and known-page content extraction.
 
+`just-bash` powers the `bash` tool for deterministic shell/data work in a
+per-thread persistent virtual workspace. Workspaces live under
+`BASH_WORKSPACE_ROOT` (default `./data/bash`) as isolated `thread-<id>`
+directories. The tool enables just-bash Python and JavaScript runtimes, keeps
+public internet access available through `curl`, blocks localhost/private
+network ranges, and returns bounded stdout/stderr controlled by
+`BASH_MAX_OUTPUT_CHARS`. `BASH_TIMEOUT_MS` bounds each bash execution. Use
+`js-exec -c '...'` for JavaScript because `node` is only a help stub in
+just-bash, avoid unsupported shell setup such as `set -o pipefail`, and prefer
+`curl -fsSL` plus `jq` for known raw URLs/APIs. Current
+compatibility tests also document sandbox limits around virtual symlinks,
+`rmdir`, and `[` tests inside `while`/`until` loops.
+
 PDFs use native text extraction through `unpdf` first, which is much faster for
 large book-style documents. If a PDF has little extractable text, or for DOCX
 files, ingestion falls back to Docling at `DOCLING_URL`.
@@ -77,4 +90,4 @@ inference and real OpenRouter embeddings.
 
 The requested `grammy-emulate` package is not published on npm. Tests use `test/helpers/grammy-emulate.ts`, a small local helper backed by `@bonkers-agency/grammy-test`, which provides in-memory grammY bot emulation without Telegram network calls.
 
-Current test coverage exercises invite onboarding and invite/timezone conversations, invalid-code paths, private-only routing, language switching and localized command menus, stream toggling, context callbacks and compaction auto-retry, `/fork` topic behavior, `/stop` file cancellation, parallel user/topic processing, rich-message send calls, draft and command topic fallback, sentence streaming, markdown repair, file/image/media-group ingestion, chunk outlines, Docling payload/live smoke tests, and file/thread memory tools.
+Current test coverage exercises invite onboarding and invite/timezone conversations, invalid-code paths, private-only routing, language switching and localized command menus, stream toggling, context callbacks and compaction auto-retry, `/fork` topic behavior, `/stop` file cancellation, parallel user/topic processing, rich-message send calls, draft and command topic fallback, sentence streaming, markdown repair, file/image/media-group ingestion, chunk outlines, Docling payload/live smoke tests, file/thread memory tools, and persistent just-bash tool execution.

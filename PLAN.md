@@ -214,7 +214,7 @@ Spec rules → behavior mapping: (a) draft answer lags 2 sentences (`visibleAnsw
 - `web_search({query: z.string(), max_results: z.number().max(10).default(5)})` → `@tavily/core` `tavily({apiKey}).search(query, {maxResults, searchDepth:'basic', includeAnswer:false})` → `[{title, url, snippet, published_date?}]`; errors → `{error}` string result (model can react).
 
 ### 8.5 `prompt.ts` + `system_prompt.md`
-Root file, hot-loaded each turn (fs.readFile, no restart needed), placeholders `{{user_name}} {{language}} {{timezone}} {{local_time}} {{date}} {{thread_title}} {{files_overview}}` replaced via simple `.replaceAll`. `{{timezone}}` = `UTC±HH:MM` from `tz_offset_min` or `unknown (suggest /timezone)`; `{{local_time}}` computed from offset; `{{files_overview}}` = bullet list of this thread's files `(#id name type · inline|searchable · summary-first-line)`.
+Root file, hot-loaded each turn (fs.readFile, no restart needed), placeholders `{{user_name}} {{language}} {{timedate}} {{timezone}} {{thread_title}} {{files_overview}}` replaced via simple `.replaceAll`. `{{timedate}}` = `YYYY-MM-DD HH:mm` computed from `tz_offset_min` or UTC when missing; `{{timezone}}` = `UTC±HH:MM` from `tz_offset_min` or `UTC+00:00` when missing; `{{files_overview}}` = bullet list of this thread's files `(#id name type · inline|searchable · summary-first-line)`.
 Starter content (write it): assistant persona; ALWAYS answer in `{{language}}`; output GitHub-flavored Markdown only (headings/tables/lists/fences/footnotes/LaTeX allowed; no raw HTML); use `search_thread`/`load_message` before claiming something wasn't discussed; use `search_in_file` for large files instead of guessing; use `web_search` for current events; keep answers concise unless asked.
 
 ## 9. Memory
@@ -292,7 +292,7 @@ Only `chat.type === 'private'` (others: one-time localized notice + `leaveChat` 
 4. **Streaming**: sentences.ts, shaper (TDD against §8.2 mapping), draftStreamer, `/stream` toggle, stream-part normalizer (+ `dev:streamdump` script run once to pin part names). ✓: live tg-thinking draft visible; 2-sentence lag; demotion on tool call (use a stub tool); ≤2-sentence answer appears directly as result.
 5. **Memory & tools**: search abstraction (both dialects), embeddings client + storage, search_thread/load_message/web_search, auto-RAG injection, token budgeting, limit UX, compactor, `/compact`, unanswered-turn auto-retry after compaction. ✓: oversized context shows compact button; compact → old content findable via search_thread, answer cites loaded message.
 6. **Files**: ingest, docling client + compose service, chunker, file card, search_in_file/read_file_section, image context storage + compaction-time descriptions + post-compaction reload. ✓: each accepted type round-trips; big PDF answered via in-file search; image recalled after compaction via load_message.
-7. **Topics/fork + timezone**: §11.4, `/timezone`. ✓: fork inherits context (ask "what did we discuss?" in fork); parallel topics isolated; timezone reflected in `{{local_time}}` answers.
+7. **Topics/fork + timezone**: §11.4, `/timezone`. ✓: fork inherits context (ask "what did we discuss?" in fork); parallel topics isolated; timezone reflected in `{{timedate}}`/`{{timezone}}` answers.
 8. **Hardening**: vitest suites green; README (setup: BotFather topics ON, compose, .env, npm run dev); final E2E checklist pass.
 
 ## 14. Verification

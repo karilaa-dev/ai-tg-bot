@@ -180,6 +180,124 @@ describe("Codex app-server client", () => {
     ]);
   });
 
+  it("uses completed agentMessage items as authoritative final text replacements", async () => {
+    const config = loadTestConfig();
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "final replacement",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: "Partial" },
+    });
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "msg-1", type: "agentMessage", text: "Complete final answer." },
+      },
+    });
+    transport.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          items: [{ id: "msg-1", type: "agentMessage", text: "Complete final answer." }],
+        },
+      },
+    });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "text-delta", text: "Partial" },
+      { type: "text-final", text: "Complete final answer." },
+    ]);
+  });
+
+  it("processes completed agentMessage items carried only by turn/completed", async () => {
+    const config = loadTestConfig();
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "turn items final",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          items: [{ id: "msg-1", type: "agentMessage", text: "Final from completed turn items." }],
+        },
+      },
+    });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "text-final", text: "Final from completed turn items." },
+    ]);
+  });
+
+  it("emits multiple completed agentMessage replacements in order", async () => {
+    const config = loadTestConfig();
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "multiple final messages",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "msg-1", type: "agentMessage", text: "First completed answer." },
+      },
+    });
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "msg-2", type: "agentMessage", text: "Second completed answer." },
+      },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "text-final", text: "First completed answer." },
+      { type: "text-final", text: "Second completed answer." },
+    ]);
+  });
+
+  it("surfaces completed reasoning summaries when no summary delta was streamed", async () => {
+    const config = loadTestConfig({ REASONING_SUMMARY: "detailed" });
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "completed reasoning",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "reason-1", type: "reasoning", summary: ["completed summary"] },
+      },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "reasoning-delta", text: "completed summary" },
+    ]);
+  });
+
   it("ignores summary events when summaries are disabled", async () => {
     const config = loadTestConfig();
     const partsPromise = collect(streamCodexTurn({

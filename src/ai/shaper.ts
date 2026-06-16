@@ -22,6 +22,7 @@ export type ToolCallMetadata = {
 export class StreamShaper {
   thinking: ThinkingItem[] = [];
   private seg = new SentenceAssembler();
+  private finalText: string | undefined;
   private toolSummaries = new Map<string, string>();
   private toolLabels = new Map<string, string>();
   private toolOrder: string[] = [];
@@ -33,12 +34,20 @@ export class StreamShaper {
   }
 
   onTextDelta(text: string): void {
+    this.finalText = undefined;
+    this.seg.push(text);
+  }
+
+  onTextFinal(text: string): void {
+    this.finalText = text;
+    this.seg = new SentenceAssembler();
     this.seg.push(text);
   }
 
   onToolCall(name: string, input?: unknown, metadata: ToolCallMetadata = {}): void {
     const text = this.seg.completed.join("") + this.seg.remainder;
     if (text.trim()) this.thinking.push({ kind: "demoted", text });
+    this.finalText = undefined;
     const display = toolDisplay(name, input, metadata);
     if (!this.toolOrder.includes(display.key)) this.toolOrder.push(display.key);
     this.toolLabels.set(display.key, display.label);
@@ -72,7 +81,7 @@ export class StreamShaper {
   }
 
   finalAnswer(): string {
-    return this.seg.completed.join("") + this.seg.remainder;
+    return this.finalText ?? this.seg.completed.join("") + this.seg.remainder;
   }
 
   thinkingMd(): string {
@@ -110,6 +119,8 @@ function toolLabel(name: string): string {
       return "📄 Searching file";
     case "read_file_section":
       return "📖 Reading file";
+    case "bash":
+      return "🐚 Running bash";
     default:
       return `🛠️ Using ${name.replaceAll("_", " ")}`;
   }
@@ -141,9 +152,20 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       const messageId = numberField(record, "message_id");
       return messageId === undefined ? undefined : `#${messageId}`;
     }
+    case "bash":
+      return bashSubject(record);
     default:
       return undefined;
   }
+}
+
+function bashSubject(record: Record<string, unknown> | undefined): string | undefined {
+  const script = stringField(record, "script")?.replace(/\s+/g, " ").trim();
+  if (!script) return undefined;
+  const tools = ["js-exec", "python3", "python", "curl"].filter((name) => new RegExp(`\\b${name}\\b`).test(script));
+  const uniqueTools = tools.filter((name, index) => name !== "python" || !tools.includes("python3") || tools.indexOf(name) === index);
+  const prefix = uniqueTools.length > 1 ? `${uniqueTools.join(" + ")}: ` : "";
+  return truncateSubject(`${prefix}${script}`, 64);
 }
 
 function urlsSubject(record: Record<string, unknown> | undefined): string | undefined {

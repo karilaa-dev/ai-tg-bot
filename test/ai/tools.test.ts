@@ -6,7 +6,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { buildTools } from "../../src/ai/tools/index.js";
+import { buildCodexToolSpecs, buildToolRegistry, buildTools, formatBotToolResultForCodex } from "../../src/ai/tools/index.js";
 import { ingestFileBytes } from "../../src/files/ingest.js";
 import { compactThread } from "../../src/memory/compactor.js";
 import { clearRetrievalVectorCacheForTests, threadChainScope } from "../../src/memory/retrieval.js";
@@ -144,6 +144,272 @@ describe("AI tools", () => {
 
     expect(result).toEqual({ error: "Error: network down" });
   });
+
+  it("runs just-bash in a persistent per-thread workspace with JS, Python, SQLite, and public curl", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-bash-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot, BASH_TIMEOUT_MS: 30_000, BASH_MAX_OUTPUT_CHARS: 5000 });
+    const user = await repos.users.ensure({ tgId: 77, firstName: "BashTool", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const otherThread = await repos.threads.activeForUserTopic(user.tg_id, 777, "Other bash thread");
+
+    const firstTools = buildTools({ config, db, repos, user, thread });
+    const firstBash = bashTool(firstTools);
+    const written = await firstBash.execute({
+      script: [
+        "mkdir -p work",
+        "printf 'alpha\\nbeta\\n' > work/notes.txt",
+        "cat work/notes.txt | grep alpha",
+        "python3 -c \"print(6 * 7)\"",
+        "js-exec -c \"console.log(20 + 22)\"",
+        "sqlite3 :memory: \"select 40 + 2;\"",
+      ].join("\n"),
+    });
+
+    expect(written).toMatchObject({ exit_code: 0, timed_out: false, stdout_truncated: false, stderr_truncated: false });
+    expect(written.stdout).toContain("alpha\n");
+    expect(written.stdout).toContain("42\n");
+
+    const secondBash = bashTool(buildTools({ config, db, repos, user, thread }));
+    const persisted = await secondBash.execute({ script: "cat work/notes.txt" });
+    expect(persisted).toMatchObject({ exit_code: 0, timed_out: false });
+    expect(persisted.stdout).toBe("alpha\nbeta\n");
+
+    const isolatedBash = bashTool(buildTools({ config, db, repos, user, thread: otherThread }));
+    const isolated = await isolatedBash.execute({ script: "cat work/notes.txt" });
+    expect(isolated.exit_code).not.toBe(0);
+    expect(isolated.stdout).not.toContain("alpha");
+
+    let fetchCalls = 0;
+    await withMockFetch(async (resource, init) => {
+      fetchCalls += 1;
+      expect(String(resource)).toBe("http://93.184.216.34/tool");
+      expect(init?.method).toBe("GET");
+      return new Response("network-ok\n", { status: 200, headers: { "content-type": "text/plain" } });
+    }, async () => {
+      const network = await secondBash.execute({ script: "curl -s http://93.184.216.34/tool" });
+      expect(network).toMatchObject({ exit_code: 0, timed_out: false });
+      expect(network.stdout).toBe("network-ok\n");
+    });
+    expect(fetchCalls).toBe(1);
+  }, 60_000);
+
+  it("bounds just-bash output, times out long scripts, and blocks symlink escapes from the thread workspace", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-bash-guard-"));
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-bash-outside-"));
+    tempDirs.push(workspaceRoot, outsideRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot, BASH_TIMEOUT_MS: 100, BASH_MAX_OUTPUT_CHARS: 8 });
+    const user = await repos.users.ensure({ tgId: 78, firstName: "BashGuard", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const bash = bashTool(buildTools({ config, db, repos, user, thread }));
+
+    const truncated = await bash.execute({ script: "printf 1234567890; printf abcdefghij >&2" });
+    expect(truncated).toMatchObject({
+      exit_code: 0,
+      stdout: "12345678",
+      stderr: "abcdefgh",
+      stdout_truncated: true,
+      stderr_truncated: true,
+    });
+
+    const timedOut = await bash.execute({ script: "while true; do sleep 1; done" });
+    expect(timedOut).toMatchObject({ exit_code: null, timed_out: true });
+    expect(timedOut.error).toContain("timed out");
+
+    const secretPath = path.join(outsideRoot, "secret.txt");
+    await fs.writeFile(secretPath, "HOST_SECRET_SHOULD_NOT_LEAK");
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.symlink(secretPath, path.join(threadRoot, "leak"));
+
+    const escaped = await bash.execute({ script: "cat leak" });
+    expect(escaped.exit_code).not.toBe(0);
+    expect(`${escaped.stdout}\n${escaped.stderr}`).not.toContain("HOST_SECRET_SHOULD_NOT_LEAK");
+
+    let fetchCalls = 0;
+    await withMockFetch(async () => {
+      fetchCalls += 1;
+      throw new Error("private fetch should have been blocked before fetch");
+    }, async () => {
+      const privateNetwork = await bash.execute({ script: "curl -s http://127.0.0.1/secret" });
+      expect(privateNetwork).toMatchObject({ timed_out: false });
+      expect(privateNetwork.exit_code).not.toBe(0);
+    });
+    expect(fetchCalls).toBe(0);
+  }, 30_000);
+
+  it("describes bash/raw-URL guidance and sends compact recovery hints to the model", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 80, firstName: "BashHints", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const registry = buildToolRegistry({ config, db, repos, user, thread });
+    const specs = await buildCodexToolSpecs(registry);
+    const bashSpec = specs.find((spec) => spec.name === "bash");
+    const webSearchSpec = specs.find((spec) => spec.name === "web_search");
+    const webExtractSpec = specs.find((spec) => spec.name === "web_extract");
+    expect(bashSpec?.description).toContain("js-exec -c");
+    expect(bashSpec?.description).toContain("curl -fsSL");
+    expect(bashSpec?.description).toContain("compact JSON");
+    expect(bashSpec?.description).toContain("equality/lengths/counts");
+    expect(bashSpec?.description).toContain("set -o pipefail");
+    expect(bashSpec?.description).toContain("Localhost/private");
+    expect(webSearchSpec?.description).toContain("discover candidate");
+    expect(webSearchSpec?.description).toContain("curl -fsSL");
+    expect(webExtractSpec?.description).toContain("readable article/page");
+    expect(webExtractSpec?.description).toContain("raw JSON/API");
+    expect(webExtractSpec?.description).toContain("PDF verification");
+    const prompt = await fs.readFile(path.resolve("system_prompt.md"), "utf8");
+    expect(prompt).toContain("js-exec -c");
+    expect(prompt).toContain("curl -fsSL");
+    expect(prompt).toContain("compact JSON");
+    expect(prompt).toContain("equality/lengths/counts");
+    expect(prompt).toContain("set -o pipefail");
+    expect(prompt).toContain("blocks localhost/private");
+
+    const nodeHint = await formatBotToolResultForCodex(
+      registry,
+      "bash",
+      { script: "node -e 'console.log(42)'" },
+      bashOutput({ stderr: "this sandbox uses js-exec instead of node\n", exit_code: 1 }),
+      "bash-node",
+    );
+    expect(JSON.stringify(nodeHint)).toContain("Use js-exec -c");
+
+    const curlHint = await formatBotToolResultForCodex(
+      registry,
+      "bash",
+      { script: "curl -s http://127.0.0.1/secret" },
+      bashOutput({ exit_code: 1 }),
+      "bash-curl",
+    );
+    expect(JSON.stringify(curlHint)).toContain("public internet URLs");
+
+    const pipefailHint = await formatBotToolResultForCodex(
+      registry,
+      "bash",
+      { script: "set -o pipefail\nprintf ok" },
+      bashOutput({ stderr: "set: pipefail: invalid option", exit_code: 1 }),
+      "bash-pipefail",
+    );
+    expect(JSON.stringify(pipefailHint)).toContain("without set -o pipefail");
+
+    const rawExtractHint = await formatBotToolResultForCodex(
+      registry,
+      "web_extract",
+      { urls: ["https://api.pi.delivery/v1/pi?start=0&numberOfDigits=2"] },
+      {
+        results: [],
+        failed_results: [{ url: "https://api.pi.delivery/v1/pi?start=0&numberOfDigits=2", error: "no readable content" }],
+      },
+      "extract-api",
+    );
+    expect(JSON.stringify(rawExtractHint)).toContain("Use bash with curl -fsSL");
+
+    const readablePage = await formatBotToolResultForCodex(
+      registry,
+      "web_extract",
+      { urls: ["https://example.com/article"] },
+      { results: [{ url: "https://example.com/article", content: "readable page text" }], failed_results: [] },
+      "extract-page",
+    );
+    expect(JSON.stringify(readablePage)).not.toContain("model_hint");
+  });
+
+  it("lets bash process outputs from thread, message, file, and web tools", async () => {
+    tavilyMock.extract.mockResolvedValue({
+      results: [
+        {
+          url: "https://example.com/data",
+          rawContent: "web_metric,42\nstatus,ok",
+        },
+      ],
+      failedResults: [],
+    });
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-bash-compose-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot, FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 79, firstName: "BashCompose", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "THREAD_JSON_MARKER says thread metric is 11." },
+      textPlain: "THREAD_JSON_MARKER says thread metric is 11.",
+    });
+    const attached = await attachFile({
+      repos,
+      config,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "metrics.txt",
+      mime: "text/plain",
+      bytes: Buffer.from("FILE_METRIC_17 appears in this attached file.\nSecond line."),
+      telegramFileId: "telegram-compose-file-id",
+    });
+    const tools = buildTools({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      embedder: { embed: async (texts) => texts.map(() => new Float32Array([1, 0])) },
+    });
+    const searchThread = tools.search_thread as unknown as {
+      execute(input: unknown): Promise<{ results: Array<{ kind: string; message_id?: number; snippet?: string }> }>;
+    };
+    const loadMessage = tools.load_message as unknown as {
+      execute(input: unknown): Promise<{ text?: string }>;
+    };
+    const searchInFile = tools.search_in_file as unknown as {
+      execute(input: unknown): Promise<{ results: Array<{ chunk_index?: number; snippet?: string }> }>;
+    };
+    const readFileSection = tools.read_file_section as unknown as {
+      execute(input: unknown): Promise<{ content?: string }>;
+    };
+    const webExtract = tools.web_extract as unknown as {
+      execute(input: unknown): Promise<{ results: Array<{ content: string }> }>;
+    };
+    const bash = bashTool(tools);
+
+    const threadHits = await searchThread.execute({ query: "THREAD_JSON_MARKER", limit: 5 });
+    const loaded = await loadMessage.execute({ message_id: message.id });
+    const fileHits = await searchInFile.execute({ file_id: attached.fileId, query: "FILE_METRIC_17", limit: 5 });
+    const fileSection = await readFileSection.execute({ file_id: attached.fileId, chunk_index: fileHits.results[0]!.chunk_index, count: 1 });
+    const web = await webExtract.execute({
+      urls: ["https://example.com/data"],
+      chunks_per_source: 1,
+      extract_depth: "basic",
+      format: "text",
+      include_images: false,
+      include_favicon: false,
+      max_chars_per_url: 1000,
+    });
+
+    const processed = await bash.execute({
+      stdin: JSON.stringify({ threadHits, loaded, fileSection, web }),
+      script: [
+        "cat > combined.json",
+        "jq -r '.threadHits.results[0].snippet' combined.json | grep THREAD_JSON_MARKER",
+        "jq -r '.loaded.text' combined.json | grep 'metric is 11'",
+        "jq -r '.fileSection.content' combined.json | grep FILE_METRIC_17",
+        "jq -r '.web.results[0].content' combined.json | grep web_metric",
+        "jq -r '[.loaded.text, .fileSection.content, .web.results[0].content] | join(\"\\n\")' combined.json > combined.txt",
+        "wc -l combined.txt",
+      ].join("\n"),
+    });
+
+    expect(processed).toMatchObject({ exit_code: 0, timed_out: false });
+    expect(processed.stdout).toContain("THREAD_JSON_MARKER");
+    expect(processed.stdout).toContain("metric is 11");
+    expect(processed.stdout).toContain("FILE_METRIC_17");
+    expect(processed.stdout).toContain("web_metric,42");
+    expect(processed.stdout).toMatch(/\b[3-9]\b/);
+
+    const persisted = await bash.execute({ script: "grep -E 'FILE_METRIC_17|web_metric' combined.txt" });
+    expect(persisted).toMatchObject({ exit_code: 0, timed_out: false });
+    expect(persisted.stdout).toContain("FILE_METRIC_17");
+    expect(persisted.stdout).toContain("web_metric,42");
+  }, 30_000);
 
   it("searches file chunks with stored embeddings when FTS has no lexical match", async () => {
     const config = loadTestConfig();
@@ -468,6 +734,46 @@ describe("AI tools", () => {
     await expect(fs.readFile(image.file.path)).resolves.toEqual(redownloadedImage);
   }, 30_000);
 });
+
+type BashToolForTests = {
+  execute(input: unknown): Promise<{
+    stdout: string;
+    stderr: string;
+    exit_code: number | null;
+    timed_out: boolean;
+    stdout_truncated: boolean;
+    stderr_truncated: boolean;
+    cwd: string;
+    error?: string;
+  }>;
+};
+
+function bashTool(tools: ReturnType<typeof buildTools>): BashToolForTests {
+  return tools.bash as unknown as BashToolForTests;
+}
+
+function bashOutput(overrides: Partial<Awaited<ReturnType<BashToolForTests["execute"]>>> = {}): Awaited<ReturnType<BashToolForTests["execute"]>> {
+  return {
+    stdout: "",
+    stderr: "",
+    exit_code: 0,
+    timed_out: false,
+    stdout_truncated: false,
+    stderr_truncated: false,
+    cwd: "/",
+    ...overrides,
+  };
+}
+
+async function withMockFetch<T>(mockFetch: typeof globalThis.fetch, action: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetch;
+  try {
+    return await action();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
 async function attachFile(input: {
   repos: Repos;

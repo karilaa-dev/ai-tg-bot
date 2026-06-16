@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { tool, zodSchema, type Tool } from "ai";
+import { Bash, ReadWriteFs } from "just-bash";
 import { z } from "zod";
 import { tavily, type TavilyExtractOptions } from "@tavily/core";
 import type { AppConfig } from "../../config.js";
@@ -284,8 +285,49 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
         return { content };
       },
     },
+    bash: {
+      description:
+        "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per Telegram thread. Use js-exec -c '...' for JavaScript, python3/python for Python, and curl -fsSL for known public raw URLs/APIs, optionally piped to jq. For exact verification or comparing runtimes, prefer one simple bash call that computes all values, checks equality/lengths/counts, and emits compact JSON. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
+      inputSchema: z.object({
+        script: z.string().min(1).max(20_000),
+        cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
+        stdin: z.string().max(100_000).default(""),
+        args: z.array(z.string().max(4096)).max(32).default([]),
+        raw_script: z.boolean().default(false),
+      }),
+      execute: async ({ script, cwd = "/", stdin = "", args = [], raw_script = false }) => {
+        input.logger?.info("tool bash starting", {
+          threadId: input.thread.id,
+          scriptChars: script.length,
+          stdinChars: stdin.length,
+          args: args.length,
+        });
+        const result = await runBashTool(input, {
+          script,
+          cwd,
+          stdin,
+          args,
+          rawScript: raw_script,
+        });
+        input.logger?.info("tool bash complete", {
+          threadId: input.thread.id,
+          exitCode: result.exit_code,
+          timedOut: result.timed_out,
+          stdoutChars: result.stdout.length,
+          stderrChars: result.stderr.length,
+          error: result.error,
+        });
+        return result;
+      },
+      toModelOutput: ({ input, output }) => {
+        const result = asRecord(output);
+        if (!result) return { type: "json", value: output };
+        const hint = bashModelHint(result, input);
+        return { type: "json", value: hint ? { ...result, model_hint: hint } : result };
+      },
+    },
     web_search: {
-      description: "Search the web for current information.",
+      description: "Search the web to discover candidate current sources. For a known public raw URL or API endpoint, prefer bash with curl -fsSL.",
       inputSchema: z.object({ query: z.string(), max_results: z.number().max(10).default(5) }),
       execute: async ({ query, max_results }) => {
         try {
@@ -311,7 +353,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
       },
     },
     web_extract: {
-      description: "Extract readable content from one or more known web page URLs.",
+      description:
+        "Extract readable article/page content from known web page URLs. Do not use for raw JSON/API endpoints or exact raw-data/PDF verification; prefer bash with curl -fsSL for those.",
       inputSchema: z.object({
         urls: z.array(z.string().url()).min(1).max(5),
         query: z.string().optional(),
@@ -365,6 +408,12 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
           input.logger?.warn("tool web_extract failed", { err: String(err), urls: urls.length });
           return { error: String(err) };
         }
+      },
+      toModelOutput: ({ input, output }) => {
+        const result = asRecord(output);
+        if (!result) return { type: "json", value: output };
+        const hint = webExtractModelHint(input, result);
+        return { type: "json", value: hint ? { ...result, model_hint: hint } : result };
       },
     },
   };
@@ -467,6 +516,158 @@ async function readCachedOrRedownloadImage(
     input.logger?.info("cached image restored from Telegram", { fileId: image.file_id, bytes: bytes.length });
     return bytes;
   }
+}
+
+async function runBashTool(
+  input: ToolBuildInput,
+  command: {
+    script: string;
+    cwd: string;
+    stdin: string;
+    args: string[];
+    rawScript: boolean;
+  },
+): Promise<{
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+  cwd: string;
+  error?: string;
+}> {
+  const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
+  await fs.mkdir(root, { recursive: true });
+  const cwd = normalizeBashCwd(command.cwd);
+  const bash = new Bash({
+    fs: new ReadWriteFs({ root, allowSymlinks: false }),
+    cwd: "/",
+    env: { TZ: "UTC" },
+    python: true,
+    javascript: true,
+    network: {
+      dangerouslyAllowFullInternetAccess: true,
+      denyPrivateRanges: true,
+      timeoutMs: input.config.BASH_TIMEOUT_MS,
+      maxResponseSize: 10 * 1024 * 1024,
+    },
+    defenseInDepth: true,
+  });
+  const controller = new AbortController();
+  let timedOut = false;
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, input.config.BASH_TIMEOUT_MS);
+  try {
+    const result = await bash.exec(command.script, {
+      args: command.args,
+      cwd,
+      env: { TZ: "UTC" },
+      replaceEnv: true,
+      rawScript: command.rawScript,
+      signal: controller.signal,
+      stdin: command.stdin,
+    });
+    const stdout = truncateBashOutput(result.stdout, input.config.BASH_MAX_OUTPUT_CHARS);
+    const stderr = truncateBashOutput(result.stderr, input.config.BASH_MAX_OUTPUT_CHARS);
+    const elapsedTimedOut = result.exitCode === 124 && Date.now() - startedAt >= input.config.BASH_TIMEOUT_MS;
+    const didTimeOut = timedOut || elapsedTimedOut;
+    return {
+      stdout: stdout.text,
+      stderr: stderr.text,
+      exit_code: didTimeOut ? null : result.exitCode,
+      timed_out: didTimeOut,
+      stdout_truncated: stdout.truncated,
+      stderr_truncated: stderr.truncated,
+      cwd,
+      ...(didTimeOut ? { error: `timed out after ${input.config.BASH_TIMEOUT_MS}ms` } : {}),
+    };
+  } catch (err) {
+    return {
+      stdout: "",
+      stderr: "",
+      exit_code: null,
+      timed_out: timedOut,
+      stdout_truncated: false,
+      stderr_truncated: false,
+      cwd,
+      error: timedOut ? `timed out after ${input.config.BASH_TIMEOUT_MS}ms` : String(err),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeBashCwd(value: string): string {
+  const normalized = path.posix.normalize(value);
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function truncateBashOutput(value: string, maxChars: number): { text: string; truncated: boolean } {
+  const limit = Math.max(1, maxChars);
+  if (value.length <= limit) return { text: value, truncated: false };
+  return { text: value.slice(0, limit), truncated: true };
+}
+
+function bashModelHint(result: Record<string, unknown>, input?: unknown): string | undefined {
+  const exitCode = numberField(result, "exit_code");
+  const timedOut = result.timed_out === true;
+  if (exitCode === 0 && !timedOut && !result.error) return undefined;
+  const script = stringField(asRecord(input), "script") ?? "";
+  const combined = [stringField(result, "error"), stringField(result, "stderr"), stringField(result, "stdout")]
+    .filter(Boolean)
+    .join("\n");
+  if (timedOut) return "The bash script timed out; retry with a smaller bounded command.";
+  if (/\bnode\b/.test(script) || /this sandbox uses js-exec instead of node|node is .*stub/i.test(combined)) {
+    return "Use js-exec -c '...' for JavaScript in just-bash; node is only a help stub.";
+  }
+  if (/pipefail/i.test(script) || /pipefail/i.test(combined)) {
+    return "Retry with a simpler just-bash script without set -o pipefail; emit compact JSON with the values and checks.";
+  }
+  if (/\bcurl\b/.test(script) || /networkaccessdenied|private\/loopback|localhost|curl:|failed to fetch|could not resolve|response.*too large/i.test(combined)) {
+    return "Use curl for public internet URLs and raw APIs; localhost/private ranges are blocked. Use web_search for discovery and web_extract for readable pages.";
+  }
+  if (/security violation|dynamic import/i.test(combined)) {
+    return "Retry with simpler just-bash syntax; some defense-in-depth paths reject dynamic imports.";
+  }
+  return undefined;
+}
+
+function webExtractModelHint(input: unknown, output: Record<string, unknown>): string | undefined {
+  const urls = stringArrayField(asRecord(input), "urls");
+  const rawUrls = urls.filter(isRawDataUrl);
+  if (!rawUrls.length) return undefined;
+  const results = arrayField(output, "results") ?? [];
+  const failedResults = arrayField(output, "failed_results") ?? arrayField(output, "failedResults") ?? [];
+  const hasReadableContent = results.some((item) => {
+    const content = stringField(asRecord(item), "content");
+    return content !== undefined && content.trim().length > 0;
+  });
+  const hasRawFailure = failedResults.some((item) => isRawDataUrl(stringField(asRecord(item), "url") ?? ""));
+  if (!hasReadableContent || hasRawFailure || output.error) {
+    return `Use bash with curl -fsSL for this URL: ${rawUrls[0]}`;
+  }
+  return undefined;
+}
+
+function isRawDataUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.toLowerCase();
+  const params = Array.from(url.searchParams.keys());
+  if (host.startsWith("api.") || host.includes(".api.")) return true;
+  if (path.includes("/api/") || /^\/v\d+(\/|$)/.test(path)) return true;
+  if (/\.(json|csv|tsv|xml|toml|yaml|yml|ndjson|txt)$/i.test(path)) return true;
+  if (url.search.length > 0 && params.length >= 2) return true;
+  return false;
 }
 
 async function enrichThreadHits(

@@ -314,6 +314,59 @@ describe("runTurn", () => {
     expect(latest).toMatchObject({ role: "assistant", text_plain: "First partial" });
   });
 
+  it("persists the completed Codex agentMessage instead of provisional streamed text after tools", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 104, firstName: "CompletedFinal", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const finalAnswer = "JS, Python, and curl verification all matched the first 100 Pi digits.";
+    codexParts = [
+      { type: "text-delta", text: "I will calculate this first, then verify it." },
+      { type: "tool-call", toolName: "bash", input: { script: "node -e 'console.log(Math.PI)'" } },
+      { type: "tool-result", toolName: "bash", output: { stderr: "this sandbox uses js-exec instead of node", exit_code: 1, timed_out: false } },
+      {
+        type: "tool-call",
+        toolName: "bash",
+        input: { script: "js-exec -c 'console.log(42)'; python3 -c 'print(42)'; curl -fsSL http://93.184.216.34/api/pi | jq -r .digits" },
+      },
+      { type: "tool-result", toolName: "bash", output: { stdout: "{\"equal\":true,\"digits\":100}\n", exit_code: 0, timed_out: false } },
+      { type: "text-final", text: finalAnswer },
+    ];
+    const richPayloads: unknown[] = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 41, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 41, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 42, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "calculate pi with tools",
+      t: testT,
+    });
+
+    expect(JSON.stringify(richPayloads)).toContain(finalAnswer);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: finalAnswer });
+    expect(latest?.text_plain).not.toContain("I will calculate this first");
+    expect(latest?.thinking).toContain("> I will calculate this first, then verify it.");
+    expect(latest?.thinking).toContain("🐚 Running bash");
+    expect(latest?.thinking).toContain("(exit 0)");
+  });
+
   it("keeps the streaming draft alive during quiet provider pauses without tool calls", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-12T12:00:00Z"));
@@ -653,6 +706,19 @@ class ScriptedCodexTransport implements CodexTransport {
         this.emit({
           method: "item/agentMessage/delta",
           params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: String(record.text ?? record.delta ?? "") },
+        });
+      } else if (record.type === "text-final") {
+        this.emit({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              id: String(record.itemId ?? "msg-final"),
+              type: "agentMessage",
+              text: String(record.text ?? ""),
+            },
+          },
         });
       } else if (record.type === "reasoning-delta") {
         this.emit({

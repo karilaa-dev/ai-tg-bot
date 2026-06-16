@@ -484,6 +484,9 @@ export function handleStreamPart(shaper: StreamShaper, part: unknown, metadata?:
     case "text":
       shaper.onTextDelta(normalized.text);
       return "content";
+    case "text-final":
+      shaper.onTextFinal(normalized.text);
+      return "content";
     case "reasoning":
       shaper.onReasoningDelta(normalized.text);
       return "content";
@@ -500,6 +503,7 @@ export function handleStreamPart(shaper: StreamShaper, part: unknown, metadata?:
 
 export type NormalizedStreamPart =
   | { kind: "text"; text: string }
+  | { kind: "text-final"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool-call"; toolName: string; input: unknown }
   | { kind: "tool-result"; toolName: string; output: unknown };
@@ -509,6 +513,8 @@ export function normalizeStreamPart(part: unknown): NormalizedStreamPart | undef
   switch (anyPart.type) {
     case "text-delta":
       return { kind: "text", text: String(anyPart.text ?? anyPart.delta ?? "") };
+    case "text-final":
+      return { kind: "text-final", text: String(anyPart.text ?? "") };
     case "reasoning-delta":
       return { kind: "reasoning", text: String(anyPart.text ?? anyPart.delta ?? "") };
     case "tool-call":
@@ -524,6 +530,10 @@ export function normalizeStreamPart(part: unknown): NormalizedStreamPart | undef
 
 function summarizeToolOutput(toolName: string, value: unknown): string {
   const record = asRecord(value);
+  if (toolName === "bash" && record) {
+    if (record.timed_out === true) return "timed out";
+    if (typeof record.exit_code === "number") return `exit ${record.exit_code}`;
+  }
   if (record?.error) return "error";
 
   const results = Array.isArray(record?.results) ? record.results : undefined;
