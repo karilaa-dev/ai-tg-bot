@@ -12,6 +12,7 @@ import {
   buildCodexToolSpecs,
   executeBotTool,
   formatBotToolResultForCodex,
+  type BotImageGenerator,
   type BotToolRegistry,
   type CodexToolContentItem,
 } from "./tools/index.js";
@@ -47,6 +48,14 @@ export type JsonRpcMessage = {
   params?: unknown;
   result?: unknown;
   error?: unknown;
+};
+
+type CodexGeneratedImagePart = {
+  type: "image-generated";
+  id?: string;
+  imageBase64: string;
+  revisedPrompt?: string | null;
+  status?: string | null;
 };
 
 let transportFactoryForTests: CodexTransportFactory | undefined;
@@ -85,6 +94,77 @@ export async function generateCodexText(input: CodexTurnInput): Promise<string> 
   const trimmed = (finalText ?? text).trim();
   if (!trimmed) throw new Error("empty Codex response");
   return trimmed;
+}
+
+export function createCodexImageGenerator(config: AppConfig, logger?: Logger): BotImageGenerator {
+  return async ({ prompt, model, quality, size, mode, references }) => {
+    const operation = mode === "auto" ? (references.length ? "edit" : "generate") : mode;
+    // App-server emits imageGeneration items from normal chat turns; ChatGPT auth rejects gpt-image-2 as the turn model.
+    const turnModel = config.CODEX_MODEL;
+    logger?.debug("Codex image generation starting", {
+      model,
+      turnModel,
+      quality,
+      size,
+      mode: operation,
+      references: references.length,
+      promptChars: prompt.length,
+    });
+    let text = "";
+    let image: CodexGeneratedImagePart | undefined;
+    const instructions = [
+      "Generate exactly one image for this Telegram user.",
+      `Use image model ${model}.`,
+      `Use quality ${quality}.`,
+      `Use size ${size}.`,
+      operation === "edit"
+        ? "Use the supplied reference image(s) as visual input and edit or transform them according to the prompt."
+        : "Create a new image from the prompt.",
+      "Do not answer with prose instead of the image.",
+      "",
+      `Prompt:\n${prompt}`,
+    ].join("\n");
+    const userInputs: CodexUserInput[] = [
+      { type: "text", text: instructions, text_elements: [] },
+      ...references.map((reference) => ({
+        type: "localImage" as const,
+        path: reference.path,
+        detail: "high" as const,
+      })),
+    ];
+    for await (const part of runCodexTurn({
+      config,
+      model: turnModel,
+      userInputs,
+      tools: {},
+      logger,
+      abortSignal: AbortSignal.timeout(180_000),
+    })) {
+      const record = asRecord(part);
+      if (record?.type === "image-generated") image = record as CodexGeneratedImagePart;
+      if (record?.type === "text-delta") text += String(record.text ?? record.delta ?? "");
+      if (record?.type === "text-final") text = String(record.text ?? "");
+    }
+    if (!image?.imageBase64) {
+      const detail = text.trim() ? `; Codex returned text instead: ${text.trim().slice(0, 500)}` : "";
+      throw new Error(`Codex image generation returned no image${detail}`);
+    }
+    logger?.debug("Codex image generation complete", {
+      model,
+      turnModel,
+      quality,
+      size,
+      mode: operation,
+      imageChars: image.imageBase64.length,
+      status: image.status ?? null,
+    });
+    return {
+      imageBase64: image.imageBase64,
+      revisedPrompt: image.revisedPrompt ?? null,
+      status: image.status ?? null,
+      mediaType: "image/png",
+    };
+  };
 }
 
 export function createCodexConversationSummarizer(config: AppConfig, logger?: Logger): ConversationSummarizer {
@@ -184,6 +264,7 @@ class CodexRpcSession {
   private readonly seenToolCalls = new Set<string>();
   private readonly seenToolResults = new Set<string>();
   private readonly seenCompletedItems = new Set<string>();
+  private readonly seenGeneratedImages = new Set<string>();
   private readonly agentMessageDeltas = new Map<string, string>();
   private readonly reasoningSummaryDeltas = new Map<string, Map<number, string>>();
 
@@ -351,6 +432,9 @@ class CodexRpcSession {
       case "item/completed":
         this.handleItemCompleted(record);
         break;
+      case "rawResponseItem/completed":
+        this.handleRawResponseItemCompleted(record);
+        break;
       case "turn/completed":
         this.handleTurnCompleted(record);
         break;
@@ -428,10 +512,20 @@ class CodexRpcSession {
       this.emitCompletedReasoning(item, itemId);
       return;
     }
+    if (itemType === "imageGeneration") {
+      this.emitGeneratedImage(item, itemId);
+      return;
+    }
     if (itemType === "dynamicToolCall") {
       const contentItems = Array.isArray(item.contentItems) ? item.contentItems as CodexToolContentItem[] : [];
       this.emitToolResult(itemId ?? String(item.tool ?? "tool"), String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
     }
+  }
+
+  private handleRawResponseItemCompleted(params: Record<string, unknown> | undefined): void {
+    const item = asRecord(params?.item);
+    if (!item || stringValue(item, "type") !== "image_generation_call") return;
+    this.emitGeneratedImage(item, stringValue(item, "id"));
   }
 
   private emitCompletedReasoning(item: Record<string, unknown>, itemId: string | undefined): void {
@@ -453,6 +547,21 @@ class CodexRpcSession {
     if (this.seenToolResults.has(callId)) return;
     this.seenToolResults.add(callId);
     this.stream.push({ type: "tool-result", toolName, output });
+  }
+
+  private emitGeneratedImage(item: Record<string, unknown>, itemId: string | undefined): void {
+    const imageBase64 = stringValue(item, "result");
+    if (!imageBase64) return;
+    const key = itemId ?? imageBase64.slice(0, 64);
+    if (this.seenGeneratedImages.has(key)) return;
+    this.seenGeneratedImages.add(key);
+    this.stream.push({
+      type: "image-generated",
+      id: itemId,
+      imageBase64,
+      revisedPrompt: stringValue(item, "revisedPrompt") ?? stringValue(item, "revised_prompt") ?? null,
+      status: stringValue(item, "status") ?? null,
+    } satisfies CodexGeneratedImagePart);
   }
 
   private pushTextDeltas(type: "text-delta" | "reasoning-delta", text: string): void {

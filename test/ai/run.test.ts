@@ -534,6 +534,98 @@ describe("runTurn", () => {
     });
   });
 
+  it("sends generated images as Telegram photos and suppresses later model text", async () => {
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 110, firstName: "ImageFinal", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw a simple blue square", caption: "Blue square" },
+      },
+      { type: "text-final", text: "Here is the image." },
+    ];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 101, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 101, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async () => {
+        throw new Error("generated images should be sent with sendPhoto");
+      },
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 103,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [
+            { file_id: "small-photo-id", file_unique_id: "small-photo-unique", width: 90, height: 90, file_size: 100 },
+            { file_id: "large-photo-id", file_unique_id: "large-photo-unique", width: 1024, height: 1024, file_size: 2000 },
+          ],
+        };
+      },
+      sendMediaGroup: async () => {
+        throw new Error("single generated image should not use sendMediaGroup");
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 102, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "generate an image",
+      imageGenerator: async ({ prompt, model, quality, size, mode, references }) => {
+        expect(prompt).toBe("draw a simple blue square");
+        expect(model).toBe("gpt-image-2");
+        expect(quality).toBe("low");
+        expect(size).toBe("1024x1024");
+        expect(mode).toBe("auto");
+        expect(references).toEqual([]);
+        return {
+          imageBase64: imageBytes.toString("base64"),
+          revisedPrompt: "A simple blue square.",
+          mediaType: "image/png",
+        };
+      },
+      t: testT,
+    });
+
+    expect(JSON.stringify(richPayloads)).not.toContain("Here is the image.");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined, caption: "Blue square" } }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Generated image: Blue square" });
+    expect(latest?.thinking).toContain("Tool calls: 1");
+    expect(latest?.thinking).toContain("- 🖼️ Generating image: 1");
+    expect(latest?.thinking).toContain("Files sent: 1");
+    expect(latest?.thinking).toContain("<code>generated-image.png</code>");
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached).toHaveLength(1);
+    expect(attached[0]).toMatchObject({
+      name: "generated-image.png",
+      type: "image",
+      telegram_file_id: "large-photo-id",
+      telegram_file_unique_id: "large-photo-unique",
+      summary: "A simple blue square.",
+    });
+    await expect(fs.readFile(attached[0]!.path)).resolves.toEqual(imageBytes);
+  });
+
   it("sends multiple files created by create_file as one Telegram media group", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-create-files-group-"));
     tempDirs.push(workspaceRoot);
@@ -937,6 +1029,88 @@ describe("runTurn", () => {
     });
   });
 
+  it("retries generated image photo sends without message_thread_id when Telegram rejects the topic", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 111, firstName: "PhotoThread", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, 42, "Topic 42");
+    const fileDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-photo-thread-"));
+    tempDirs.push(fileDir);
+    const filePath = path.join(fileDir, "topic-image.png");
+    await fs.writeFile(filePath, pngBytes());
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "image",
+      name: "topic-image.png",
+      path: filePath,
+      size: pngBytes().length,
+      summary: "topic image",
+      isInline: true,
+    });
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      raw: {
+        sendRichMessage: async () => {
+          throw new Error("attachment-only generated image should not send rich text");
+        },
+      },
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        if (other?.message_thread_id === 42) throw threadError();
+        return {
+          message_id: 112,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "topic-photo-id", file_unique_id: "topic-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+    };
+
+    await sendFinal(
+      {
+        api: api as never,
+        chatId: user.tg_id,
+        messageThreadId: 42,
+        config,
+        db,
+        repos,
+        logger: createLogger(config),
+        user,
+        thread,
+        text: "question",
+        t: (key) => key,
+      },
+      "",
+      "",
+      0,
+      [{
+        fileId: file.id,
+        type: "image",
+        name: file.name,
+        path: file.path,
+        size: file.size,
+        caption: "Image caption",
+        inline: true,
+        card: "topic image",
+        delivery: "photo",
+        origin: "generated_image",
+      }],
+    );
+
+    expect(photoCalls).toHaveLength(2);
+    expect(photoCalls[0]).toMatchObject({ filename: "topic-image.png", other: { message_thread_id: 42, caption: "Image caption" } });
+    expect(photoCalls[1]?.other?.message_thread_id).toBeUndefined();
+    expect(photoCalls[1]?.other?.caption).toContain("[Topic 42]");
+    expect(photoCalls[1]?.other?.caption).toContain("Image caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Generated image: Image caption" });
+    expect(await repos.files.listForMessage(latest!.id)).toMatchObject([{ id: file.id }]);
+    await expect(repos.files.get(file.id)).resolves.toMatchObject({
+      telegram_file_id: "topic-photo-id",
+      telegram_file_unique_id: "topic-photo-unique",
+    });
+  });
+
   it("retries outbound media group sends without message_thread_id when Telegram rejects the topic", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 108, firstName: "MediaThread", lang: "en" });
@@ -1102,6 +1276,13 @@ function fakeEmbedder() {
   return {
     embed: async (texts: string[]) => texts.map((text) => new Float32Array([text.length, 1])),
   };
+}
+
+function pngBytes(): Buffer {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axw7NAAAAAASUVORK5CYII=",
+    "base64",
+  );
 }
 
 function richMarkdownOf(payload: unknown): string {

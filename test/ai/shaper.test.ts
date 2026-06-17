@@ -171,6 +171,7 @@ describe("StreamShaper", () => {
     s.onToolCall("load_message", { message_id: 42 });
     s.onToolCall("search_in_file", { file_id: 7 }, { fileName: "book.pdf" });
     s.onToolCall("read_file_section", { file_id: 7 }, { fileName: "book.pdf" });
+    s.onToolCall("generate_image", { prompt: "small red square", reference_file_ids: [9] });
     s.onToolCall("create_file", { path: "/report.txt", name: "report.txt" });
     s.onToolCall("bash", { script: "printf hello" });
     const status = s.toolStatusMd();
@@ -181,6 +182,7 @@ describe("StreamShaper", () => {
     expect(status).toContain("📨 Loading message <code>#42</code>");
     expect(status).toContain("📄 Searching file <code>book.pdf</code>");
     expect(status).toContain("📖 Reading file <code>book.pdf</code>");
+    expect(status).toContain("🖼️ Generating image <code>small red square +1 ref</code>");
     expect(status).toContain("📎 Creating file <code>report.txt</code>");
     expect(status).toContain("🐚 Running bash <code>printf hello</code>");
     expect(status).not.toContain("web_search");
@@ -189,6 +191,7 @@ describe("StreamShaper", () => {
     expect(status).not.toContain("load_message");
     expect(status).not.toContain("search_in_file");
     expect(status).not.toContain("read_file_section");
+    expect(status).not.toContain("generate_image");
     expect(status).not.toContain("create_file");
   });
 
@@ -197,6 +200,18 @@ describe("StreamShaper", () => {
     expect(handleStreamPart(s, { type: "tool-call", toolName: "create_file", input: { path: "/report.txt" } })).toBe("tool-call");
     expect(handleStreamPart(s, { type: "tool-result", toolName: "create_file", output: { file_id: 12, name: "report.txt" } })).toBe("tool-result");
     expect(s.thinkingMd()).toContain("📎 Creating file <code>/report.txt</code> (1 file)");
+  });
+
+  it("summarizes generated image outputs as images", () => {
+    const s = new StreamShaper();
+    expect(handleStreamPart(s, { type: "tool-call", toolName: "generate_image", input: { prompt: "red square" } })).toBe("tool-call");
+    expect(handleStreamPart(s, { type: "tool-result", toolName: "generate_image", output: { file_id: 12, name: "generated-image.png" } })).toBe("tool-result");
+    expect(s.thinkingMd()).toContain("🖼️ Generating image <code>red square</code> (1 image)");
+    expect(s.runSummary()).toEqual({
+      reasoningTitles: [],
+      toolCallCount: 1,
+      toolCounts: [{ label: "🖼️ Generating image", count: 1 }],
+    });
   });
 
   it("summarizes bash results with exit status and timeout", () => {

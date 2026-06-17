@@ -3,6 +3,7 @@ import { z } from "zod";
 import { loadTestConfig } from "../../src/config.js";
 import {
   codexAppServerConfigArgs,
+  createCodexImageGenerator,
   setCodexTransportFactoryForTests,
   streamCodexTurn,
   type CodexTransport,
@@ -308,6 +309,151 @@ describe("Codex app-server client", () => {
     await expect(partsPromise).resolves.toEqual([
       { type: "text-final", text: "Final from completed turn items." },
     ]);
+  });
+
+  it("emits generated image items from completed app-server imageGeneration records", async () => {
+    const config = loadTestConfig();
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "generate an image",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "ig-1",
+          type: "imageGeneration",
+          status: "generating",
+          revisedPrompt: "A red square.",
+          result: "base64-image",
+        },
+      },
+    });
+    transport.emit({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          items: [
+            {
+              id: "ig-1",
+              type: "imageGeneration",
+              status: "completed",
+              revisedPrompt: "A red square.",
+              result: "base64-image",
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(partsPromise).resolves.toEqual([
+      {
+        type: "image-generated",
+        id: "ig-1",
+        imageBase64: "base64-image",
+        revisedPrompt: "A red square.",
+        status: "generating",
+      },
+    ]);
+  });
+
+  it("emits raw response image_generation_call items", async () => {
+    const config = loadTestConfig();
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "generate raw image",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "raw-image-1",
+          type: "image_generation_call",
+          status: "completed",
+          revised_prompt: "A blue square.",
+          result: "raw-base64-image",
+        },
+      },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      {
+        type: "image-generated",
+        id: "raw-image-1",
+        imageBase64: "raw-base64-image",
+        revisedPrompt: "A blue square.",
+        status: "completed",
+      },
+    ]);
+  });
+
+  it("uses the configured image model, quality, size, and local references in the image-generation turn", async () => {
+    const config = loadTestConfig({
+      CODEX_MODEL: "gpt-5.5",
+      CODEX_IMAGE_MODEL: "gpt-image-2",
+      CODEX_IMAGE_QUALITY: "low",
+    });
+    const imagePromise = createCodexImageGenerator(config)({
+      prompt: "Turn the reference into a watercolor postcard.",
+      model: config.CODEX_IMAGE_MODEL,
+      quality: config.CODEX_IMAGE_QUALITY,
+      size: "1024x1024",
+      mode: "edit",
+      references: [{
+        fileId: 7,
+        name: "reference.png",
+        path: "/tmp/reference.png",
+        mimeType: "image/png",
+      }],
+    });
+
+    const initialize = await waitForSent(transport, (message) => message.method === "initialize");
+    transport.emit({ id: initialize.id, result: {} });
+    const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
+    expect(threadStart.params).toMatchObject({ model: "gpt-5.5" });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
+    const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
+    expect(turnStart.params).toMatchObject({ model: "gpt-5.5" });
+    const turnInput = ((turnStart.params as Record<string, unknown>).input ?? []) as Array<Record<string, unknown>>;
+    expect(turnInput[0]?.text).toContain("Use image model gpt-image-2.");
+    expect(turnInput[0]?.text).toContain("Use quality low.");
+    expect(turnInput[0]?.text).toContain("Use size 1024x1024.");
+    expect(turnInput[0]?.text).toContain("Use the supplied reference image");
+    expect(turnInput[0]?.text).toContain("Turn the reference into a watercolor postcard.");
+    expect(turnInput[1]).toMatchObject({
+      type: "localImage",
+      path: "/tmp/reference.png",
+      detail: "high",
+    });
+    transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "ig-1", type: "imageGeneration", result: "generated-base64", revisedPrompt: "Watercolor postcard." },
+      },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(imagePromise).resolves.toEqual({
+      imageBase64: "generated-base64",
+      mediaType: "image/png",
+      revisedPrompt: "Watercolor postcard.",
+      status: null,
+    });
   });
 
   it("emits multiple completed agentMessage replacements in order", async () => {

@@ -198,6 +198,8 @@ function toolLabel(name: string): string {
       return "📄 Searching file";
     case "read_file_section":
       return "📖 Reading file";
+    case "generate_image":
+      return "🖼️ Generating image";
     case "create_file":
       return "📎 Creating file";
     case "bash":
@@ -229,6 +231,8 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
     case "search_in_file":
     case "read_file_section":
       return metadata.fileName ?? fileIdSubject(record);
+    case "generate_image":
+      return generateImageSubject(record);
     case "create_file":
       return truncateSubject(stringField(record, "name") ?? stringField(record, "path"), 64);
     case "load_message": {
@@ -240,6 +244,14 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
     default:
       return undefined;
   }
+}
+
+function generateImageSubject(record: Record<string, unknown> | undefined): string | undefined {
+  const prompt = truncateSubject(stringField(record, "prompt"), 64);
+  const references = record?.reference_file_ids;
+  const referenceCount = Array.isArray(references) ? references.length : 0;
+  if (!prompt) return referenceCount ? `${referenceCount} reference${referenceCount === 1 ? "" : "s"}` : undefined;
+  return referenceCount ? `${prompt} +${referenceCount} ref${referenceCount === 1 ? "" : "s"}` : prompt;
 }
 
 function bashSubject(record: Record<string, unknown> | undefined): string | undefined {

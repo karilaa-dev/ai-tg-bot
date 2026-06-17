@@ -6,7 +6,14 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { buildCodexToolSpecs, buildToolRegistry, buildTools, formatBotToolResultForCodex } from "../../src/ai/tools/index.js";
+import {
+  buildCodexToolSpecs,
+  buildToolRegistry,
+  buildTools,
+  formatBotToolResultForCodex,
+  type BotImageGenerator,
+  type CreatedFileAttachment,
+} from "../../src/ai/tools/index.js";
 import { ingestFileBytes } from "../../src/files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { compactThread } from "../../src/memory/compactor.js";
@@ -267,6 +274,11 @@ describe("AI tools", () => {
     expect(webExtractSpec?.description).toContain("before claiming a web page verifies");
     expect(webExtractSpec?.description).toContain("raw JSON/API");
     expect(webExtractSpec?.description).toContain("PDF verification");
+    const generateImageSpec = specs.find((spec) => spec.name === "generate_image");
+    expect(generateImageSpec).toMatchObject({ exposeToContext: true });
+    expect(generateImageSpec?.description).toContain("Generate or edit an image");
+    expect(generateImageSpec?.description).toContain("reference_file_ids");
+    expect(generateImageSpec?.description).toContain("terminal");
     const createFileSpec = specs.find((spec) => spec.name === "create_file");
     expect(createFileSpec).toMatchObject({ exposeToContext: true });
     expect(createFileSpec?.description).toContain("send back to the Telegram user");
@@ -291,6 +303,10 @@ describe("AI tools", () => {
     expect(prompt).toContain("Do not perform unnecessary tool calls after you have enough evidence");
     expect(prompt).toContain("set -o pipefail");
     expect(prompt).toContain("blocks localhost/private");
+    expect(prompt).toContain("Use generate_image when the user asks you to create, draw, render, generate, or edit an image");
+    expect(prompt).toContain("reference_file_ids");
+    expect(prompt).toContain("After a successful generate_image call, treat it as the final step");
+    expect(prompt).toContain("Do not use create_file for image generation requests");
     expect(prompt).toContain("call create_file");
     expect(prompt).toContain("Attach at most 10 files per answer");
     expect(prompt).toContain("do not call create_file more than 10 times");
@@ -799,6 +815,167 @@ describe("AI tools", () => {
     await expect(fs.readFile(imagePath)).resolves.toEqual(redownloaded);
   });
 
+  it("queues generated images as photo attachments using configured image model, quality, and references", async () => {
+    const bytes = pngBytes();
+    const config = loadTestConfig({
+      CODEX_IMAGE_MODEL: "gpt-image-2-test",
+      CODEX_IMAGE_QUALITY: "low",
+    });
+    const user = await repos.users.ensure({ tgId: 86, firstName: "GenerateImage", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const reference = await attachFile({
+      repos,
+      config,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "reference.png",
+      mime: "image/png",
+      bytes,
+      telegramFileId: "telegram-reference-image",
+      imageSummary: "reference image",
+    });
+    const createdFiles: CreatedFileAttachment[] = [];
+    let request: Parameters<BotImageGenerator>[0] | undefined;
+    const imageGenerator: BotImageGenerator = async (input) => {
+      request = input;
+      return {
+        imageBase64: bytes.toString("base64"),
+        revisedPrompt: "A clean generated test image.",
+        mediaType: "image/png",
+      };
+    };
+    const registry = buildToolRegistry({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles,
+      imageGenerator,
+    });
+
+    const result = await registry.generate_image.execute({
+      prompt: "  make the reference image softer  ",
+      reference_file_ids: [reference.fileId],
+      mode: "edit",
+      size: "1024x1024",
+      caption: "Generated preview",
+    }) as {
+      file_id?: number;
+      name?: string;
+      type?: string;
+      caption?: string | null;
+      terminal?: boolean;
+      generated_image?: boolean;
+      model?: string;
+      quality?: string;
+      requested_size?: string;
+      mode?: string;
+      reference_file_ids?: number[];
+      revised_prompt?: string | null;
+      status?: string;
+      error?: string;
+    };
+
+    expect(result).toMatchObject({
+      name: "generated-image.png",
+      type: "image",
+      caption: "Generated preview",
+      terminal: true,
+      generated_image: true,
+      model: "gpt-image-2-test",
+      quality: "low",
+      requested_size: "1024x1024",
+      mode: "edit",
+      reference_file_ids: [reference.fileId],
+      revised_prompt: "A clean generated test image.",
+      status: "1 image generated (1/10 files used)",
+    });
+    expect(request).toMatchObject({
+      prompt: "make the reference image softer",
+      model: "gpt-image-2-test",
+      quality: "low",
+      size: "1024x1024",
+      mode: "edit",
+      references: [{
+        fileId: reference.fileId,
+        name: "reference.png",
+        path: reference.file.path,
+        mimeType: "image/png",
+      }],
+    });
+    expect(createdFiles).toHaveLength(1);
+    expect(createdFiles[0]).toMatchObject({
+      fileId: result.file_id,
+      type: "image",
+      name: "generated-image.png",
+      delivery: "photo",
+      origin: "generated_image",
+      caption: "Generated preview",
+      inline: true,
+    });
+    const stored = await repos.files.get(result.file_id!);
+    expect(stored).toMatchObject({
+      type: "image",
+      name: "generated-image.png",
+      summary: "A clean generated test image.",
+      is_inline: 1,
+    });
+    await expect(fs.readFile(stored!.path)).resolves.toEqual(bytes);
+  });
+
+  it("rejects generate_image references that are not images in the current thread", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 87, firstName: "ImageReferences", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const otherThread = await repos.threads.activeForUserTopic(user.tg_id, 870, "Other image thread");
+    const sameThreadText = await attachFile({
+      repos,
+      config,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "notes.txt",
+      mime: "text/plain",
+      bytes: Buffer.from("not an image"),
+      telegramFileId: "telegram-notes-file",
+    });
+    const otherImage = await attachFile({
+      repos,
+      config,
+      userId: user.tg_id,
+      threadId: otherThread.id,
+      name: "other.png",
+      mime: "image/png",
+      bytes: pngBytes(),
+      telegramFileId: "telegram-other-image",
+      imageSummary: "other thread image",
+    });
+    const registry = buildToolRegistry({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles: [],
+      imageGenerator: async () => ({ imageBase64: pngBytes().toString("base64") }),
+    });
+
+    await expect(registry.generate_image.execute({
+      prompt: "edit this",
+      reference_file_ids: [sameThreadText.fileId],
+      mode: "edit",
+    })).resolves.toMatchObject({ error: expect.stringContaining("not an image") });
+    await expect(registry.generate_image.execute({
+      prompt: "edit other",
+      reference_file_ids: [otherImage.fileId],
+      mode: "edit",
+    })).resolves.toMatchObject({ error: expect.stringContaining("was not found in this thread") });
+    await expect(registry.generate_image.execute({
+      prompt: "edit missing",
+      mode: "edit",
+    })).resolves.toMatchObject({ error: expect.stringContaining("mode edit requires at least one reference_file_id") });
+  });
+
   it("retrieves multiple compacted file types from a forked thread", async () => {
     const inlineConfig = loadTestConfig({ FILE_INLINE_TOKENS: 1000 });
     const searchableConfig = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
@@ -972,6 +1149,13 @@ function bashOutput(overrides: Partial<Awaited<ReturnType<BashToolForTests["exec
     cwd: "/",
     ...overrides,
   };
+}
+
+function pngBytes(): Buffer {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axw7NAAAAAASUVORK5CYII=",
+    "base64",
+  );
 }
 
 async function withMockFetch<T>(mockFetch: typeof globalThis.fetch, action: () => Promise<T>): Promise<T> {

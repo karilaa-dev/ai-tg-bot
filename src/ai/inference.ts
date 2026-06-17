@@ -1,6 +1,7 @@
 import type { BuiltContext } from "../memory/contextBuilder.js";
 import {
   createCodexConversationSummarizer,
+  createCodexImageGenerator,
   createCodexImageCaptioner,
   streamCodexTurn,
 } from "./codexAppServer.js";
@@ -12,11 +13,12 @@ export type InferenceInput = ToolBuildInput & {
 };
 
 export function streamInference(input: InferenceInput): { fullStream: AsyncIterable<unknown> } {
+  const imageGenerator = input.imageGenerator ?? createCodexImageGenerator(input.config, input.logger);
   return streamCodexTurn({
     config: input.config,
     system: input.context.system,
     messages: input.context.messages,
-    tools: buildToolRegistry(input),
+    tools: buildToolRegistry({ ...input, imageGenerator }),
     logger: input.logger,
     abortSignal: input.abortSignal,
   });

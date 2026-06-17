@@ -27,6 +27,7 @@ export interface ToolBuildInput {
   embedder?: TextEmbedder;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
   createdFiles?: CreatedFileAttachment[];
+  imageGenerator?: BotImageGenerator;
 }
 
 export interface CreatedFileAttachment {
@@ -38,7 +39,36 @@ export interface CreatedFileAttachment {
   caption?: string | null;
   inline: boolean;
   card: string;
+  delivery?: "document" | "photo";
+  origin?: "created_file" | "generated_image";
 }
+
+export type ImageGenerationMode = "auto" | "generate" | "edit";
+
+export interface ImageGenerationReference {
+  fileId: number;
+  name: string;
+  path: string;
+  mimeType: string;
+}
+
+export interface ImageGenerationRequest {
+  prompt: string;
+  model: string;
+  quality: AppConfig["CODEX_IMAGE_QUALITY"];
+  size: "auto" | "1024x1024" | "1536x1024" | "1024x1536";
+  mode: ImageGenerationMode;
+  references: ImageGenerationReference[];
+}
+
+export interface ImageGenerationResult {
+  imageBase64: string;
+  revisedPrompt?: string | null;
+  status?: string | null;
+  mediaType?: string | null;
+}
+
+export type BotImageGenerator = (input: ImageGenerationRequest) => Promise<ImageGenerationResult>;
 
 export interface BotToolDefinition<Input = unknown, Output = unknown> {
   description: string;
@@ -305,6 +335,120 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
         return { content };
       },
     },
+    generate_image: {
+      description:
+        "Generate or edit an image with the configured Codex app-server image model and queue it as the final Telegram photo response. Use this when the user asks you to create, draw, render, generate, or edit an image. For edits or image references, pass current-thread image file ids in reference_file_ids. This tool is terminal: after a successful call, do not call more tools or add a separate final text answer unless a short caption was explicitly requested.",
+      inputSchema: z.object({
+        prompt: z.string().min(1).max(4000),
+        reference_file_ids: z.array(z.coerce.number().int().positive()).max(4).default([]),
+        mode: z.enum(["auto", "generate", "edit"]).default("auto"),
+        size: z.enum(["auto", "1024x1024", "1536x1024", "1024x1536"]).default("1024x1024"),
+        caption: z.string().max(1024).optional(),
+      }),
+      execute: async ({ prompt, reference_file_ids = [], mode = "auto", size = "1024x1024", caption }) => {
+        try {
+          if (!input.imageGenerator) throw new Error("image generator is unavailable");
+          const usedBefore = input.createdFiles?.length ?? 0;
+          if (usedBefore >= MAX_CREATED_FILES_PER_ANSWER) {
+            throw new Error(
+              `File limit reached: ${MAX_CREATED_FILES_PER_ANSWER} files are already attached to this answer. Do not try to attach more files in this answer.`,
+            );
+          }
+          if (input.createdFiles?.some((file) => file.origin === "generated_image")) {
+            throw new Error("an image has already been generated for this answer; finish the conversation with that image");
+          }
+          const promptText = prompt.trim();
+          if (!promptText) throw new Error("prompt is empty");
+          const references = await resolveImageGenerationReferences(input, reference_file_ids);
+          if (mode === "edit" && !references.length) {
+            throw new Error("mode edit requires at least one reference_file_id");
+          }
+          input.logger?.info("tool generate_image starting", {
+            threadId: input.thread.id,
+            promptChars: promptText.length,
+            references: references.length,
+            model: input.config.CODEX_IMAGE_MODEL,
+            quality: input.config.CODEX_IMAGE_QUALITY,
+            size,
+          });
+          const generated = await input.imageGenerator({
+            prompt: promptText,
+            model: input.config.CODEX_IMAGE_MODEL,
+            quality: input.config.CODEX_IMAGE_QUALITY,
+            size,
+            mode,
+            references,
+          });
+          const bytes = Buffer.from(generated.imageBase64, "base64");
+          if (!bytes.length) throw new Error("image generator returned empty image data");
+          if (bytes.length > MAX_TELEGRAM_PHOTO_BYTES) {
+            throw new Error(`generated image is too large to send as a Telegram photo (${formatBytes(bytes.length)})`);
+          }
+          const mediaType = normalizeGeneratedImageMediaType(generated.mediaType, bytes);
+          const name = generatedImageName(mediaType);
+          const summary = generated.revisedPrompt?.trim() || promptText;
+          const ingested = await ingestFileBytes({
+            config: input.config,
+            repo: input.repos.files,
+            userId: input.user.tg_id,
+            threadId: input.thread.id,
+            bytes,
+            name,
+            mime: mediaType,
+            imageSummary: summary,
+            embeddings: input.repos.embeddings,
+            embedder: input.embedder,
+            logger: input.logger,
+          });
+          const stored = await input.repos.files.get(ingested.fileId);
+          if (!stored) throw new Error(`generated image was not stored: ${ingested.fileId}`);
+          const attachment: CreatedFileAttachment = {
+            fileId: ingested.fileId,
+            type: ingested.type,
+            name: stored.name,
+            path: stored.path,
+            size: stored.size,
+            caption: caption?.trim() || null,
+            inline: ingested.inline,
+            card: ingested.card,
+            delivery: "photo",
+            origin: "generated_image",
+          };
+          input.createdFiles?.push(attachment);
+          const used = usedBefore + 1;
+          input.logger?.info("tool generate_image complete", {
+            threadId: input.thread.id,
+            fileId: attachment.fileId,
+            bytes: attachment.size,
+            references: references.length,
+            filesUsed: used,
+            filesLimit: MAX_CREATED_FILES_PER_ANSWER,
+          });
+          return {
+            file_id: attachment.fileId,
+            name: attachment.name,
+            type: attachment.type,
+            size: attachment.size,
+            caption: attachment.caption ?? null,
+            status: `1 image generated (${used}/${MAX_CREATED_FILES_PER_ANSWER} files used)`,
+            generated_image: true,
+            terminal: true,
+            model: input.config.CODEX_IMAGE_MODEL,
+            quality: input.config.CODEX_IMAGE_QUALITY,
+            requested_size: size,
+            mode,
+            reference_file_ids,
+            revised_prompt: generated.revisedPrompt ?? null,
+          };
+        } catch (err) {
+          input.logger?.warn("tool generate_image failed", {
+            threadId: input.thread.id,
+            err: String(err),
+          });
+          return { error: String(err) };
+        }
+      },
+    },
     create_file: {
       description:
         "Queue a file that you created in this thread's bash workspace to send back to the Telegram user. First create the file with bash, then call this tool with its absolute virtual path. Attach at most 10 files per answer; do not call create_file more than 10 times in one answer. If more files are needed, send the first 10 and say the rest can be sent in another answer. Files up to 20 MB are allowed unless they are native/compiled executables such as exe, dll, ELF/Mach-O binaries, shared libraries, Java bytecode archives, or WebAssembly. Scripts and source files such as sh, bash, ps1, py, js, ts, and similar text/code files are allowed. Images are sent as documents to preserve exact bytes.",
@@ -569,6 +713,68 @@ function codexContentFromModelOutput(modelOutput: unknown): CodexToolContentItem
   return items;
 }
 
+const MAX_TELEGRAM_PHOTO_BYTES = 10 * 1024 * 1024;
+
+async function resolveImageGenerationReferences(
+  input: ToolBuildInput,
+  fileIds: number[],
+): Promise<ImageGenerationReference[]> {
+  if (!fileIds.length) return [];
+  const requestedIds = [...new Set(fileIds)];
+  const scope = await threadChainScope(input.repos, input.thread);
+  const scopedIds = new Set(scope.fileIds);
+  const files = await input.repos.files.listByIds(requestedIds);
+  const byId = new Map(files.map((file) => [file.id, file]));
+  const references: ImageGenerationReference[] = [];
+  for (const fileId of requestedIds) {
+    const file = byId.get(fileId);
+    if (!file || !scopedIds.has(file.id)) throw new Error(`reference image #${fileId} was not found in this thread`);
+    if (file.type !== "image") throw new Error(`reference file #${fileId} is ${file.type}, not an image`);
+    await readCachedOrRedownloadImage(input, { file_id: file.id, path: file.path });
+    references.push({
+      fileId: file.id,
+      name: file.name,
+      path: file.path,
+      mimeType: referenceImageMediaType(file),
+    });
+  }
+  return references;
+}
+
+function normalizeGeneratedImageMediaType(value: string | null | undefined, bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" {
+  const normalized = value?.toLowerCase().trim();
+  if (normalized === "image/jpeg" || normalized === "image/png" || normalized === "image/webp") return normalized;
+  const detected = detectImageMediaType(bytes);
+  return detected ?? "image/png";
+}
+
+function detectImageMediaType(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | undefined {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+function generatedImageName(mediaType: "image/png" | "image/jpeg" | "image/webp"): string {
+  switch (mediaType) {
+    case "image/jpeg":
+      return "generated-image.jpg";
+    case "image/webp":
+      return "generated-image.webp";
+    case "image/png":
+      return "generated-image.png";
+  }
+}
+
+function referenceImageMediaType(file: FileRow): string {
+  const mediaType = imageMediaType(file.name);
+  return mediaType === "image/*" ? imageMediaType(file.path) : mediaType;
+}
+
 async function prepareCreatedFile(
   input: ToolBuildInput,
   file: { virtualPath: string; name?: string; mime?: string; caption?: string },
@@ -619,6 +825,8 @@ async function prepareCreatedFile(
         caption: file.caption?.trim() || null,
         inline: ingested.inline,
         card: ingested.card,
+        delivery: "document",
+        origin: "created_file",
       };
     } catch (err) {
       input.logger?.warn("created file ingest failed; storing as generic attachment", {
@@ -640,6 +848,8 @@ async function prepareCreatedFile(
     caption: file.caption?.trim() || null,
     inline: Boolean(stored.is_inline),
     card: `File #${stored.id}: ${stored.name} (${formatBytes(stored.size)}).`,
+    delivery: "document",
+    origin: "created_file",
   };
 }
 

@@ -13,7 +13,7 @@ import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { streamInference } from "./inference.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
-import type { CreatedFileAttachment } from "./tools/index.js";
+import type { BotImageGenerator, CreatedFileAttachment } from "./tools/index.js";
 
 export interface TurnInput {
   api: Api;
@@ -31,6 +31,7 @@ export interface TurnInput {
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
   embedder?: TextEmbedder;
+  imageGenerator?: BotImageGenerator;
   t: (key: string, params?: Record<string, string | number>) => string;
 }
 
@@ -192,8 +193,9 @@ export const runTurn: TurnRunner = async (input) => {
       toolResults,
     });
     const answer = shaper.finalAnswer();
-    let finalAnswer = answer;
-    if (!answer.trim()) {
+    const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
+    let finalAnswer = hasGeneratedImage ? "" : answer;
+    if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
       input.logger.warn("turn produced empty final answer", {
         threadId: input.thread.id,
         userId: input.user.tg_id,
@@ -368,16 +370,20 @@ export async function sendFinal(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const messages = renderFinal({
-    thinkingLog: thinking,
-    answerMd: answer,
-    elapsedMs,
-    t: input.t,
-  });
+  const messages = thinking.trim() || answer.trim()
+    ? renderFinal({
+        thinkingLog: thinking,
+        answerMd: answer,
+        elapsedMs,
+        t: input.t,
+      })
+    : [];
+  const persistedText = answer.trim() ? answer : attachmentPersistedText(outboundAttachments);
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
     parts: messages.length,
     answerChars: answer.length,
+    persistedChars: persistedText.length,
     thinkingChars: thinking.length,
   });
   const ids: number[] = [];
@@ -389,16 +395,17 @@ export async function sendFinal(
     role: "assistant",
     content: outboundAttachments.length
       ? {
-          text: answer,
+          text: persistedText,
           files: outboundAttachments.map((file) => ({
             id: file.fileId,
             type: file.type,
             name: file.name,
             inline: file.inline,
+            delivery: file.delivery ?? "document",
           })),
         }
-      : { text: answer },
-    textPlain: answer,
+      : { text: persistedText },
+    textPlain: persistedText,
     thinking,
     tgMessageId: ids.find((id) => id > 0) ?? null,
   });
@@ -421,6 +428,18 @@ export async function sendFinal(
 }
 
 async function sendCreatedFileAttachments(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
+  if (!attachments.length) return;
+  const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") !== "photo");
+  const photos = attachments.filter((attachment) => attachment.delivery === "photo");
+  await sendDocumentAttachments(input, assistantMessage, documents);
+  await sendPhotoAttachments(input, assistantMessage, photos);
+}
+
+async function sendDocumentAttachments(
   input: TurnInput,
   assistantMessage: MessageRow,
   attachments: CreatedFileAttachment[],
@@ -451,7 +470,7 @@ async function sendCreatedFileAttachments(
   }
 
   try {
-    const sent = await sendMediaGroupWithThreadFallback(input, attachments);
+    const sent = await sendDocumentMediaGroupWithThreadFallback(input, attachments);
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index]!;
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
@@ -473,29 +492,89 @@ async function sendCreatedFileAttachments(
   }
 }
 
+async function sendPhotoAttachments(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
+  if (!attachments.length) return;
+  if (attachments.length === 1) {
+    const attachment = attachments[0]!;
+    try {
+      const sent = await sendPhotoWithThreadFallback(input, attachment);
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+      input.logger.info("generated image photo sent", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        telegramMessageId: sent.message_id,
+        name: attachment.name,
+      });
+    } catch (err) {
+      input.logger.warn("failed to send generated image photo", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        name: attachment.name,
+        err: String(err),
+      });
+    }
+    return;
+  }
+
+  try {
+    const sent = await sendPhotoMediaGroupWithThreadFallback(input, attachments);
+    for (let index = 0; index < attachments.length; index += 1) {
+      const attachment = attachments[index]!;
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
+    }
+    input.logger.info("generated image photo media group sent", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      files: attachments.length,
+      telegramMessages: sent.map((message) => message.message_id),
+    });
+  } catch (err) {
+    input.logger.warn("failed to send generated image photo media group", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      files: attachments.length,
+      fileIds: attachments.map((attachment) => attachment.fileId),
+      err: String(err),
+    });
+  }
+}
+
 async function rememberSentCreatedFileAttachment(
   input: TurnInput,
   assistantMessage: MessageRow,
   attachment: CreatedFileAttachment,
-  sent: SentDocumentMessage | undefined,
+  sent: SentTelegramFileMessage | undefined,
 ): Promise<void> {
   await input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
     displayName: attachment.name,
     caption: attachment.caption ?? null,
   });
-  const document = asRecord(sent)?.document;
+  const message = asRecord(sent);
+  const document = asRecord(message?.document);
+  const photo = largestTelegramPhoto(message?.photo);
+  const fileRecord = document ?? photo;
   await input.repos.files.rememberTelegramFileRef(attachment.fileId, {
-    fileUniqueId: stringField(asRecord(document), "file_unique_id") ?? null,
-    telegramFileId: stringField(asRecord(document), "file_id") ?? null,
+    fileUniqueId: stringField(fileRecord, "file_unique_id") ?? null,
+    telegramFileId: stringField(fileRecord, "file_id") ?? null,
   });
 }
 
-type SentDocumentMessage = { message_id: number; document?: { file_id?: string; file_unique_id?: string } };
+type SentTelegramFileMessage = {
+  message_id: number;
+  document?: { file_id?: string; file_unique_id?: string };
+  photo?: Array<{ file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number }>;
+};
 
 async function sendDocumentWithThreadFallback(
   input: TurnInput,
   attachment: CreatedFileAttachment,
-): Promise<SentDocumentMessage> {
+): Promise<SentTelegramFileMessage> {
   const other = documentSendOptions(input.messageThreadId, attachment);
   try {
     return await input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), other);
@@ -513,10 +592,31 @@ async function sendDocumentWithThreadFallback(
   }
 }
 
-async function sendMediaGroupWithThreadFallback(
+async function sendPhotoWithThreadFallback(
+  input: TurnInput,
+  attachment: CreatedFileAttachment,
+): Promise<SentTelegramFileMessage> {
+  const other = photoSendOptions(input.messageThreadId, attachment);
+  try {
+    return await input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), other);
+  } catch (err) {
+    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
+    input.logger.warn("telegram topic send failed; retrying generated image photo without message_thread_id", {
+      threadId: input.thread.id,
+      topicId: input.messageThreadId,
+      fileId: attachment.fileId,
+    });
+    return input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), {
+      ...photoSendOptions(undefined, attachment),
+      caption: photoFallbackCaption(input.thread.title, attachment),
+    });
+  }
+}
+
+async function sendDocumentMediaGroupWithThreadFallback(
   input: TurnInput,
   attachments: CreatedFileAttachment[],
-): Promise<SentDocumentMessage[]> {
+): Promise<SentTelegramFileMessage[]> {
   try {
     return await input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), mediaGroupSendOptions(input.messageThreadId));
   } catch (err) {
@@ -535,10 +635,42 @@ async function sendMediaGroupWithThreadFallback(
   }
 }
 
+async function sendPhotoMediaGroupWithThreadFallback(
+  input: TurnInput,
+  attachments: CreatedFileAttachment[],
+): Promise<SentTelegramFileMessage[]> {
+  try {
+    return await input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), mediaGroupSendOptions(input.messageThreadId));
+  } catch (err) {
+    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
+    input.logger.warn("telegram topic send failed; retrying generated image photo media group without message_thread_id", {
+      threadId: input.thread.id,
+      topicId: input.messageThreadId,
+      files: attachments.length,
+      fileIds: attachments.map((attachment) => attachment.fileId),
+    });
+    return input.api.sendMediaGroup(
+      input.chatId,
+      photoMediaGroup(attachments, input.thread.title),
+      mediaGroupSendOptions(undefined),
+    );
+  }
+}
+
 function documentSendOptions(
   messageThreadId: number | undefined,
   attachment: CreatedFileAttachment,
 ): Parameters<Api["sendDocument"]>[2] {
+  return {
+    message_thread_id: messageThreadId,
+    caption: attachment.caption ?? undefined,
+  };
+}
+
+function photoSendOptions(
+  messageThreadId: number | undefined,
+  attachment: CreatedFileAttachment,
+): Parameters<Api["sendPhoto"]>[2] {
   return {
     message_thread_id: messageThreadId,
     caption: attachment.caption ?? undefined,
@@ -564,9 +696,51 @@ function documentMediaGroup(
   }));
 }
 
+function photoMediaGroup(
+  attachments: CreatedFileAttachment[],
+  fallbackThreadTitle?: string,
+): Parameters<Api["sendMediaGroup"]>[1] {
+  return attachments.map((attachment, index) => ({
+    type: "photo" as const,
+    media: new InputFile(attachment.path, attachment.name),
+    caption: fallbackThreadTitle && index === 0
+      ? photoFallbackCaption(fallbackThreadTitle, attachment)
+      : attachment.caption ?? undefined,
+  }));
+}
+
 function documentFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
   const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
   return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
+}
+
+function photoFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
+  const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
+  return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
+}
+
+function attachmentPersistedText(attachments: CreatedFileAttachment[]): string {
+  if (!attachments.length) return "";
+  const generatedImages = attachments.filter((attachment) => attachment.origin === "generated_image");
+  const files = generatedImages.length ? generatedImages : attachments;
+  const names = files.map((file) => file.caption?.trim() || file.name).filter(Boolean).join(", ");
+  if (generatedImages.length) return `Generated image: ${names}`;
+  return `Attached file${files.length === 1 ? "" : "s"}: ${names}`;
+}
+
+function largestTelegramPhoto(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map(asRecord)
+    .filter((photo): photo is Record<string, unknown> => Boolean(photo))
+    .sort((left, right) => telegramPhotoScore(right) - telegramPhotoScore(left))[0];
+}
+
+function telegramPhotoScore(photo: Record<string, unknown>): number {
+  const size = typeof photo.file_size === "number" && Number.isFinite(photo.file_size) ? photo.file_size : 0;
+  const width = typeof photo.width === "number" && Number.isFinite(photo.width) ? photo.width : 0;
+  const height = typeof photo.height === "number" && Number.isFinite(photo.height) ? photo.height : 0;
+  return Math.max(size, width * height);
 }
 
 async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string; html?: string }): Promise<number[]> {
@@ -774,6 +948,10 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   if (toolName === "create_file" && record) {
     return record.file_id === undefined ? "done" : formatCount(1, "file");
+  }
+
+  if (toolName === "generate_image" && record) {
+    return record.file_id === undefined ? "done" : formatCount(1, "image");
   }
 
   const results = Array.isArray(record?.results) ? record.results : undefined;

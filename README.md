@@ -31,6 +31,11 @@ Personal AI assistant Telegram bot built with TypeScript, grammY, Codex app-serv
 All chat inference runs through `codex app-server`. `CODEX_MODEL` controls
 normal generation, `CODEX_COMPACTION_MODEL` controls conversation
 summarization/rolling memory and compaction-time image descriptions.
+`CODEX_IMAGE_MODEL` is the requested image model for the `generate_image`
+dynamic tool and defaults to `gpt-image-2`; `CODEX_IMAGE_QUALITY` defaults to
+`low`.
+Generated images are stored as image files for future `#file` references and
+sent back through Telegram `sendPhoto`.
 `CODEX_SPEED_MODE=fast` maps to Codex `serviceTier: "fast"`.
 `CODEX_VERBOSITY` defaults to `high` and is sent as Codex `model_verbosity`.
 `REASONING_SUMMARY` defaults to `none` and is the only reasoning-display
