@@ -108,4 +108,14 @@ describe("renderFinal", () => {
     expect(markdown).toContain("<details>\n<summary>Thought for 1m 05s</summary>");
     expect(markdown).not.toContain("steps");
   });
+
+  it("preserves rich Markdown media blocks", () => {
+    const [payload] = renderFinal({
+      answerMd: "![Generated image](https://cdn.example.test/generated-image.png)",
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(payload?.markdown).toContain("![Generated image](https://cdn.example.test/generated-image.png)");
+  });
 });

@@ -34,8 +34,13 @@ summarization/rolling memory and compaction-time image descriptions.
 `CODEX_IMAGE_MODEL` is the requested image model for the `generate_image`
 dynamic tool and defaults to `gpt-image-2`; `CODEX_IMAGE_QUALITY` defaults to
 `low`.
-Generated images are stored as image files for future `#file` references and
-sent back through Telegram `sendPhoto`.
+Generated images are stored as image files for future `#file` references. To
+embed them in the final Telegram `sendRichMessage` Markdown payload, the bot
+decodes Codex's base64 image result, stores it under `./data/files`, and builds
+a hosted HTTP(S) URL from `GENERATED_MEDIA_PUBLIC_BASE_URL`. Serve
+`./data/files` from a public HTTPS URL and set that URL prefix before enabling
+image generation. Telegram rich media blocks require HTTP/HTTPS URLs, so
+generated images are not sent as separate Telegram photos.
 `CODEX_SPEED_MODE=fast` maps to Codex `serviceTier: "fast"`.
 `CODEX_VERBOSITY` defaults to `high` and is sent as Codex `model_verbosity`.
 `REASONING_SUMMARY` defaults to `none` and is the only reasoning-display

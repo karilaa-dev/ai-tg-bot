@@ -815,11 +815,12 @@ describe("AI tools", () => {
     await expect(fs.readFile(imagePath)).resolves.toEqual(redownloaded);
   });
 
-  it("queues generated images as photo attachments using configured image model, quality, and references", async () => {
+  it("queues generated images as rich Markdown attachments using configured image model, quality, and references", async () => {
     const bytes = pngBytes();
     const config = loadTestConfig({
       CODEX_IMAGE_MODEL: "gpt-image-2-test",
       CODEX_IMAGE_QUALITY: "low",
+      GENERATED_MEDIA_PUBLIC_BASE_URL: "https://cdn.example.test/files/",
     });
     const user = await repos.users.ensure({ tgId: 86, firstName: "GenerateImage", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
@@ -909,7 +910,8 @@ describe("AI tools", () => {
       fileId: result.file_id,
       type: "image",
       name: "generated-image.png",
-      delivery: "photo",
+      delivery: "rich-photo",
+      publicUrl: expect.stringMatching(/^https:\/\/cdn\.example\.test\/files\//),
       origin: "generated_image",
       caption: "Generated preview",
       inline: true,
@@ -922,6 +924,32 @@ describe("AI tools", () => {
       is_inline: 1,
     });
     await expect(fs.readFile(stored!.path)).resolves.toEqual(bytes);
+  });
+
+  it("rejects generate_image when no media base URL is configured for Codex base64 output", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 90, firstName: "GenerateImageNoUrl", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    let called = false;
+    const registry = buildToolRegistry({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles: [],
+      imageGenerator: async () => {
+        called = true;
+        return { imageBase64: pngBytes().toString("base64") };
+      },
+    });
+
+    await expect(registry.generate_image.execute({
+      prompt: "make a red square",
+    })).resolves.toMatchObject({
+      error: expect.stringContaining("no public image URL"),
+    });
+    expect(called).toBe(true);
   });
 
   it("rejects generate_image references that are not images in the current thread", async () => {

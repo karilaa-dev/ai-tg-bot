@@ -550,7 +550,7 @@ class CodexRpcSession {
   }
 
   private emitGeneratedImage(item: Record<string, unknown>, itemId: string | undefined): void {
-    const imageBase64 = stringValue(item, "result");
+    const imageBase64 = stringValue(item, "result")?.trim();
     if (!imageBase64) return;
     const key = itemId ?? imageBase64.slice(0, 64);
     if (this.seenGeneratedImages.has(key)) return;

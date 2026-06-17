@@ -11,6 +11,7 @@ import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
 import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { streamInference } from "./inference.js";
+import { publicGeneratedMediaUrl, requireGeneratedMediaPublicBaseUrl } from "./mediaUrls.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
 import type { BotImageGenerator, CreatedFileAttachment } from "./tools/index.js";
@@ -146,6 +147,8 @@ export const runTurn: TurnRunner = async (input) => {
   let contentEvents = 0;
   let toolCalls = 0;
   let toolResults = 0;
+  let generateImageToolCalls = 0;
+  let generateImageToolError: string | undefined;
   const createdFiles: CreatedFileAttachment[] = [];
   try {
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
@@ -169,6 +172,7 @@ export const runTurn: TurnRunner = async (input) => {
       if (event === "content") contentEvents += 1;
       if (event === "tool-call") {
         toolCalls += 1;
+        if (normalized?.kind === "tool-call" && normalized.toolName === "generate_image") generateImageToolCalls += 1;
         input.logger.info("tool call started", {
           threadId: input.thread.id,
           toolName: normalized?.kind === "tool-call" ? normalized.toolName : "tool",
@@ -176,6 +180,9 @@ export const runTurn: TurnRunner = async (input) => {
       }
       if (event === "tool-result") {
         toolResults += 1;
+        if (normalized?.kind === "tool-result" && normalized.toolName === "generate_image") {
+          generateImageToolError = toolErrorText(normalized.output) ?? generateImageToolError;
+        }
         input.logger.info("tool call finished", {
           threadId: input.thread.id,
           toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
@@ -194,6 +201,9 @@ export const runTurn: TurnRunner = async (input) => {
     });
     const answer = shaper.finalAnswer();
     const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
+    if (generateImageToolCalls > 0 && !hasGeneratedImage) {
+      throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
+    }
     let finalAnswer = hasGeneratedImage ? "" : answer;
     if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
       input.logger.warn("turn produced empty final answer", {
@@ -362,6 +372,8 @@ export async function sendFinal(
   attachments: CreatedFileAttachment[] = [],
 ): Promise<void> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
+  const richPhotoAttachments = outboundAttachments.filter(isRichPhotoAttachment);
+  const separateAttachments = outboundAttachments.filter((attachment) => !isRichPhotoAttachment(attachment));
   if (attachments.length > outboundAttachments.length) {
     input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
       threadId: input.thread.id,
@@ -370,10 +382,13 @@ export async function sendFinal(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const messages = thinking.trim() || answer.trim()
+  const richImageMarkdown = richPhotoMarkdown(input, richPhotoAttachments);
+  const richAnswer = [answer.trim() ? answer : "", richImageMarkdown].filter(Boolean).join("\n\n");
+  let richPhotoAttachmentsSent = false;
+  const messages = thinking.trim() || richAnswer.trim()
     ? renderFinal({
         thinkingLog: thinking,
-        answerMd: answer,
+        answerMd: richAnswer,
         elapsedMs,
         t: input.t,
       })
@@ -387,9 +402,15 @@ export async function sendFinal(
     thinkingChars: thinking.length,
   });
   const ids: number[] = [];
+  const richSentMessages: SentTelegramFileMessage[] = [];
   for (const rich of messages) {
-    ids.push(...(await sendRichWithFallback(input, rich)));
+    const sent = await sendRichWithFallback(input, rich, {
+      requireRich: containsRichMediaMarkdown(rich),
+    });
+    richSentMessages.push(...sent);
+    ids.push(...sent.map((message) => message.message_id));
   }
+  richPhotoAttachmentsSent = richPhotoAttachments.length > 0;
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
     role: "assistant",
@@ -409,7 +430,10 @@ export async function sendFinal(
     thinking,
     tgMessageId: ids.find((id) => id > 0) ?? null,
   });
-  await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
+  if (richPhotoAttachmentsSent) {
+    await rememberRichPhotoAttachments(input, assistantMessage, richPhotoAttachments, richSentMessages);
+  }
+  await sendCreatedFileAttachments(input, assistantMessage, richPhotoAttachmentsSent ? separateAttachments : outboundAttachments);
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -433,7 +457,7 @@ async function sendCreatedFileAttachments(
   attachments: CreatedFileAttachment[],
 ): Promise<void> {
   if (!attachments.length) return;
-  const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") !== "photo");
+  const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") === "document");
   const photos = attachments.filter((attachment) => attachment.delivery === "photo");
   await sendDocumentAttachments(input, assistantMessage, documents);
   await sendPhotoAttachments(input, assistantMessage, photos);
@@ -557,7 +581,7 @@ async function rememberSentCreatedFileAttachment(
   });
   const message = asRecord(sent);
   const document = asRecord(message?.document);
-  const photo = largestTelegramPhoto(message?.photo);
+  const photo = largestTelegramPhotoFromMessage(sent);
   const fileRecord = document ?? photo;
   await input.repos.files.rememberTelegramFileRef(attachment.fileId, {
     fileUniqueId: stringField(fileRecord, "file_unique_id") ?? null,
@@ -743,13 +767,77 @@ function telegramPhotoScore(photo: Record<string, unknown>): number {
   return Math.max(size, width * height);
 }
 
-async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string; html?: string }): Promise<number[]> {
+function isRichPhotoAttachment(attachment: CreatedFileAttachment): boolean {
+  return attachment.delivery === "rich-photo";
+}
+
+function richPhotoMarkdown(input: TurnInput, attachments: CreatedFileAttachment[]): string {
+  return attachments
+    .map((attachment) => {
+      const url = richPhotoUrl(input, attachment);
+      if (!url) return undefined;
+      const alt = escapeMarkdownImageAlt(attachment.caption?.trim() || attachment.name);
+      return `![${alt}](${url})`;
+    })
+    .filter((line): line is string => Boolean(line))
+    .join("\n\n");
+}
+
+function richPhotoUrl(input: TurnInput, attachment: CreatedFileAttachment): string {
+  if (!isRichPhotoAttachment(attachment)) throw new Error(`attachment ${attachment.fileId} is not a rich photo`);
+  if (attachment.publicUrl) return attachment.publicUrl;
+  return publicGeneratedMediaUrl(requireGeneratedMediaPublicBaseUrl(input.config), attachment.path);
+}
+
+function escapeMarkdownImageAlt(text: string): string {
+  return text.replace(/[\]\r\n]/g, " ").trim() || "generated image";
+}
+
+function containsRichMediaMarkdown(rich: { markdown?: string; html?: string }): boolean {
+  return /!\[[^\]\r\n]*]\(https?:\/\//i.test(rich.markdown ?? "") || /<(?:img|video|audio)\s/i.test(rich.html ?? "");
+}
+
+async function rememberRichPhotoAttachments(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachments: CreatedFileAttachment[],
+  sentMessages: SentTelegramFileMessage[],
+): Promise<void> {
+  for (const attachment of attachments) {
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sentMessages.find((message) => Boolean(largestTelegramPhotoFromMessage(message))));
+  }
+}
+
+function largestTelegramPhotoFromMessage(sent: SentTelegramFileMessage | undefined): Record<string, unknown> | undefined {
+  const message = asRecord(sent);
+  return largestTelegramPhoto(message?.photo) ?? largestTelegramPhoto(collectNestedTelegramPhotos(message));
+}
+
+function collectNestedTelegramPhotos(value: unknown, out: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectNestedTelegramPhotos(item, out);
+    return out;
+  }
+  const record = asRecord(value);
+  if (!record) return out;
+  if (typeof record.file_id === "string" && typeof record.file_unique_id === "string") out.push(record);
+  for (const child of Object.values(record)) collectNestedTelegramPhotos(child, out);
+  return out;
+}
+
+async function sendRichWithFallback(
+  input: TurnInput,
+  rich: { markdown?: string; html?: string },
+  options: { requireRich?: boolean } = {},
+): Promise<SentTelegramFileMessage[]> {
   const markdown = rich.markdown ?? rich.html ?? "";
+  let lastRichError: unknown;
   try {
     const sent = await sendRichMessageWithThreadFallback(input, rich);
-    return [sent.message_id];
+    return [sent];
   } catch (err) {
     if (!isRichParseError(err)) throw err;
+    lastRichError = err;
     input.logger.debug("rich message parse failed; trying repaired variants", {
       threadId: input.thread.id,
       err: String(err),
@@ -759,14 +847,19 @@ async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string;
   for (const variant of variantsForRichRetry(markdown)) {
     try {
       const sent = await sendRichMessageWithThreadFallback(input, variant);
-      return [sent.message_id];
+      return [sent];
     } catch (err) {
       if (!isRichParseError(err)) throw err;
+      lastRichError = err;
       input.logger.debug("rich message repaired variant failed", {
         threadId: input.thread.id,
         err: String(err),
       });
     }
+  }
+
+  if (options.requireRich) {
+    throw lastRichError ?? new Error("rich message send failed");
   }
 
   input.logger.error("all rich message repair attempts failed; falling back to plain sendMessage", {
@@ -779,13 +872,13 @@ async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string;
     ids.push(sent.message_id);
   }
   input.logger.info("plain fallback messages sent", { threadId: input.thread.id, messages: ids.length });
-  return ids;
+  return ids.map((message_id) => ({ message_id }));
 }
 
 async function sendRichMessageWithThreadFallback(
   input: TurnInput,
   rich: { markdown?: string; html?: string },
-): Promise<{ message_id: number }> {
+): Promise<SentTelegramFileMessage> {
   try {
     return await sendRich(input.api, {
       chat_id: input.chatId,
@@ -970,6 +1063,11 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   const text = typeof value === "string" ? value : safeJson(value);
   return text && text !== "{}" ? formatCount(1, "result") : "done";
+}
+
+function toolErrorText(value: unknown): string | undefined {
+  const error = asRecord(value)?.error;
+  return typeof error === "string" && error.trim() ? error.trim() : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

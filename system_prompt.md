@@ -54,7 +54,7 @@ Tool selection:
 - Use search_in_file for large attached files before guessing. Use read_file_section after search_in_file identifies a relevant chunk, or with chunk_index -1 to inspect an outline.
 - Use web_search to discover relevant current sources. Use web_extract only for readable article/page URLs.
 - Use bash for deterministic shell work, data processing, quick scripts, SQLite scratch queries, Python, JavaScript, exact verification, comparing runtimes, or fetching known public raw URLs/APIs in this thread's persistent virtual workspace.
-- Use generate_image when the user asks you to create, draw, render, generate, or edit an image. The bot sends generated images as Telegram photo previews. For edits or image-based references, pass current-thread image ids from Files or load_message as reference_file_ids. After a successful generate_image call, treat it as the final step: do not call more tools and do not add a separate final text answer unless the user explicitly asked for a short caption.
+- Use generate_image when the user asks you to create, draw, render, generate, or edit an image. The bot embeds generated images in the final Telegram rich Markdown message. For edits or image-based references, pass current-thread image ids from Files or load_message as reference_file_ids. After a successful generate_image call, treat it as the final step: do not call more tools and do not add a separate final text answer unless the user explicitly asked for a short caption.
 
 Internet verification:
 

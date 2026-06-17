@@ -16,6 +16,7 @@ import { hybridSearch, threadChainScope } from "../../memory/retrieval.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { sha256Hex } from "../../files/hash.js";
+import { publicGeneratedMediaUrl } from "../mediaUrls.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -39,7 +40,8 @@ export interface CreatedFileAttachment {
   caption?: string | null;
   inline: boolean;
   card: string;
-  delivery?: "document" | "photo";
+  delivery?: "document" | "photo" | "rich-photo";
+  publicUrl?: string | null;
   origin?: "created_file" | "generated_image";
 }
 
@@ -337,7 +339,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     },
     generate_image: {
       description:
-        "Generate or edit an image with the configured Codex app-server image model and queue it as the final Telegram photo response. Use this when the user asks you to create, draw, render, generate, or edit an image. For edits or image references, pass current-thread image file ids in reference_file_ids. This tool is terminal: after a successful call, do not call more tools or add a separate final text answer unless a short caption was explicitly requested.",
+        "Generate or edit an image with the configured Codex app-server image model and embed it in the final Telegram rich Markdown response. Use this when the user asks you to create, draw, render, generate, or edit an image. For edits or image references, pass current-thread image file ids in reference_file_ids. This tool is terminal: after a successful call, do not call more tools or add a separate final text answer unless a short caption was explicitly requested.",
       inputSchema: z.object({
         prompt: z.string().min(1).max(4000),
         reference_file_ids: z.array(z.coerce.number().int().positive()).max(4).default([]),
@@ -379,12 +381,20 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
             mode,
             references,
           });
-          const bytes = Buffer.from(generated.imageBase64, "base64");
+          const hasInlineImageData = Boolean(generated.imageBase64?.trim());
+          if (!hasInlineImageData) throw new Error("Codex image generation returned no base64 image data");
+          if (!input.config.GENERATED_MEDIA_PUBLIC_BASE_URL) {
+            throw new Error(
+              "Codex image generation returned base64 image data but no public image URL; set GENERATED_MEDIA_PUBLIC_BASE_URL to embed generated images in Telegram rich Markdown.",
+            );
+          }
+          const generatedBytes = generatedImageBytes(generated);
+          const bytes = generatedBytes.bytes;
           if (!bytes.length) throw new Error("image generator returned empty image data");
           if (bytes.length > MAX_TELEGRAM_PHOTO_BYTES) {
             throw new Error(`generated image is too large to send as a Telegram photo (${formatBytes(bytes.length)})`);
           }
-          const mediaType = normalizeGeneratedImageMediaType(generated.mediaType, bytes);
+          const mediaType = normalizeGeneratedImageMediaType(generated.mediaType ?? generatedBytes.mediaType, bytes);
           const name = generatedImageName(mediaType);
           const summary = generated.revisedPrompt?.trim() || promptText;
           const ingested = await ingestFileBytes({
@@ -402,6 +412,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
           });
           const stored = await input.repos.files.get(ingested.fileId);
           if (!stored) throw new Error(`generated image was not stored: ${ingested.fileId}`);
+          const publicUrl = publicGeneratedMediaUrl(input.config.GENERATED_MEDIA_PUBLIC_BASE_URL, stored.path);
           const attachment: CreatedFileAttachment = {
             fileId: ingested.fileId,
             type: ingested.type,
@@ -411,7 +422,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
             caption: caption?.trim() || null,
             inline: ingested.inline,
             card: ingested.card,
-            delivery: "photo",
+            delivery: "rich-photo",
+            publicUrl,
             origin: "generated_image",
           };
           input.createdFiles?.push(attachment);
@@ -435,6 +447,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
             terminal: true,
             model: input.config.CODEX_IMAGE_MODEL,
             quality: input.config.CODEX_IMAGE_QUALITY,
+            image_url: publicUrl,
             requested_size: size,
             mode,
             reference_file_ids,
@@ -746,6 +759,18 @@ function normalizeGeneratedImageMediaType(value: string | null | undefined, byte
   if (normalized === "image/jpeg" || normalized === "image/png" || normalized === "image/webp") return normalized;
   const detected = detectImageMediaType(bytes);
   return detected ?? "image/png";
+}
+
+function generatedImageBytes(generated: ImageGenerationResult): { bytes: Buffer; mediaType?: string | null } {
+  const inline = generated.imageBase64?.trim();
+  if (inline) {
+    const dataUrl = inline.match(/^data:([^;,]+);base64,(.+)$/i);
+    return {
+      bytes: Buffer.from(dataUrl?.[2] ?? inline, "base64"),
+      mediaType: dataUrl?.[1] ?? generated.mediaType,
+    };
+  }
+  return { bytes: Buffer.alloc(0), mediaType: generated.mediaType };
 }
 
 function detectImageMediaType(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | undefined {
