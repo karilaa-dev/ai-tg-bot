@@ -22,6 +22,7 @@ import { cardForFile, classifyFile, ingestFileBytes, type AcceptedFileType, type
 import { sha256Hex } from "../files/hash.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
+import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
 import { isThreadNotFound } from "../telegram/richApi.js";
 
@@ -355,7 +356,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       mime: doc.mime_type ?? null,
       size: doc.file_size ?? null,
     }));
-    if ((doc.file_size ?? 0) > 20 * 1024 * 1024) {
+    if ((doc.file_size ?? 0) > MAX_FILE_BYTES) {
       ctx.services.logger.warn("document rejected; too large", ctxLogMeta(ctx, {
         name: doc.file_name ?? "file",
         size: doc.file_size ?? null,
@@ -394,7 +395,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       width: photo.width,
       height: photo.height,
     }));
-    if ((photo.file_size ?? 0) > 20 * 1024 * 1024) {
+    if ((photo.file_size ?? 0) > MAX_FILE_BYTES) {
       ctx.services.logger.warn("photo rejected; too large", ctxLogMeta(ctx, { size: photo.file_size ?? null }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
@@ -921,7 +922,7 @@ async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Pr
       type: input.type,
       bytes: bytes.length,
     }));
-    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+    if ((input.size ?? bytes.length) > MAX_FILE_BYTES) {
       ctx.services.logger.warn("downloaded file rejected; too large", ctxLogMeta(ctx, {
         name: input.name,
         type: input.type,
@@ -1039,7 +1040,7 @@ async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): P
     throwIfAborted(controller.signal);
     const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
     ctx.services.logger.debug("telegram image download complete", ctxLogMeta(ctx, { name: input.name, bytes: bytes.length }));
-    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+    if ((input.size ?? bytes.length) > MAX_FILE_BYTES) {
       ctx.services.logger.warn("downloaded image rejected; too large", ctxLogMeta(ctx, { name: input.name, bytes: bytes.length }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
@@ -1124,7 +1125,7 @@ async function prepareCachedTelegramFile(
       bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
     }
     throwIfAborted(signal);
-    if ((input.size ?? bytes.length) > 20 * 1024 * 1024) {
+    if ((input.size ?? bytes.length) > MAX_FILE_BYTES) {
       ctx.services.logger.warn("restored cached file rejected; too large", ctxLogMeta(ctx, {
         fileId: cached.id,
         bytes: bytes.length,
@@ -1155,7 +1156,7 @@ async function prepareCachedTelegramFile(
     fileId: cached.id,
     card: cardForFile(cached, chunks, input.name),
     inline: Boolean(cached.is_inline),
-    type: cached.type,
+    type: input.type,
   };
 }
 

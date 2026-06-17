@@ -1,4 +1,4 @@
-import type { Api } from "grammy";
+import { InputFile, type Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
@@ -9,9 +9,11 @@ import { persistEmbedding, type TextEmbedder } from "../memory/embeddings.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
 import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
+import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { streamInference } from "./inference.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
+import type { CreatedFileAttachment } from "./tools/index.js";
 
 export interface TurnInput {
   api: Api;
@@ -143,6 +145,7 @@ export const runTurn: TurnRunner = async (input) => {
   let contentEvents = 0;
   let toolCalls = 0;
   let toolResults = 0;
+  const createdFiles: CreatedFileAttachment[] = [];
   try {
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("provider stream starting", {
@@ -154,6 +157,7 @@ export const runTurn: TurnRunner = async (input) => {
     const result = streamInference({
       ...input,
       context,
+      createdFiles,
       abortSignal: input.config.CODEX_TURN_TIMEOUT_MS > 0 ? AbortSignal.timeout(input.config.CODEX_TURN_TIMEOUT_MS) : undefined,
     });
     streamer?.update({ thinkingMd: "", answerMd: "" });
@@ -198,7 +202,7 @@ export const runTurn: TurnRunner = async (input) => {
       finalAnswer = input.t("empty-answer");
     }
     await streamer?.finish({ thinkingMd: shaper.thinkingMd(), answerMd: finalAnswer });
-    await sendFinal(input, shaper.thinkingMd(), finalAnswer, Date.now() - startedAt);
+    await sendFinal(input, shaper.thinkingMd(), finalAnswer, Date.now() - startedAt, createdFiles);
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
       threadId: input.thread.id,
@@ -293,7 +297,22 @@ function buildThinkingStatus(heading: string, toolStatusMd: string): string {
   return tools ? `${heading}\n\n${tools}` : heading;
 }
 
-export async function sendFinal(input: TurnInput, thinking: string, answer: string, elapsedMs = 0): Promise<void> {
+export async function sendFinal(
+  input: TurnInput,
+  thinking: string,
+  answer: string,
+  elapsedMs = 0,
+  attachments: CreatedFileAttachment[] = [],
+): Promise<void> {
+  const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
+  if (attachments.length > outboundAttachments.length) {
+    input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
+      threadId: input.thread.id,
+      requestedFiles: attachments.length,
+      sentFiles: outboundAttachments.length,
+      limit: MAX_CREATED_FILES_PER_ANSWER,
+    });
+  }
   const messages = renderFinal({
     thinkingLog: thinking,
     answerMd: answer,
@@ -313,15 +332,27 @@ export async function sendFinal(input: TurnInput, thinking: string, answer: stri
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
     role: "assistant",
-    content: { text: answer },
+    content: outboundAttachments.length
+      ? {
+          text: answer,
+          files: outboundAttachments.map((file) => ({
+            id: file.fileId,
+            type: file.type,
+            name: file.name,
+            inline: file.inline,
+          })),
+        }
+      : { text: answer },
     textPlain: answer,
     thinking,
     tgMessageId: ids.find((id) => id > 0) ?? null,
   });
+  await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
     telegramMessages: ids.length,
+    files: outboundAttachments.length,
   });
   await persistEmbedding({
     repos: input.repos,
@@ -332,6 +363,155 @@ export async function sendFinal(input: TurnInput, thinking: string, answer: stri
     embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
     logger: input.logger,
   });
+}
+
+async function sendCreatedFileAttachments(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
+  if (!attachments.length) return;
+  if (attachments.length === 1) {
+    const attachment = attachments[0]!;
+    try {
+      const sent = await sendDocumentWithThreadFallback(input, attachment);
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+      input.logger.info("created file attachment sent", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        telegramMessageId: sent.message_id,
+        name: attachment.name,
+      });
+    } catch (err) {
+      input.logger.warn("failed to send created file attachment", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        name: attachment.name,
+        err: String(err),
+      });
+    }
+    return;
+  }
+
+  try {
+    const sent = await sendMediaGroupWithThreadFallback(input, attachments);
+    for (let index = 0; index < attachments.length; index += 1) {
+      const attachment = attachments[index]!;
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
+    }
+    input.logger.info("created file attachment media group sent", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      files: attachments.length,
+      telegramMessages: sent.map((message) => message.message_id),
+    });
+  } catch (err) {
+    input.logger.warn("failed to send created file attachment media group", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      files: attachments.length,
+      fileIds: attachments.map((attachment) => attachment.fileId),
+      err: String(err),
+    });
+  }
+}
+
+async function rememberSentCreatedFileAttachment(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachment: CreatedFileAttachment,
+  sent: SentDocumentMessage | undefined,
+): Promise<void> {
+  await input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
+    displayName: attachment.name,
+    caption: attachment.caption ?? null,
+  });
+  const document = asRecord(sent)?.document;
+  await input.repos.files.rememberTelegramFileRef(attachment.fileId, {
+    fileUniqueId: stringField(asRecord(document), "file_unique_id") ?? null,
+    telegramFileId: stringField(asRecord(document), "file_id") ?? null,
+  });
+}
+
+type SentDocumentMessage = { message_id: number; document?: { file_id?: string; file_unique_id?: string } };
+
+async function sendDocumentWithThreadFallback(
+  input: TurnInput,
+  attachment: CreatedFileAttachment,
+): Promise<SentDocumentMessage> {
+  const other = documentSendOptions(input.messageThreadId, attachment);
+  try {
+    return await input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), other);
+  } catch (err) {
+    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
+    input.logger.warn("telegram topic send failed; retrying created file without message_thread_id", {
+      threadId: input.thread.id,
+      topicId: input.messageThreadId,
+      fileId: attachment.fileId,
+    });
+    return input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), {
+      ...documentSendOptions(undefined, attachment),
+      caption: documentFallbackCaption(input.thread.title, attachment),
+    });
+  }
+}
+
+async function sendMediaGroupWithThreadFallback(
+  input: TurnInput,
+  attachments: CreatedFileAttachment[],
+): Promise<SentDocumentMessage[]> {
+  try {
+    return await input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), mediaGroupSendOptions(input.messageThreadId));
+  } catch (err) {
+    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
+    input.logger.warn("telegram topic send failed; retrying created file media group without message_thread_id", {
+      threadId: input.thread.id,
+      topicId: input.messageThreadId,
+      files: attachments.length,
+      fileIds: attachments.map((attachment) => attachment.fileId),
+    });
+    return input.api.sendMediaGroup(
+      input.chatId,
+      documentMediaGroup(attachments, input.thread.title),
+      mediaGroupSendOptions(undefined),
+    );
+  }
+}
+
+function documentSendOptions(
+  messageThreadId: number | undefined,
+  attachment: CreatedFileAttachment,
+): Parameters<Api["sendDocument"]>[2] {
+  return {
+    message_thread_id: messageThreadId,
+    caption: attachment.caption ?? undefined,
+  };
+}
+
+function mediaGroupSendOptions(messageThreadId: number | undefined): Parameters<Api["sendMediaGroup"]>[2] {
+  return {
+    message_thread_id: messageThreadId,
+  };
+}
+
+function documentMediaGroup(
+  attachments: CreatedFileAttachment[],
+  fallbackThreadTitle?: string,
+): Parameters<Api["sendMediaGroup"]>[1] {
+  return attachments.map((attachment, index) => ({
+    type: "document" as const,
+    media: new InputFile(attachment.path, attachment.name),
+    caption: fallbackThreadTitle && index === 0
+      ? documentFallbackCaption(fallbackThreadTitle, attachment)
+      : attachment.caption ?? undefined,
+  }));
+}
+
+function documentFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
+  const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
+  return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
 }
 
 async function sendRichWithFallback(input: TurnInput, rich: { markdown?: string; html?: string }): Promise<number[]> {
@@ -537,6 +717,10 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
   }
   if (record?.error) return "error";
 
+  if (toolName === "create_file" && record) {
+    return record.file_id === undefined ? "done" : formatCount(1, "file");
+  }
+
   const results = Array.isArray(record?.results) ? record.results : undefined;
   if (results) {
     return formatCount(results.length, "result");
@@ -557,6 +741,11 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {

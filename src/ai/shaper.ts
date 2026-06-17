@@ -119,6 +119,8 @@ function toolLabel(name: string): string {
       return "📄 Searching file";
     case "read_file_section":
       return "📖 Reading file";
+    case "create_file":
+      return "📎 Creating file";
     case "bash":
       return "🐚 Running bash";
     default:
@@ -148,6 +150,8 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
     case "search_in_file":
     case "read_file_section":
       return metadata.fileName ?? fileIdSubject(record);
+    case "create_file":
+      return truncateSubject(stringField(record, "name") ?? stringField(record, "path"), 64);
     case "load_message": {
       const messageId = numberField(record, "message_id");
       return messageId === undefined ? undefined : `#${messageId}`;

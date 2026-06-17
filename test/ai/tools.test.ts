@@ -8,6 +8,7 @@ import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { buildCodexToolSpecs, buildToolRegistry, buildTools, formatBotToolResultForCodex } from "../../src/ai/tools/index.js";
 import { ingestFileBytes } from "../../src/files/ingest.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { compactThread } from "../../src/memory/compactor.js";
 import { clearRetrievalVectorCacheForTests, threadChainScope } from "../../src/memory/retrieval.js";
 
@@ -266,6 +267,13 @@ describe("AI tools", () => {
     expect(webExtractSpec?.description).toContain("before claiming a web page verifies");
     expect(webExtractSpec?.description).toContain("raw JSON/API");
     expect(webExtractSpec?.description).toContain("PDF verification");
+    const createFileSpec = specs.find((spec) => spec.name === "create_file");
+    expect(createFileSpec).toMatchObject({ exposeToContext: true });
+    expect(createFileSpec?.description).toContain("send back to the Telegram user");
+    expect(createFileSpec?.description).toContain("Attach at most 10 files per answer");
+    expect(createFileSpec?.description).toContain("do not call create_file more than 10 times");
+    expect(createFileSpec?.description).toContain("20 MB");
+    expect(createFileSpec?.description).toContain("compiled executables");
     const prompt = await fs.readFile(path.resolve("system_prompt.md"), "utf8");
     expect(prompt).toContain("js-exec -c");
     expect(prompt).toContain("curl -fsSL");
@@ -283,6 +291,12 @@ describe("AI tools", () => {
     expect(prompt).toContain("Do not perform unnecessary tool calls after you have enough evidence");
     expect(prompt).toContain("set -o pipefail");
     expect(prompt).toContain("blocks localhost/private");
+    expect(prompt).toContain("call create_file");
+    expect(prompt).toContain("Attach at most 10 files per answer");
+    expect(prompt).toContain("do not call create_file more than 10 times");
+    expect(prompt).toContain("If more files are needed, send the first 10");
+    expect(prompt).toContain("Outbound files up to 20 MB are allowed");
+    expect(prompt).toContain("Bash, PowerShell, Python, JavaScript, TypeScript, and similar scripts/source files are allowed");
 
     const nodeHint = await formatBotToolResultForCodex(
       registry,
@@ -438,6 +452,173 @@ describe("AI tools", () => {
     expect(persisted.stdout).toContain("FILE_METRIC_17");
     expect(persisted.stdout).toContain("web_metric,42");
   }, 30_000);
+
+  it("queues supported and safe unsupported files from the thread bash workspace for Telegram delivery", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-file-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 81, firstName: "CreateFile", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "answer.txt"), "created text file");
+    await fs.writeFile(path.join(threadRoot, "table.csv"), "name,value\nalpha,42\n");
+    await fs.writeFile(path.join(threadRoot, "script.ps1"), "Write-Output 'safe script'\n");
+    await fs.writeFile(path.join(threadRoot, "archive.zip"), "not actually a compiled executable");
+    await fs.writeFile(path.join(threadRoot, "legacy.doc"), "legacy document attachment");
+    const createdFiles: Array<{ fileId: number; name: string; type: string; caption?: string | null }> = [];
+    const registry = buildToolRegistry({ config, db, repos, user, thread, createdFiles: createdFiles as never });
+
+    const textResult = await registry.create_file.execute({
+      path: "/answer.txt",
+      caption: "Generated notes",
+    }) as { file_id?: number; name?: string; type?: string; size?: number; caption?: string | null; error?: string };
+    const csvResult = await registry.create_file.execute({
+      path: "/table.csv",
+      name: "renamed.csv",
+      mime: "text/csv",
+    }) as { file_id?: number; name?: string; type?: string; error?: string };
+    const scriptResult = await registry.create_file.execute({
+      path: "/script.ps1",
+    }) as { file_id?: number; name?: string; type?: string; error?: string };
+    const zipResult = await registry.create_file.execute({
+      path: "/archive.zip",
+    }) as { file_id?: number; name?: string; type?: string; error?: string };
+    const legacyDocResult = await registry.create_file.execute({
+      path: "/legacy.doc",
+    }) as { file_id?: number; name?: string; type?: string; error?: string };
+
+    expect(textResult).toMatchObject({
+      name: "answer.txt",
+      type: "txt",
+      size: "created text file".length,
+      caption: "Generated notes",
+      status: "1 file attached (1/10 used)",
+      attached_files_used: 1,
+      attached_files_limit: MAX_CREATED_FILES_PER_ANSWER,
+    });
+    expect(csvResult).toMatchObject({ name: "renamed.csv", type: "csv", status: "1 file attached (2/10 used)" });
+    expect(scriptResult).toMatchObject({ name: "script.ps1", type: "other", status: "1 file attached (3/10 used)" });
+    expect(zipResult).toMatchObject({ name: "archive.zip", type: "other", status: "1 file attached (4/10 used)" });
+    expect(legacyDocResult).toMatchObject({ name: "legacy.doc", type: "other", status: "1 file attached (5/10 used)" });
+    expect(createdFiles.map((file) => [file.name, file.type])).toEqual([
+      ["answer.txt", "txt"],
+      ["renamed.csv", "csv"],
+      ["script.ps1", "other"],
+      ["archive.zip", "other"],
+      ["legacy.doc", "other"],
+    ]);
+    await expect(repos.files.get(textResult.file_id!)).resolves.toMatchObject({
+      name: "answer.txt",
+      type: "txt",
+      content_md: "created text file",
+    });
+    await expect(repos.files.get(csvResult.file_id!)).resolves.toMatchObject({
+      name: "renamed.csv",
+      type: "csv",
+    });
+    await expect(repos.files.get(scriptResult.file_id!)).resolves.toMatchObject({
+      name: "script.ps1",
+      type: "other",
+      content_md: null,
+    });
+    await expect(fs.readFile((await repos.files.get(zipResult.file_id!))!.path, "utf8")).resolves.toBe("not actually a compiled executable");
+  });
+
+  it("rejects create_file after 10 queued files without storing the extra file", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-file-limit-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 84, firstName: "CreateFileLimit", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    for (let index = 1; index <= MAX_CREATED_FILES_PER_ANSWER + 1; index += 1) {
+      await fs.writeFile(path.join(threadRoot, `file-${index}.dat`), `safe generic file ${index}`);
+    }
+    const createdFiles: Array<{ fileId: number; name: string; type: string }> = [];
+    const registry = buildToolRegistry({ config, db, repos, user, thread, createdFiles: createdFiles as never });
+
+    let lastAccepted: { status?: string; attached_files_used?: number } | undefined;
+    for (let index = 1; index <= MAX_CREATED_FILES_PER_ANSWER; index += 1) {
+      lastAccepted = await registry.create_file.execute({ path: `/file-${index}.dat` }) as typeof lastAccepted;
+    }
+    const rejected = await registry.create_file.execute({ path: `/file-${MAX_CREATED_FILES_PER_ANSWER + 1}.dat` }) as { error?: string };
+
+    expect(lastAccepted).toMatchObject({
+      status: `1 file attached (${MAX_CREATED_FILES_PER_ANSWER}/${MAX_CREATED_FILES_PER_ANSWER} used)`,
+      attached_files_used: MAX_CREATED_FILES_PER_ANSWER,
+    });
+    expect(rejected).toMatchObject({
+      error: expect.stringContaining("File limit reached: 10 files are already attached to this answer"),
+    });
+    expect(rejected.error).toContain("Do not try to attach more files in this answer");
+    expect(createdFiles).toHaveLength(MAX_CREATED_FILES_PER_ANSWER);
+    expect(createdFiles.map((file) => file.name)).not.toContain(`file-${MAX_CREATED_FILES_PER_ANSWER + 1}.dat`);
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(MAX_CREATED_FILES_PER_ANSWER);
+    expect(files.map((file) => file.name)).not.toContain(`file-${MAX_CREATED_FILES_PER_ANSWER + 1}.dat`);
+  });
+
+  it("queues supported document files as generic attachments when extraction fails", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-file-doc-fallback-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 83, firstName: "CreateDocFallback", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    const bytes = Buffer.from("fake docx bytes that docling cannot convert");
+    await fs.writeFile(path.join(threadRoot, "draft.docx"), bytes);
+    const createdFiles: Array<{ fileId: number; name: string; type: string }> = [];
+    const registry = buildToolRegistry({ config, db, repos, user, thread, createdFiles: createdFiles as never });
+
+    const result = await withMockFetch(async () => new Response("docling down", { status: 500 }), async () => registry.create_file.execute({
+      path: "/draft.docx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    })) as { file_id?: number; name?: string; type?: string; status?: string; error?: string };
+
+    expect(result).toMatchObject({ name: "draft.docx", type: "other", status: "1 file attached (1/10 used)" });
+    expect(createdFiles).toMatchObject([{ name: "draft.docx", type: "other" }]);
+    const stored = await repos.files.get(result.file_id!);
+    expect(stored).toMatchObject({ name: "draft.docx", type: "other", content_md: null });
+    await expect(fs.readFile(stored!.path)).resolves.toEqual(bytes);
+  });
+
+  it("rejects invalid outbound file paths and compiled generated files", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-file-guard-"));
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-file-outside-"));
+    tempDirs.push(workspaceRoot, outsideRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 82, firstName: "CreateGuard", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "app.exe"), "plain text but executable extension");
+    await fs.writeFile(path.join(threadRoot, "lib.so"), "plain text but shared library extension");
+    await fs.writeFile(path.join(threadRoot, "renamed.txt"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1]));
+    await fs.writeFile(path.join(threadRoot, "mime-blocked.dat"), "blocked by MIME");
+    await fs.writeFile(path.join(outsideRoot, "outside.txt"), "outside");
+    await fs.symlink(path.join(outsideRoot, "outside.txt"), path.join(threadRoot, "escape.txt"));
+    const bigPath = path.join(threadRoot, "big.txt");
+    await fs.writeFile(bigPath, "");
+    await fs.truncate(bigPath, MAX_FILE_BYTES + 1);
+    const createdFiles: unknown[] = [];
+    const registry = buildToolRegistry({ config, db, repos, user, thread, createdFiles: createdFiles as never });
+
+    await expect(registry.create_file.execute({ path: "/missing.txt" })).resolves.toMatchObject({ error: expect.stringContaining("file not found") });
+    await expect(registry.create_file.execute({ path: "/app.exe" })).resolves.toMatchObject({ error: expect.stringContaining("blocked executable file type") });
+    await expect(registry.create_file.execute({ path: "/lib.so" })).resolves.toMatchObject({ error: expect.stringContaining("blocked executable file type") });
+    await expect(registry.create_file.execute({ path: "/renamed.txt" })).resolves.toMatchObject({ error: expect.stringContaining("blocked compiled executable") });
+    await expect(registry.create_file.execute({ path: "/mime-blocked.dat", mime: "application/x-msdownload" })).resolves.toMatchObject({
+      error: expect.stringContaining("blocked executable MIME type"),
+    });
+    await expect(registry.create_file.execute({ path: "/big.txt" })).resolves.toMatchObject({ error: expect.stringContaining("larger than 20 MB") });
+    await expect(registry.create_file.execute({ path: "/escape.txt" })).resolves.toMatchObject({ error: expect.stringContaining("escapes") });
+    expect(createdFiles).toHaveLength(0);
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(0);
+  });
 
   it("searches file chunks with stored embeddings when FTS has no lexical match", async () => {
     const config = loadTestConfig();

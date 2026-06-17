@@ -133,7 +133,7 @@ async function buildFilesOverview(repos: Repos, threadIds: number[], fileIds: nu
   if (!files.length) return "- none";
   return files
     .map((file) => {
-      const mode = file.is_inline ? "inline" : "searchable";
+      const mode = file.type === "other" ? "attachment" : file.is_inline ? "inline" : "searchable";
       const summary = file.summary?.split("\n")[0] ?? "";
       return `- #${file.id} ${file.name} ${file.type} · ${mode}${summary ? ` · ${summary}` : ""}`;
     })

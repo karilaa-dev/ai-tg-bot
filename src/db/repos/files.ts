@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { queryOne, valueList, type SqlExecutor } from "../sql.js";
 import type { TextSearch } from "../search.js";
-import type { FileChunkRow, FileRow } from "../types.js";
+import type { FileChunkRow, FileRow, StoredFileType } from "../types.js";
 
 export class FilesRepo {
   constructor(
@@ -13,7 +13,7 @@ export class FilesRepo {
     userId: number;
     threadId: number;
     messageId?: number | null;
-    type: "txt" | "csv" | "pdf" | "docx" | "image";
+    type: StoredFileType;
     telegramFileId?: string | null;
     telegramFileUniqueId?: string | null;
     contentSha256?: string | null;
@@ -85,7 +85,7 @@ export class FilesRepo {
 
   findByContentHash(
     hash: string,
-    input: { type: "txt" | "csv" | "pdf" | "docx" | "image"; size: number },
+    input: { type: StoredFileType; size: number },
   ): Promise<FileRow | undefined> {
     return queryOne<FileRow>(
       this.db,

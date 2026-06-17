@@ -1,3 +1,5 @@
+export type StoredFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "other";
+
 export type DialectName = "sqlite" | "postgres";
 
 export interface UsersTable {
@@ -52,7 +54,7 @@ export interface FilesTable {
   user_id: number;
   thread_id: number;
   message_id: number | null;
-  type: "txt" | "csv" | "pdf" | "docx" | "image";
+  type: StoredFileType;
   telegram_file_id: string | null;
   telegram_file_unique_id: string | null;
   content_sha256: string | null;

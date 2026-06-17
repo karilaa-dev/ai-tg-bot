@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GrammyError } from "grammy";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -15,9 +18,11 @@ describe("runTurn", () => {
   let db: AppDatabase;
   let repos: Repos;
   let codexParts: unknown[];
+  let tempDirs: string[];
 
   beforeEach(async () => {
     codexParts = [];
+    tempDirs = [];
     setCodexTransportFactoryForTests(() => new ScriptedCodexTransport(codexParts));
     const config = loadTestConfig();
     db = createDatabase(config, createLogger(config));
@@ -29,6 +34,7 @@ describe("runTurn", () => {
     setCodexTransportFactoryForTests(undefined);
     vi.useRealTimers();
     await db.destroy();
+    await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
   });
 
   it("does not duplicate an already persisted latest user message on retry", async () => {
@@ -368,6 +374,166 @@ describe("runTurn", () => {
     expect(latest?.thinking).toContain("(exit 0)");
   });
 
+  it("sends and links files created by the create_file dynamic tool", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-create-file-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 105, firstName: "FileFinal", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "answer.txt"), "generated file body");
+    codexParts = [
+      { type: "server-tool-call", toolName: "create_file", input: { path: "/answer.txt", caption: "Generated file" } },
+      { type: "text-final", text: "I made the file." },
+    ];
+    const events: string[] = [];
+    const documents: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 61, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 61, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async (_chatId: number, document: { filename?: string }, other?: Record<string, unknown>) => {
+        events.push("document");
+        documents.push({ filename: document.filename, other });
+        return {
+          message_id: 63,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          document: { file_id: "telegram-created-file-id", file_unique_id: "telegram-created-file-unique" },
+        };
+      },
+      sendMediaGroup: async () => {
+        throw new Error("single file should not use sendMediaGroup");
+      },
+      raw: {
+        sendRichMessage: async () => {
+          events.push("rich");
+          return { message_id: 62, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "make a file",
+      t: testT,
+    });
+
+    expect(events).toEqual(["rich", "document"]);
+    expect(documents).toEqual([{ filename: "answer.txt", other: { message_thread_id: undefined, caption: "Generated file" } }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the file." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached).toHaveLength(1);
+    expect(attached[0]).toMatchObject({
+      name: "answer.txt",
+      type: "txt",
+      telegram_file_id: "telegram-created-file-id",
+      telegram_file_unique_id: "telegram-created-file-unique",
+    });
+  });
+
+  it("sends multiple files created by create_file as one Telegram media group", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-create-files-group-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 107, firstName: "FileGroupFinal", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "first.txt"), "first generated file");
+    await fs.writeFile(path.join(threadRoot, "second.txt"), "second generated file");
+    codexParts = [
+      { type: "server-tool-call", toolName: "create_file", input: { path: "/first.txt", caption: "First caption" } },
+      { type: "server-tool-call", toolName: "create_file", input: { path: "/second.txt", caption: "Second caption" } },
+      { type: "text-final", text: "I made the files." },
+    ];
+    const events: string[] = [];
+    const mediaGroups: Array<{
+      media: Array<{ type?: string; filename?: string; caption?: string }>;
+      other?: Record<string, unknown>;
+    }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 81, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 81, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async () => {
+        throw new Error("multiple files should use sendMediaGroup");
+      },
+      sendMediaGroup: async (_chatId: number, media: Array<Record<string, unknown>>, other?: Record<string, unknown>) => {
+        events.push("media-group");
+        mediaGroups.push({
+          media: media.map((item) => ({
+            type: item.type as string | undefined,
+            filename: (item.media as { filename?: string } | undefined)?.filename,
+            caption: item.caption as string | undefined,
+          })),
+          other,
+        });
+        return media.map((_item, index) => ({
+          message_id: 83 + index,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          document: { file_id: `telegram-group-file-${index + 1}`, file_unique_id: `telegram-group-unique-${index + 1}` },
+        }));
+      },
+      raw: {
+        sendRichMessage: async () => {
+          events.push("rich");
+          return { message_id: 82, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "make files",
+      t: testT,
+    });
+
+    expect(events).toEqual(["rich", "media-group"]);
+    expect(mediaGroups).toEqual([{
+      media: [
+        { type: "document", filename: "first.txt", caption: "First caption" },
+        { type: "document", filename: "second.txt", caption: "Second caption" },
+      ],
+      other: { message_thread_id: undefined },
+    }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the files." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached).toHaveLength(2);
+    expect(attached[0]).toMatchObject({
+      name: "first.txt",
+      type: "txt",
+      telegram_file_id: "telegram-group-file-1",
+      telegram_file_unique_id: "telegram-group-unique-1",
+    });
+    expect(attached[1]).toMatchObject({
+      name: "second.txt",
+      type: "txt",
+      telegram_file_id: "telegram-group-file-2",
+      telegram_file_unique_id: "telegram-group-unique-2",
+    });
+  });
+
   it("keeps the streaming draft alive during quiet provider pauses without tool calls", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-12T12:00:00Z"));
@@ -599,6 +765,211 @@ describe("runTurn", () => {
     expect(latest).toMatchObject({ role: "assistant", tg_message_id: 55 });
   });
 
+  it("retries outbound document sends without message_thread_id when Telegram rejects the topic", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 106, firstName: "DocThread", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, 42, "Topic 42");
+    const filePath = path.join(os.tmpdir(), `ai-tg-bot-doc-thread-${Date.now()}.txt`);
+    tempDirs.push(filePath);
+    await fs.writeFile(filePath, "document content");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "topic-file.txt",
+      path: filePath,
+      size: "document content".length,
+      contentMd: "document content",
+      summary: "document content",
+      isInline: true,
+    });
+    const documentCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({ message_id: 70, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      },
+      sendDocument: async (_chatId: number, document: { filename?: string }, other?: Record<string, unknown>) => {
+        documentCalls.push({ filename: document.filename, other });
+        if (other?.message_thread_id === 42) throw threadError();
+        return {
+          message_id: 71,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          document: { file_id: "topic-doc-file-id", file_unique_id: "topic-doc-unique-id" },
+        };
+      },
+    };
+
+    await sendFinal(
+      {
+        api: api as never,
+        chatId: user.tg_id,
+        messageThreadId: 42,
+        config,
+        db,
+        repos,
+        logger: createLogger(config),
+        user,
+        thread,
+        text: "question",
+        t: (key) => key,
+      },
+      "",
+      "answer with document",
+      0,
+      [{
+        fileId: file.id,
+        type: "txt",
+        name: file.name,
+        path: file.path,
+        size: file.size,
+        caption: "Document caption",
+        inline: true,
+        card: "document content",
+      }],
+    );
+
+    expect(documentCalls).toHaveLength(2);
+    expect(documentCalls[0]).toMatchObject({ filename: "topic-file.txt", other: { message_thread_id: 42, caption: "Document caption" } });
+    expect(documentCalls[1]?.other?.message_thread_id).toBeUndefined();
+    expect(documentCalls[1]?.other?.caption).toContain("[Topic 42]");
+    const latest = await repos.messages.latest(thread.id);
+    expect(await repos.files.listForMessage(latest!.id)).toMatchObject([{ id: file.id }]);
+    await expect(repos.files.get(file.id)).resolves.toMatchObject({
+      telegram_file_id: "topic-doc-file-id",
+      telegram_file_unique_id: "topic-doc-unique-id",
+    });
+  });
+
+  it("retries outbound media group sends without message_thread_id when Telegram rejects the topic", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 108, firstName: "MediaThread", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, 42, "Topic 42");
+    const fileDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-media-thread-"));
+    tempDirs.push(fileDir);
+    const firstPath = path.join(fileDir, "first.txt");
+    const secondPath = path.join(fileDir, "second.txt");
+    await fs.writeFile(firstPath, "first document content");
+    await fs.writeFile(secondPath, "second document content");
+    const first = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "first-topic-file.txt",
+      path: firstPath,
+      size: "first document content".length,
+      contentMd: "first document content",
+      summary: "first document content",
+      isInline: true,
+    });
+    const second = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "second-topic-file.txt",
+      path: secondPath,
+      size: "second document content".length,
+      contentMd: "second document content",
+      summary: "second document content",
+      isInline: true,
+    });
+    const mediaGroupCalls: Array<{
+      media: Array<{ type?: string; filename?: string; caption?: string }>;
+      other?: Record<string, unknown>;
+    }> = [];
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({ message_id: 90, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      },
+      sendDocument: async () => {
+        throw new Error("multiple files should use sendMediaGroup");
+      },
+      sendMediaGroup: async (_chatId: number, media: Array<Record<string, unknown>>, other?: Record<string, unknown>) => {
+        mediaGroupCalls.push({
+          media: media.map((item) => ({
+            type: item.type as string | undefined,
+            filename: (item.media as { filename?: string } | undefined)?.filename,
+            caption: item.caption as string | undefined,
+          })),
+          other,
+        });
+        if (other?.message_thread_id === 42) throw threadError();
+        return media.map((_item, index) => ({
+          message_id: 91 + index,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          document: { file_id: `topic-group-file-${index + 1}`, file_unique_id: `topic-group-unique-${index + 1}` },
+        }));
+      },
+    };
+
+    await sendFinal(
+      {
+        api: api as never,
+        chatId: user.tg_id,
+        messageThreadId: 42,
+        config,
+        db,
+        repos,
+        logger: createLogger(config),
+        user,
+        thread,
+        text: "question",
+        t: (key) => key,
+      },
+      "",
+      "answer with grouped documents",
+      0,
+      [
+        {
+          fileId: first.id,
+          type: "txt",
+          name: first.name,
+          path: first.path,
+          size: first.size,
+          caption: "First caption",
+          inline: true,
+          card: "first document content",
+        },
+        {
+          fileId: second.id,
+          type: "txt",
+          name: second.name,
+          path: second.path,
+          size: second.size,
+          caption: "Second caption",
+          inline: true,
+          card: "second document content",
+        },
+      ],
+    );
+
+    expect(mediaGroupCalls).toHaveLength(2);
+    expect(mediaGroupCalls[0]?.other?.message_thread_id).toBe(42);
+    expect(mediaGroupCalls[1]?.other?.message_thread_id).toBeUndefined();
+    expect(mediaGroupCalls[1]?.media[0]).toMatchObject({
+      type: "document",
+      filename: "first-topic-file.txt",
+    });
+    expect(mediaGroupCalls[1]?.media[0]?.caption).toContain("[Topic 42]");
+    expect(mediaGroupCalls[1]?.media[0]?.caption).toContain("First caption");
+    expect(mediaGroupCalls[1]?.media[1]).toMatchObject({
+      type: "document",
+      filename: "second-topic-file.txt",
+      caption: "Second caption",
+    });
+    const latest = await repos.messages.latest(thread.id);
+    expect(await repos.files.listForMessage(latest!.id)).toMatchObject([{ id: first.id }, { id: second.id }]);
+    await expect(repos.files.get(first.id)).resolves.toMatchObject({
+      telegram_file_id: "topic-group-file-1",
+      telegram_file_unique_id: "topic-group-unique-1",
+    });
+    await expect(repos.files.get(second.id)).resolves.toMatchObject({
+      telegram_file_id: "topic-group-file-2",
+      telegram_file_unique_id: "topic-group-unique-2",
+    });
+  });
+
   it("detects provider context length errors inside nested response bodies", () => {
     expect(
       isContextLengthError({
@@ -758,8 +1129,32 @@ class ScriptedCodexTransport implements CodexTransport {
             },
           },
         });
+      } else if (record.type === "server-tool-call") {
+        toolId += 1;
+        const requestId = 1000 + toolId;
+        this.emit({
+          id: requestId,
+          method: "item/tool/call",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: `tool-${toolId}`,
+            namespace: "telegram",
+            tool: String(record.toolName ?? "tool"),
+            arguments: record.input ?? record.args ?? {},
+          },
+        });
+        await this.waitForResponse(requestId);
       }
     }
+  }
+
+  private async waitForResponse(id: number): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (this.sent.some((message) => message.id === id && (message.result !== undefined || message.error !== undefined))) return;
+      await delay(0);
+    }
+    throw new Error(`timed out waiting for tool response ${id}`);
   }
 }
 

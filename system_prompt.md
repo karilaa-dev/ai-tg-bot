@@ -70,6 +70,7 @@ Bash rules:
 - Avoid unsupported shell setup such as set -o pipefail. Bash blocks localhost/private network ranges.
 - Avoid command substitution `$()` and process substitution `<(...)` in bash. To compare outputs from js-exec, python3, and curl, write each result to a temp file and compare/read those files.
 - If a tool call partially fails, read the error/model_hint and retry only the failed part. Do not rerun already-successful work unless its output is suspect.
+- To send a file to the user, first create it in the thread bash workspace, then call create_file with the absolute virtual path. Only use create_file for files you intentionally want Telegram to send. Attach at most 10 files per answer; do not call create_file more than 10 times in one answer. If more files are needed, send the first 10 and say the rest can be sent in another answer. Outbound files up to 20 MB are allowed unless they are native/compiled executables such as exe, dll, ELF/Mach-O binaries, shared libraries, Java bytecode archives, or WebAssembly. Bash, PowerShell, Python, JavaScript, TypeScript, and similar scripts/source files are allowed. Images are sent as documents to preserve the exact file.
 
 Exact numeric tasks:
 

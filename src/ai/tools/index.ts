@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { nanoid } from "nanoid";
 import { tool, zodSchema, type Tool } from "ai";
 import { Bash, ReadWriteFs } from "just-bash";
 import { z } from "zod";
@@ -7,11 +8,14 @@ import { tavily, type TavilyExtractOptions } from "@tavily/core";
 import type { AppConfig } from "../../config.js";
 import type { AppDatabase } from "../../db/index.js";
 import type { Repos } from "../../db/repos/index.js";
-import type { FileRow, ThreadRow, UserRow } from "../../db/types.js";
+import type { FileRow, StoredFileType, ThreadRow, UserRow } from "../../db/types.js";
 import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
 import { embed } from "../provider.js";
 import { hybridSearch, threadChainScope } from "../../memory/retrieval.js";
+import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
+import { sha256Hex } from "../../files/hash.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -22,6 +26,18 @@ export interface ToolBuildInput {
   logger?: Logger;
   embedder?: TextEmbedder;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
+  createdFiles?: CreatedFileAttachment[];
+}
+
+export interface CreatedFileAttachment {
+  fileId: number;
+  type: StoredFileType;
+  name: string;
+  path: string;
+  size: number;
+  caption?: string | null;
+  inline: boolean;
+  card: string;
 }
 
 export interface BotToolDefinition<Input = unknown, Output = unknown> {
@@ -289,6 +305,61 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
         return { content };
       },
     },
+    create_file: {
+      description:
+        "Queue a file that you created in this thread's bash workspace to send back to the Telegram user. First create the file with bash, then call this tool with its absolute virtual path. Attach at most 10 files per answer; do not call create_file more than 10 times in one answer. If more files are needed, send the first 10 and say the rest can be sent in another answer. Files up to 20 MB are allowed unless they are native/compiled executables such as exe, dll, ELF/Mach-O binaries, shared libraries, Java bytecode archives, or WebAssembly. Scripts and source files such as sh, bash, ps1, py, js, ts, and similar text/code files are allowed. Images are sent as documents to preserve exact bytes.",
+      inputSchema: z.object({
+        path: z.string().regex(/^\//, "path must be an absolute virtual path"),
+        name: z.string().min(1).max(255).optional(),
+        mime: z.string().max(255).optional(),
+        caption: z.string().max(1024).optional(),
+      }),
+      execute: async ({ path: virtualPath, name, mime, caption }) => {
+        try {
+          const usedBefore = input.createdFiles?.length ?? 0;
+          if (usedBefore >= MAX_CREATED_FILES_PER_ANSWER) {
+            throw new Error(
+              `File limit reached: ${MAX_CREATED_FILES_PER_ANSWER} files are already attached to this answer. Do not try to attach more files in this answer.`,
+            );
+          }
+          input.logger?.info("tool create_file starting", {
+            threadId: input.thread.id,
+            path: virtualPath,
+            name: name ?? null,
+            mime: mime ?? null,
+          });
+          const prepared = await prepareCreatedFile(input, { virtualPath, name, mime, caption });
+          input.createdFiles?.push(prepared);
+          const used = usedBefore + 1;
+          input.logger?.info("tool create_file complete", {
+            threadId: input.thread.id,
+            fileId: prepared.fileId,
+            name: prepared.name,
+            type: prepared.type,
+            bytes: prepared.size,
+            filesUsed: used,
+            filesLimit: MAX_CREATED_FILES_PER_ANSWER,
+          });
+          return {
+            file_id: prepared.fileId,
+            name: prepared.name,
+            type: prepared.type,
+            size: prepared.size,
+            caption: prepared.caption ?? null,
+            status: `1 file attached (${used}/${MAX_CREATED_FILES_PER_ANSWER} used)`,
+            attached_files_used: used,
+            attached_files_limit: MAX_CREATED_FILES_PER_ANSWER,
+          };
+        } catch (err) {
+          input.logger?.warn("tool create_file failed", {
+            threadId: input.thread.id,
+            path: virtualPath,
+            err: String(err),
+          });
+          return { error: String(err) };
+        }
+      },
+    },
     bash: {
       description:
         "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per Telegram thread. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
@@ -496,6 +567,199 @@ function codexContentFromModelOutput(modelOutput: unknown): CodexToolContentItem
     }
   }
   return items;
+}
+
+async function prepareCreatedFile(
+  input: ToolBuildInput,
+  file: { virtualPath: string; name?: string; mime?: string; caption?: string },
+): Promise<CreatedFileAttachment> {
+  const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
+  await fs.mkdir(root, { recursive: true });
+  const rootReal = await fs.realpath(root);
+  const virtualPath = normalizeBashCwd(file.virtualPath);
+  const hostPath = path.resolve(root, `.${virtualPath}`);
+  const realPath = await fs.realpath(hostPath).catch(() => {
+    throw new Error(`file not found: ${virtualPath}`);
+  });
+  if (!isPathInside(rootReal, realPath)) {
+    throw new Error("file path escapes the thread workspace");
+  }
+  const stat = await fs.stat(realPath);
+  if (!stat.isFile()) throw new Error("path is not a regular file");
+  if (stat.size > MAX_FILE_BYTES) throw new Error("file is larger than 20 MB");
+
+  const bytes = await fs.readFile(realPath);
+  if (bytes.length > MAX_FILE_BYTES) throw new Error("file is larger than 20 MB");
+  const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
+  assertAllowedOutboundFile(displayName, file.mime, bytes);
+
+  const type = classifyFile(displayName, file.mime ?? "");
+  if (type && type !== "legacy-doc") {
+    try {
+      const ingested = await ingestFileBytes({
+        config: input.config,
+        repo: input.repos.files,
+        userId: input.user.tg_id,
+        threadId: input.thread.id,
+        bytes,
+        name: displayName,
+        mime: file.mime,
+        embeddings: input.repos.embeddings,
+        embedder: input.embedder,
+        logger: input.logger,
+      });
+      const stored = await input.repos.files.get(ingested.fileId);
+      if (!stored) throw new Error(`created file was not stored: ${ingested.fileId}`);
+      return {
+        fileId: ingested.fileId,
+        type: ingested.type,
+        name: stored.name,
+        path: stored.path,
+        size: stored.size,
+        caption: file.caption?.trim() || null,
+        inline: ingested.inline,
+        card: ingested.card,
+      };
+    } catch (err) {
+      input.logger?.warn("created file ingest failed; storing as generic attachment", {
+        threadId: input.thread.id,
+        name: displayName,
+        type,
+        err: String(err),
+      });
+    }
+  }
+
+  const stored = await storeOtherCreatedFile(input, { bytes, name: displayName });
+  return {
+    fileId: stored.id,
+    type: stored.type,
+    name: stored.name,
+    path: stored.path,
+    size: stored.size,
+    caption: file.caption?.trim() || null,
+    inline: Boolean(stored.is_inline),
+    card: `File #${stored.id}: ${stored.name} (${formatBytes(stored.size)}).`,
+  };
+}
+
+async function storeOtherCreatedFile(
+  input: ToolBuildInput,
+  file: { bytes: Buffer; name: string },
+): Promise<FileRow> {
+  const outDir = path.resolve("data/files");
+  await fs.mkdir(outDir, { recursive: true });
+  const ext = path.extname(file.name).toLowerCase();
+  const dest = path.join(outDir, `${nanoid()}${ext}`);
+  await fs.writeFile(dest, file.bytes);
+  return input.repos.files.insertFile({
+    userId: input.user.tg_id,
+    threadId: input.thread.id,
+    type: "other",
+    contentSha256: sha256Hex(file.bytes),
+    name: file.name,
+    path: dest,
+    size: file.bytes.length,
+    summary: `Outbound file ${file.name}`,
+    isInline: false,
+  });
+}
+
+function assertAllowedOutboundFile(name: string, mime: string | undefined, bytes: Buffer): void {
+  const ext = path.extname(name).toLowerCase();
+  if (BLOCKED_EXECUTABLE_EXTENSIONS.has(ext)) throw new Error(`blocked executable file type: ${ext}`);
+  const normalizedMime = mime?.toLowerCase().trim();
+  if (normalizedMime && BLOCKED_EXECUTABLE_MIME_TYPES.has(normalizedMime)) {
+    throw new Error(`blocked executable MIME type: ${normalizedMime}`);
+  }
+  const magic = executableMagic(bytes);
+  if (magic) throw new Error(`blocked compiled executable: ${magic}`);
+}
+
+const BLOCKED_EXECUTABLE_EXTENSIONS = new Set([
+  ".exe",
+  ".dll",
+  ".com",
+  ".scr",
+  ".msi",
+  ".msp",
+  ".sys",
+  ".drv",
+  ".ocx",
+  ".cpl",
+  ".efi",
+  ".so",
+  ".dylib",
+  ".bundle",
+  ".node",
+  ".o",
+  ".obj",
+  ".a",
+  ".lib",
+  ".class",
+  ".jar",
+  ".war",
+  ".ear",
+  ".apk",
+  ".ipa",
+  ".wasm",
+]);
+
+const BLOCKED_EXECUTABLE_MIME_TYPES = new Set([
+  "application/x-msdownload",
+  "application/vnd.microsoft.portable-executable",
+  "application/x-dosexec",
+  "application/x-msdos-program",
+  "application/x-msi",
+  "application/x-executable",
+  "application/x-elf",
+  "application/x-mach-binary",
+  "application/x-sharedlib",
+  "application/java-archive",
+  "application/x-java-applet",
+  "application/wasm",
+]);
+
+function executableMagic(bytes: Buffer): string | undefined {
+  if (bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46) {
+    return "ELF binary";
+  }
+  if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
+    return "Windows PE binary";
+  }
+  const magic4 = bytes.length >= 4 ? bytes.subarray(0, 4).toString("hex") : "";
+  switch (magic4) {
+    case "feedface":
+    case "feedfacf":
+    case "cefaedfe":
+    case "cffaedfe":
+      return "Mach-O binary";
+    case "cafebabe":
+    case "bebafeca":
+      return "Mach-O universal binary or Java class";
+    case "0061736d":
+      return "WebAssembly binary";
+    default:
+      return undefined;
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
+function normalizeCreatedFileName(value: string): string {
+  const normalized = value.replace(/[\r\n]/g, " ").trim();
+  const base = path.basename(normalized);
+  if (!base || base === "." || base === "..") throw new Error("file name is empty");
+  return base;
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function readCachedOrRedownloadImage(
