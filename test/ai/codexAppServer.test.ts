@@ -80,6 +80,69 @@ describe("Codex app-server client", () => {
     ]);
   });
 
+  it("starts streamed reasoning summary sections on their own lines", async () => {
+    const config = loadTestConfig({ REASONING_SUMMARY: "detailed", STREAM_DELTA_CHARS: 999 });
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "multi-section reasoning",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", delta: "Comparing runtimes effectively\nFor comparing runtimes.", summaryIndex: 0 },
+    });
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", delta: "Creating files and verification\nI need to send result files.", summaryIndex: 1 },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "reasoning-delta", text: "Comparing runtimes effectively\nFor comparing runtimes." },
+      { type: "reasoning-delta", text: "\n\nCreating files and verification\nI need to send result files." },
+    ]);
+  });
+
+  it("does not duplicate completed reasoning after streaming multiple summary sections", async () => {
+    const config = loadTestConfig({ REASONING_SUMMARY: "detailed", STREAM_DELTA_CHARS: 999 });
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "completed multi-section reasoning",
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", delta: "Comparing runtimes effectively\nFor comparing runtimes.", summaryIndex: 0 },
+    });
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", delta: "Creating files and verification\nI need to send result files.", summaryIndex: 1 },
+    });
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "reason-1",
+          type: "reasoning",
+          summary: [
+            "Comparing runtimes effectively\nFor comparing runtimes.",
+            "Creating files and verification\nI need to send result files.",
+          ],
+        },
+      },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "reasoning-delta", text: "Comparing runtimes effectively\nFor comparing runtimes." },
+      { type: "reasoning-delta", text: "\n\nCreating files and verification\nI need to send result files." },
+    ]);
+  });
+
   it("handshakes and sends ephemeral thread and turn payloads with dynamic tools", async () => {
     const config = loadTestConfig({
       CODEX_MODEL: "gpt-5.5",

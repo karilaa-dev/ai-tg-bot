@@ -185,7 +185,7 @@ class CodexRpcSession {
   private readonly seenToolResults = new Set<string>();
   private readonly seenCompletedItems = new Set<string>();
   private readonly agentMessageDeltas = new Map<string, string>();
-  private readonly reasoningSummaryDeltas = new Map<string, string>();
+  private readonly reasoningSummaryDeltas = new Map<string, Map<number, string>>();
 
   constructor(
     private readonly transport: CodexTransport,
@@ -398,8 +398,16 @@ class CodexRpcSession {
     if (this.config.REASONING_SUMMARY === "none") return;
     const text = String(params?.delta ?? "");
     const itemId = stringValue(params, "itemId");
-    if (itemId) this.reasoningSummaryDeltas.set(itemId, `${this.reasoningSummaryDeltas.get(itemId) ?? ""}${text}`);
-    this.pushTextDeltas("reasoning-delta", text);
+    const summaryIndex = numberValue(params, "summaryIndex") ?? 0;
+    let streamText = text;
+    if (itemId) {
+      const existing = this.reasoningSummaryDeltas.get(itemId) ?? new Map<number, string>();
+      const startsNewSection = !existing.has(summaryIndex) && existing.size > 0;
+      existing.set(summaryIndex, `${existing.get(summaryIndex) ?? ""}${text}`);
+      this.reasoningSummaryDeltas.set(itemId, existing);
+      if (startsNewSection) streamText = prefixReasoningSection(text);
+    }
+    this.pushTextDeltas("reasoning-delta", streamText);
   }
 
   private handleCompletedItem(item: Record<string, unknown> | undefined): void {
@@ -430,8 +438,8 @@ class CodexRpcSession {
     if (this.config.REASONING_SUMMARY === "none") return;
     const text = reasoningSummaryText(item);
     if (!text.trim()) return;
-    const streamed = itemId ? this.reasoningSummaryDeltas.get(itemId) : undefined;
-    if (streamed?.trim() === text.trim()) return;
+    const streamed = itemId ? streamedReasoningSummaryText(this.reasoningSummaryDeltas.get(itemId)) : undefined;
+    if (streamed !== undefined && comparableReasoningSummary(streamed) === comparableReasoningSummary(text)) return;
     this.pushTextDeltas("reasoning-delta", text);
   }
 
@@ -625,12 +633,34 @@ function agentMessageText(item: Record<string, unknown>, deltaFallback?: string)
 
 function reasoningSummaryText(item: Record<string, unknown>): string {
   const summary = item.summary;
-  if (Array.isArray(summary)) return summary.map(textPart).filter((part) => part !== undefined).join("\n");
+  if (Array.isArray(summary)) return joinReasoningSummaryParts(summary.map(textPart));
   if (typeof summary === "string") return summary;
   const content = item.content;
-  if (Array.isArray(content)) return content.map(textPart).filter((part) => part !== undefined).join("\n");
+  if (Array.isArray(content)) return joinReasoningSummaryParts(content.map(textPart));
   if (typeof content === "string") return content;
   return "";
+}
+
+function streamedReasoningSummaryText(parts: Map<number, string> | undefined): string | undefined {
+  if (!parts) return undefined;
+  return joinReasoningSummaryParts([...parts.entries()].sort(([left], [right]) => left - right).map(([, text]) => text));
+}
+
+function joinReasoningSummaryParts(parts: Array<string | undefined>): string {
+  return parts
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+}
+
+function prefixReasoningSection(text: string): string {
+  if (!text) return text;
+  if (/^\s*\n/.test(text)) return text;
+  return `\n\n${text.trimStart()}`;
+}
+
+function comparableReasoningSummary(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function textPart(value: unknown): string | undefined {
@@ -643,6 +673,11 @@ function textPart(value: unknown): string | undefined {
 function stringValue(record: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function numberValue(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function formatMessageForSummary(message: {
