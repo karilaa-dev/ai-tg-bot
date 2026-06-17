@@ -113,6 +113,7 @@ export const runTurn: TurnRunner = async (input) => {
         chatId: input.chatId,
         messageThreadId: input.messageThreadId,
         threadTitle: input.thread.title,
+        startedAt,
         updateMs: input.config.DRAFT_UPDATE_MS,
         t: input.t,
       })
@@ -153,10 +154,9 @@ export const runTurn: TurnRunner = async (input) => {
     const result = streamInference({
       ...input,
       context,
-      abortSignal: AbortSignal.timeout(300_000),
+      abortSignal: input.config.CODEX_TURN_TIMEOUT_MS > 0 ? AbortSignal.timeout(input.config.CODEX_TURN_TIMEOUT_MS) : undefined,
     });
-    streamer?.update({ thinkingMd: input.t("thinking-placeholder"), answerMd: "" });
-    streamer?.startKeepalive();
+    streamer?.update({ thinkingMd: "", answerMd: "" });
     for await (const part of result.fullStream) {
       const normalized = normalizeStreamPart(part);
       const metadata = normalized?.kind === "tool-call" ? await toolCallMetadata(input, normalized) : undefined;
@@ -198,7 +198,7 @@ export const runTurn: TurnRunner = async (input) => {
       finalAnswer = input.t("empty-answer");
     }
     await streamer?.finish({ thinkingMd: shaper.thinkingMd(), answerMd: finalAnswer });
-    await sendFinal(input, shaper.thinkingMd(), finalAnswer);
+    await sendFinal(input, shaper.thinkingMd(), finalAnswer, Date.now() - startedAt);
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
       threadId: input.thread.id,
@@ -293,10 +293,11 @@ function buildThinkingStatus(heading: string, toolStatusMd: string): string {
   return tools ? `${heading}\n\n${tools}` : heading;
 }
 
-export async function sendFinal(input: TurnInput, thinking: string, answer: string): Promise<void> {
+export async function sendFinal(input: TurnInput, thinking: string, answer: string, elapsedMs = 0): Promise<void> {
   const messages = renderFinal({
     thinkingLog: thinking,
     answerMd: answer,
+    elapsedMs,
     t: input.t,
   });
   input.logger.debug("sending final answer", {

@@ -48,7 +48,7 @@ describe("StreamShaper", () => {
     expect(s.finalAnswer()).toBe("Final checked answer.");
   });
 
-  it("reports stream event kinds used by the draft keepalive loop", () => {
+  it("reports stream event kinds used by draft updates", () => {
     const s = new StreamShaper();
     expect(handleStreamPart(s, { type: "text-delta", text: "One." })).toBe("content");
     expect(handleStreamPart(s, { type: "tool-call", toolName: "web_search", input: { query: "x" } })).toBe("tool-call");

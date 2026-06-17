@@ -303,7 +303,8 @@ describe("runTurn", () => {
     });
 
     expect(draftPayloads).toHaveLength(2);
-    expect(richMarkdownOf(draftPayloads[0])).toContain("💭 Thinking...");
+    expect(richMarkdownOf(draftPayloads[0])).toBe("💭 Thinking...");
+    expect(richMarkdownOf(draftPayloads[0])).not.toContain("<details>");
     expect(richMarkdownOf(draftPayloads[0])).not.toContain("First partial");
     expect(richMarkdownOf(draftPayloads[1])).toContain("First partial");
     expect(events.at(-1)?.startsWith("final:")).toBe(true);
@@ -406,12 +407,12 @@ describe("runTurn", () => {
     try {
       await firstDraft;
       expect(draftPayloads).toHaveLength(1);
-      expect(draftPayloads[0]).toContain("💭 Thinking...");
+      expect(draftPayloads[0]).toBe("💭 Thinking...");
 
       await vi.advanceTimersByTimeAsync(20_000);
       expect(draftPayloads.length).toBeGreaterThanOrEqual(2);
-      expect(draftPayloads[1]).toContain("💭 Thinking...");
-      expect(draftPayloads[1]).not.toContain("After quiet wait.");
+      expect(draftPayloads[1]).toBe("💭 Thinking...");
+      expect(draftPayloads.every((markdown) => !markdown.includes("After quiet wait."))).toBe(true);
 
       await vi.advanceTimersByTimeAsync(1_000);
       await turn;
@@ -646,8 +647,10 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return "💭 Thinking...";
     case "thinking-done":
       return "✅ Done.";
-    case "thinking-summary":
-      return `🧠 Thinking (${params?.steps} steps)`;
+    case "thinking-summary-running":
+      return `🧠 Thinking for ${params?.time}`;
+    case "thinking-summary-final":
+      return `🧠 Thought for ${params?.time}`;
     case "show-more":
       return "Show more";
     case "error-generic":

@@ -59,7 +59,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
   };
   return {
     search_thread: {
-      description: "Search this Telegram thread memory.",
+      description:
+        "Search this Telegram thread memory and linked fork/compaction context. Use before claiming something was not discussed, when the user asks about prior chat details, or to find message ids for load_message.",
       inputSchema: z.object({ query: z.string(), limit: z.number().max(20).default(8) }),
       execute: async ({ query, limit }) => {
         input.logger?.debug("tool search_thread starting", {
@@ -90,7 +91,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
       },
     },
     load_message: {
-      description: "Load one previous message by numeric id.",
+      description:
+        "Load one previous message by numeric id from search_thread results or a user reference. Use when an exact earlier message, attached file metadata, or image context is needed.",
       inputSchema: z.object({ message_id: z.number() }),
       execute: async ({ message_id }) => {
         input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
@@ -187,7 +189,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
       },
     },
     search_in_file: {
-      description: "Search chunks of an attached large file.",
+      description:
+        "Search chunks of an attached large file by file_id. Use before read_file_section when the user asks about a large uploaded document and the relevant chunk is unknown.",
       inputSchema: z.object({
         file_id: z.number(),
         query: z.string(),
@@ -240,7 +243,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
       },
     },
     read_file_section: {
-      description: "Read one or more chunks from an attached file.",
+      description:
+        "Read one or more chunks from an attached file by file_id and chunk_index. Use after search_in_file identifies a chunk, or use chunk_index -1 to inspect the file outline.",
       inputSchema: z.object({
         file_id: z.number(),
         chunk_index: z.number(),
@@ -287,7 +291,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     },
     bash: {
       description:
-        "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per Telegram thread. Use js-exec -c '...' for JavaScript, python3/python for Python, and curl -fsSL for known public raw URLs/APIs, optionally piped to jq. For exact verification or comparing runtimes, prefer one simple bash call that computes all values, checks equality/lengths/counts, and emits compact JSON. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
+        "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per Telegram thread. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
       inputSchema: z.object({
         script: z.string().min(1).max(20_000),
         cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -327,7 +331,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
       },
     },
     web_search: {
-      description: "Search the web to discover candidate current sources. For a known public raw URL or API endpoint, prefer bash with curl -fsSL.",
+      description:
+        "Search the web to discover candidate current sources and readable reference pages. Use when the user asks to search the internet/web/online and no successful curl result already verifies the answer. Do not claim or cite online verification from memory; cite only sources returned by current-turn web/curl tools. Use for finding sources, not for fetching known raw data. For a known public raw URL or API endpoint, prefer bash with curl -fsSL.",
       inputSchema: z.object({ query: z.string(), max_results: z.number().max(10).default(5) }),
       execute: async ({ query, max_results }) => {
         try {
@@ -354,7 +359,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     },
     web_extract: {
       description:
-        "Extract readable article/page content from known web page URLs. Do not use for raw JSON/API endpoints or exact raw-data/PDF verification; prefer bash with curl -fsSL for those.",
+        "Extract readable article/page content from known web page URLs after discovery or when the URL is already known. Use current-turn extracted content before claiming a web page verifies an answer. Do not use for raw JSON/API endpoints, text data files, or exact raw-data/PDF verification; prefer bash with curl -fsSL for those.",
       inputSchema: z.object({
         urls: z.array(z.string().url()).min(1).max(5),
         query: z.string().optional(),
@@ -623,6 +628,9 @@ function bashModelHint(result: Record<string, unknown>, input?: unknown): string
   if (timedOut) return "The bash script timed out; retry with a smaller bounded command.";
   if (/\bnode\b/.test(script) || /this sandbox uses js-exec instead of node|node is .*stub/i.test(combined)) {
     return "Use js-exec -c '...' for JavaScript in just-bash; node is only a help stub.";
+  }
+  if (/\$\(|<\(/.test(script) || /command substitution|process substitution|syntax error near unexpected token|bad substitution/i.test(combined)) {
+    return "Avoid just-bash command/process substitution. Write js-exec, python3, and curl outputs to temp files, then compare/read those files.";
   }
   if (/pipefail/i.test(script) || /pipefail/i.test(combined)) {
     return "Retry with a simpler just-bash script without set -o pipefail; emit compact JSON with the values and checks.";

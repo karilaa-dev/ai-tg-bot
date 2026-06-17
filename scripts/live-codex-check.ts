@@ -11,6 +11,7 @@ import { createOpenRouterTextEmbedder, persistEmbedding, type TextEmbedder } fro
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-live-codex-"));
 const marker = `CODEX_CHECK_MARKER_${Date.now()}_SAPPHIRE`;
 const bashMarker = `BASH_CHECK_MARKER_${Date.now()}_TOPAZ`;
+const pi100Decimal = "3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679";
 const question = [
   `Use the search_in_file tool on the attached file to find this exact marker: ${marker}.`,
   "Do not answer from the file list or memory alone.",
@@ -22,6 +23,7 @@ const bashQuestion = [
   "js-exec -c 'console.log(42)'; python3 -c 'print(42)'; curl -s https://api.pi.delivery/v1/pi?start=0\\&numberOfDigits=2",
   `If the JavaScript output is 42, the Python output is 42, and curl returns digits starting with 31, reply exactly: ${bashMarker}`,
 ].join("\n");
+const piQuestion = "Calculate first 100 digits of Pi using js, and then using python. Then search internet to verify results";
 
 const baseConfig = loadConfig({
   ...process.env,
@@ -108,6 +110,33 @@ async function runCodex(): Promise<CodexResult> {
     check("codex-bash-tool-used", result.bashUsedTool, result);
     check("codex-bash-thinking-shows-js-python-curl", result.bashThinkingShowsScript, result);
     check("codex-bash-status-shows-js-python-curl", result.bashStatusShowsScript, result);
+
+    const piThread = await repos.threads.activeForUserTopic(setup.user.tg_id, 314159, "Live Pi");
+    await runTurn({
+      api: api as never,
+      chatId: setup.user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user: setup.user,
+      thread: piThread,
+      text: piQuestion,
+      embedder,
+      t,
+    });
+    const piAssistant = await repos.messages.latest(piThread.id);
+    const piThinking = piAssistant?.thinking ?? "";
+    const piAnswer = piAssistant?.text_plain ?? "";
+    const piFirstCodeBlock = firstCodeBlock(piAnswer);
+    result.piFinalUsesDecimalConvention = piFirstCodeBlock.includes(pi100Decimal);
+    result.piUsedBash = piThinking.includes("🐚 Running bash");
+    result.piUsedInternetTool = ["🔎 Searching web", "🌐 Reading page", "curl"].some((token) => piThinking.includes(token));
+    result.piAnswerPreview = piAnswer.slice(0, 700);
+    result.piThinkingPreview = piThinking.slice(0, 1200);
+    check("codex-pi-decimal-convention", result.piFinalUsesDecimalConvention, result);
+    check("codex-pi-used-bash", result.piUsedBash, result);
+    check("codex-pi-used-internet-verification", result.piUsedInternetTool, result);
     return result;
   } finally {
     await db.destroy().catch((err) => logger.warn("live codex database destroy failed", { err: String(err) }));
@@ -224,8 +253,13 @@ interface CodexResult {
   bashUsedTool?: boolean;
   bashThinkingShowsScript?: boolean;
   bashStatusShowsScript?: boolean;
+  piFinalUsesDecimalConvention?: boolean;
+  piUsedBash?: boolean;
+  piUsedInternetTool?: boolean;
   bashAnswerPreview?: string;
   bashThinking?: string;
+  piAnswerPreview?: string;
+  piThinkingPreview?: string;
   answerPreview: string;
   thinking: string;
   statusEdits: string[];
@@ -238,14 +272,20 @@ function check(name: string, ok: boolean, details?: unknown): void {
   if (!ok) throw new Error(`Live Codex check failed: ${name}`);
 }
 
+function firstCodeBlock(text: string): string {
+  return text.match(/```(?:[^\n]*)\n([\s\S]*?)```/)?.[1] ?? text.slice(0, 700);
+}
+
 function t(key: string, params?: Record<string, string | number>): string {
   switch (key) {
     case "thinking-placeholder":
       return "💭 Thinking...";
     case "thinking-done":
       return "✅ Done.";
-    case "thinking-summary":
-      return `🧠 Thinking${params?.steps ? ` (${params.steps})` : ""}`;
+    case "thinking-summary-running":
+      return `🧠 Thinking for ${params?.time}`;
+    case "thinking-summary-final":
+      return `🧠 Thought for ${params?.time}`;
     case "empty-answer":
       return "⚠️ No final answer returned.";
     case "error-generic":
@@ -263,3 +303,6 @@ try {
 } finally {
   await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
 }
+
+// Real provider clients may leave keep-alive handles open after all checks pass.
+process.exit(0);

@@ -249,20 +249,38 @@ describe("AI tools", () => {
     const webExtractSpec = specs.find((spec) => spec.name === "web_extract");
     expect(bashSpec?.description).toContain("js-exec -c");
     expect(bashSpec?.description).toContain("curl -fsSL");
+    expect(bashSpec?.description).toContain("Do not use Python urllib/requests");
+    expect(bashSpec?.description).toContain("before claiming online verification");
+    expect(bashSpec?.description).toContain("constant-digit checks");
+    expect(bashSpec?.description).toContain("Avoid command substitution");
+    expect(bashSpec?.description).toContain("temp files");
     expect(bashSpec?.description).toContain("compact JSON");
     expect(bashSpec?.description).toContain("equality/lengths/counts");
+    expect(bashSpec?.description).toContain("retry only the failed part");
     expect(bashSpec?.description).toContain("set -o pipefail");
     expect(bashSpec?.description).toContain("Localhost/private");
     expect(webSearchSpec?.description).toContain("discover candidate");
+    expect(webSearchSpec?.description).toContain("Do not claim or cite online verification from memory");
     expect(webSearchSpec?.description).toContain("curl -fsSL");
     expect(webExtractSpec?.description).toContain("readable article/page");
+    expect(webExtractSpec?.description).toContain("before claiming a web page verifies");
     expect(webExtractSpec?.description).toContain("raw JSON/API");
     expect(webExtractSpec?.description).toContain("PDF verification");
     const prompt = await fs.readFile(path.resolve("system_prompt.md"), "utf8");
     expect(prompt).toContain("js-exec -c");
     expect(prompt).toContain("curl -fsSL");
+    expect(prompt).toContain("Do not use Python urllib/requests");
+    expect(prompt).toContain("If the user asks to search the internet/web/online");
+    expect(prompt).toContain("Do not claim, cite, or imply online verification");
+    expect(prompt).toContain("one combined bash call");
+    expect(prompt).toContain("common published-list convention");
+    expect(prompt).toContain("3.` plus N digits after the decimal");
+    expect(prompt).toContain("Avoid command substitution");
+    expect(prompt).toContain("write each result to a temp file");
     expect(prompt).toContain("compact JSON");
     expect(prompt).toContain("equality/lengths/counts");
+    expect(prompt).toContain("retry only the failed part");
+    expect(prompt).toContain("Do not perform unnecessary tool calls after you have enough evidence");
     expect(prompt).toContain("set -o pipefail");
     expect(prompt).toContain("blocks localhost/private");
 
@@ -274,6 +292,16 @@ describe("AI tools", () => {
       "bash-node",
     );
     expect(JSON.stringify(nodeHint)).toContain("Use js-exec -c");
+
+    const commandSubstitutionHint = await formatBotToolResultForCodex(
+      registry,
+      "bash",
+      { script: "value=$(js-exec -c 'console.log(42)')\nprintf '%s\\n' \"$value\"" },
+      bashOutput({ stderr: "syntax error near unexpected token `('", exit_code: 1 }),
+      "bash-command-substitution",
+    );
+    expect(JSON.stringify(commandSubstitutionHint)).toContain("Avoid just-bash command/process substitution");
+    expect(JSON.stringify(commandSubstitutionHint)).toContain("temp files");
 
     const curlHint = await formatBotToolResultForCodex(
       registry,

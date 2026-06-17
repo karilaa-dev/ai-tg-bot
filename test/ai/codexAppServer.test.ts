@@ -25,6 +25,8 @@ describe("Codex app-server client", () => {
   it("builds process-level app-server config overrides for reasoning summaries", () => {
     expect(codexAppServerConfigArgs(loadTestConfig())).toEqual([
       "-c",
+      'approvals_reviewer="guardian_subagent"',
+      "-c",
       'model_verbosity="high"',
       "-c",
       'model_reasoning_summary="none"',
@@ -32,6 +34,8 @@ describe("Codex app-server client", () => {
     expect(codexAppServerConfigArgs(loadTestConfig({
       REASONING_SUMMARY: "detailed",
     }))).toEqual([
+      "-c",
+      'approvals_reviewer="guardian_subagent"',
       "-c",
       'model_verbosity="high"',
       "-c",

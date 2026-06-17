@@ -8,24 +8,31 @@ export type RenderT = (key: string, params?: Record<string, string | number>) =>
 export interface RenderFinalInput {
   thinkingLog?: string;
   answerMd: string;
+  elapsedMs: number;
   t: RenderT;
 }
 
 export interface RenderDraftInput {
   thinkingMd: string;
   answerMd: string;
+  elapsedMs: number;
   t: RenderT;
 }
 
 export function renderFinal(input: RenderFinalInput): InputRichMessage[] {
-  const thinking = renderThinkingDetails(input.thinkingLog, input.t, 8000);
+  const thinking = renderThinkingDetails(input.thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs), 8000);
   const answer = withShowMore(sanitize(input.answerMd, { enforceLimit: false }), SHOW_MORE_THRESHOLD, input.t);
   return splitRich(`${thinking}${answer}`).map((markdown) => ({ markdown: sanitize(markdown) }));
 }
 
 export function renderDraft(input: RenderDraftInput): InputRichMessage {
-  const thinking = renderThinkingDetails(input.thinkingMd, input.t, 3000);
-  return { markdown: sanitize(`${thinking}${input.answerMd}`) };
+  if (!input.thinkingMd.trim() && !input.answerMd.trim()) {
+    return { markdown: sanitize(input.t("thinking-placeholder")) };
+  }
+  const title = thinkingTitle(input.t, "running", input.elapsedMs);
+  const thinking = renderDraftThinking(input.thinkingMd, title, 3000);
+  const answer = input.answerMd.trim() ? `${thinking ? "" : "\n\n"}${input.answerMd}` : "";
+  return { markdown: sanitize(`${thinking || title}${answer}`) };
 }
 
 export function variantsForRichRetry(markdown: string): InputRichMessage[] {
@@ -40,10 +47,16 @@ function withShowMore(md: string, threshold: number, t: (key: string) => string)
   return `${head}\n\n<details><summary>${t("show-more")}</summary>\n\n${tailText}\n\n</details>`;
 }
 
-function renderThinkingDetails(thinkingLog: string | undefined, t: RenderT, chars: number): string {
+function renderDraftThinking(thinkingLog: string | undefined, title: string, chars: number): string {
   const trimmed = thinkingLog?.trim();
   if (!trimmed) return "";
-  return `<details>\n<summary>${t("thinking-summary", { steps: countLines(trimmed) })}</summary>\n\n${tail(trimmed, chars)}\n\n</details>\n\n`;
+  return renderThinkingDetails(trimmed, title, chars);
+}
+
+function renderThinkingDetails(thinkingLog: string | undefined, title: string, chars: number): string {
+  const trimmed = thinkingLog?.trim();
+  if (!trimmed) return "";
+  return `<details>\n<summary>${title}</summary>\n\n${tail(trimmed, chars)}\n\n</details>\n\n`;
 }
 
 function findBlockBoundary(md: string, threshold: number): number {
@@ -108,10 +121,20 @@ function splitRich(md: string): string[] {
   return parts;
 }
 
-function countLines(text: string): number {
-  return text.split("\n").filter((line) => line.trim()).length;
-}
-
 function tail(text: string, chars: number): string {
   return text.length > chars ? `...${text.slice(-chars)}` : text;
+}
+
+function thinkingTitle(t: RenderT, state: "running" | "final", elapsedMs: number): string {
+  return t(state === "running" ? "thinking-summary-running" : "thinking-summary-final", {
+    time: formatElapsed(elapsedMs),
+  });
+}
+
+export function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }

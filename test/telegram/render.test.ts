@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import { renderDraft, renderFinal } from "../../src/telegram/render.js";
 
 describe("renderFinal", () => {
-  const t = (key: string, params?: Record<string, string | number>) => key === "thinking-summary" ? `Thinking (${params?.steps} steps)` : key;
+  const t = (key: string, params?: Record<string, string | number>) => {
+    if (key === "thinking-placeholder") return "Thinking...";
+    if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
+    if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
+    return key;
+  };
 
   it("splits long rich messages instead of truncating before split", () => {
     const answer = `${"long paragraph\n\n".repeat(2600)}tail-marker`;
     const parts = renderFinal({
       answerMd: answer,
+      elapsedMs: 0,
       t,
     });
 
@@ -20,6 +26,7 @@ describe("renderFinal", () => {
     const answer = `Intro\n\n\`\`\`ts\n${"const value = 1;\n".repeat(300)}\`\`\`\n\nTail`;
     const [part] = renderFinal({
       answerMd: answer,
+      elapsedMs: 0,
       t,
     });
     const markdown = part?.markdown ?? "";
@@ -31,6 +38,7 @@ describe("renderFinal", () => {
     const answer = `\`\`\`ts\n${"const value = 1;\n".repeat(4000)}\`\`\``;
     const parts = renderFinal({
       answerMd: answer,
+      elapsedMs: 0,
       t,
     });
 
@@ -44,18 +52,45 @@ describe("renderFinal", () => {
     expect(parts.slice(1).some((part) => (part.markdown ?? "").startsWith("```ts\n"))).toBe(true);
   });
 
-  it("renders draft thinking in the same closed details block as final answers", () => {
+  it("renders an empty draft as the plain thinking placeholder without a details block", () => {
     const payload = renderDraft({
-      thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)",
-      answerMd: "Answer.",
+      thinkingMd: "",
+      answerMd: "",
+      elapsedMs: 0,
       t,
     });
     const markdown = payload.markdown ?? "";
 
-    expect(markdown).toContain("<details>\n<summary>Thinking (1 steps)</summary>");
+    expect(markdown).toBe("Thinking...");
+    expect(markdown).not.toContain("<details>");
+  });
+
+  it("renders draft thinking in a closed elapsed details block once content exists", () => {
+    const payload = renderDraft({
+      thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)",
+      answerMd: "Answer.",
+      elapsedMs: 27_000,
+      t,
+    });
+    const markdown = payload.markdown ?? "";
+
+    expect(markdown).toContain("<details>\n<summary>Thinking for 27s</summary>");
     expect(markdown).toContain("🔎 Searching web <code>alpha</code> (5 results)");
     expect(markdown).toContain("</details>");
     expect(markdown).toContain("Answer.");
     expect(markdown).not.toContain("<tg-thinking>");
+  });
+
+  it("renders final thinking with a final elapsed title instead of step counts", () => {
+    const [payload] = renderFinal({
+      thinkingLog: "First thought\nSecond thought",
+      answerMd: "Answer.",
+      elapsedMs: 65_000,
+      t,
+    });
+    const markdown = payload?.markdown ?? "";
+
+    expect(markdown).toContain("<details>\n<summary>Thought for 1m 05s</summary>");
+    expect(markdown).not.toContain("steps");
   });
 });

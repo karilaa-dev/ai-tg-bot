@@ -16,6 +16,7 @@ const ConfigSchema = z.object({
   CODEX_COMPACTION_MODEL: z.string().default("gpt-5.4-mini"),
   CODEX_SPEED_MODE: z.enum(["standard", "fast"]).default("standard"),
   CODEX_VERBOSITY: CodexVerbositySchema.default("high"),
+  CODEX_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(900_000),
   REASONING_SUMMARY: ReasoningSummarySchema.default("none"),
   OPENROUTER_API_KEY: z.string().min(1),
   OPENROUTER_EMBEDDING_MODEL: z
@@ -50,6 +51,7 @@ export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
     CODEX_SPEED_MODE: "standard",
     CODEX_VERBOSITY: "high",
+    CODEX_TURN_TIMEOUT_MS: 900_000,
     REASONING_SUMMARY: "none",
     OPENROUTER_API_KEY: "test-openrouter",
     OPENROUTER_EMBEDDING_MODEL: DEFAULT_OPENROUTER_EMBEDDING_MODEL,

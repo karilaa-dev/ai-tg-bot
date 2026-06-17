@@ -62,6 +62,8 @@ export function codexServiceTier(config: AppConfig): string | null {
 export function codexAppServerConfigArgs(config: AppConfig): string[] {
   return [
     "-c",
+    'approvals_reviewer="guardian_subagent"',
+    "-c",
     `model_verbosity=${tomlString(config.CODEX_VERBOSITY)}`,
     "-c",
     `model_reasoning_summary=${tomlString(config.REASONING_SUMMARY)}`,

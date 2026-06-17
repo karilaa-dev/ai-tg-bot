@@ -36,6 +36,8 @@ summarization/rolling memory and compaction-time image descriptions.
 `REASONING_SUMMARY` defaults to `none` and is the only reasoning-display
 environment setting; set it to `auto`, `concise`, or `detailed` to stream Codex
 reasoning summaries into the thinking block.
+`CODEX_TURN_TIMEOUT_MS` defaults to `900000` (15 minutes); set it to `0` to
+disable the hard cap for very long turns.
 `STREAM_DELTA_CHARS` defaults to `48`, splitting large Codex answer/reasoning
 deltas into smaller draft-rendering chunks. The rendered `system_prompt.md` is
 sent as Codex `baseInstructions`, replacing the default Codex base prompt for

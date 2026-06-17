@@ -305,12 +305,16 @@ function fakeEmbedder() {
   };
 }
 
-function testT(key: string): string {
+function testT(key: string, params?: Record<string, string | number>): string {
   switch (key) {
     case "thinking-placeholder":
       return "💭 Thinking...";
     case "thinking-done":
       return "✅ Done.";
+    case "thinking-summary-running":
+      return `🧠 Thinking for ${params?.time}`;
+    case "thinking-summary-final":
+      return `🧠 Thought for ${params?.time}`;
     case "empty-answer":
       return "⚠️ No final answer returned.";
     case "error-generic":

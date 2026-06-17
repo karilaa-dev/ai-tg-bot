@@ -3,16 +3,18 @@ import { isRichParseError, isThreadNotFound, sendRichDraft, type InputRichMessag
 import { renderDraft, type RenderT, variantsForRichRetry } from "./render.js";
 
 type DraftFrame = { thinkingMd: string; answerMd: string };
-type PendingDraft = { frame: DraftFrame; force: boolean };
+type PendingDraft = { frame: DraftFrame; force: boolean; elapsedMs: number };
 type DraftSendResult = "sent" | "dropped" | { retryAfterMs: number };
 
 const floodWaitSafetyMs = 100;
+const thinkingElapsedTickMs = 10_000;
 
 export interface DraftStreamerOptions {
   api: RawRichApi;
   chatId: number;
   messageThreadId?: number;
   threadTitle?: string;
+  startedAt: number;
   updateMs: number;
   t: RenderT;
 }
@@ -25,7 +27,9 @@ export class DraftStreamer {
   private pending?: PendingDraft;
   private timer?: NodeJS.Timeout;
   private timerAt = 0;
-  private keepalive?: NodeJS.Timeout;
+  private elapsedTimer?: NodeJS.Timeout;
+  private lastThinkingMd: string | undefined;
+  private titleElapsedMs = 0;
   private sending = false;
   private blockedUntil = 0;
   private threadUnavailable = false;
@@ -35,23 +39,18 @@ export class DraftStreamer {
   constructor(private readonly options: DraftStreamerOptions) {}
 
   update(frame: DraftFrame): void {
-    this.queue(frame, false);
-  }
-
-  startKeepalive(): void {
-    this.keepalive ??= setInterval(() => {
-      if (this.latest) this.queue(this.latest, true);
-    }, 20_000);
-  }
-
-  stopKeepalive(): void {
-    if (this.keepalive) clearInterval(this.keepalive);
-    this.keepalive = undefined;
+    const thinkingChanged = frame.thinkingMd !== this.lastThinkingMd;
+    if (frame.thinkingMd !== this.lastThinkingMd) {
+      this.lastThinkingMd = frame.thinkingMd;
+      this.titleElapsedMs = this.elapsedMs();
+    }
+    this.queue(frame, false, this.titleElapsedMs);
+    if (thinkingChanged) this.scheduleElapsedTick();
   }
 
   stop(): void {
     if (this.timer) clearTimeout(this.timer);
-    this.stopKeepalive();
+    this.stopElapsedTick();
     this.timer = undefined;
     this.timerAt = 0;
     this.pending = undefined;
@@ -60,21 +59,49 @@ export class DraftStreamer {
   }
 
   async finish(frame?: DraftFrame): Promise<void> {
-    this.stopKeepalive();
-    if (frame && (frame.thinkingMd.trim() || frame.answerMd.trim())) this.queue(frame, false);
-    else this.schedulePump();
+    this.stopElapsedTick();
+    if (frame && (frame.thinkingMd.trim() || frame.answerMd.trim())) {
+      if (frame.thinkingMd !== this.lastThinkingMd) {
+        this.lastThinkingMd = frame.thinkingMd;
+        this.titleElapsedMs = this.elapsedMs();
+      }
+      this.queue(frame, false, this.titleElapsedMs);
+    } else {
+      this.schedulePump();
+    }
     await this.waitForIdle();
   }
 
-  private queue(frame: DraftFrame, force: boolean): void {
+  private queue(frame: DraftFrame, force: boolean, elapsedMs: number): void {
     if (this.closed) return;
     this.latest = frame;
-    this.pending = { frame, force };
+    this.pending = { frame, force, elapsedMs };
     this.schedulePump();
   }
 
-  private renderPending(frame: DraftFrame): InputRichMessage {
-    return renderDraft({ ...frame, t: this.options.t });
+  private renderPending(pending: PendingDraft): InputRichMessage {
+    return renderDraft({ ...pending.frame, elapsedMs: pending.elapsedMs, t: this.options.t });
+  }
+
+  private elapsedMs(): number {
+    return Math.max(0, Date.now() - this.options.startedAt);
+  }
+
+  private scheduleElapsedTick(): void {
+    if (this.closed || !this.latest) return;
+    this.stopElapsedTick();
+    this.elapsedTimer = setTimeout(() => {
+      this.elapsedTimer = undefined;
+      if (!this.latest || this.closed) return;
+      this.titleElapsedMs = this.elapsedMs();
+      this.queue(this.latest, true, this.titleElapsedMs);
+      this.scheduleElapsedTick();
+    }, thinkingElapsedTickMs);
+  }
+
+  private stopElapsedTick(): void {
+    if (this.elapsedTimer) clearTimeout(this.elapsedTimer);
+    this.elapsedTimer = undefined;
   }
 
   private schedulePump(): void {
@@ -116,7 +143,7 @@ export class DraftStreamer {
       return;
     }
     this.pending = undefined;
-    const payload = this.renderPending(queued.frame);
+    const payload = this.renderPending(queued);
     const hash = JSON.stringify(payload);
     if (!queued.force && hash === this.lastHash) {
       this.schedulePump();

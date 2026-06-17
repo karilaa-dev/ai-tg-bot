@@ -7,9 +7,10 @@ describe("DraftStreamer", () => {
     vi.useRealTimers();
   });
 
-  it("resends the latest draft frame as a keepalive during long tool waits", async () => {
+  it("shows the plain thinking placeholder before any response content", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-12T12:00:00Z"));
+    const startedAt = Date.now();
     const payloads: unknown[] = [];
     const streamer = new DraftStreamer({
       api: {
@@ -21,27 +22,70 @@ describe("DraftStreamer", () => {
         },
       },
       chatId: 1,
+      startedAt,
       updateMs: 1000,
       t: testT,
     });
 
-    streamer.update({ thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)", answerMd: "" });
+    streamer.update({ thinkingMd: "", answerMd: "" });
     await flushPromises();
     expect(payloads).toHaveLength(1);
-    const markdown = markdownOf(payloads[0]);
-    expect(markdown).toContain("<details>\n<summary>🧠 Thinking (1 steps)</summary>");
-    expect(markdown).toContain("🔎 Searching web <code>alpha</code> (5 results)");
-    expect(markdown).not.toContain("<tg-thinking>");
+    expect(markdownOf(payloads[0])).toBe("💭 Thinking...");
+    expect(markdownOf(payloads[0])).not.toContain("<details>");
 
-    streamer.startKeepalive();
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     await flushPromises();
     expect(payloads).toHaveLength(2);
+    expect(markdownOf(payloads[1])).toBe("💭 Thinking...");
 
-    streamer.stopKeepalive();
-    await vi.advanceTimersByTimeAsync(20_000);
+    streamer.stop();
+  });
+
+  it("refreshes elapsed time for thinking changes but not answer-only frames", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T12:00:00Z"));
+    const startedAt = Date.now();
+    const payloads: unknown[] = [];
+    const streamer = new DraftStreamer({
+      api: {
+        raw: {
+          sendRichMessageDraft: async (payload: unknown) => {
+            payloads.push(payload);
+            return true;
+          },
+        },
+      },
+      chatId: 1,
+      startedAt,
+      updateMs: 0,
+      t: testT,
+    });
+
+    streamer.update({ thinkingMd: "", answerMd: "" });
     await flushPromises();
-    expect(payloads).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    streamer.update({ thinkingMd: "", answerMd: "Partial answer." });
+    await flushPromises();
+    expect(markdownOf(payloads.at(-1))).toContain("🧠 Thinking for 0s");
+    expect(markdownOf(payloads.at(-1))).toContain("Partial answer.");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    streamer.update({ thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)", answerMd: "Partial answer." });
+    await flushPromises();
+    expect(markdownOf(payloads.at(-1))).toContain("<details>\n<summary>🧠 Thinking for 5s</summary>");
+    expect(markdownOf(payloads.at(-1))).toContain("🔎 Searching web <code>alpha</code> (5 results)");
+    expect(markdownOf(payloads.at(-1))).not.toContain("<tg-thinking>");
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    streamer.update({ thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)", answerMd: "Longer partial answer." });
+    await flushPromises();
+    expect(markdownOf(payloads.at(-1))).toContain("<summary>🧠 Thinking for 5s</summary>");
+    expect(markdownOf(payloads.at(-1))).toContain("Longer partial answer.");
+
+    await vi.advanceTimersByTimeAsync(7_000);
+    await flushPromises();
+    expect(markdownOf(payloads.at(-1))).toContain("<summary>🧠 Thinking for 15s</summary>");
 
     streamer.stop();
   });
@@ -62,6 +106,7 @@ describe("DraftStreamer", () => {
         },
       },
       chatId: 1,
+      startedAt: Date.now(),
       updateMs: 0,
       t: testT,
     });
@@ -101,6 +146,7 @@ describe("DraftStreamer", () => {
         },
       },
       chatId: 1,
+      startedAt: Date.now(),
       updateMs: 0,
       t: testT,
     });
@@ -140,6 +186,7 @@ describe("DraftStreamer", () => {
       chatId: 1,
       messageThreadId: 42,
       threadTitle: "Topic 42",
+      startedAt: Date.now(),
       updateMs: 1000,
       t: testT,
     });
@@ -196,6 +243,8 @@ function markdownOf(payload: unknown): string {
 }
 
 function testT(key: string, params?: Record<string, string | number>): string {
-  if (key === "thinking-summary") return `🧠 Thinking (${params?.steps} steps)`;
+  if (key === "thinking-placeholder") return "💭 Thinking...";
+  if (key === "thinking-summary-running") return `🧠 Thinking for ${params?.time}`;
+  if (key === "thinking-summary-final") return `🧠 Thought for ${params?.time}`;
   return key;
 }
