@@ -193,9 +193,13 @@ describe("runTurn", () => {
     });
 
     expect(JSON.stringify(richPayloads)).toContain("No final answer returned.");
+    expect(JSON.stringify(richPayloads)).toContain("Tool calls: 1");
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "⚠️ No final answer returned." });
-    expect(latest?.thinking).toContain("📄 Searching file <code>chapter-notes.txt</code> (0 results)");
+    expect(latest?.thinking).toContain("Tool calls: 1");
+    expect(latest?.thinking).toContain("- 📄 Searching file: 1");
+    expect(latest?.thinking).not.toContain("<code>chapter-notes.txt</code>");
+    expect(latest?.thinking).not.toContain("0 results");
   });
 
   it("edits a regular HTML status message with readable tool subjects when streaming is off", async () => {
@@ -267,8 +271,10 @@ describe("runTurn", () => {
     ].join("\n"));
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Final answer." });
-    expect(latest?.thinking).toContain("🔎 Searching web <code>alpha</code> (5 results)");
-    expect(latest?.thinking).toContain("🔎 Searching web <code>beta</code> (2 results)");
+    expect(latest?.thinking).toContain("Tool calls: 2");
+    expect(latest?.thinking).toContain("- 🔎 Searching web: 2");
+    expect(latest?.thinking).not.toContain("🔎 Searching web <code>alpha</code>");
+    expect(latest?.thinking).not.toContain("🔎 Searching web <code>beta</code>");
     expect(latest?.thinking).not.toContain("x2");
     expect(latest?.thinking).not.toContain("↳");
     expect(latest?.thinking).not.toContain("web_search");
@@ -321,6 +327,84 @@ describe("runTurn", () => {
     expect(latest).toMatchObject({ role: "assistant", text_plain: "First partial" });
   });
 
+  it("streams full reasoning drafts and compacts final reasoning to titles", async () => {
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0, REASONING_SUMMARY: "detailed" });
+    const user = await repos.users.ensure({ tgId: 109, firstName: "CompactDraft", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    codexParts = [
+      {
+        type: "reasoning-delta",
+        text: [
+          "Evaluating technical options",
+          "I need to figure out the best way to perform an explicit internet search.",
+          "",
+          "Planning file creation for Pi calculation",
+          "Since I am responding within Telegram, I will use available tools.",
+        ].join("\n"),
+      },
+      {
+        type: "reasoning-delta",
+        text: [
+          "",
+          "",
+          "Considering pi verification process",
+          "I need to use a combined bash command to create both source files.",
+        ].join("\n"),
+      },
+      {
+        type: "reasoning-delta",
+        text: [
+          "",
+          "",
+          "Evaluating pi digit sources",
+          "For an exact machine comparison of pi digits, I should fetch a reliable reference.",
+        ].join("\n"),
+      },
+      { type: "text-delta", text: "Answer after compact reasoning." },
+    ];
+    const draftPayloads: string[] = [];
+    const api = {
+      raw: {
+        sendRichMessageDraft: async (payload: unknown) => {
+          draftPayloads.push(richMarkdownOf(payload));
+          return true;
+        },
+        sendRichMessage: async () => ({ message_id: 32, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user,
+      thread,
+      text: "stream long reasoning",
+      t: testT,
+    });
+
+    const reasoningDraft = draftPayloads.find((markdown) => markdown.includes("Evaluating pi digit sources"));
+    expect(reasoningDraft).toBeDefined();
+    expect(reasoningDraft!).toContain("Considering pi verification process");
+    expect(reasoningDraft!).toContain("Evaluating pi digit sources");
+    expect(reasoningDraft!).toContain("explicit internet search");
+    expect(reasoningDraft!).toContain("Planning file creation");
+    expect(reasoningDraft!).toContain("combined bash command");
+    expect(reasoningDraft!).not.toContain("\n\n...");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest?.thinking).toContain("Reasoning blocks: 3");
+    expect(latest?.thinking).toContain("Evaluating technical options");
+    expect(latest?.thinking).toContain("Considering pi verification process");
+    expect(latest?.thinking).toContain("Evaluating pi digit sources");
+    expect(latest?.thinking).not.toContain("explicit internet search");
+    expect(latest?.thinking).not.toContain("Planning file creation");
+    expect(latest?.thinking).not.toContain("combined bash command");
+    expect(latest?.thinking).not.toContain("reliable reference");
+  });
+
   it("persists the completed Codex agentMessage instead of provisional streamed text after tools", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 104, firstName: "CompletedFinal", lang: "en" });
@@ -369,9 +453,12 @@ describe("runTurn", () => {
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: finalAnswer });
     expect(latest?.text_plain).not.toContain("I will calculate this first");
-    expect(latest?.thinking).toContain("> I will calculate this first, then verify it.");
-    expect(latest?.thinking).toContain("🐚 Running bash");
-    expect(latest?.thinking).toContain("(exit 0)");
+    expect(latest?.thinking).toContain("Tool calls: 2");
+    expect(latest?.thinking).not.toContain("I will calculate this first, then verify it.");
+    expect(latest?.thinking).toContain("- 🐚 Running bash: 2");
+    expect(latest?.thinking).not.toContain("node -e");
+    expect(latest?.thinking).not.toContain("python3");
+    expect(latest?.thinking).not.toContain("(exit 0)");
   });
 
   it("sends and links files created by the create_file dynamic tool", async () => {
@@ -432,6 +519,11 @@ describe("runTurn", () => {
     expect(documents).toEqual([{ filename: "answer.txt", other: { message_thread_id: undefined, caption: "Generated file" } }]);
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the file." });
+    expect(latest?.thinking).toContain("Tool calls: 1");
+    expect(latest?.thinking).toContain("- 📎 Creating file: 1");
+    expect(latest?.thinking).toContain("Files sent: 1");
+    expect(latest?.thinking).toContain("<code>answer.txt</code>");
+    expect(latest?.thinking).not.toContain("<code>/answer.txt</code>");
     const attached = await repos.files.listForMessage(latest!.id);
     expect(attached).toHaveLength(1);
     expect(attached[0]).toMatchObject({
@@ -518,6 +610,10 @@ describe("runTurn", () => {
     }]);
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the files." });
+    expect(latest?.thinking).toContain("Tool calls: 2");
+    expect(latest?.thinking).toContain("- 📎 Creating file: 2");
+    expect(latest?.thinking).toContain("Files sent: 2");
+    expect(latest?.thinking).toContain("<code>first.txt</code>, <code>second.txt</code>");
     const attached = await repos.files.listForMessage(latest!.id);
     expect(attached).toHaveLength(2);
     expect(attached[0]).toMatchObject({
@@ -1022,6 +1118,16 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return `🧠 Thinking for ${params?.time}`;
     case "thinking-summary-final":
       return `🧠 Thought for ${params?.time}`;
+    case "thinking-final-tool-calls":
+      return `Tool calls: ${params?.count}`;
+    case "thinking-final-reasoning":
+      return `Reasoning blocks: ${params?.count}`;
+    case "thinking-final-tools":
+      return "Tools:";
+    case "thinking-final-files":
+      return `Files sent: ${params?.count}`;
+    case "thinking-final-files-capped":
+      return `Files sent: ${params?.sent} of ${params?.requested} (limit ${params?.limit})`;
     case "show-more":
       return "Show more";
     case "error-generic":

@@ -33,7 +33,7 @@ describe("StreamShaper", () => {
     expect(s.visibleAnswer()).toBe("One. Two. Three. Four. Five.");
     s.onToolCall("search_thread", { query: "alpha" });
     expect(s.visibleAnswer()).toBe("");
-    expect(s.thinkingMd()).toContain("> One. Two. Three. Four. Five.");
+    expect(s.thinkingMd()).not.toContain("One. Two. Three. Four. Five.");
     expect(s.thinkingMd()).toContain("💬 Searching chat <code>alpha</code>");
   });
 
@@ -43,7 +43,7 @@ describe("StreamShaper", () => {
     expect(handleStreamPart(s, { type: "tool-call", toolName: "bash", input: { script: "printf ok" } })).toBe("tool-call");
     expect(handleStreamPart(s, { type: "tool-result", toolName: "bash", output: { exit_code: 0, timed_out: false } })).toBe("tool-result");
     expect(handleStreamPart(s, { type: "text-final", text: "Final checked answer." })).toBe("content");
-    expect(s.thinkingMd()).toContain("> I will check this first.");
+    expect(s.thinkingMd()).not.toContain("I will check this first.");
     expect(s.thinkingMd()).toContain("🐚 Running bash <code>printf ok</code> (exit 0)");
     expect(s.finalAnswer()).toBe("Final checked answer.");
   });
@@ -59,6 +59,80 @@ describe("StreamShaper", () => {
     expect(s.thinkingMd()).not.toContain("web_search");
   });
 
+  it("compacts reasoning to block titles while preserving tool summaries", () => {
+    const s = new StreamShaper();
+    s.onReasoningDelta([
+      "Comparing runtimes effectively",
+      "For comparing runtimes, I will inspect the available data.",
+    ].join("\n"));
+    s.onReasoningDelta([
+      "",
+      "",
+      "Creating files and verification",
+      "I need to create output files and verify them.",
+    ].join("\n"));
+    s.onTextDelta("I will check this first.");
+    s.onToolCall("web_search", { query: "alpha" });
+    s.onToolResult("web_search", "5 results");
+
+    expect(s.compactThinkingMd()).toBe([
+      "Comparing runtimes effectively",
+      "Creating files and verification",
+      "",
+      "🔎 Searching web <code>alpha</code> (5 results)",
+    ].join("\n"));
+    expect(s.thinkingMd()).toBe(s.compactThinkingMd());
+    expect(s.compactThinkingMd()).not.toContain("inspect the available data");
+    expect(s.compactThinkingMd()).not.toContain("I will check this first");
+    expect(s.compactThinkingMd()).not.toContain("web_search");
+    expect(s.streamingThinkingMd()).toContain("For comparing runtimes, I will inspect the available data.");
+    expect(s.streamingThinkingMd()).toContain("I need to create output files and verify them.");
+    expect(s.streamingThinkingMd()).toContain("🔎 Searching web <code>alpha</code> (5 results)");
+    expect(s.streamingThinkingMd()).not.toContain("I will check this first");
+    expect(s.runSummary()).toEqual({
+      reasoningTitles: ["Comparing runtimes effectively", "Creating files and verification"],
+      toolCallCount: 1,
+      toolCounts: [{ label: "🔎 Searching web", count: 1 }],
+    });
+  });
+
+  it("keeps only streamed section titles from verbose reasoning text", () => {
+    const s = new StreamShaper();
+    s.onReasoningDelta([
+      "Evaluating technical options",
+      "I need to figure out the best way to perform an explicit internet search.",
+      "",
+      "Planning file creation for Pi calculation",
+      "Since I am responding within Telegram, I will use the available tools.",
+    ].join("\n"));
+    s.onReasoningDelta([
+      "",
+      "",
+      "Considering pi verification process",
+      "I need to use a combined bash command to create source files.",
+    ].join("\n"));
+    s.onReasoningDelta([
+      "",
+      "",
+      "Evaluating pi digit sources",
+      "For an exact machine comparison, I should fetch a reliable reference.",
+    ].join("\n"));
+
+    expect(s.compactThinkingMd()).toBe([
+      "Evaluating technical options",
+      "Considering pi verification process",
+      "Evaluating pi digit sources",
+    ].join("\n"));
+    expect(s.compactThinkingMd()).not.toContain("explicit internet search");
+    expect(s.compactThinkingMd()).not.toContain("Planning file creation");
+    expect(s.compactThinkingMd()).not.toContain("combined bash command");
+    expect(s.compactThinkingMd()).not.toContain("reliable reference");
+    expect(s.streamingThinkingMd()).toContain("explicit internet search");
+    expect(s.streamingThinkingMd()).toContain("Planning file creation");
+    expect(s.streamingThinkingMd()).toContain("combined bash command");
+    expect(s.streamingThinkingMd()).toContain("reliable reference");
+  });
+
   it("updates repeated tool calls for the same subject without x-count suffixes", () => {
     const s = new StreamShaper();
     s.onToolCall("web_search", { query: "alpha" });
@@ -69,6 +143,11 @@ describe("StreamShaper", () => {
     expect(s.toolStatusMd()).toBe("🔎 Searching web <code>alpha</code> (2 results)");
     expect(s.thinkingMd()).toBe("🔎 Searching web <code>alpha</code> (2 results)");
     expect(s.thinkingMd()).not.toContain("x2");
+    expect(s.runSummary()).toEqual({
+      reasoningTitles: [],
+      toolCallCount: 2,
+      toolCounts: [{ label: "🔎 Searching web", count: 2 }],
+    });
   });
 
   it("keeps separate status lines for different tool subjects", () => {

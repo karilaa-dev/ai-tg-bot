@@ -81,6 +81,21 @@ describe("renderFinal", () => {
     expect(markdown).not.toContain("<tg-thinking>");
   });
 
+  it("renders provided long draft thinking without character-tail slicing", () => {
+    const payload = renderDraft({
+      thinkingMd: `Opening title\n${"reasoning detail ".repeat(260)}`,
+      answerMd: "",
+      elapsedMs: 8_000,
+      t,
+    });
+    const markdown = payload.markdown ?? "";
+
+    expect(markdown).toContain("<details>\n<summary>Thinking for 8s</summary>");
+    expect(markdown).toContain("Opening title");
+    expect(markdown).toContain("reasoning detail");
+    expect(markdown).not.toContain("\n\n...");
+  });
+
   it("renders final thinking with a final elapsed title instead of step counts", () => {
     const [payload] = renderFinal({
       thinkingLog: "First thought\nSecond thought",

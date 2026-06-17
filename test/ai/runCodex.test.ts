@@ -90,7 +90,9 @@ describe("runTurn with Codex app-server inference", () => {
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Codex found alpha." });
-    expect(latest?.thinking).toContain("💬 Searching chat <code>alpha</code>");
+    expect(latest?.thinking).toContain("Tool calls: 1");
+    expect(latest?.thinking).toContain("- 💬 Searching chat: 1");
+    expect(latest?.thinking).not.toContain("💬 Searching chat <code>alpha</code>");
     const embeddings = await repos.embeddings.list("message", [latest!.id]);
     expect(embeddings[0]?.model).toBe(config.OPENROUTER_EMBEDDING_MODEL);
     expect(embeddings[0]?.decoded[0]).toBe("Codex found alpha.".length);
@@ -192,10 +194,12 @@ describe("runTurn with Codex app-server inference", () => {
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Pi verification used bash compact JSON." });
-    expect(latest?.thinking).toContain("🐚 Running bash <code>js-exec");
-    expect(latest?.thinking).toContain("python3");
-    expect(latest?.thinking).toContain("curl");
-    expect(latest?.thinking).toContain("(exit 0)");
+    expect(latest?.thinking).toContain("Tool calls: 1");
+    expect(latest?.thinking).toContain("- 🐚 Running bash: 1");
+    expect(latest?.thinking).not.toContain("🐚 Running bash <code>js-exec");
+    expect(latest?.thinking).not.toContain("python3");
+    expect(latest?.thinking).not.toContain("curl");
+    expect(latest?.thinking).not.toContain("(exit 0)");
   }, 30_000);
 });
 
@@ -315,6 +319,16 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return `🧠 Thinking for ${params?.time}`;
     case "thinking-summary-final":
       return `🧠 Thought for ${params?.time}`;
+    case "thinking-final-tool-calls":
+      return `Tool calls: ${params?.count}`;
+    case "thinking-final-reasoning":
+      return `Reasoning blocks: ${params?.count}`;
+    case "thinking-final-tools":
+      return "Tools:";
+    case "thinking-final-files":
+      return `Files sent: ${params?.count}`;
+    case "thinking-final-files-capped":
+      return `Files sent: ${params?.sent} of ${params?.requested} (limit ${params?.limit})`;
     case "empty-answer":
       return "⚠️ No final answer returned.";
     case "error-generic":

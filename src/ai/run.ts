@@ -180,7 +180,7 @@ export const runTurn: TurnRunner = async (input) => {
           toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
         });
       }
-      streamer?.update({ thinkingMd: shaper.thinkingMd(), answerMd: shaper.visibleAnswer() });
+      streamer?.update({ thinkingMd: draftThinkingMd(shaper), answerMd: shaper.visibleAnswer() });
       if (event === "tool-call" || event === "tool-result") {
         await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
       }
@@ -201,13 +201,18 @@ export const runTurn: TurnRunner = async (input) => {
       });
       finalAnswer = input.t("empty-answer");
     }
-    await streamer?.finish({ thinkingMd: shaper.thinkingMd(), answerMd: finalAnswer });
-    await sendFinal(input, shaper.thinkingMd(), finalAnswer, Date.now() - startedAt, createdFiles);
+    const finalThinking = buildFinalThinkingSummary({
+      t: input.t,
+      shaper,
+      attachments: createdFiles,
+    });
+    await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
+    await sendFinal(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles);
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
       threadId: input.thread.id,
       answerChars: finalAnswer.length,
-      thinkingChars: shaper.thinkingMd().length,
+      thinkingChars: finalThinking.length,
       ms: Date.now() - startedAt,
     });
   } catch (err) {
@@ -295,6 +300,56 @@ class TurnStatusMessage {
 function buildThinkingStatus(heading: string, toolStatusMd: string): string {
   const tools = toolStatusMd.trim();
   return tools ? `${heading}\n\n${tools}` : heading;
+}
+
+function draftThinkingMd(shaper: StreamShaper): string {
+  return shaper.streamingThinkingMd();
+}
+
+function buildFinalThinkingSummary(input: {
+  t: TurnInput["t"];
+  shaper: StreamShaper;
+  attachments: CreatedFileAttachment[];
+}): string {
+  const summary = input.shaper.runSummary();
+  const requestedFiles = input.attachments.length;
+  if (!summary.reasoningTitles.length && !summary.toolCallCount && !requestedFiles) return "";
+
+  const lines = [
+    input.t("thinking-final-tool-calls", {
+      count: summary.toolCallCount,
+    }),
+  ];
+
+  if (summary.reasoningTitles.length) {
+    lines.push(input.t("thinking-final-reasoning", { count: summary.reasoningTitles.length }));
+    lines.push(...summary.reasoningTitles.map((title) => `- ${title}`));
+  }
+
+  if (summary.toolCounts.length) {
+    lines.push(input.t("thinking-final-tools"));
+    lines.push(...summary.toolCounts.map((tool) => `- ${tool.label}: ${tool.count}`));
+  }
+
+  if (requestedFiles) {
+    const sentFiles = Math.min(requestedFiles, MAX_CREATED_FILES_PER_ANSWER);
+    const sentNames = input.attachments
+      .slice(0, sentFiles)
+      .map((file) => `<code>${escapeHtml(file.name)}</code>`)
+      .join(", ");
+    lines.push(
+      requestedFiles > sentFiles
+        ? input.t("thinking-final-files-capped", {
+            sent: sentFiles,
+            requested: requestedFiles,
+            limit: MAX_CREATED_FILES_PER_ANSWER,
+          })
+        : input.t("thinking-final-files", { count: sentFiles }),
+    );
+    if (sentNames) lines.push(sentNames);
+  }
+
+  return lines.join("\n");
 }
 
 export async function sendFinal(
