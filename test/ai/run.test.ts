@@ -534,9 +534,148 @@ describe("runTurn", () => {
     });
   });
 
-  it("embeds generated images in the final rich Markdown message and suppresses later model text", async () => {
+  it("sends image files created by create_file as Telegram photos by default", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-create-image-photo-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 116, firstName: "ImageFilePhoto", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "preview.png"), pngBytes());
+    codexParts = [
+      { type: "server-tool-call", toolName: "create_file", input: { path: "/preview.png", caption: "Preview image" } },
+      { type: "text-final", text: "I made the image file." },
+    ];
+    const events: string[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 64, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 64, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async () => {
+        throw new Error("default image create_file delivery should use sendPhoto");
+      },
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        events.push("photo");
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 66,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "created-photo-id", file_unique_id: "created-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async () => {
+          events.push("rich");
+          return { message_id: 65, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "make an image file",
+      t: testT,
+    });
+
+    expect(events).toEqual(["rich", "photo"]);
+    expect(photoCalls).toEqual([{ filename: "preview.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the image file." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      name: "preview.png",
+      type: "image",
+      telegram_file_id: "created-photo-id",
+      telegram_file_unique_id: "created-photo-unique",
+    });
+  });
+
+  it("sends image files created by create_file as uncompressed documents when requested", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-create-image-document-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 117, firstName: "ImageFileDocument", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "source.png"), pngBytes());
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "create_file",
+        input: { path: "/source.png", caption: "Exact source image", delivery: "document" },
+      },
+      { type: "text-final", text: "I made the exact image file." },
+    ];
+    const events: string[] = [];
+    const documents: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 67, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 67, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async (_chatId: number, document: { filename?: string }, other?: Record<string, unknown>) => {
+        events.push("document");
+        documents.push({ filename: document.filename, other });
+        return {
+          message_id: 69,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          document: { file_id: "created-document-id", file_unique_id: "created-document-unique" },
+        };
+      },
+      sendPhoto: async () => {
+        throw new Error("explicit document delivery should not use sendPhoto");
+      },
+      raw: {
+        sendRichMessage: async () => {
+          events.push("rich");
+          return { message_id: 68, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "make an exact image file",
+      t: testT,
+    });
+
+    expect(events).toEqual(["rich", "document"]);
+    expect(documents).toEqual([{ filename: "source.png", other: { message_thread_id: undefined, caption: "Exact source image" } }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "I made the exact image file." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      name: "source.png",
+      type: "image",
+      telegram_file_id: "created-document-id",
+      telegram_file_unique_id: "created-document-unique",
+    });
+  });
+
+  it("sends generated images as separate captionless Telegram photos and preserves model text", async () => {
     const imageBytes = pngBytes();
-    const config = loadTestConfig({ GENERATED_MEDIA_PUBLIC_BASE_URL: "https://cdn.example.test/files/" });
+    const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 110, firstName: "ImageFinal", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const streamOffUser = await repos.users.toggleStream(user.tg_id);
@@ -549,6 +688,7 @@ describe("runTurn", () => {
       { type: "text-final", text: "Here is the image." },
     ];
     const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
     const api = {
       sendMessage: async () => ({ message_id: 101, date: 1, chat: { id: user.tg_id, type: "private" } }),
       editMessageText: async () => ({ message_id: 101, date: 1, chat: { id: user.tg_id, type: "private" } }),
@@ -556,8 +696,17 @@ describe("runTurn", () => {
       sendDocument: async () => {
         throw new Error("generated images should not be sent as documents");
       },
-      sendPhoto: async () => {
-        throw new Error("generated images should be embedded in sendRichMessage");
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 103,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [
+            { file_id: "small-photo-id", file_unique_id: "small-photo-unique", width: 90, height: 90, file_size: 100 },
+            { file_id: "large-photo-id", file_unique_id: "large-photo-unique", width: 1024, height: 1024, file_size: 2000 },
+          ],
+        };
       },
       sendMediaGroup: async () => {
         throw new Error("single generated image should not use sendMediaGroup");
@@ -565,20 +714,7 @@ describe("runTurn", () => {
       raw: {
         sendRichMessage: async (payload: unknown) => {
           richPayloads.push(payload);
-          return {
-            message_id: 102,
-            date: 1,
-            chat: { id: user.tg_id, type: "private" },
-            rich_message: {
-              blocks: [{
-                type: "photo",
-                photo: [
-                  { file_id: "small-photo-id", file_unique_id: "small-photo-unique", width: 90, height: 90, file_size: 100 },
-                  { file_id: "large-photo-id", file_unique_id: "large-photo-unique", width: 1024, height: 1024, file_size: 2000 },
-                ],
-              }],
-            },
-          };
+          return { message_id: 102, date: 1, chat: { id: user.tg_id, type: "private" } };
         },
       },
     };
@@ -610,14 +746,12 @@ describe("runTurn", () => {
     });
 
     expect(richPayloads).toHaveLength(1);
-    const richPayload = richPayloads[0] as Record<string, unknown>;
-    const markdown = (richPayload.rich_message as { markdown?: string } | undefined)?.markdown ?? "";
-    expect(markdown).not.toContain("Here is the image.");
-    expect(markdown).toContain("![Blue square](https://cdn.example.test/files/");
-    expect(markdown).toContain(".png)");
-    expect(richPayload.generated_image_1).toBeUndefined();
+    expect(richMarkdownOf(richPayloads[0])).toContain("Here is the image.");
+    expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Generated image: Blue square" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Here is the image." });
     expect(latest?.thinking).toContain("Tool calls: 1");
     expect(latest?.thinking).toContain("- 🖼️ Generating image: 1");
     expect(latest?.thinking).toContain("Files sent: 1");
@@ -632,6 +766,467 @@ describe("runTurn", () => {
       summary: "A simple blue square.",
     });
     await expect(fs.readFile(attached[0]!.path)).resolves.toEqual(imageBytes);
+  });
+
+  it("acknowledges generated-image tool calls before slow image generation finishes", async () => {
+    let transport: ScriptedCodexTransport | undefined;
+    setCodexTransportFactoryForTests(() => {
+      transport = new ScriptedCodexTransport(codexParts);
+      return transport;
+    });
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 118, firstName: "ImageAsync", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw a simple purple square", caption: "Purple square" },
+      },
+      { type: "text-final", text: "Here is the follow-up image." },
+    ];
+    let resolveImage!: (value: { imageBase64: string; revisedPrompt: string; mediaType: string }) => void;
+    const imagePromise = new Promise<{ imageBase64: string; revisedPrompt: string; mediaType: string }>((resolve) => {
+      resolveImage = resolve;
+    });
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 112, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 112, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 114,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "purple-photo-id", file_unique_id: "purple-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 113, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    const runPromise = runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "generate a follow-up image",
+      imageGenerator: async () => imagePromise,
+      t: testT,
+    });
+
+    await waitUntil(() => Boolean(transport?.sent.some((message) => (
+      message.id === 1001
+      && JSON.stringify(message.result).includes("pending")
+    ))));
+    expect(richPayloads).toHaveLength(0);
+    expect(photoCalls).toHaveLength(0);
+
+    resolveImage({
+      imageBase64: imageBytes.toString("base64"),
+      revisedPrompt: "A simple purple square.",
+      mediaType: "image/png",
+    });
+    await runPromise;
+
+    expect(richPayloads).toHaveLength(1);
+    expect(richMarkdownOf(richPayloads[0])).toContain("Here is the follow-up image.");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Here is the follow-up image." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      telegram_file_id: "purple-photo-id",
+      telegram_file_unique_id: "purple-photo-unique",
+    });
+  });
+
+  it("hides generated-image final text from streaming drafts until the image is ready", async () => {
+    let transport: ScriptedCodexTransport | undefined;
+    setCodexTransportFactoryForTests(() => {
+      transport = new ScriptedCodexTransport(codexParts);
+      return transport;
+    });
+    const imageBytes = pngBytes();
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
+    const user = await repos.users.ensure({ tgId: 120, firstName: "ImageDraft", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw Hatsune Miku", caption: "Hatsune Miku" },
+      },
+      { type: "text-final", text: "Done — generated Hatsune Miku." },
+    ];
+    let resolveImage!: (value: { imageBase64: string; revisedPrompt: string; mediaType: string }) => void;
+    const imagePromise = new Promise<{ imageBase64: string; revisedPrompt: string; mediaType: string }>((resolve) => {
+      resolveImage = resolve;
+    });
+    const draftPayloads: string[] = [];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 123,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "miku-photo-id", file_unique_id: "miku-photo-unique", width: 1024, height: 1536 }],
+        };
+      },
+      raw: {
+        sendRichMessageDraft: async (payload: unknown) => {
+          draftPayloads.push(richMarkdownOf(payload));
+          return true;
+        },
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 122, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    const runPromise = runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user,
+      thread,
+      text: "generate Hatsune Miku image",
+      imageGenerator: async () => imagePromise,
+      t: testT,
+    });
+
+    await waitUntil(() => Boolean(transport?.sent.some((message) => (
+      message.id === 1001
+      && JSON.stringify(message.result).includes("pending")
+    ))));
+    await delay(20);
+
+    const latestDraft = draftPayloads.at(-1) ?? "";
+    expect(latestDraft).toContain("🖼️ Generating image for");
+    expect(latestDraft).toContain("🖼️ Generating image");
+    expect(latestDraft).not.toContain("Done — generated Hatsune Miku.");
+    expect(richPayloads).toHaveLength(0);
+    expect(photoCalls).toHaveLength(0);
+
+    resolveImage({
+      imageBase64: imageBytes.toString("base64"),
+      revisedPrompt: "Generated Hatsune Miku.",
+      mediaType: "image/png",
+    });
+    await runPromise;
+
+    expect(richPayloads).toHaveLength(1);
+    expect(richMarkdownOf(richPayloads[0])).toContain("Done — generated Hatsune Miku.");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done — generated Hatsune Miku." });
+  });
+
+  it("sends Done before a generated image when the model returns no final text", async () => {
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 115, firstName: "ImageDone", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw a simple yellow square", caption: "Yellow square" },
+      },
+      { type: "text-final", text: "" },
+    ];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 109, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 109, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendDocument: async () => {
+        throw new Error("generated images should not be sent as documents");
+      },
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 111,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "yellow-photo-id", file_unique_id: "yellow-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 110, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "generate an image",
+      imageGenerator: async () => ({
+        imageBase64: imageBytes.toString("base64"),
+        revisedPrompt: "A simple yellow square.",
+        mediaType: "image/png",
+      }),
+      t: testT,
+    });
+
+    expect(richPayloads).toHaveLength(1);
+    expect(richMarkdownOf(richPayloads[0])).toContain("Done");
+    expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done" });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      telegram_file_id: "yellow-photo-id",
+      telegram_file_unique_id: "yellow-photo-unique",
+    });
+  });
+
+  it("sends meaningful generated-image text separately while keeping the photo captionless", async () => {
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 114, firstName: "ImageText", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw a simple green square", caption: "Green square" },
+      },
+      { type: "text-final", text: "I used a flat green fill with a thin border." },
+    ];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 106, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 106, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 108,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "green-photo-id", file_unique_id: "green-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 107, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "generate an image and describe it",
+      imageGenerator: async () => ({
+        imageBase64: imageBytes.toString("base64"),
+        revisedPrompt: "A simple green square.",
+        mediaType: "image/png",
+      }),
+      t: testT,
+    });
+
+    expect(richPayloads).toHaveLength(1);
+    expect(richMarkdownOf(richPayloads[0])).toContain("I used a flat green fill with a thin border.");
+    expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "I used a flat green fill with a thin border." });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      telegram_file_id: "green-photo-id",
+      telegram_file_unique_id: "green-photo-unique",
+    });
+  });
+
+  it("demotes generated-image tool usage text into final thinking instead of the visible answer", async () => {
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 121, firstName: "ImageToolText", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    const toolUsageText = "Using imagegen to edit the existing image and change only her hair to red.";
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "change only her hair to red", caption: "Edited hair color" },
+      },
+      { type: "text-final", text: toolUsageText },
+    ];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 124, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 124, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 126,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "tool-text-photo-id", file_unique_id: "tool-text-photo-unique", width: 1024, height: 1536 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 125, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "change her hair to red",
+      imageGenerator: async () => ({
+        imageBase64: imageBytes.toString("base64"),
+        revisedPrompt: "Only her hair was changed to red.",
+        mediaType: "image/png",
+      }),
+      t: testT,
+    });
+
+    expect(richPayloads).toHaveLength(1);
+    const markdown = richMarkdownOf(richPayloads[0]);
+    expect(markdown).toContain(`- ${toolUsageText}`);
+    expect(markdown).toContain("Image generated:");
+    const answerAfterThinking = markdown.slice(markdown.indexOf("</details>") + "</details>".length);
+    expect(answerAfterThinking).toContain("Image generated:");
+    expect(answerAfterThinking).not.toContain(toolUsageText);
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Image generated:" });
+    expect(latest?.thinking).toContain(toolUsageText);
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      telegram_file_id: "tool-text-photo-id",
+      telegram_file_unique_id: "tool-text-photo-unique",
+    });
+  });
+
+  it("replaces stale in-progress generated-image text after the photo is ready", async () => {
+    const imageBytes = pngBytes();
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 119, firstName: "ImageReady", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const streamOffUser = await repos.users.toggleStream(user.tg_id);
+    codexParts = [
+      {
+        type: "server-tool-call",
+        toolName: "generate_image",
+        input: { prompt: "draw a simple orange square", caption: "Orange square" },
+      },
+      { type: "text-final", text: "Done — generating the image now." },
+    ];
+    const richPayloads: unknown[] = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const api = {
+      sendMessage: async () => ({ message_id: 116, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      editMessageText: async () => ({ message_id: 116, date: 1, chat: { id: user.tg_id, type: "private" } }),
+      sendChatAction: async () => true,
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        return {
+          message_id: 118,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "orange-photo-id", file_unique_id: "orange-photo-unique", width: 1024, height: 1024 }],
+        };
+      },
+      raw: {
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 117, date: 1, chat: { id: user.tg_id, type: "private" } };
+        },
+      },
+    };
+
+    await runTurn({
+      api: api as never,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger: createLogger(config),
+      user: streamOffUser,
+      thread,
+      text: "generate an image",
+      imageGenerator: async () => ({
+        imageBase64: imageBytes.toString("base64"),
+        revisedPrompt: "A simple orange square.",
+        mediaType: "image/png",
+      }),
+      t: testT,
+    });
+
+    expect(richPayloads).toHaveLength(1);
+    const markdown = richMarkdownOf(richPayloads[0]);
+    expect(markdown).toContain("Image generated:");
+    expect(markdown).not.toContain("Done — generating the image now.");
+    expect(markdown).not.toContain("![");
+    expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    const latest = await repos.messages.latest(thread.id);
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Image generated:" });
+    const attached = await repos.files.listForMessage(latest!.id);
+    expect(attached[0]).toMatchObject({
+      telegram_file_id: "orange-photo-id",
+      telegram_file_unique_id: "orange-photo-unique",
+    });
   });
 
   it("does not persist a fake Done answer when image generation produces no attachment", async () => {
@@ -654,7 +1249,7 @@ describe("runTurn", () => {
       editMessageText: async () => ({ message_id: 104, date: 1, chat: { id: user.tg_id, type: "private" } }),
       sendChatAction: async () => true,
       sendPhoto: async () => {
-        throw new Error("failed generated images must not be sent as separate photos");
+        throw new Error("failed generated images must not be sent as photos");
       },
       raw: {
         sendRichMessage: async (payload: unknown) => {
@@ -676,7 +1271,7 @@ describe("runTurn", () => {
       text: "generate an image",
       imageGenerator: async () => {
         imageGeneratorCalled = true;
-        return { imageBase64: pngBytes().toString("base64"), mediaType: "image/png" };
+        return { imageBase64: "", mediaType: "image/png" };
       },
       t: testT,
     });
@@ -685,12 +1280,12 @@ describe("runTurn", () => {
     expect(richPayloads).toHaveLength(1);
     const markdown = richMarkdownOf(richPayloads[0]);
     expect(markdown).toContain("⚠️ Something went wrong.");
-    expect(markdown).toContain("no public image URL");
+    expect(markdown).toContain("no base64 image data");
     expect(markdown).not.toContain("Done.");
     const latest = await repos.messages.latest(thread.id);
     expect(latest?.role).toBe("assistant");
     expect(latest?.text_plain).toContain("⚠️ Something went wrong.");
-    expect(latest?.text_plain).toContain("no public image URL");
+    expect(latest?.text_plain).toContain("no base64 image data");
     expect(latest?.text_plain).not.toBe("Done.");
     await expect(repos.files.listForMessage(latest!.id)).resolves.toEqual([]);
   });
@@ -1098,8 +1693,8 @@ describe("runTurn", () => {
     });
   });
 
-  it("retries generated image rich messages without message_thread_id when Telegram rejects the topic", async () => {
-    const config = loadTestConfig({ GENERATED_MEDIA_PUBLIC_BASE_URL: "https://cdn.example.test/files/" });
+  it("retries generated image photo sends without message_thread_id and without captions when Telegram rejects the topic", async () => {
+    const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 111, firstName: "PhotoThread", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, 42, "Topic 42");
     const fileDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-photo-thread-"));
@@ -1116,27 +1711,24 @@ describe("runTurn", () => {
       summary: "topic image",
       isInline: true,
     });
-    const payloads: Array<Record<string, unknown>> = [];
+    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
+    const richPayloads: unknown[] = [];
     const api = {
       raw: {
-        sendRichMessage: async (payload: Record<string, unknown>) => {
-          payloads.push(payload);
-          if (payload.message_thread_id === 42) throw threadError();
-          return {
-            message_id: 112,
-            date: 1,
-            chat: { id: user.tg_id, type: "private" },
-            rich_message: {
-              blocks: [{
-                type: "photo",
-                photo: [{ file_id: "topic-photo-id", file_unique_id: "topic-photo-unique", width: 1024, height: 1024 }],
-              }],
-            },
-          };
+        sendRichMessage: async (payload: unknown) => {
+          richPayloads.push(payload);
+          return { message_id: 111, date: 1, chat: { id: user.tg_id, type: "private" } };
         },
       },
-      sendPhoto: async () => {
-        throw new Error("rich topic fallback should not use sendPhoto");
+      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
+        photoCalls.push({ filename: photo.filename, other });
+        if (other?.message_thread_id === 42) throw threadError();
+        return {
+          message_id: 112,
+          date: 1,
+          chat: { id: user.tg_id, type: "private" },
+          photo: [{ file_id: "topic-photo-id", file_unique_id: "topic-photo-unique", width: 1024, height: 1024 }],
+        };
       },
     };
 
@@ -1152,7 +1744,7 @@ describe("runTurn", () => {
         user,
         thread,
         text: "question",
-        t: (key) => key,
+        t: testT,
       },
       "",
       "",
@@ -1166,100 +1758,25 @@ describe("runTurn", () => {
         caption: "Image caption",
         inline: true,
         card: "topic image",
-        delivery: "rich-photo",
+        delivery: "photo",
         origin: "generated_image",
       }],
     );
 
-    expect(payloads).toHaveLength(2);
-    expect(payloads[0]?.message_thread_id).toBe(42);
-    expect((payloads[0]?.rich_message as { markdown?: string } | undefined)?.markdown).toContain("![Image caption](https://cdn.example.test/files/");
-    expect(payloads[1]?.message_thread_id).toBeUndefined();
-    expect(JSON.stringify(payloads[1]?.rich_message)).toContain("Topic 42");
-    expect((payloads[1]?.rich_message as { markdown?: string } | undefined)?.markdown).toContain("![Image caption](https://cdn.example.test/files/");
+    expect(richPayloads).toHaveLength(1);
+    expect(richMarkdownOf(richPayloads[0])).toContain("Done");
+    expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
+    expect(photoCalls).toHaveLength(2);
+    expect(photoCalls[0]).toMatchObject({ filename: "topic-image.png", other: { message_thread_id: 42 } });
+    expect(photoCalls[0]?.other).not.toHaveProperty("caption");
+    expect(photoCalls[1]?.other?.message_thread_id).toBeUndefined();
+    expect(photoCalls[1]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Generated image: Image caption" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done" });
     expect(await repos.files.listForMessage(latest!.id)).toMatchObject([{ id: file.id }]);
     await expect(repos.files.get(file.id)).resolves.toMatchObject({
       telegram_file_id: "topic-photo-id",
       telegram_file_unique_id: "topic-photo-unique",
-    });
-  });
-
-  it("rejects generated image delivery instead of sending a separate photo when no public rich media URL is configured", async () => {
-    const config = loadTestConfig();
-    const user = await repos.users.ensure({ tgId: 112, firstName: "PhotoFallback", lang: "en" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    const fileDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-photo-fallback-"));
-    tempDirs.push(fileDir);
-    const filePath = path.join(fileDir, "fallback-image.png");
-    await fs.writeFile(filePath, pngBytes());
-    const file = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      type: "image",
-      name: "fallback-image.png",
-      path: filePath,
-      size: pngBytes().length,
-      summary: "fallback image",
-      isInline: true,
-    });
-    const photoCalls: Array<{ filename?: string; other?: Record<string, unknown> }> = [];
-    const richPayloads: unknown[] = [];
-    const api = {
-      raw: {
-        sendRichMessage: async (payload: unknown) => {
-          richPayloads.push(payload);
-          return { message_id: 113, date: 1, chat: { id: user.tg_id, type: "private" } };
-        },
-      },
-      sendPhoto: async (_chatId: number, photo: { filename?: string }, other?: Record<string, unknown>) => {
-        photoCalls.push({ filename: photo.filename, other });
-        return {
-          message_id: 113,
-          date: 1,
-          chat: { id: user.tg_id, type: "private" },
-          photo: [{ file_id: "fallback-photo-id", file_unique_id: "fallback-photo-unique", width: 1024, height: 1024 }],
-        };
-      },
-    };
-
-    await expect(sendFinal(
-      {
-        api: api as never,
-        chatId: user.tg_id,
-        config,
-        db,
-        repos,
-        logger: createLogger(config),
-        user,
-        thread,
-        text: "question",
-        t: (key) => key,
-      },
-      "",
-      "",
-      0,
-      [{
-        fileId: file.id,
-        type: "image",
-        name: file.name,
-        path: file.path,
-        size: file.size,
-        caption: "Fallback image",
-        inline: true,
-        card: "fallback image",
-        delivery: "rich-photo",
-        origin: "generated_image",
-      }],
-    )).rejects.toThrow("GENERATED_MEDIA_PUBLIC_BASE_URL is required");
-
-    expect(richPayloads).toHaveLength(0);
-    expect(photoCalls).toHaveLength(0);
-    await expect(repos.messages.latest(thread.id)).resolves.toBeUndefined();
-    await expect(repos.files.get(file.id)).resolves.toMatchObject({
-      telegram_file_id: null,
-      telegram_file_unique_id: null,
     });
   });
 
@@ -1447,8 +1964,14 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return "💭 Thinking...";
     case "thinking-done":
       return "✅ Done.";
+    case "image-generated-done":
+      return "Done";
+    case "image-generated-ready":
+      return "Image generated:";
     case "thinking-summary-running":
       return `🧠 Thinking for ${params?.time}`;
+    case "thinking-summary-generating-image":
+      return `🖼️ Generating image for ${params?.time}`;
     case "thinking-summary-final":
       return `🧠 Thought for ${params?.time}`;
     case "thinking-final-tool-calls":
@@ -1599,6 +2122,15 @@ class ScriptedCodexTransport implements CodexTransport {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error("timed out waiting for condition");
 }
 
 class AsyncQueue<T> implements AsyncIterable<T> {

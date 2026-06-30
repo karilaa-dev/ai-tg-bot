@@ -29,7 +29,7 @@ export function renderDraft(input: RenderDraftInput): InputRichMessage {
   if (!input.thinkingMd.trim() && !input.answerMd.trim()) {
     return { markdown: sanitize(input.t("thinking-placeholder")) };
   }
-  const title = thinkingTitle(input.t, "running", input.elapsedMs);
+  const title = draftThinkingTitle(input.t, input.thinkingMd, input.elapsedMs);
   const thinking = renderDraftThinking(input.thinkingMd, title);
   const answer = input.answerMd.trim() ? `${thinking ? "" : "\n\n"}${input.answerMd}` : "";
   return { markdown: sanitize(`${thinking || title}${answer}`) };
@@ -125,6 +125,15 @@ function thinkingTitle(t: RenderT, state: "running" | "final", elapsedMs: number
   return t(state === "running" ? "thinking-summary-running" : "thinking-summary-final", {
     time: formatElapsed(elapsedMs),
   });
+}
+
+function draftThinkingTitle(t: RenderT, thinkingMd: string, elapsedMs: number): string {
+  const key = isGeneratingImageThinking(thinkingMd) ? "thinking-summary-generating-image" : "thinking-summary-running";
+  return t(key, { time: formatElapsed(elapsedMs) });
+}
+
+function isGeneratingImageThinking(thinkingMd: string): boolean {
+  return /(?:^|\n)\s*🖼️ Generating image\b/.test(thinkingMd);
 }
 
 export function formatElapsed(ms: number): string {

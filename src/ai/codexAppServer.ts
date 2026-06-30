@@ -101,7 +101,7 @@ export function createCodexImageGenerator(config: AppConfig, logger?: Logger): B
     const operation = mode === "auto" ? (references.length ? "edit" : "generate") : mode;
     // App-server emits imageGeneration items from normal chat turns; ChatGPT auth rejects gpt-image-2 as the turn model.
     const turnModel = config.CODEX_MODEL;
-    logger?.debug("Codex image generation starting", {
+    logger?.info("Codex image generation starting", {
       model,
       turnModel,
       quality,
@@ -138,7 +138,7 @@ export function createCodexImageGenerator(config: AppConfig, logger?: Logger): B
       userInputs,
       tools: {},
       logger,
-      abortSignal: AbortSignal.timeout(180_000),
+      abortSignal: config.CODEX_IMAGE_TIMEOUT_MS > 0 ? AbortSignal.timeout(config.CODEX_IMAGE_TIMEOUT_MS) : undefined,
     })) {
       const record = asRecord(part);
       if (record?.type === "image-generated") image = record as CodexGeneratedImagePart;
@@ -149,7 +149,7 @@ export function createCodexImageGenerator(config: AppConfig, logger?: Logger): B
       const detail = text.trim() ? `; Codex returned text instead: ${text.trim().slice(0, 500)}` : "";
       throw new Error(`Codex image generation returned no image${detail}`);
     }
-    logger?.debug("Codex image generation complete", {
+    logger?.info("Codex image generation complete", {
       model,
       turnModel,
       quality,
@@ -267,6 +267,10 @@ class CodexRpcSession {
   private readonly seenGeneratedImages = new Set<string>();
   private readonly agentMessageDeltas = new Map<string, string>();
   private readonly reasoningSummaryDeltas = new Map<string, Map<number, string>>();
+  private readonly abortSignal?: AbortSignal;
+  private readonly abortHandler?: () => void;
+  private closed = false;
+  private failed = false;
 
   constructor(
     private readonly transport: CodexTransport,
@@ -275,10 +279,14 @@ class CodexRpcSession {
     private readonly logger?: Logger,
     abortSignal?: AbortSignal,
   ) {
+    this.abortSignal = abortSignal;
     void this.pump();
     if (abortSignal) {
-      if (abortSignal.aborted) this.abort();
-      abortSignal.addEventListener("abort", () => this.abort(), { once: true });
+      if (abortSignal.aborted) this.abort(abortSignal.reason);
+      else {
+        this.abortHandler = () => this.abort(abortSignal.reason);
+        abortSignal.addEventListener("abort", this.abortHandler, { once: true });
+      }
     }
   }
 
@@ -336,8 +344,13 @@ class CodexRpcSession {
   }
 
   close(): void {
-    for (const [, pending] of this.pending) pending.reject(new Error("Codex app-server session closed"));
-    this.pending.clear();
+    if (this.closed) return;
+    this.closed = true;
+    this.cleanupAbortListener();
+    if (!this.failed) {
+      for (const [, pending] of this.pending) pending.reject(new Error("Codex app-server session closed"));
+      this.pending.clear();
+    }
     this.transport.close();
     this.stream.close();
   }
@@ -574,17 +587,31 @@ class CodexRpcSession {
     return Math.max(1, this.config.STREAM_DELTA_CHARS);
   }
 
-  private abort(): void {
-    this.fail(new Error("Codex turn aborted"));
+  private abort(reason?: unknown): void {
+    if (this.closed || this.failed) return;
+    this.fail(codexAbortError(reason));
     this.transport.close();
   }
 
   private fail(err: unknown): void {
+    if (this.closed || this.failed) return;
+    this.failed = true;
+    this.cleanupAbortListener();
     this.logger?.warn("Codex app-server stream failed", { err: String(err) });
     for (const [, pending] of this.pending) pending.reject(err);
     this.pending.clear();
     this.stream.fail(err);
   }
+
+  private cleanupAbortListener(): void {
+    if (this.abortSignal && this.abortHandler) this.abortSignal.removeEventListener("abort", this.abortHandler);
+  }
+}
+
+function codexAbortError(reason: unknown): Error {
+  if (!reason) return new Error("Codex turn aborted");
+  const reasonText = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
+  return new Error(`Codex turn aborted: ${reasonText}`);
 }
 
 class ProcessCodexTransport implements CodexTransport {

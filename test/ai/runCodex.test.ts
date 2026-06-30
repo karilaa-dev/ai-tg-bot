@@ -315,8 +315,14 @@ function testT(key: string, params?: Record<string, string | number>): string {
       return "💭 Thinking...";
     case "thinking-done":
       return "✅ Done.";
+    case "image-generated-done":
+      return "Done";
+    case "image-generated-ready":
+      return "Image generated:";
     case "thinking-summary-running":
       return `🧠 Thinking for ${params?.time}`;
+    case "thinking-summary-generating-image":
+      return `🖼️ Generating image for ${params?.time}`;
     case "thinking-summary-final":
       return `🧠 Thought for ${params?.time}`;
     case "thinking-final-tool-calls":

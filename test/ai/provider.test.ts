@@ -51,6 +51,9 @@ describe("Codex provider helpers", () => {
 
     expect(config.CODEX_MODEL).toBe("gpt-5.5");
     expect(config.CODEX_COMPACTION_MODEL).toBe("gpt-5.4-mini");
+    expect(config.CODEX_IMAGE_MODEL).toBe("gpt-image-2");
+    expect(config.CODEX_IMAGE_QUALITY).toBe("low");
+    expect(config.CODEX_IMAGE_TIMEOUT_MS).toBe(300_000);
     expect(config.CODEX_SPEED_MODE).toBe("fast");
     expect(config.CODEX_VERBOSITY).toBe("high");
     expect(config.REASONING_SUMMARY).toBe("detailed");

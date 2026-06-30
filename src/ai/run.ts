@@ -11,10 +11,9 @@ import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
 import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { streamInference } from "./inference.js";
-import { publicGeneratedMediaUrl, requireGeneratedMediaPublicBaseUrl } from "./mediaUrls.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
-import type { BotImageGenerator, CreatedFileAttachment } from "./tools/index.js";
+import type { BotImageGenerator, CreatedFileAttachment, PendingCreatedFile } from "./tools/index.js";
 
 export interface TurnInput {
   api: Api;
@@ -150,6 +149,7 @@ export const runTurn: TurnRunner = async (input) => {
   let generateImageToolCalls = 0;
   let generateImageToolError: string | undefined;
   const createdFiles: CreatedFileAttachment[] = [];
+  const pendingCreatedFiles: PendingCreatedFile[] = [];
   try {
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("provider stream starting", {
@@ -162,6 +162,7 @@ export const runTurn: TurnRunner = async (input) => {
       ...input,
       context,
       createdFiles,
+      pendingCreatedFiles,
       abortSignal: input.config.CODEX_TURN_TIMEOUT_MS > 0 ? AbortSignal.timeout(input.config.CODEX_TURN_TIMEOUT_MS) : undefined,
     });
     streamer?.update({ thinkingMd: "", answerMd: "" });
@@ -180,15 +181,22 @@ export const runTurn: TurnRunner = async (input) => {
       }
       if (event === "tool-result") {
         toolResults += 1;
+        const pendingGenerateImage = normalized?.kind === "tool-result"
+          && normalized.toolName === "generate_image"
+          && isPendingToolResult(normalized.output);
         if (normalized?.kind === "tool-result" && normalized.toolName === "generate_image") {
           generateImageToolError = toolErrorText(normalized.output) ?? generateImageToolError;
         }
-        input.logger.info("tool call finished", {
+        input.logger.info(pendingGenerateImage ? "tool call acknowledged" : "tool call finished", {
           threadId: input.thread.id,
           toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
+          pending: pendingGenerateImage || undefined,
         });
       }
-      streamer?.update({ thinkingMd: draftThinkingMd(shaper), answerMd: shaper.visibleAnswer() });
+      streamer?.update({
+        thinkingMd: draftThinkingMd(shaper),
+        answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), generateImageToolCalls > 0),
+      });
       if (event === "tool-call" || event === "tool-result") {
         await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
       }
@@ -199,12 +207,15 @@ export const runTurn: TurnRunner = async (input) => {
       toolCalls,
       toolResults,
     });
+    const pendingFileError = await waitForPendingCreatedFiles(input, pendingCreatedFiles);
+    generateImageToolError = pendingFileError ?? generateImageToolError;
     const answer = shaper.finalAnswer();
     const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
     if (generateImageToolCalls > 0 && !hasGeneratedImage) {
       throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
     }
-    let finalAnswer = hasGeneratedImage ? "" : answer;
+    const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImage);
+    let finalAnswer = finalText.answer;
     if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
       input.logger.warn("turn produced empty final answer", {
         threadId: input.thread.id,
@@ -217,6 +228,7 @@ export const runTurn: TurnRunner = async (input) => {
       t: input.t,
       shaper,
       attachments: createdFiles,
+      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
     });
     await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
     await sendFinal(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles);
@@ -244,6 +256,22 @@ export const runTurn: TurnRunner = async (input) => {
     if (typing) clearInterval(typing);
   }
 };
+
+async function waitForPendingCreatedFiles(input: TurnInput, pending: PendingCreatedFile[]): Promise<string | undefined> {
+  if (!pending.length) return undefined;
+  input.logger.info("waiting for pending created files", {
+    threadId: input.thread.id,
+    files: pending.length,
+  });
+  const results = await Promise.all(pending);
+  const error = results.find((result) => result.error)?.error;
+  input.logger.info("pending created files finished", {
+    threadId: input.thread.id,
+    files: results.filter((result) => result.attachment).length,
+    errors: results.filter((result) => result.error).length,
+  });
+  return error;
+}
 
 async function latestRetryableUserMessage(input: TurnInput, latest: MessageRow | undefined): Promise<MessageRow | undefined> {
   if (!(latest?.role === "assistant" && !latest.text_plain.trim())) return latest;
@@ -322,10 +350,13 @@ function buildFinalThinkingSummary(input: {
   t: TurnInput["t"];
   shaper: StreamShaper;
   attachments: CreatedFileAttachment[];
+  extraReasoning?: string[];
 }): string {
   const summary = input.shaper.runSummary();
   const requestedFiles = input.attachments.length;
-  if (!summary.reasoningTitles.length && !summary.toolCallCount && !requestedFiles) return "";
+  const extraReasoning = (input.extraReasoning ?? []).map((item) => item.trim()).filter(Boolean);
+  const reasoningTitles = [...summary.reasoningTitles, ...extraReasoning];
+  if (!reasoningTitles.length && !summary.toolCallCount && !requestedFiles) return "";
 
   const lines = [
     input.t("thinking-final-tool-calls", {
@@ -333,9 +364,9 @@ function buildFinalThinkingSummary(input: {
     }),
   ];
 
-  if (summary.reasoningTitles.length) {
-    lines.push(input.t("thinking-final-reasoning", { count: summary.reasoningTitles.length }));
-    lines.push(...summary.reasoningTitles.map((title) => `- ${title}`));
+  if (reasoningTitles.length) {
+    lines.push(input.t("thinking-final-reasoning", { count: reasoningTitles.length }));
+    lines.push(...reasoningTitles.map((title) => `- ${title}`));
   }
 
   if (summary.toolCounts.length) {
@@ -364,6 +395,78 @@ function buildFinalThinkingSummary(input: {
   return lines.join("\n");
 }
 
+function draftAnswerWhileGeneratingImage(answer: string, hasGenerateImageCall: boolean): string {
+  return hasGenerateImageCall ? "" : answer;
+}
+
+type GeneratedImageFinalText = {
+  answer: string;
+  demotedReasoning?: string;
+};
+
+function normalizeGeneratedImageFinalText(t: TurnInput["t"], answer: string, hasGeneratedImage: boolean): GeneratedImageFinalText {
+  if (!hasGeneratedImage) return { answer };
+  const trimmed = answer.trim();
+  if (!trimmed) return { answer: t("image-generated-done") };
+  if (isPendingGeneratedImageAnswer(trimmed)) return { answer: generatedImageReadyText(t) };
+  if (isGeneratedImageToolUsageAnswer(trimmed)) {
+    return {
+      answer: generatedImageReadyText(t),
+      demotedReasoning: trimmed,
+    };
+  }
+  return { answer };
+}
+
+function generatedImageReadyText(t: TurnInput["t"]): string {
+  const text = t("image-generated-ready");
+  return text && text !== "image-generated-ready" ? text : t("image-generated-done");
+}
+
+function isPendingGeneratedImageAnswer(answer: string): boolean {
+  const compact = answer
+    .trim()
+    .toLowerCase()
+    .replace(/[’']/g, "'")
+    .replace(/\s+/g, " ");
+  if (!compact) return false;
+  const mentionsImage = /\b(image|photo|picture)\b/.test(compact);
+  const inProgressVerb = /\b(generating|creating|making|rendering|drawing)\b/.test(compact);
+  if (mentionsImage && /\b(is|still|currently)\b.*\bbeing (generated|created|rendered|made|drawn)\b/.test(compact)) {
+    return true;
+  }
+  if (!inProgressVerb) return false;
+  if (/^done\b/.test(compact)) return true;
+  if (mentionsImage && /\b(now|currently|still|started|starting|queued|shortly|soon)\b/.test(compact)) return true;
+  if (mentionsImage && /\bin progress\b/.test(compact)) return true;
+  return false;
+}
+
+function isGeneratedImageToolUsageAnswer(answer: string): boolean {
+  const compact = answer
+    .trim()
+    .toLowerCase()
+    .replace(/[’']/g, "'")
+    .replace(/\s+/g, " ");
+  if (!compact) return false;
+  const mentionsImageTool = /\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b/.test(compact);
+  if (!mentionsImageTool) return false;
+  return /^(?:i(?:'m| am)?\s+)?(?:using|calling|invoking|running|used|called|invoked|ran)\b/.test(compact)
+    || /\b(?:using|calling|invoking|running|used|called|invoked|ran)\b.{0,40}\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b/.test(compact)
+    || /\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b.{0,40}\b(?:tool|to edit|to generate|to create|to draw|to render)\b/.test(compact);
+}
+
+function appendGeneratedImageDemotedThinking(
+  t: TurnInput["t"],
+  thinking: string,
+  demotedReasoning: string | undefined,
+): string {
+  const note = demotedReasoning?.trim();
+  if (!note) return thinking;
+  const section = `${t("thinking-final-reasoning", { count: 1 })}\n- ${note}`;
+  return thinking.trim() ? `${thinking.trimEnd()}\n${section}` : section;
+}
+
 export async function sendFinal(
   input: TurnInput,
   thinking: string,
@@ -372,8 +475,6 @@ export async function sendFinal(
   attachments: CreatedFileAttachment[] = [],
 ): Promise<void> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
-  const richPhotoAttachments = outboundAttachments.filter(isRichPhotoAttachment);
-  const separateAttachments = outboundAttachments.filter((attachment) => !isRichPhotoAttachment(attachment));
   if (attachments.length > outboundAttachments.length) {
     input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
       threadId: input.thread.id,
@@ -382,35 +483,32 @@ export async function sendFinal(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const richImageMarkdown = richPhotoMarkdown(input, richPhotoAttachments);
-  const richAnswer = [answer.trim() ? answer : "", richImageMarkdown].filter(Boolean).join("\n\n");
-  let richPhotoAttachmentsSent = false;
-  const messages = thinking.trim() || richAnswer.trim()
+  const hasGeneratedImageAttachment = outboundAttachments.some((attachment) => attachment.origin === "generated_image");
+  const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImageAttachment);
+  const visibleAnswer = finalText.answer;
+  const visibleThinking = appendGeneratedImageDemotedThinking(input.t, thinking, finalText.demotedReasoning);
+  const shouldSendFinalMessage = visibleAnswer.trim() || visibleThinking.trim();
+  const messages = shouldSendFinalMessage
     ? renderFinal({
-        thinkingLog: thinking,
-        answerMd: richAnswer,
+        thinkingLog: visibleThinking,
+        answerMd: visibleAnswer,
         elapsedMs,
         t: input.t,
       })
     : [];
-  const persistedText = answer.trim() ? answer : attachmentPersistedText(outboundAttachments);
+  const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(outboundAttachments);
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
     parts: messages.length,
-    answerChars: answer.length,
+    answerChars: visibleAnswer.length,
     persistedChars: persistedText.length,
-    thinkingChars: thinking.length,
+    thinkingChars: visibleThinking.length,
   });
   const ids: number[] = [];
-  const richSentMessages: SentTelegramFileMessage[] = [];
   for (const rich of messages) {
-    const sent = await sendRichWithFallback(input, rich, {
-      requireRich: containsRichMediaMarkdown(rich),
-    });
-    richSentMessages.push(...sent);
+    const sent = await sendRichWithFallback(input, rich);
     ids.push(...sent.map((message) => message.message_id));
   }
-  richPhotoAttachmentsSent = richPhotoAttachments.length > 0;
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
     role: "assistant",
@@ -427,13 +525,10 @@ export async function sendFinal(
         }
       : { text: persistedText },
     textPlain: persistedText,
-    thinking,
+    thinking: visibleThinking,
     tgMessageId: ids.find((id) => id > 0) ?? null,
   });
-  if (richPhotoAttachmentsSent) {
-    await rememberRichPhotoAttachments(input, assistantMessage, richPhotoAttachments, richSentMessages);
-  }
-  await sendCreatedFileAttachments(input, assistantMessage, richPhotoAttachmentsSent ? separateAttachments : outboundAttachments);
+  await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -620,7 +715,7 @@ async function sendPhotoWithThreadFallback(
   input: TurnInput,
   attachment: CreatedFileAttachment,
 ): Promise<SentTelegramFileMessage> {
-  const other = photoSendOptions(input.messageThreadId, attachment);
+  const other = photoSendOptions(input.messageThreadId);
   try {
     return await input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), other);
   } catch (err) {
@@ -631,8 +726,7 @@ async function sendPhotoWithThreadFallback(
       fileId: attachment.fileId,
     });
     return input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), {
-      ...photoSendOptions(undefined, attachment),
-      caption: photoFallbackCaption(input.thread.title, attachment),
+      ...photoSendOptions(undefined),
     });
   }
 }
@@ -675,7 +769,7 @@ async function sendPhotoMediaGroupWithThreadFallback(
     });
     return input.api.sendMediaGroup(
       input.chatId,
-      photoMediaGroup(attachments, input.thread.title),
+      photoMediaGroup(attachments),
       mediaGroupSendOptions(undefined),
     );
   }
@@ -693,11 +787,9 @@ function documentSendOptions(
 
 function photoSendOptions(
   messageThreadId: number | undefined,
-  attachment: CreatedFileAttachment,
 ): Parameters<Api["sendPhoto"]>[2] {
   return {
     message_thread_id: messageThreadId,
-    caption: attachment.caption ?? undefined,
   };
 }
 
@@ -722,23 +814,14 @@ function documentMediaGroup(
 
 function photoMediaGroup(
   attachments: CreatedFileAttachment[],
-  fallbackThreadTitle?: string,
 ): Parameters<Api["sendMediaGroup"]>[1] {
-  return attachments.map((attachment, index) => ({
+  return attachments.map((attachment) => ({
     type: "photo" as const,
     media: new InputFile(attachment.path, attachment.name),
-    caption: fallbackThreadTitle && index === 0
-      ? photoFallbackCaption(fallbackThreadTitle, attachment)
-      : attachment.caption ?? undefined,
   }));
 }
 
 function documentFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
-  const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
-  return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
-}
-
-function photoFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
   const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
   return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
 }
@@ -767,68 +850,14 @@ function telegramPhotoScore(photo: Record<string, unknown>): number {
   return Math.max(size, width * height);
 }
 
-function isRichPhotoAttachment(attachment: CreatedFileAttachment): boolean {
-  return attachment.delivery === "rich-photo";
-}
-
-function richPhotoMarkdown(input: TurnInput, attachments: CreatedFileAttachment[]): string {
-  return attachments
-    .map((attachment) => {
-      const url = richPhotoUrl(input, attachment);
-      if (!url) return undefined;
-      const alt = escapeMarkdownImageAlt(attachment.caption?.trim() || attachment.name);
-      return `![${alt}](${url})`;
-    })
-    .filter((line): line is string => Boolean(line))
-    .join("\n\n");
-}
-
-function richPhotoUrl(input: TurnInput, attachment: CreatedFileAttachment): string {
-  if (!isRichPhotoAttachment(attachment)) throw new Error(`attachment ${attachment.fileId} is not a rich photo`);
-  if (attachment.publicUrl) return attachment.publicUrl;
-  return publicGeneratedMediaUrl(requireGeneratedMediaPublicBaseUrl(input.config), attachment.path);
-}
-
-function escapeMarkdownImageAlt(text: string): string {
-  return text.replace(/[\]\r\n]/g, " ").trim() || "generated image";
-}
-
-function containsRichMediaMarkdown(rich: { markdown?: string; html?: string }): boolean {
-  return /!\[[^\]\r\n]*]\(https?:\/\//i.test(rich.markdown ?? "") || /<(?:img|video|audio)\s/i.test(rich.html ?? "");
-}
-
-async function rememberRichPhotoAttachments(
-  input: TurnInput,
-  assistantMessage: MessageRow,
-  attachments: CreatedFileAttachment[],
-  sentMessages: SentTelegramFileMessage[],
-): Promise<void> {
-  for (const attachment of attachments) {
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sentMessages.find((message) => Boolean(largestTelegramPhotoFromMessage(message))));
-  }
-}
-
 function largestTelegramPhotoFromMessage(sent: SentTelegramFileMessage | undefined): Record<string, unknown> | undefined {
   const message = asRecord(sent);
-  return largestTelegramPhoto(message?.photo) ?? largestTelegramPhoto(collectNestedTelegramPhotos(message));
-}
-
-function collectNestedTelegramPhotos(value: unknown, out: Record<string, unknown>[] = []): Record<string, unknown>[] {
-  if (Array.isArray(value)) {
-    for (const item of value) collectNestedTelegramPhotos(item, out);
-    return out;
-  }
-  const record = asRecord(value);
-  if (!record) return out;
-  if (typeof record.file_id === "string" && typeof record.file_unique_id === "string") out.push(record);
-  for (const child of Object.values(record)) collectNestedTelegramPhotos(child, out);
-  return out;
+  return largestTelegramPhoto(message?.photo);
 }
 
 async function sendRichWithFallback(
   input: TurnInput,
   rich: { markdown?: string; html?: string },
-  options: { requireRich?: boolean } = {},
 ): Promise<SentTelegramFileMessage[]> {
   const markdown = rich.markdown ?? rich.html ?? "";
   let lastRichError: unknown;
@@ -856,10 +885,6 @@ async function sendRichWithFallback(
         err: String(err),
       });
     }
-  }
-
-  if (options.requireRich) {
-    throw lastRichError ?? new Error("rich message send failed");
   }
 
   input.logger.error("all rich message repair attempts failed; falling back to plain sendMessage", {
@@ -1044,6 +1069,7 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
   }
 
   if (toolName === "generate_image" && record) {
+    if (record.pending === true) return "generating";
     return record.file_id === undefined ? "done" : formatCount(1, "image");
   }
 
@@ -1068,6 +1094,10 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 function toolErrorText(value: unknown): string | undefined {
   const error = asRecord(value)?.error;
   return typeof error === "string" && error.trim() ? error.trim() : undefined;
+}
+
+function isPendingToolResult(value: unknown): boolean {
+  return asRecord(value)?.pending === true;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

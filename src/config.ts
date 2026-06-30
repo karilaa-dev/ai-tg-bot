@@ -9,7 +9,6 @@ export const CodexVerbositySchema = z.enum(["low", "medium", "high"]);
 export type CodexVerbosity = z.infer<typeof CodexVerbositySchema>;
 export const CodexImageQualitySchema = z.enum(["low", "medium", "high", "auto"]);
 export type CodexImageQuality = z.infer<typeof CodexImageQualitySchema>;
-const OptionalUrlSchema = z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional());
 
 const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
@@ -19,6 +18,7 @@ const ConfigSchema = z.object({
   CODEX_COMPACTION_MODEL: z.string().default("gpt-5.4-mini"),
   CODEX_IMAGE_MODEL: z.string().default("gpt-image-2"),
   CODEX_IMAGE_QUALITY: CodexImageQualitySchema.default("low"),
+  CODEX_IMAGE_TIMEOUT_MS: z.coerce.number().int().min(0).default(300_000),
   CODEX_SPEED_MODE: z.enum(["standard", "fast"]).default("standard"),
   CODEX_VERBOSITY: CodexVerbositySchema.default("high"),
   CODEX_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(900_000),
@@ -32,7 +32,6 @@ const ConfigSchema = z.object({
   DOCLING_URL: z.string().url().default("http://localhost:5001"),
   DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
-  GENERATED_MEDIA_PUBLIC_BASE_URL: OptionalUrlSchema,
   BASH_WORKSPACE_ROOT: z.string().min(1).default("./data/bash"),
   BASH_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BASH_MAX_OUTPUT_CHARS: z.coerce.number().int().positive().default(12_000),
@@ -57,6 +56,7 @@ export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
     CODEX_IMAGE_MODEL: "gpt-image-2",
     CODEX_IMAGE_QUALITY: "low",
+    CODEX_IMAGE_TIMEOUT_MS: 300_000,
     CODEX_SPEED_MODE: "standard",
     CODEX_VERBOSITY: "high",
     CODEX_TURN_TIMEOUT_MS: 900_000,
@@ -68,7 +68,6 @@ export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     DOCLING_URL: "http://localhost:5001",
     DOCLING_TIMEOUT_MS: 300_000,
     FILE_INLINE_TOKENS: 6000,
-    GENERATED_MEDIA_PUBLIC_BASE_URL: undefined,
     BASH_WORKSPACE_ROOT: "./data/bash",
     BASH_TIMEOUT_MS: 30_000,
     BASH_MAX_OUTPUT_CHARS: 12_000,

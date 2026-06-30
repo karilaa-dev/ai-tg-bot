@@ -277,6 +277,7 @@ describe("AI tools", () => {
     const generateImageSpec = specs.find((spec) => spec.name === "generate_image");
     expect(generateImageSpec).toMatchObject({ exposeToContext: true });
     expect(generateImageSpec?.description).toContain("Generate or edit an image");
+    expect(generateImageSpec?.description).toContain("separate captionless Telegram photo");
     expect(generateImageSpec?.description).toContain("reference_file_ids");
     expect(generateImageSpec?.description).toContain("terminal");
     const createFileSpec = specs.find((spec) => spec.name === "create_file");
@@ -286,6 +287,8 @@ describe("AI tools", () => {
     expect(createFileSpec?.description).toContain("do not call create_file more than 10 times");
     expect(createFileSpec?.description).toContain("20 MB");
     expect(createFileSpec?.description).toContain("compiled executables");
+    expect(createFileSpec?.description).toContain("Images are sent as Telegram photos by default");
+    expect(createFileSpec?.description).toContain("delivery to document");
     const prompt = await fs.readFile(path.resolve("system_prompt.md"), "utf8");
     expect(prompt).toContain("js-exec -c");
     expect(prompt).toContain("curl -fsSL");
@@ -304,8 +307,12 @@ describe("AI tools", () => {
     expect(prompt).toContain("set -o pipefail");
     expect(prompt).toContain("blocks localhost/private");
     expect(prompt).toContain("Use generate_image when the user asks you to create, draw, render, generate, or edit an image");
+    expect(prompt).toContain("separate captionless Telegram photo message");
     expect(prompt).toContain("reference_file_ids");
-    expect(prompt).toContain("After a successful generate_image call, treat it as the final step");
+    expect(prompt).toContain("After a successful generate_image call, treat it as the final tool step");
+    expect(prompt).toContain("the bot will send Done before the photo");
+    expect(prompt).toContain("Do not say the image is still generating, queued, or coming soon in your final text");
+    expect(prompt).toContain("Do not mention using imagegen, generate_image, or an image tool in final text");
     expect(prompt).toContain("Do not use create_file for image generation requests");
     expect(prompt).toContain("call create_file");
     expect(prompt).toContain("Attach at most 10 files per answer");
@@ -313,6 +320,8 @@ describe("AI tools", () => {
     expect(prompt).toContain("If more files are needed, send the first 10");
     expect(prompt).toContain("Outbound files up to 20 MB are allowed");
     expect(prompt).toContain("Bash, PowerShell, Python, JavaScript, TypeScript, and similar scripts/source files are allowed");
+    expect(prompt).toContain("Image files are sent as Telegram photos by default");
+    expect(prompt).toContain("Set create_file delivery to document");
 
     const nodeHint = await formatBotToolResultForCodex(
       registry,
@@ -539,6 +548,44 @@ describe("AI tools", () => {
       content_md: null,
     });
     await expect(fs.readFile((await repos.files.get(zipResult.file_id!))!.path, "utf8")).resolves.toBe("not actually a compiled executable");
+  });
+
+  it("chooses create_file image delivery as photo by default or document when requested", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-create-image-delivery-"));
+    tempDirs.push(workspaceRoot);
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: workspaceRoot });
+    const user = await repos.users.ensure({ tgId: 87, firstName: "CreateImageDelivery", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threadRoot = path.join(workspaceRoot, `thread-${thread.id}`);
+    await fs.mkdir(threadRoot, { recursive: true });
+    await fs.writeFile(path.join(threadRoot, "preview.png"), pngBytes());
+    await fs.writeFile(path.join(threadRoot, "exact.png"), pngBytes());
+    await fs.writeFile(path.join(threadRoot, "notes.txt"), "plain notes");
+    const createdFiles: CreatedFileAttachment[] = [];
+    const registry = buildToolRegistry({ config, db, repos, user, thread, createdFiles });
+
+    const defaultImage = await registry.create_file.execute({
+      path: "/preview.png",
+      caption: "Preview",
+    }) as { file_id?: number; name?: string; type?: string; status?: string; error?: string };
+    const exactImage = await registry.create_file.execute({
+      path: "/exact.png",
+      caption: "Exact",
+      delivery: "document",
+    }) as { file_id?: number; name?: string; type?: string; status?: string; error?: string };
+    const rejected = await registry.create_file.execute({
+      path: "/notes.txt",
+      delivery: "photo",
+    }) as { error?: string };
+
+    expect(defaultImage).toMatchObject({ name: "preview.png", type: "image", status: "1 file attached (1/10 used)" });
+    expect(exactImage).toMatchObject({ name: "exact.png", type: "image", status: "1 file attached (2/10 used)" });
+    expect(rejected).toMatchObject({ error: expect.stringContaining("delivery photo requires an image file: notes.txt") });
+    expect(createdFiles).toMatchObject([
+      { name: "preview.png", type: "image", delivery: "photo", caption: "Preview" },
+      { name: "exact.png", type: "image", delivery: "document", caption: "Exact" },
+    ]);
+    expect(await repos.files.listForThreads([thread.id])).toHaveLength(2);
   });
 
   it("rejects create_file after 10 queued files without storing the extra file", async () => {
@@ -815,12 +862,11 @@ describe("AI tools", () => {
     await expect(fs.readFile(imagePath)).resolves.toEqual(redownloaded);
   });
 
-  it("queues generated images as rich Markdown attachments using configured image model, quality, and references", async () => {
+  it("queues generated images as photo attachments using configured image model, quality, and references", async () => {
     const bytes = pngBytes();
     const config = loadTestConfig({
       CODEX_IMAGE_MODEL: "gpt-image-2-test",
       CODEX_IMAGE_QUALITY: "low",
-      GENERATED_MEDIA_PUBLIC_BASE_URL: "https://cdn.example.test/files/",
     });
     const user = await repos.users.ensure({ tgId: 86, firstName: "GenerateImage", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
@@ -865,6 +911,7 @@ describe("AI tools", () => {
       file_id?: number;
       name?: string;
       type?: string;
+      size?: number;
       caption?: string | null;
       terminal?: boolean;
       generated_image?: boolean;
@@ -878,10 +925,13 @@ describe("AI tools", () => {
       error?: string;
     };
 
-    expect(result).toMatchObject({
+    expect(result).toEqual({
+      file_id: expect.any(Number),
       name: "generated-image.png",
       type: "image",
+      size: bytes.length,
       caption: "Generated preview",
+      status: "1 image generated (1/10 files used)",
       terminal: true,
       generated_image: true,
       model: "gpt-image-2-test",
@@ -890,7 +940,6 @@ describe("AI tools", () => {
       mode: "edit",
       reference_file_ids: [reference.fileId],
       revised_prompt: "A clean generated test image.",
-      status: "1 image generated (1/10 files used)",
     });
     expect(request).toMatchObject({
       prompt: "make the reference image softer",
@@ -906,15 +955,17 @@ describe("AI tools", () => {
       }],
     });
     expect(createdFiles).toHaveLength(1);
-    expect(createdFiles[0]).toMatchObject({
+    expect(createdFiles[0]).toEqual({
       fileId: result.file_id,
       type: "image",
       name: "generated-image.png",
-      delivery: "rich-photo",
-      publicUrl: expect.stringMatching(/^https:\/\/cdn\.example\.test\/files\//),
-      origin: "generated_image",
+      path: expect.any(String),
+      size: bytes.length,
       caption: "Generated preview",
       inline: true,
+      card: expect.any(String),
+      delivery: "photo",
+      origin: "generated_image",
     });
     const stored = await repos.files.get(result.file_id!);
     expect(stored).toMatchObject({
@@ -924,32 +975,6 @@ describe("AI tools", () => {
       is_inline: 1,
     });
     await expect(fs.readFile(stored!.path)).resolves.toEqual(bytes);
-  });
-
-  it("rejects generate_image when no media base URL is configured for Codex base64 output", async () => {
-    const config = loadTestConfig();
-    const user = await repos.users.ensure({ tgId: 90, firstName: "GenerateImageNoUrl", lang: "en" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    let called = false;
-    const registry = buildToolRegistry({
-      config,
-      db,
-      repos,
-      user,
-      thread,
-      createdFiles: [],
-      imageGenerator: async () => {
-        called = true;
-        return { imageBase64: pngBytes().toString("base64") };
-      },
-    });
-
-    await expect(registry.generate_image.execute({
-      prompt: "make a red square",
-    })).resolves.toMatchObject({
-      error: expect.stringContaining("no public image URL"),
-    });
-    expect(called).toBe(true);
   });
 
   it("rejects generate_image references that are not images in the current thread", async () => {

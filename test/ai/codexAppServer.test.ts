@@ -456,6 +456,20 @@ describe("Codex app-server client", () => {
     });
   });
 
+  it("surfaces image-generation timeout aborts with the abort reason", async () => {
+    const config = loadTestConfig({ CODEX_IMAGE_TIMEOUT_MS: 1 });
+    const imagePromise = createCodexImageGenerator(config)({
+      prompt: "Generate a slow image.",
+      model: config.CODEX_IMAGE_MODEL,
+      quality: config.CODEX_IMAGE_QUALITY,
+      size: "1024x1024",
+      mode: "generate",
+      references: [],
+    });
+
+    await expect(imagePromise).rejects.toThrow(/Codex turn aborted: TimeoutError/);
+  });
+
   it("emits multiple completed agentMessage replacements in order", async () => {
     const config = loadTestConfig();
     const partsPromise = collect(streamCodexTurn({
@@ -638,6 +652,42 @@ describe("Codex app-server client", () => {
     await expect(partsPromise).resolves.toEqual([
       { type: "text-delta", text: "answer after retry" },
     ]);
+  });
+
+  it("ignores abort signals after a stream has completed", async () => {
+    const config = loadTestConfig();
+    const abort = new AbortController();
+    const warnings: Array<{ message: string; meta?: unknown }> = [];
+    const logger = {
+      level: "debug",
+      isLevelEnabled: () => true,
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message: string, meta?: unknown) => warnings.push({ message, meta }),
+      error: () => undefined,
+    };
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      prompt: "complete before abort",
+      logger: logger as never,
+      abortSignal: abort.signal,
+    }).fullStream);
+
+    await completeHandshake();
+    transport.emit({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: "completed answer" },
+    });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([
+      { type: "text-delta", text: "completed answer" },
+    ]);
+
+    abort.abort(new Error("late timeout"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(warnings).toEqual([]);
   });
 
   async function completeHandshake(): Promise<void> {

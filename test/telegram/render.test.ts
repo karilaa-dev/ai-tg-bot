@@ -5,6 +5,7 @@ describe("renderFinal", () => {
   const t = (key: string, params?: Record<string, string | number>) => {
     if (key === "thinking-placeholder") return "Thinking...";
     if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
+    if (key === "thinking-summary-generating-image") return `Generating image for ${params?.time}`;
     if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
     return key;
   };
@@ -81,6 +82,35 @@ describe("renderFinal", () => {
     expect(markdown).not.toContain("<tg-thinking>");
   });
 
+  it("uses a generated-image elapsed title while image generation is active", () => {
+    const payload = renderDraft({
+      thinkingMd: "🖼️ Generating image <code>blue square</code>",
+      answerMd: "",
+      elapsedMs: 19_000,
+      t,
+    });
+    const markdown = payload.markdown ?? "";
+
+    expect(markdown).toContain("<details>\n<summary>Generating image for 19s</summary>");
+    expect(markdown).toContain("🖼️ Generating image <code>blue square</code>");
+    expect(markdown).not.toContain("Thinking for 19s");
+  });
+
+  it("uses the generated-image title when reasoning appears before the image tool", () => {
+    const payload = renderDraft({
+      thinkingMd: "Determining final text\n\n🖼️ Generating image <code>blue square</code>",
+      answerMd: "",
+      elapsedMs: 31_000,
+      t,
+    });
+    const markdown = payload.markdown ?? "";
+
+    expect(markdown).toContain("<details>\n<summary>Generating image for 31s</summary>");
+    expect(markdown).toContain("Determining final text");
+    expect(markdown).toContain("🖼️ Generating image <code>blue square</code>");
+    expect(markdown).not.toContain("Thinking for 31s");
+  });
+
   it("renders provided long draft thinking without character-tail slicing", () => {
     const payload = renderDraft({
       thinkingMd: `Opening title\n${"reasoning detail ".repeat(260)}`,
@@ -109,13 +139,4 @@ describe("renderFinal", () => {
     expect(markdown).not.toContain("steps");
   });
 
-  it("preserves rich Markdown media blocks", () => {
-    const [payload] = renderFinal({
-      answerMd: "![Generated image](https://cdn.example.test/generated-image.png)",
-      elapsedMs: 0,
-      t,
-    });
-
-    expect(payload?.markdown).toContain("![Generated image](https://cdn.example.test/generated-image.png)");
-  });
 });
