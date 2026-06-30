@@ -31,7 +31,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(res.getLastApiCall("leaveChat")).toBeDefined();
   });
 
-  it("creates and redeems an invite, then shows language picker", async () => {
+  it("creates and redeems an invite, then shows the onboarding timezone prompt", async () => {
     const adminChat = env.bot.createChat({ id: env.admin.id, type: "private", first_name: "Admin" });
     const panel = await env.bot.sendCommand(env.admin, adminChat, "/invite");
     expect(panel.text).toContain("Invite settings");
@@ -55,8 +55,22 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(invite?.expires_at).toBeGreaterThan(Date.now() + 29 * 24 * 60 * 60 * 1000);
 
     const onboarded = await env.bot.sendCommand(env.user, env.chat, `/start ${invite!.code}`);
-    expect(onboarded.texts.join("\n")).toContain("Choose a language");
-    expect(onboarded.hasInlineKeyboard()).toBe(true);
+    const richWelcome = JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload);
+    expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
+    expect(richWelcome).toContain("## What I can help with");
+    expect(richWelcome).toContain("- 🔎 *Search*:");
+    expect(richWelcome).toContain("- 🎨 *Images*:");
+    expect(richWelcome).toContain("- 💻 *Code*:");
+    expect(richWelcome).toContain("- 📎 *Files*:");
+    expect(richWelcome).not.toContain("###");
+    expect(richWelcome).not.toContain("Try asking");
+    expect(richWelcome).not.toContain("Stream mode");
+    const surface = onboarded.texts.join("\n");
+    expect(surface).toContain("Set your timezone");
+    expect(surface).not.toContain("Stream mode");
+    expect(surface).not.toContain("Choose a language");
+    expect(onboarded.getInlineButtonByData("tz:onboarding:set")).toBeDefined();
+    expect(onboarded.getInlineButtonByData("tz:onboarding:later")).toBeDefined();
   });
 
   it("updates invite settings inline before creating", async () => {
@@ -94,7 +108,8 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("persists language and stream settings", async () => {
     await onboard("LANGCODE");
-    const lang = await env.bot.clickButton(env.user, env.chat, "lang:ru");
+    const picker = await env.bot.sendCommand(env.user, env.chat, "/lang");
+    const lang = await env.bot.clickButton(env.user, env.chat, "lang:ru", picker.messages.at(-1)!);
     expect(lang.text ?? lang.editedText).toContain("русский");
     const commandCall = lang.getLastApiCall("setMyCommands");
     expect(JSON.stringify(commandCall?.payload)).toContain("Сменить язык");
@@ -115,9 +130,56 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(retry.text).toContain("could not parse");
 
     const done = await env.bot.sendMessage(env.user, env.chat, "2:30 PM");
-    expect(done.text).toContain("Timezone set");
+    expect(done.texts.join("\n")).toContain("Timezone saved");
+    expect(done.texts.join("\n")).toContain("Ready");
     const user = await env.repos.users.get(env.user.id);
     expect(typeof user?.tz_offset_min).toBe("number");
+  });
+
+  it("lets users postpone timezone setup from onboarding", async () => {
+    const onboarded = await onboard("TZLATER");
+    const later = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:later", onboarded.messages.at(-1)!);
+
+    expect(later.text).toContain("/timezone");
+    const user = await env.repos.users.get(env.user.id);
+    expect(user?.tz_offset_min).toBeNull();
+  });
+
+  it("starts the default timezone flow from the onboarding button", async () => {
+    const onboarded = await onboard("TZSET");
+    const prompt = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:set", onboarded.messages.at(-1)!);
+    expect(prompt.text).toContain("What time");
+
+    const done = await env.bot.sendMessage(env.user, env.chat, "2:30 PM");
+    expect(done.texts.join("\n")).toContain("Timezone saved");
+    expect(done.texts.join("\n")).toContain("Ready");
+    const user = await env.repos.users.get(env.user.id);
+    expect(typeof user?.tz_offset_min).toBe("number");
+  });
+
+  it("offers Moscow timezone directly for Russian-language users", async () => {
+    const ruUser = env.bot.createUser({ id: env.config.TELEGRAM_ADMIN_ID + 2, first_name: "Alina", language_code: "ru" });
+    const ruChat = env.bot.createChat({ id: ruUser.id, type: "private", first_name: "Alina" }) as typeof env.chat;
+    const onboarded = await onboard("TZMOSCOW", ruUser, ruChat);
+
+    expect(onboarded.getInlineButtonByData("tz:onboarding:moscow")).toBeDefined();
+    const done = await env.bot.clickButton(ruUser, ruChat, "tz:onboarding:moscow", onboarded.messages.at(-1)!);
+    expect(done.texts.join("\n")).toContain("UTC+03:00");
+    expect(done.texts.join("\n")).toContain("Готово");
+    const user = await env.repos.users.get(ruUser.id);
+    expect(user?.lang).toBe("ru");
+    expect(user?.tz_offset_min).toBe(180);
+  });
+
+  it("does not show onboarding timezone prompt when timezone is already set", async () => {
+    await onboard("TZEXISTS");
+    await env.repos.users.setTimezone(env.user.id, -420);
+
+    const restarted = await env.bot.sendCommand(env.user, env.chat, "/start");
+
+    const richWelcome = JSON.stringify(restarted.getLastApiCall("sendRichMessage")?.payload);
+    expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
+    expect(restarted.getInlineButtonByData("tz:onboarding:set")).toBeUndefined();
   });
 
   it("runs user text through the turn runner and sends rich messages", async () => {
@@ -960,9 +1022,9 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain("album caption");
   });
 
-  async function onboard(code: string, user = env.user, chat = env.chat): Promise<void> {
+  async function onboard(code: string, user = env.user, chat = env.chat): Promise<BotResponse> {
     await env.repos.invites.insert({ code, maxUses: 5, expiresAt: null, createdBy: env.config.TELEGRAM_ADMIN_ID });
-    await env.bot.sendCommand(user, chat, `/start ${code}`);
+    return env.bot.sendCommand(user, chat, `/start ${code}`);
   }
 });
 

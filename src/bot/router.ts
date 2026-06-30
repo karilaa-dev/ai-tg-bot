@@ -16,7 +16,7 @@ import { runTurn, type TurnRunner } from "../ai/run.js";
 import { formatUtcOffset, offsetFromLocalTime } from "./timezone.js";
 import type { BotContext, BotServices } from "./context.js";
 import { localizedCommands } from "./commands.js";
-import { languageKeyboard } from "./keyboards.js";
+import { languageKeyboard, onboardingTimezoneKeyboard } from "./keyboards.js";
 import { Localizer } from "./i18n.js";
 import { cardForFile, classifyFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { sha256Hex } from "../files/hash.js";
@@ -24,7 +24,7 @@ import { downloadTelegramFile, type TelegramFileDownloader } from "../files/tele
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
-import { isThreadNotFound } from "../telegram/richApi.js";
+import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -47,6 +47,7 @@ const textBurstFlushMs = 1_000;
 const splitTextChunkMinChars = 3_000;
 const inviteUseOptions = [1, 5, 10] as const;
 const inviteExpiryOptions = ["7d", "30d", "never"] as const;
+const moscowTimezoneOffsetMin = 180;
 type InviteExpiry = typeof inviteExpiryOptions[number];
 type BotConversation = Conversation<BotContext, BotContext>;
 
@@ -190,6 +191,31 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logCommand(ctx, "timezone");
     if (!ctx.from) return;
     await ctx.conversation.enter("timezone");
+  });
+  bot.callbackQuery("tz:onboarding:set", async (ctx) => {
+    logCallback(ctx, "timezone:onboarding:set");
+    await ctx.answerCallbackQuery();
+    await clearInlineKeyboard(ctx);
+    await ctx.conversation.enter("timezone");
+  });
+  bot.callbackQuery("tz:onboarding:later", async (ctx) => {
+    logCallback(ctx, "timezone:onboarding:later");
+    await ctx.answerCallbackQuery();
+    await clearInlineKeyboard(ctx);
+    await replyMarkdownWithThreadFallback(ctx, ctx.t("tz-onboarding-later"), threadExtra(ctx.thread));
+  });
+  bot.callbackQuery("tz:onboarding:moscow", async (ctx) => {
+    logCallback(ctx, "timezone:onboarding:moscow");
+    if (!ctx.user || !ctx.from) return;
+    await ctx.services.repos.users.setTimezone(ctx.from.id, moscowTimezoneOffsetMin);
+    ctx.user = { ...ctx.user, tz_offset_min: moscowTimezoneOffsetMin };
+    await ctx.answerCallbackQuery();
+    await clearInlineKeyboard(ctx);
+    await replyMarkdownWithThreadFallback(ctx, ctx.t("tz-direct-set", {
+      label: ctx.t("tz-moscow-label"),
+      offset: formatUtcOffset(moscowTimezoneOffsetMin),
+    }), threadExtra(ctx.thread));
+    await replyMarkdownWithThreadFallback(ctx, ctx.t("onboarding-ready"), threadExtra(ctx.thread));
   });
   bot.command("compact", async (ctx) => {
     logCommand(ctx, "compact");
@@ -576,32 +602,38 @@ async function redeemInvite(ctx: BotContext, code: string, lang: "en" | "ru"): P
 }
 
 async function sendWelcome(ctx: BotContext): Promise<void> {
-  const stream = ctx.t(ctx.user?.stream_mode ? "stream-state-on" : "stream-state-off");
-  await replyWithThreadFallback(ctx, ctx.t("start-welcome", { stream }), threadExtra(ctx.thread));
-  await replyWithThreadFallback(ctx, ctx.t("lang-pick", { lang: ctx.user?.lang ?? "en" }), {
+  await replyRichMarkdownWithThreadFallback(ctx, ctx.t("start-welcome"), threadExtra(ctx.thread));
+  if (!ctx.user || ctx.user.tz_offset_min !== null) return;
+  await delay(ctx.services.config.ONBOARDING_TIMEZONE_DELAY_MS);
+  const user = await ctx.services.repos.users.get(ctx.user.tg_id);
+  if (!user || user.tz_offset_min !== null) return;
+  ctx.user = user;
+  await replyMarkdownWithThreadFallback(ctx, ctx.t("tz-onboarding-prompt"), {
     ...threadExtra(ctx.thread),
-    reply_markup: languageKeyboard(),
+    reply_markup: onboardingTimezoneKeyboard(ctx.t, user.lang === "ru"),
   });
 }
 
 async function timezoneConversation(conversation: BotConversation, ctx: BotContext): Promise<void> {
   optionalLogger(ctx)?.debug("timezone conversation started", ctxLogMeta(ctx));
-  await conversationReply(conversation, ctx, (ctx) => replyData(ctx, ctx.t("tz-ask")));
+  await conversationReply(conversation, ctx, (ctx) => markdownReplyData(ctx, ctx.t("tz-ask")));
   for (let attempts = 0; attempts < 3; attempts += 1) {
     const answer = await conversation.waitFor("message:text");
     const text = answer.message.text;
     const offset = offsetFromLocalTime(text);
     if (offset === null) {
       optionalLogger(answer)?.debug("timezone input rejected", ctxLogMeta(answer, { attempt: attempts + 1 }));
-      await conversationReply(conversation, answer, (ctx) => replyData(ctx, ctx.t("tz-bad-format")));
+      await conversationReply(conversation, answer, (ctx) => markdownReplyData(ctx, ctx.t("tz-bad-format")));
       continue;
     }
     const data = await conversation.external(async (ctx) => {
       await ctx.services.repos.users.setTimezone(ctx.from!.id, offset);
-      return replyData(ctx, ctx.t("tz-set", { offset: formatUtcOffset(offset), time: text }));
+      return markdownReplyData(ctx, ctx.t("tz-set", { offset: formatUtcOffset(offset), time: text }));
     });
     optionalLogger(answer)?.info("timezone set", ctxLogMeta(answer, { offset }));
     await replyWithCapturedThreadFallback(answer, data);
+    const ready = await conversation.external((ctx) => markdownReplyData(ctx, ctx.t("onboarding-ready")));
+    await replyWithCapturedThreadFallback(answer, ready);
     return;
   }
   optionalLogger(ctx)?.info("timezone conversation ended after invalid attempts", ctxLogMeta(ctx));
@@ -622,8 +654,15 @@ interface ConversationReplyData {
   threadTitle?: string;
 }
 
-function replyData(ctx: BotContext, text: string, other = threadExtra(ctx.thread)): ConversationReplyData {
+function replyData(ctx: BotContext, text: string, other: ReplyOptions = threadExtra(ctx.thread)): ConversationReplyData {
   return { text, other, threadTitle: ctx.thread?.title };
+}
+
+function markdownReplyData(ctx: BotContext, text: string, other: ReplyOptions = threadExtra(ctx.thread)): ConversationReplyData {
+  return replyData(ctx, text, {
+    ...other,
+    parse_mode: "Markdown",
+  });
 }
 
 async function replyWithCapturedThreadFallback(ctx: BotContext, data: ConversationReplyData): Promise<void> {
@@ -1325,6 +1364,74 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
 
 type ReplyOptions = Parameters<BotContext["reply"]>[1];
 
+async function replyRichMarkdownWithThreadFallback(
+  ctx: BotContext,
+  markdown: string,
+  other?: ReplyOptions,
+): Promise<void> {
+  if (!ctx.chat) {
+    await replyMarkdownWithThreadFallback(ctx, markdown, other);
+    return;
+  }
+  const payload = (other ?? {}) as Record<string, unknown>;
+  const messageThreadId = typeof payload.message_thread_id === "number" ? payload.message_thread_id : undefined;
+  const replyMarkup = payload.reply_markup;
+  try {
+    await sendRich(ctx.api, {
+      chat_id: ctx.chat.id,
+      message_thread_id: messageThreadId,
+      rich_message: { markdown },
+      reply_markup: replyMarkup,
+    });
+    return;
+  } catch (err) {
+    if (!messageThreadId || !ctx.thread || !isThreadNotFound(err)) {
+      if (!isRichParseError(err)) throw err;
+      ctx.services.logger.warn("rich markdown reply failed; retrying as legacy markdown", {
+        err: String(err),
+      });
+      await replyMarkdownWithThreadFallback(ctx, markdown, other);
+      return;
+    }
+  }
+
+  ctx.services.logger.warn("telegram topic rich reply failed; retrying without message_thread_id", {
+    threadId: ctx.thread.id,
+    topicId: messageThreadId,
+  });
+  try {
+    await sendRich(ctx.api, {
+      chat_id: ctx.chat.id,
+      rich_message: { markdown: prefixPlainForThreadFallback(ctx.thread.title, markdown) },
+      reply_markup: replyMarkup,
+    });
+  } catch (err) {
+    if (!isRichParseError(err)) throw err;
+    ctx.services.logger.warn("topic fallback rich markdown failed; retrying as legacy markdown", {
+      err: String(err),
+    });
+    await replyMarkdownWithThreadFallback(ctx, markdown, other);
+  }
+}
+
+async function replyMarkdownWithThreadFallback(
+  ctx: BotContext,
+  text: string,
+  other?: ReplyOptions,
+): ReturnType<BotContext["reply"]> {
+  try {
+    return await replyWithThreadFallback(ctx, text, {
+      ...other,
+      parse_mode: "Markdown",
+    });
+  } catch (err) {
+    ctx.services.logger.warn("markdown reply failed; retrying as plain text", {
+      err: String(err),
+    });
+    return replyWithThreadFallback(ctx, text, other);
+  }
+}
+
 async function replyWithThreadFallback(
   ctx: BotContext,
   text: string,
@@ -1346,6 +1453,17 @@ async function replyWithThreadFallback(
 
 function prefixPlainForThreadFallback(title: string, text: string): string {
   return `[${title}]\n\n${text}`;
+}
+
+async function clearInlineKeyboard(ctx: BotContext): Promise<void> {
+  await ctx.editMessageReplyMarkup().catch((err) => {
+    ctx.services.logger.debug("failed to clear inline keyboard", { err: String(err) });
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escapeHtml(text: string): string {

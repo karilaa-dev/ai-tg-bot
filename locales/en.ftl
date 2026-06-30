@@ -1,4 +1,12 @@
-start-welcome = 👋 Welcome. Commands: /lang /timezone /stream /stop /fork /compact /help. Stream mode: { $stream }.
+start-welcome =
+    # 👋 Welcome to your AI assistant
+
+    ## What I can help with
+    - 🔎 *Search*: find current information, verify facts with sources, summarize web results
+    - 🎨 *Images*: generate new images, edit or transform existing images, refine visual prompts
+    - 💻 *Code*: run scripts and calculations, debug errors, analyze data or files
+    - 📎 *Files*: read uploaded documents, create reports or tables, send generated files back here
+    _Send a message or upload a file to start._ Use /help for commands.
 lang-pick = 🌐 Choose a language. Auto-picked: { $lang }.
 lang-auto-note = 🌐 Language was selected from your Telegram profile.
 lang-set = ✅ Language set to English.
@@ -37,9 +45,39 @@ invite-status-revoked = 🗑️ revoked
 invite-revoked-toast = 🗑️ Invite revoked
 invite-revoked = 🗑️ Invite revoked.
 invites-empty = 📭 No invites yet.
-tz-ask = 🕒 What time is it for you right now? Example: 14:30 or 2:30 PM.
-tz-bad-format = ⚠️ I could not parse that time. Send it like 14:30 or 2:30 PM.
-tz-set = ✅ Timezone set to { $offset }. I calculate your current time as { $time }.
+tz-ask =
+    🕒 *Set timezone*
+
+    What time is it for you right now?
+    Example: `14:30` or `2:30 PM`
+tz-bad-format =
+    ⚠️ *I could not parse that time.*
+
+    Send it like `14:30` or `2:30 PM`.
+tz-set =
+    ✅ *Timezone saved*
+
+    Offset: `{ $offset }`
+    Your current time: `{ $time }`
+tz-onboarding-prompt =
+    🕒 *Set your timezone*
+
+    This helps me handle dates, reminders, and time-sensitive answers correctly.
+tz-onboarding-btn-set = 🕒 Set timezone
+tz-onboarding-btn-later = Later
+tz-onboarding-btn-moscow = Moscow UTC+03:00
+tz-moscow-label = Moscow
+tz-onboarding-later =
+    No problem. You can set your timezone anytime with /timezone.
+tz-direct-set =
+    ✅ *Timezone saved*
+
+    Location: *{ $label }*
+    Offset: `{ $offset }`
+onboarding-ready =
+    ✨ *Ready.*
+
+    Send me a task whenever you want.
 stream-on = 🌊 Streaming drafts are on.
 stream-off = 📴 Streaming drafts are off.
 stream-state-on = 🌊 on

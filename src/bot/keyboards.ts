@@ -9,6 +9,19 @@ export function languageKeyboard() {
   };
 }
 
+export function onboardingTimezoneKeyboard(t: (key: string) => string, includeMoscow: boolean) {
+  const rows = [
+    [
+      { text: t("tz-onboarding-btn-set"), callback_data: "tz:onboarding:set" },
+      { text: t("tz-onboarding-btn-later"), callback_data: "tz:onboarding:later" },
+    ],
+  ];
+  if (includeMoscow) {
+    rows.push([{ text: t("tz-onboarding-btn-moscow"), callback_data: "tz:onboarding:moscow" }]);
+  }
+  return { inline_keyboard: rows };
+}
+
 export function contextLimitKeyboard(t: (key: string) => string) {
   return {
     inline_keyboard: [[{ text: t("btn-compact"), callback_data: "ctx:compact" }]],
