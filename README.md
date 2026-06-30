@@ -4,7 +4,66 @@ Personal AI assistant Telegram bot built with TypeScript, grammY, Codex app-serv
 
 ## Setup
 
-1. Install Node 22.13 or newer. SQLite development uses Drizzle's `node:sqlite` driver, and Postgres uses Drizzle's `node-postgres` driver over `pg`.
+1. Copy `.env.example` to `.env` and set real Telegram, OpenRouter, and Tavily values.
+2. Build the bot image:
+
+   ```bash
+   docker compose build
+   ```
+
+3. Log in to Codex once inside Docker. This stores auth in the `codex-home` Docker volume, not in the image and not in host `~/.codex`:
+
+   ```bash
+   docker compose run --rm bot codex login --device-auth
+   ```
+
+4. Start the bot and Docling:
+
+   ```bash
+   docker compose up -d
+   ```
+
+5. Inspect startup logs:
+
+   ```bash
+   docker compose logs -f bot
+   ```
+
+6. Enable Topics for the bot in BotFather before using `/fork`.
+
+The default Docker runtime uses SQLite at `/app/data/bot.db`, uploaded and
+generated files under `/app/data`, and per-thread just-bash workspaces under
+`/app/data/bash`. The `bot-data` Docker volume preserves that state across
+container rebuilds and restarts. Codex state lives in `/home/node/.codex` and is
+preserved by the `codex-home` Docker volume.
+
+The bot does not mount host `~/.codex` by default. All chat inference stays on
+the private `codex app-server` stdio integration spawned by the bot process.
+Secrets stay out of the image; `.env` is loaded only at runtime.
+
+## Docker With Postgres
+
+Use `docker-compose.postgres.yml` when you want the Docker bot to use Postgres
+instead of the default SQLite volume:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml build
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml run --rm bot codex login --device-auth
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f bot
+```
+
+The Postgres override adds a `postgres` service, persists it in the `pg-data`
+volume, and changes the bot database URL to
+`postgres://aibot:${POSTGRES_PASSWORD:-aibot}@postgres:5432/aibot`. Set
+`POSTGRES_PASSWORD` in `.env` before starting the stack if you want a different
+password; keep it URL-safe because Compose uses the same value in the bot's
+connection URL.
+
+## Local Development
+
+1. Install Node 22.13 or newer. SQLite development uses Drizzle's `node:sqlite`
+   driver, and Postgres uses Drizzle's `node-postgres` driver over `pg`.
 2. Install dependencies:
 
    ```bash
@@ -18,15 +77,13 @@ Personal AI assistant Telegram bot built with TypeScript, grammY, Codex app-serv
    docker compose up -d docling
    ```
 
-5. For Postgres instead of SQLite:
+5. For Postgres instead of local SQLite:
 
    ```bash
-   docker compose --profile pg up -d postgres
+   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d postgres
    ```
 
    Then set `DB_URL=postgres://aibot:aibot@localhost:5432/aibot`.
-
-6. Enable Topics for the bot in BotFather before using `/fork`.
 
 All chat inference runs through `codex app-server`. `CODEX_MODEL` controls
 normal generation, `CODEX_COMPACTION_MODEL` controls conversation
@@ -76,6 +133,30 @@ PDFs use native text extraction through `unpdf` first, which is much faster for
 large book-style documents. If a PDF has little extractable text, or for DOCX
 files, ingestion falls back to Docling at `DOCLING_URL`.
 
+## Docker Data
+
+`docker compose down` removes containers but preserves the `bot-data` and
+`codex-home` volumes. `docker compose down -v` deletes those volumes and will
+remove chat history, files, bash workspaces, and container Codex login state.
+When using `docker-compose.postgres.yml`, the same `down -v` command also
+deletes `pg-data`.
+
+To back up the default Compose volumes, replace the volume names if your Compose
+project name differs:
+
+```bash
+docker run --rm -v ai-tg-bot_bot-data:/data:ro -v "$PWD":/backup alpine tar czf /backup/bot-data-backup.tgz -C /data .
+docker run --rm -v ai-tg-bot_codex-home:/data:ro -v "$PWD":/backup alpine tar czf /backup/codex-home-backup.tgz -C /data .
+```
+
+To restore:
+
+```bash
+docker compose down
+docker run --rm -v ai-tg-bot_bot-data:/data -v "$PWD":/backup alpine sh -c 'rm -rf /data/* && tar xzf /backup/bot-data-backup.tgz -C /data'
+docker run --rm -v ai-tg-bot_codex-home:/data -v "$PWD":/backup alpine sh -c 'rm -rf /data/* && tar xzf /backup/codex-home-backup.tgz -C /data'
+```
+
 ## Commands
 
 ```bash
@@ -85,6 +166,17 @@ npm run build
 npm test
 npm run dev:streamdump
 npm run live:codex-check
+```
+
+Docker entrypoint and image checks:
+
+```bash
+docker compose config
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml config
+docker compose build --pull bot
+docker compose build --build-arg CODEX_RELEASE=0.142.4 bot
+docker compose run --rm bot codex --version
+docker compose run --rm bot codex login status
 ```
 
 To exercise real Codex app-server inference, local tool use, and OpenRouter

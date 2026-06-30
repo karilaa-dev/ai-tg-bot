@@ -1,21 +1,29 @@
 services:
+  bot:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DB_URL: sqlite:/app/data/bot.db
+      BASH_WORKSPACE_ROOT: /app/data/bash
+      DOCLING_URL: http://docling:5001
+      CODEX_HOME: /home/node/.codex
+    volumes:
+      - bot-data:/app/data
+      - codex-home:/home/node/.codex
+    depends_on:
+      docling:
+        condition: service_started
+    restart: unless-stopped
+
   docling:
     image: quay.io/docling-project/docling-serve
     ports:
       - "5001:5001"
     restart: unless-stopped
 
-  postgres:
-    image: postgres:17-alpine
-    profiles: ["pg"]
-    environment:
-      POSTGRES_DB: aibot
-      POSTGRES_USER: aibot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aibot}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-
 volumes:
-  pg-data:
+  bot-data:
+  codex-home:

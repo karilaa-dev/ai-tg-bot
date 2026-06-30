@@ -1,0 +1,28 @@
+services:
+  bot:
+    environment:
+      DB_URL: "postgres://aibot:${POSTGRES_PASSWORD:-aibot}@postgres:5432/aibot"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: aibot
+      POSTGRES_USER: aibot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aibot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pg-data:
