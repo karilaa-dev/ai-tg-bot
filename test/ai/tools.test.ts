@@ -280,6 +280,7 @@ describe("AI tools", () => {
     expect(generateImageSpec?.description).toContain("separate captionless Telegram photo");
     expect(generateImageSpec?.description).toContain("reference_file_ids");
     expect(generateImageSpec?.description).toContain("terminal");
+    expect(generateImageSpec?.description).toContain('starting with "Done —"');
     const createFileSpec = specs.find((spec) => spec.name === "create_file");
     expect(createFileSpec).toMatchObject({ exposeToContext: true });
     expect(createFileSpec?.description).toContain("send back to the Telegram user");
@@ -310,7 +311,9 @@ describe("AI tools", () => {
     expect(prompt).toContain("separate captionless Telegram photo message");
     expect(prompt).toContain("reference_file_ids");
     expect(prompt).toContain("After a successful generate_image call, treat it as the final tool step");
-    expect(prompt).toContain("the bot will send Done before the photo");
+    expect(prompt).toContain("starts with `Done —`");
+    expect(prompt).toContain("even for first-time image generation");
+    expect(prompt).toContain("generic ready message before the photo");
     expect(prompt).toContain("Do not say the image is still generating, queued, or coming soon in your final text");
     expect(prompt).toContain("Do not mention using imagegen, generate_image, or an image tool in final text");
     expect(prompt).toContain("Do not use create_file for image generation requests");
@@ -921,6 +924,7 @@ describe("AI tools", () => {
       mode?: string;
       reference_file_ids?: number[];
       revised_prompt?: string | null;
+      final_text_guidance?: string;
       status?: string;
       error?: string;
     };
@@ -940,6 +944,7 @@ describe("AI tools", () => {
       mode: "edit",
       reference_file_ids: [reference.fileId],
       revised_prompt: "A clean generated test image.",
+      final_text_guidance: expect.stringContaining("Done —"),
     });
     expect(request).toMatchObject({
       prompt: "make the reference image softer",

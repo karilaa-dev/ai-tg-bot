@@ -47,6 +47,8 @@ export interface CreatedFileAttachment {
 export type PendingCreatedFile = Promise<{ attachment?: CreatedFileAttachment; revisedPrompt?: string | null; error?: string }>;
 export type ImageGenerationMode = "auto" | "generate" | "edit";
 type CreatedFileDeliveryPreference = "auto" | "photo" | "document";
+const GENERATED_IMAGE_FINAL_TEXT_GUIDANCE =
+  'Write one concise past-tense final sentence starting with "Done —" that says what you generated or changed. Do not mention imagegen, generate_image, or an image tool.';
 
 export interface ImageGenerationReference {
   fileId: number;
@@ -341,7 +343,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     },
     generate_image: {
       description:
-        "Generate or edit an image with the configured Codex app-server image model. The bot waits for generation to finish, then sends your final text followed by a separate captionless Telegram photo message. Use this when the user asks you to create, draw, render, generate, or edit an image. For edits or image references, pass current-thread image file ids in reference_file_ids. This tool is terminal: after a successful call, do not call more tools. If you have useful final text, write it normally; if you have nothing to add, the bot will send Done before the photo. Do not say the image is still generating, queued, or coming soon in your final text. Do not mention using imagegen, generate_image, or an image tool in final text; tool usage belongs in reasoning.",
+        'Generate or edit an image with the configured Codex app-server image model. The bot waits for generation to finish, then sends your final text followed by a separate captionless Telegram photo message. Use this when the user asks you to create, draw, render, generate, or edit an image. For edits or image references, pass current-thread image file ids in reference_file_ids. This tool is terminal: after a successful call, do not call more tools. Write one concise past-tense final sentence starting with "Done —" that says what you generated or changed, even for first-time image generation. Examples: "Done — I generated a pixel-styled Hatsune Miku." or "Done — I made her sitting and changed her hair to red." If you return empty text, the bot will send a generic ready message before the photo. Do not say the image is still generating, queued, or coming soon in your final text. Do not mention using imagegen, generate_image, or an image tool in final text; tool usage belongs in reasoning.',
       inputSchema: z.object({
         prompt: z.string().min(1).max(4000),
         reference_file_ids: z.array(z.coerce.number().int().positive()).max(4).default([]),
@@ -416,6 +418,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
               requested_size: size,
               mode,
               reference_file_ids,
+              final_text_guidance: GENERATED_IMAGE_FINAL_TEXT_GUIDANCE,
             };
           }
           const result = await createAttachment()
@@ -439,6 +442,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
             mode,
             reference_file_ids,
             revised_prompt: result.revisedPrompt ?? null,
+            final_text_guidance: GENERATED_IMAGE_FINAL_TEXT_GUIDANCE,
           };
         } catch (err) {
           input.logger?.warn("tool generate_image failed", {

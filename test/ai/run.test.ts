@@ -1001,12 +1001,12 @@ describe("runTurn", () => {
     });
 
     expect(richPayloads).toHaveLength(1);
-    expect(richMarkdownOf(richPayloads[0])).toContain("Done");
+    expect(richMarkdownOf(richPayloads[0])).toContain("Done — the image is ready.");
     expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
     expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
     expect(photoCalls[0]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
     const attached = await repos.files.listForMessage(latest!.id);
     expect(attached[0]).toMatchObject({
       telegram_file_id: "yellow-photo-id",
@@ -1142,14 +1142,14 @@ describe("runTurn", () => {
     expect(richPayloads).toHaveLength(1);
     const markdown = richMarkdownOf(richPayloads[0]);
     expect(markdown).toContain(`- ${toolUsageText}`);
-    expect(markdown).toContain("Image generated:");
+    expect(markdown).toContain("Done — the image is ready.");
     const answerAfterThinking = markdown.slice(markdown.indexOf("</details>") + "</details>".length);
-    expect(answerAfterThinking).toContain("Image generated:");
+    expect(answerAfterThinking).toContain("Done — the image is ready.");
     expect(answerAfterThinking).not.toContain(toolUsageText);
     expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
     expect(photoCalls[0]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Image generated:" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
     expect(latest?.thinking).toContain(toolUsageText);
     const attached = await repos.files.listForMessage(latest!.id);
     expect(attached[0]).toMatchObject({
@@ -1215,13 +1215,13 @@ describe("runTurn", () => {
 
     expect(richPayloads).toHaveLength(1);
     const markdown = richMarkdownOf(richPayloads[0]);
-    expect(markdown).toContain("Image generated:");
+    expect(markdown).toContain("Done — the image is ready.");
     expect(markdown).not.toContain("Done — generating the image now.");
     expect(markdown).not.toContain("![");
     expect(photoCalls).toEqual([{ filename: "generated-image.png", other: { message_thread_id: undefined } }]);
     expect(photoCalls[0]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Image generated:" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
     const attached = await repos.files.listForMessage(latest!.id);
     expect(attached[0]).toMatchObject({
       telegram_file_id: "orange-photo-id",
@@ -1764,7 +1764,7 @@ describe("runTurn", () => {
     );
 
     expect(richPayloads).toHaveLength(1);
-    expect(richMarkdownOf(richPayloads[0])).toContain("Done");
+    expect(richMarkdownOf(richPayloads[0])).toContain("Done — the image is ready.");
     expect(richMarkdownOf(richPayloads[0])).not.toContain("![");
     expect(photoCalls).toHaveLength(2);
     expect(photoCalls[0]).toMatchObject({ filename: "topic-image.png", other: { message_thread_id: 42 } });
@@ -1772,7 +1772,7 @@ describe("runTurn", () => {
     expect(photoCalls[1]?.other?.message_thread_id).toBeUndefined();
     expect(photoCalls[1]?.other).not.toHaveProperty("caption");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done" });
+    expect(latest).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
     expect(await repos.files.listForMessage(latest!.id)).toMatchObject([{ id: file.id }]);
     await expect(repos.files.get(file.id)).resolves.toMatchObject({
       telegram_file_id: "topic-photo-id",
@@ -1965,9 +1965,9 @@ function testT(key: string, params?: Record<string, string | number>): string {
     case "thinking-done":
       return "✅ Done.";
     case "image-generated-done":
-      return "Done";
+      return "Done — the image is ready.";
     case "image-generated-ready":
-      return "Image generated:";
+      return "Done — the image is ready.";
     case "thinking-summary-running":
       return `🧠 Thinking for ${params?.time}`;
     case "thinking-summary-generating-image":

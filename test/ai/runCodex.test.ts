@@ -316,9 +316,9 @@ function testT(key: string, params?: Record<string, string | number>): string {
     case "thinking-done":
       return "✅ Done.";
     case "image-generated-done":
-      return "Done";
+      return "Done — the image is ready.";
     case "image-generated-ready":
-      return "Image generated:";
+      return "Done — the image is ready.";
     case "thinking-summary-running":
       return `🧠 Thinking for ${params?.time}`;
     case "thinking-summary-generating-image":
