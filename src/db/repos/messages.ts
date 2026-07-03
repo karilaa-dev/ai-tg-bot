@@ -1,7 +1,9 @@
 import { sql, type SQL } from "drizzle-orm";
-import { queryOne, valueList, type SqlExecutor } from "../sql.js";
+import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import type { TextSearch } from "../search.js";
-import type { MessageRow, ThreadRow } from "../types.js";
+import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
+
+const MESSAGE_SNIPPET_MAX_CHARS = 240;
 
 export class MessagesRepo {
   constructor(
@@ -11,15 +13,15 @@ export class MessagesRepo {
 
   async insert(input: {
     threadId: number;
-    role: "user" | "assistant" | "system";
-    kind?: "text" | "image" | "file" | "system";
+    role: MessageRole;
+    kind?: MessageKind;
     content: unknown;
     textPlain: string;
     thinking?: string | null;
     tgMessageId?: number | null;
     tokensEst?: number | null;
   }): Promise<MessageRow> {
-    const inserted = (await queryOne<MessageRow>(
+    const inserted = await insertReturning<MessageRow>(
       this.db,
       sql`
         insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, tokens_est, created_at)
@@ -36,7 +38,7 @@ export class MessagesRepo {
         )
         returning *
       `,
-    ))!;
+    );
     await this.search.indexMessage(inserted.id, inserted.thread_id, inserted.text_plain);
     return inserted;
   }
@@ -82,7 +84,7 @@ export class MessagesRepo {
   async snippets(ids: number[]): Promise<Map<number, string>> {
     if (!ids.length) return new Map();
     const rows = await this.db.query<{ id: number; text_plain: string }>(sql`select id, text_plain from messages where id in (${valueList(ids)})`);
-    return new Map(rows.map((row) => [row.id, row.text_plain.slice(0, 240)]));
+    return new Map(rows.map((row) => [row.id, row.text_plain.slice(0, MESSAGE_SNIPPET_MAX_CHARS)]));
   }
 
   latest(threadId: number): Promise<MessageRow | undefined> {

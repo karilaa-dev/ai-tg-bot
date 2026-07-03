@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { queryOne, valueList, type SqlExecutor } from "../sql.js";
+import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import type { TextSearch } from "../search.js";
 import type { FileChunkRow, FileRow, StoredFileType } from "../types.js";
 
@@ -25,7 +25,7 @@ export class FilesRepo {
     outline?: unknown;
     isInline: boolean;
   }): Promise<FileRow> {
-    return (await queryOne<FileRow>(
+    return insertReturning<FileRow>(
       this.db,
       sql`
         insert into files(user_id, thread_id, message_id, type, telegram_file_id, telegram_file_unique_id, content_sha256, name, path, size, content_md, summary, outline_json, is_inline, created_at)
@@ -48,18 +48,18 @@ export class FilesRepo {
         )
         returning *
       `,
-    ))!;
+    );
   }
 
   async insertChunk(input: { fileId: number; idx: number; headingPath?: string | null; content: string }): Promise<FileChunkRow> {
-    const inserted = (await queryOne<FileChunkRow>(
+    const inserted = await insertReturning<FileChunkRow>(
       this.db,
       sql`
         insert into file_chunks(file_id, idx, heading_path, content, created_at)
         values (${input.fileId}, ${input.idx}, ${input.headingPath ?? null}, ${input.content}, ${Date.now()})
         returning *
       `,
-    ))!;
+    );
     await this.search.indexChunk(inserted.id, input.fileId, input.content);
     return inserted;
   }
@@ -102,14 +102,7 @@ export class FilesRepo {
   }
 
   listForMessage(messageId: number): Promise<FileRow[]> {
-    return this.db.query<FileRow>(sql`
-      select distinct f.*
-      from files f
-      left join message_files mf on mf.file_id = f.id
-      where mf.message_id = ${messageId}
-         or f.message_id = ${messageId}
-      order by f.id asc
-    `);
+    return this.listForMessages([messageId]);
   }
 
   listForMessages(messageIds: number[]): Promise<FileRow[]> {

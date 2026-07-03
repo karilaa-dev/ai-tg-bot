@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { valueList, type SqlExecutor } from "../sql.js";
 import type { EmbeddingRow } from "../types.js";
 
@@ -21,10 +21,11 @@ export class EmbeddingsRepo {
 
   async list(kind: EmbeddingKind, refIds: number[], model?: string): Promise<Array<EmbeddingRow & { decoded: Float32Array }>> {
     if (!refIds.length) return [];
+    const filters: SQL[] = [sql`kind = ${kind}`];
+    if (model) filters.push(sql`model = ${model}`);
+    filters.push(sql`ref_id in (${valueList(refIds)})`);
     const rows = await this.db.query<EmbeddingRow>(
-      model
-        ? sql`select * from embeddings where kind = ${kind} and model = ${model} and ref_id in (${valueList(refIds)})`
-        : sql`select * from embeddings where kind = ${kind} and ref_id in (${valueList(refIds)})`,
+      sql`select * from embeddings where ${sql.join(filters, sql` and `)}`,
     );
     return rows.map((row) => ({ ...row, decoded: bufferToVector(row.vector, row.dim) }));
   }

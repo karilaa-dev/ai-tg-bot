@@ -8,8 +8,56 @@ import type { Logger } from "../logger.js";
 import type { ImageCaptioner } from "../ai/provider.js";
 import type { TurnRunner } from "../ai/run.js";
 import type { TelegramFileDownloader } from "../files/telegram.js";
+import type { AcceptedFileType } from "../files/ingest.js";
 import type { ConversationSummarizer } from "../memory/compactor.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
+import type { FileProcessingStatus } from "./files.js";
+
+export interface ActiveFileJob {
+  controller: AbortController;
+  status: FileProcessingStatus;
+}
+
+export interface PendingMediaGroupItem {
+  caption?: string;
+  card: string;
+  file: {
+    id: number;
+    type: AcceptedFileType;
+    name: string;
+    inline: boolean;
+  };
+}
+
+export interface PendingMediaGroup {
+  ctx: BotContext;
+  timer: NodeJS.Timeout;
+  items: PendingMediaGroupItem[];
+}
+
+export interface PendingTextBurst {
+  ctx: BotContext;
+  timer: NodeJS.Timeout;
+  texts: string[];
+}
+
+export interface RouterState {
+  awaitingCode: Set<number>;
+  busyThreads: Set<number>;
+  activeFileJobs: Map<string, ActiveFileJob>;
+  pendingMediaGroups: Map<string, PendingMediaGroup>;
+  pendingTextBursts: Map<string, PendingTextBurst>;
+}
+
+export function createRouterState(): RouterState {
+  return {
+    awaitingCode: new Set<number>(),
+    busyThreads: new Set<number>(),
+    activeFileJobs: new Map<string, ActiveFileJob>(),
+    pendingMediaGroups: new Map<string, PendingMediaGroup>(),
+    pendingTextBursts: new Map<string, PendingTextBurst>(),
+  };
+}
 
 export interface BotServices {
   config: AppConfig;
@@ -21,6 +69,7 @@ export interface BotServices {
   embedder?: TextEmbedder;
   imageCaptioner?: ImageCaptioner;
   summarizer?: ConversationSummarizer;
+  routerState: RouterState;
 }
 
 export type BotContext = ConversationFlavor<Context> & {

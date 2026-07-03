@@ -1,7 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
-import { queryOne, valueList, type SqlExecutor } from "../sql.js";
+import { insertReturning, valueList, type SqlExecutor } from "../sql.js";
 import type { TextSearch } from "../search.js";
-import type { SummaryRow } from "../types.js";
+import type { SummaryLevel, SummaryRow } from "../types.js";
 
 export class SummariesRepo {
   constructor(
@@ -11,24 +11,24 @@ export class SummariesRepo {
 
   async insert(input: {
     threadId: number;
-    level: 0 | 1;
+    level: SummaryLevel;
     fromMessageId: number;
     toMessageId: number;
     content: string;
   }): Promise<SummaryRow> {
-    const inserted = (await queryOne<SummaryRow>(
+    const inserted = await insertReturning<SummaryRow>(
       this.db,
       sql`
         insert into summaries(thread_id, level, from_message_id, to_message_id, content, created_at)
         values (${input.threadId}, ${input.level}, ${input.fromMessageId}, ${input.toMessageId}, ${input.content}, ${Date.now()})
         returning *
       `,
-    ))!;
+    );
     await this.search.indexSummary(inserted.id, input.threadId, inserted.content);
     return inserted;
   }
 
-  listForThreads(threadIds: number[], level?: 0 | 1): Promise<SummaryRow[]> {
+  listForThreads(threadIds: number[], level?: SummaryLevel): Promise<SummaryRow[]> {
     if (!threadIds.length) return Promise.resolve([]);
     const filters: SQL[] = [sql`thread_id in (${valueList(threadIds)})`];
     if (level !== undefined) filters.push(sql`level = ${level}`);

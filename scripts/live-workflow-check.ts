@@ -12,6 +12,7 @@ import { Localizer } from "../src/bot/i18n.js";
 import { compactThread } from "../src/memory/compactor.js";
 import { buildContext } from "../src/memory/contextBuilder.js";
 import { ingestFileBytes } from "../src/files/ingest.js";
+import { imageMediaTypeFromName } from "../src/files/mediaType.js";
 import type { MessageRow } from "../src/db/types.js";
 
 const kotlinPdfPath = process.argv[2] ?? "/Users/karilaa/Downloads/How to Build Android Applications with Kotlin.pdf";
@@ -150,7 +151,7 @@ try {
     const caption = await createImageCaptioner(config, logger).caption({
       bytes: imageBytes,
       name: imageName,
-      mime: imageMediaType(imageName),
+      mime: imageMediaTypeFromName(imageName),
     });
     const image = await ingestFileBytes({
       config,
@@ -160,7 +161,7 @@ try {
       telegramFileId: "live-image-telegram-file-id",
       bytes: imageBytes,
       name: imageName,
-      mime: imageMediaType(imageName),
+      mime: imageMediaTypeFromName(imageName),
       imageSummary: caption,
     });
     const imageMessage = await repos.messages.insert({
@@ -460,9 +461,3 @@ async function execTool<T>(tool: unknown, input: unknown): Promise<T> {
   });
 }
 
-function imageMediaType(name: string): string | undefined {
-  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
-  if (/\.png$/i.test(name)) return "image/png";
-  if (/\.webp$/i.test(name)) return "image/webp";
-  return undefined;
-}

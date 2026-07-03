@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
-import { queryOne, type SqlExecutor } from "../sql.js";
-import type { UserRow } from "../types.js";
+import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
+import type { Locale, UserRow } from "../types.js";
 
 export class UsersRepo {
   constructor(private readonly db: SqlExecutor) {}
@@ -13,21 +13,24 @@ export class UsersRepo {
     tgId: number;
     firstName?: string;
     username?: string;
-    lang?: "en" | "ru";
+    lang?: Locale;
     invitedWith?: string | null;
   }): Promise<UserRow> {
     const now = Date.now();
-    await this.db.execute(sql`
-      insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, invited_with, created_at)
-      values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${input.invitedWith ?? null}, ${now})
-      on conflict (tg_id) do update set
-        first_name = excluded.first_name,
-        username = excluded.username
-    `);
-    return (await this.get(input.tgId))!;
+    return insertReturning<UserRow>(
+      this.db,
+      sql`
+        insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, invited_with, created_at)
+        values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${input.invitedWith ?? null}, ${now})
+        on conflict (tg_id) do update set
+          first_name = excluded.first_name,
+          username = excluded.username
+        returning *
+      `,
+    );
   }
 
-  async setLang(tgId: number, lang: "en" | "ru"): Promise<void> {
+  async setLang(tgId: number, lang: Locale): Promise<void> {
     await this.db.execute(sql`update users set lang = ${lang} where tg_id = ${tgId}`);
   }
 

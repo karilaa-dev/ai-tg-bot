@@ -150,6 +150,18 @@ describe("StreamShaper", () => {
     });
   });
 
+  it("registers a tool result arriving with no prior tool call", () => {
+    const s = new StreamShaper();
+    s.onToolResult("web_search", "5 results");
+    expect(s.toolStatusMd()).toBe("🔎 Searching web (5 results)");
+    expect(s.thinkingMd()).toBe("🔎 Searching web (5 results)");
+    expect(s.runSummary()).toEqual({
+      reasoningTitles: [],
+      toolCallCount: 0,
+      toolCounts: [],
+    });
+  });
+
   it("keeps separate status lines for different tool subjects", () => {
     const s = new StreamShaper();
     s.onToolCall("web_search", { query: "alpha" });

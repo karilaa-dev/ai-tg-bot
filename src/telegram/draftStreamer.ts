@@ -1,5 +1,5 @@
 import { GrammyError } from "grammy";
-import { isRichParseError, isThreadNotFound, sendRichDraft, type InputRichMessage, type RawRichApi } from "./richApi.js";
+import { isRichParseError, isThreadNotFound, prefixRichForThreadFallback, sendRichDraft, type InputRichMessage, type RawRichApi } from "./richApi.js";
 import { renderDraft, type RenderT, variantsForRichRetry } from "./render.js";
 
 type DraftFrame = { thinkingMd: string; answerMd: string };
@@ -39,13 +39,16 @@ export class DraftStreamer {
   constructor(private readonly options: DraftStreamerOptions) {}
 
   update(frame: DraftFrame): void {
-    const thinkingChanged = frame.thinkingMd !== this.lastThinkingMd;
-    if (frame.thinkingMd !== this.lastThinkingMd) {
-      this.lastThinkingMd = frame.thinkingMd;
-      this.titleElapsedMs = this.elapsedMs();
-    }
+    const thinkingChanged = this.trackThinking(frame);
     this.queue(frame, false, this.titleElapsedMs);
     if (thinkingChanged) this.scheduleElapsedTick();
+  }
+
+  private trackThinking(frame: DraftFrame): boolean {
+    if (frame.thinkingMd === this.lastThinkingMd) return false;
+    this.lastThinkingMd = frame.thinkingMd;
+    this.titleElapsedMs = this.elapsedMs();
+    return true;
   }
 
   stop(): void {
@@ -61,10 +64,7 @@ export class DraftStreamer {
   async finish(frame?: DraftFrame): Promise<void> {
     this.stopElapsedTick();
     if (frame && (frame.thinkingMd.trim() || frame.answerMd.trim())) {
-      if (frame.thinkingMd !== this.lastThinkingMd) {
-        this.lastThinkingMd = frame.thinkingMd;
-        this.titleElapsedMs = this.elapsedMs();
-      }
+      this.trackThinking(frame);
       this.queue(frame, false, this.titleElapsedMs);
     } else {
       this.schedulePump();
@@ -104,6 +104,10 @@ export class DraftStreamer {
     this.elapsedTimer = undefined;
   }
 
+  private nextReadyAt(): number {
+    return Math.max(this.lastSentAt + Math.max(0, this.options.updateMs), this.blockedUntil);
+  }
+
   private schedulePump(): void {
     if (this.closed) return;
     if (this.sending) return;
@@ -111,7 +115,7 @@ export class DraftStreamer {
       this.resolveIdle();
       return;
     }
-    const readyAt = Math.max(this.lastSentAt + Math.max(0, this.options.updateMs), this.blockedUntil);
+    const readyAt = this.nextReadyAt();
     const delay = Math.max(0, readyAt - Date.now());
     if (delay === 0) {
       if (this.timer) clearTimeout(this.timer);
@@ -137,7 +141,7 @@ export class DraftStreamer {
       this.resolveIdle();
       return;
     }
-    const readyAt = Math.max(this.lastSentAt + Math.max(0, this.options.updateMs), this.blockedUntil);
+    const readyAt = this.nextReadyAt();
     if (Date.now() < readyAt) {
       this.schedulePump();
       return;
@@ -226,8 +230,7 @@ export class DraftStreamer {
   private prefixForThreadFallback(payload: InputRichMessage): InputRichMessage {
     const title = this.options.threadTitle?.trim();
     if (!title) return payload;
-    if (payload.markdown !== undefined) return { ...payload, markdown: `**${escapeMarkdownTitle(title)}**\n\n${payload.markdown}` };
-    return { ...payload, html: `<p><strong>${escapeHtml(title)}</strong></p>\n\n${payload.html ?? ""}` };
+    return prefixRichForThreadFallback(title, payload);
   }
 }
 
@@ -238,10 +241,3 @@ function retryAfterMs(err: unknown): number | undefined {
   return retryAfter * 1000 + floodWaitSafetyMs;
 }
 
-function escapeMarkdownTitle(title: string): string {
-  return title.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, "\\$1");
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}

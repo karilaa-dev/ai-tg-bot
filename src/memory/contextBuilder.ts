@@ -6,7 +6,9 @@ import type { TextSearch } from "../db/search.js";
 import type { MessageRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { renderSystemPrompt } from "../ai/prompt.js";
-import { embed, getContextBudget } from "../ai/provider.js";
+import { getContextBudget } from "../ai/provider.js";
+import { imageMediaTypeFromName } from "../files/mediaType.js";
+import { createOpenRouterTextEmbedder } from "./embeddings.js";
 import { hybridSearch, threadChainScope } from "./retrieval.js";
 import { estimateTokens } from "./tokens.js";
 
@@ -42,7 +44,7 @@ export async function buildContext(input: {
     summaries: scope.summaryIds.length,
     files: scope.fileIds.length,
   });
-  const filesOverview = await buildFilesOverview(input.repos, scope.threadIds, scope.fileIds);
+  const filesOverview = await buildFilesOverview(input.repos, scope.fileIds);
   const memoryBlocks = await buildMemoryBlocks(input, threadChain, scope);
   const systemBase = await renderSystemPrompt({
     user: input.user,
@@ -94,19 +96,12 @@ async function toModelMessage(repos: Repos, row: MessageRow, logger?: Logger): P
   for (const file of await repos.files.listForMessage(row.id)) {
     if (file.type !== "image") continue;
     try {
-      parts.push({ type: "image", image: await fs.readFile(file.path), mediaType: imageMediaType(file.name) });
+      parts.push({ type: "image", image: await fs.readFile(file.path), mediaType: imageMediaTypeFromName(file.name) });
     } catch (err) {
       logger?.warn("failed to attach image to model context", { err: String(err), fileId: file.id, path: file.path });
     }
   }
   return { role: "user", content: parts } as ModelMessage;
-}
-
-function imageMediaType(name: string): string | undefined {
-  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
-  if (/\.png$/i.test(name)) return "image/png";
-  if (/\.webp$/i.test(name)) return "image/webp";
-  return undefined;
 }
 
 function estimateMessageTokens(system: string, messages: ModelMessage[]): { tokens: number; images: number } {
@@ -127,9 +122,8 @@ function estimateMessageTokens(system: string, messages: ModelMessage[]): { toke
   return { tokens: estimateTokens(textParts.join("\n\n")), images };
 }
 
-async function buildFilesOverview(repos: Repos, threadIds: number[], fileIds: number[]): Promise<string> {
-  const allowed = new Set(fileIds);
-  const files = (await repos.files.listByIds(fileIds)).filter((file) => allowed.has(file.id));
+async function buildFilesOverview(repos: Repos, fileIds: number[]): Promise<string> {
+  const files = await repos.files.listByIds(fileIds);
   if (!files.length) return "- none";
   return files
     .map((file) => {
@@ -164,8 +158,7 @@ async function buildMemoryBlocks(input: {
   }
 
   const hasCompaction = threadChain.some((thread) => thread.compacted_upto_message_id !== null);
-  const scopedFileIds = new Set(scope.fileIds);
-  const files = (await input.repos.files.listByIds(scope.fileIds)).filter((file) => scopedFileIds.has(file.id));
+  const files = await input.repos.files.listByIds(scope.fileIds);
   const hasSearchableFiles = files.some((file) => !file.is_inline);
   if (hasCompaction || hasSearchableFiles) {
     try {
@@ -178,7 +171,7 @@ async function buildMemoryBlocks(input: {
         fileIds: scope.fileIds,
         query: input.newUserText,
         k: 6,
-        embedder: { embed: (texts) => embed(texts, input.config, input.logger) },
+        embedder: createOpenRouterTextEmbedder(input.config, input.logger),
         embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
         logger: input.logger,
       });

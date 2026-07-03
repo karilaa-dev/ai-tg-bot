@@ -1,5 +1,5 @@
 import type { AppConfig } from "../config.js";
-import type { EmbeddingsRepo, EmbeddingKind } from "../db/repos/embeddings.js";
+import type { EmbeddingKind } from "../db/repos/embeddings.js";
 import type { Repos } from "../db/repos/index.js";
 import type { Logger } from "../logger.js";
 import { embed as openRouterEmbed } from "../ai/provider.js";
@@ -25,26 +25,6 @@ export async function persistEmbedding(input: {
   embeddingModel?: string;
   logger?: Logger;
 }): Promise<void> {
-  await persistEmbeddingWithRepo({
-    embeddings: input.repos.embeddings,
-    kind: input.kind,
-    refId: input.refId,
-    text: input.text,
-    embedder: input.embedder,
-    embeddingModel: input.embeddingModel ?? input.embedder?.model,
-    logger: input.logger,
-  });
-}
-
-export async function persistEmbeddingWithRepo(input: {
-  embeddings: EmbeddingsRepo;
-  kind: EmbeddingKind;
-  refId: number;
-  text: string;
-  embedder?: TextEmbedder;
-  embeddingModel?: string;
-  logger?: Logger;
-}): Promise<void> {
   if (!input.embedder || !input.text.trim()) {
     input.logger?.debug("embedding persistence skipped", {
       kind: input.kind,
@@ -54,16 +34,17 @@ export async function persistEmbeddingWithRepo(input: {
     });
     return;
   }
+  const model = input.embeddingModel ?? input.embedder.model ?? null;
   try {
     input.logger?.debug("embedding persistence starting", {
       kind: input.kind,
       refId: input.refId,
       chars: input.text.length,
-      model: input.embeddingModel ?? input.embedder.model ?? null,
+      model,
     });
     const [vector] = await input.embedder.embed([input.text]);
     if (vector) {
-      await input.embeddings.upsert(input.kind, input.refId, vector, input.embeddingModel ?? input.embedder.model ?? null);
+      await input.repos.embeddings.upsert(input.kind, input.refId, vector, model);
       input.logger?.debug("embedding persistence complete", {
         kind: input.kind,
         refId: input.refId,

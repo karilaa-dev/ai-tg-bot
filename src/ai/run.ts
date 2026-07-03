@@ -2,18 +2,33 @@ import { InputFile, type Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
-import type { MessageRow, ThreadRow, UserRow } from "../db/types.js";
+import type { MessageKind, MessageRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { buildContext } from "../memory/contextBuilder.js";
 import { persistEmbedding, type TextEmbedder } from "../memory/embeddings.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
-import { isRichParseError, isThreadNotFound, sendRich } from "../telegram/richApi.js";
+import {
+  isRichParseError,
+  isThreadNotFound,
+  prefixPlainForThreadFallback,
+  prefixRichForThreadFallback,
+  sendRich,
+  withThreadNotFoundFallback,
+  type InputRichMessage,
+} from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { streamInference } from "./inference.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
 import type { BotImageGenerator, CreatedFileAttachment, PendingCreatedFile } from "./tools/index.js";
+import { asRecord, safeJson } from "../util/records.js";
+import { escapeHtml } from "../util/text.js";
+
+const TYPING_ACTION_INTERVAL_MS = 5000;
+const TG_CAPTION_LIMIT = 1024;
+const TG_MESSAGE_LIMIT = 4096;
+const MIN_SPLIT_RATIO = 0.5;
 
 export interface TurnInput {
   api: Api;
@@ -26,7 +41,7 @@ export interface TurnInput {
   user: UserRow;
   thread: ThreadRow;
   text: string;
-  userMessageKind?: "text" | "image" | "file" | "system";
+  userMessageKind?: MessageKind;
   userMessageContent?: unknown;
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
   redownloadFile?: (file: FileRow) => Promise<Buffer>;
@@ -46,46 +61,7 @@ export const runTurn: TurnRunner = async (input) => {
     textChars: input.text.length,
     streamMode: input.user.stream_mode,
   });
-  const latest = await input.repos.messages.latest(input.thread.id);
-  let userMessage = await latestRetryableUserMessage(input, latest);
-  if (!(latest?.role === "user" && latest.text_plain === input.text)) {
-    if (!(userMessage?.role === "user" && userMessage.text_plain === input.text)) {
-      userMessage = await input.repos.messages.insert({
-        threadId: input.thread.id,
-        role: "user",
-        kind: input.userMessageKind,
-        content: input.userMessageContent ?? { text: input.text },
-        textPlain: input.text,
-      });
-      input.logger.debug("user message persisted for turn", {
-        threadId: input.thread.id,
-        messageId: userMessage.id,
-        kind: userMessage.kind,
-      });
-    } else {
-      input.logger.debug("reusing retryable user message for turn", {
-        threadId: input.thread.id,
-        messageId: userMessage.id,
-      });
-    }
-  } else {
-    input.logger.debug("latest user message already matches turn text", {
-      threadId: input.thread.id,
-      messageId: latest.id,
-    });
-  }
-  if (userMessage?.role === "user") {
-    await input.onUserMessagePersisted?.(userMessage);
-    await persistEmbedding({
-      repos: input.repos,
-      kind: "message",
-      refId: userMessage.id,
-      text: userMessage.text_plain,
-      embedder: input.embedder,
-      embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-      logger: input.logger,
-    });
-  }
+  await resolveTurnUserMessage(input);
   const context = await buildContext({
     config: input.config,
     repos: input.repos,
@@ -110,6 +86,89 @@ export const runTurn: TurnRunner = async (input) => {
   });
 
   const shaper = new StreamShaper();
+  const { streamer, status, stop } = createTurnPresenter(input, startedAt);
+
+  const createdFiles: CreatedFileAttachment[] = [];
+  const pendingCreatedFiles: PendingCreatedFile[] = [];
+  try {
+    await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
+    input.logger.info("provider stream starting", {
+      threadId: input.thread.id,
+      provider: "codex",
+      model: input.config.CODEX_MODEL,
+      reasoningSummary: input.config.REASONING_SUMMARY,
+    });
+    const result = streamInference({
+      ...input,
+      context,
+      createdFiles,
+      pendingCreatedFiles,
+      abortSignal: input.config.CODEX_TURN_TIMEOUT_MS > 0 ? AbortSignal.timeout(input.config.CODEX_TURN_TIMEOUT_MS) : undefined,
+    });
+    streamer?.update({ thinkingMd: "", answerMd: "" });
+    const stats = await runStreamLoop(input, shaper, streamer, status, result);
+    input.logger.debug("provider stream complete", {
+      threadId: input.thread.id,
+      contentEvents: stats.contentEvents,
+      toolCalls: stats.toolCalls,
+      toolResults: stats.toolResults,
+    });
+    const pendingFileError = await waitForPendingCreatedFiles(input, pendingCreatedFiles);
+    const generateImageToolError = pendingFileError ?? stats.generateImageToolError;
+    const answer = shaper.finalAnswer();
+    const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
+    if (stats.generateImageToolCalls > 0 && !hasGeneratedImage) {
+      throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
+    }
+    const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImage);
+    let finalAnswer = finalText.answer;
+    if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
+      input.logger.warn("turn produced empty final answer", {
+        threadId: input.thread.id,
+        userId: input.user.tg_id,
+        toolStatus: shaper.toolStatusMd(),
+      });
+      finalAnswer = input.t("empty-answer");
+    }
+    const finalThinking = buildFinalThinkingSummary({
+      t: input.t,
+      shaper,
+      attachments: createdFiles,
+      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
+    });
+    await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
+    await sendFinalVisible(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles);
+    await status?.finish(shaper.toolStatusMd());
+    input.logger.info("turn complete", {
+      threadId: input.thread.id,
+      answerChars: finalAnswer.length,
+      thinkingChars: finalThinking.length,
+      ms: Date.now() - startedAt,
+    });
+  } catch (err) {
+    if (isContextLengthError(err)) {
+      input.logger.warn("provider context limit hit", { threadId: input.thread.id, err: String(err) });
+      await status?.finish(shaper.toolStatusMd());
+      await streamer?.finish();
+      await sendContextLimitNotice(input);
+      return;
+    }
+    input.logger.error("turn failed", { threadId: input.thread.id, err: String(err), ms: Date.now() - startedAt });
+    await status?.finish(shaper.toolStatusMd());
+    await streamer?.finish();
+    await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
+  } finally {
+    stop();
+  }
+};
+
+interface TurnPresenter {
+  streamer: DraftStreamer | undefined;
+  status: TurnStatusMessage | undefined;
+  stop: () => void;
+}
+
+function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter {
   const streamer = input.user.stream_mode
     ? new DraftStreamer({
         api: input.api,
@@ -140,122 +199,75 @@ export const runTurn: TurnRunner = async (input) => {
           typingThreadId = undefined;
         }
       });
-    }, 5000);
+    }, TYPING_ACTION_INTERVAL_MS);
   }
+  return {
+    streamer,
+    status,
+    stop: () => {
+      streamer?.stop();
+      if (typing) clearInterval(typing);
+    },
+  };
+}
 
+interface TurnStreamStats {
+  contentEvents: number;
+  toolCalls: number;
+  toolResults: number;
+  generateImageToolCalls: number;
+  generateImageToolError: string | undefined;
+}
+
+async function runStreamLoop(
+  input: TurnInput,
+  shaper: StreamShaper,
+  streamer: DraftStreamer | undefined,
+  status: TurnStatusMessage | undefined,
+  result: { fullStream: AsyncIterable<unknown> },
+): Promise<TurnStreamStats> {
   let contentEvents = 0;
   let toolCalls = 0;
   let toolResults = 0;
   let generateImageToolCalls = 0;
   let generateImageToolError: string | undefined;
-  const createdFiles: CreatedFileAttachment[] = [];
-  const pendingCreatedFiles: PendingCreatedFile[] = [];
-  try {
-    await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
-    input.logger.info("provider stream starting", {
-      threadId: input.thread.id,
-      provider: "codex",
-      model: input.config.CODEX_MODEL,
-      reasoningSummary: input.config.REASONING_SUMMARY,
-    });
-    const result = streamInference({
-      ...input,
-      context,
-      createdFiles,
-      pendingCreatedFiles,
-      abortSignal: input.config.CODEX_TURN_TIMEOUT_MS > 0 ? AbortSignal.timeout(input.config.CODEX_TURN_TIMEOUT_MS) : undefined,
-    });
-    streamer?.update({ thinkingMd: "", answerMd: "" });
-    for await (const part of result.fullStream) {
-      const normalized = normalizeStreamPart(part);
-      const metadata = normalized?.kind === "tool-call" ? await toolCallMetadata(input, normalized) : undefined;
-      const event = handleStreamPart(shaper, part, metadata);
-      if (event === "content") contentEvents += 1;
-      if (event === "tool-call") {
-        toolCalls += 1;
-        if (normalized?.kind === "tool-call" && normalized.toolName === "generate_image") generateImageToolCalls += 1;
-        input.logger.info("tool call started", {
-          threadId: input.thread.id,
-          toolName: normalized?.kind === "tool-call" ? normalized.toolName : "tool",
-        });
-      }
-      if (event === "tool-result") {
-        toolResults += 1;
-        const pendingGenerateImage = normalized?.kind === "tool-result"
-          && normalized.toolName === "generate_image"
-          && isPendingToolResult(normalized.output);
-        if (normalized?.kind === "tool-result" && normalized.toolName === "generate_image") {
-          generateImageToolError = toolErrorText(normalized.output) ?? generateImageToolError;
-        }
-        input.logger.info(pendingGenerateImage ? "tool call acknowledged" : "tool call finished", {
-          threadId: input.thread.id,
-          toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
-          pending: pendingGenerateImage || undefined,
-        });
-      }
-      streamer?.update({
-        thinkingMd: draftThinkingMd(shaper),
-        answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), generateImageToolCalls > 0),
-      });
-      if (event === "tool-call" || event === "tool-result") {
-        await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
-      }
-    }
-    input.logger.debug("provider stream complete", {
-      threadId: input.thread.id,
-      contentEvents,
-      toolCalls,
-      toolResults,
-    });
-    const pendingFileError = await waitForPendingCreatedFiles(input, pendingCreatedFiles);
-    generateImageToolError = pendingFileError ?? generateImageToolError;
-    const answer = shaper.finalAnswer();
-    const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
-    if (generateImageToolCalls > 0 && !hasGeneratedImage) {
-      throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
-    }
-    const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImage);
-    let finalAnswer = finalText.answer;
-    if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
-      input.logger.warn("turn produced empty final answer", {
+  for await (const part of result.fullStream) {
+    const normalized = normalizeStreamPart(part);
+    const metadata = normalized?.kind === "tool-call" ? await toolCallMetadata(input, normalized) : undefined;
+    const event = handleNormalizedStreamPart(shaper, normalized, metadata);
+    if (event === "content") contentEvents += 1;
+    if (event === "tool-call") {
+      toolCalls += 1;
+      if (normalized?.kind === "tool-call" && normalized.toolName === "generate_image") generateImageToolCalls += 1;
+      input.logger.info("tool call started", {
         threadId: input.thread.id,
-        userId: input.user.tg_id,
-        toolStatus: shaper.toolStatusMd(),
+        toolName: normalized?.kind === "tool-call" ? normalized.toolName : "tool",
       });
-      finalAnswer = input.t("empty-answer");
     }
-    const finalThinking = buildFinalThinkingSummary({
-      t: input.t,
-      shaper,
-      attachments: createdFiles,
-      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
-    });
-    await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
-    await sendFinal(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles);
-    await status?.finish(shaper.toolStatusMd());
-    input.logger.info("turn complete", {
-      threadId: input.thread.id,
-      answerChars: finalAnswer.length,
-      thinkingChars: finalThinking.length,
-      ms: Date.now() - startedAt,
-    });
-  } catch (err) {
-    if (isContextLengthError(err)) {
-      input.logger.warn("provider context limit hit", { threadId: input.thread.id, err: String(err) });
-      await status?.finish(shaper.toolStatusMd());
-      await streamer?.finish();
-      await sendContextLimitNotice(input);
-      return;
+    if (event === "tool-result") {
+      toolResults += 1;
+      const pendingGenerateImage = normalized?.kind === "tool-result"
+        && normalized.toolName === "generate_image"
+        && isPendingToolResult(normalized.output);
+      if (normalized?.kind === "tool-result" && normalized.toolName === "generate_image") {
+        generateImageToolError = toolErrorText(normalized.output) ?? generateImageToolError;
+      }
+      input.logger.info(pendingGenerateImage ? "tool call acknowledged" : "tool call finished", {
+        threadId: input.thread.id,
+        toolName: normalized?.kind === "tool-result" ? normalized.toolName : "tool",
+        pending: pendingGenerateImage || undefined,
+      });
     }
-    input.logger.error("turn failed", { threadId: input.thread.id, err: String(err), ms: Date.now() - startedAt });
-    await status?.finish(shaper.toolStatusMd());
-    await streamer?.finish();
-    await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
-  } finally {
-    streamer?.stop();
-    if (typing) clearInterval(typing);
+    streamer?.update({
+      thinkingMd: shaper.streamingThinkingMd(),
+      answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), generateImageToolCalls > 0),
+    });
+    if (event === "tool-call" || event === "tool-result") {
+      await status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
+    }
   }
-};
+  return { contentEvents, toolCalls, toolResults, generateImageToolCalls, generateImageToolError };
+}
 
 async function waitForPendingCreatedFiles(input: TurnInput, pending: PendingCreatedFile[]): Promise<string | undefined> {
   if (!pending.length) return undefined;
@@ -271,6 +283,55 @@ async function waitForPendingCreatedFiles(input: TurnInput, pending: PendingCrea
     errors: results.filter((result) => result.error).length,
   });
   return error;
+}
+
+async function resolveTurnUserMessage(input: TurnInput): Promise<MessageRow | undefined> {
+  const latest = await input.repos.messages.latest(input.thread.id);
+  const userMessage = await persistedTurnUserMessage(input, latest);
+  if (userMessage?.role === "user") {
+    await input.onUserMessagePersisted?.(userMessage);
+    await persistEmbedding({
+      repos: input.repos,
+      kind: "message",
+      refId: userMessage.id,
+      text: userMessage.text_plain,
+      embedder: input.embedder,
+      embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
+      logger: input.logger,
+    });
+  }
+  return userMessage;
+}
+
+async function persistedTurnUserMessage(input: TurnInput, latest: MessageRow | undefined): Promise<MessageRow | undefined> {
+  if (latest?.role === "user" && latest.text_plain === input.text) {
+    input.logger.debug("latest user message already matches turn text", {
+      threadId: input.thread.id,
+      messageId: latest.id,
+    });
+    return latest;
+  }
+  const retryable = await latestRetryableUserMessage(input, latest);
+  if (retryable?.role === "user" && retryable.text_plain === input.text) {
+    input.logger.debug("reusing retryable user message for turn", {
+      threadId: input.thread.id,
+      messageId: retryable.id,
+    });
+    return retryable;
+  }
+  const inserted = await input.repos.messages.insert({
+    threadId: input.thread.id,
+    role: "user",
+    kind: input.userMessageKind,
+    content: input.userMessageContent ?? { text: input.text },
+    textPlain: input.text,
+  });
+  input.logger.debug("user message persisted for turn", {
+    threadId: input.thread.id,
+    messageId: inserted.id,
+    kind: inserted.kind,
+  });
+  return inserted;
 }
 
 async function latestRetryableUserMessage(input: TurnInput, latest: MessageRow | undefined): Promise<MessageRow | undefined> {
@@ -340,10 +401,6 @@ class TurnStatusMessage {
 function buildThinkingStatus(heading: string, toolStatusMd: string): string {
   const tools = toolStatusMd.trim();
   return tools ? `${heading}\n\n${tools}` : heading;
-}
-
-function draftThinkingMd(shaper: StreamShaper): string {
-  return shaper.streamingThinkingMd();
 }
 
 function buildFinalThinkingSummary(input: {
@@ -423,12 +480,18 @@ function generatedImageReadyText(t: TurnInput["t"]): string {
   return text && text !== "image-generated-ready" ? text : t("image-generated-done");
 }
 
-function isPendingGeneratedImageAnswer(answer: string): boolean {
-  const compact = answer
+function compactAnswerText(answer: string): string {
+  return answer
     .trim()
     .toLowerCase()
     .replace(/[’']/g, "'")
     .replace(/\s+/g, " ");
+}
+
+const IMAGE_TOOL_NAME_SOURCE = "(?:imagegen|generate_image|image generation tool|image generator tool|image tool)";
+
+function isPendingGeneratedImageAnswer(answer: string): boolean {
+  const compact = compactAnswerText(answer);
   if (!compact) return false;
   const mentionsImage = /\b(image|photo|picture)\b/.test(compact);
   const inProgressVerb = /\b(generating|creating|making|rendering|drawing)\b/.test(compact);
@@ -443,17 +506,13 @@ function isPendingGeneratedImageAnswer(answer: string): boolean {
 }
 
 function isGeneratedImageToolUsageAnswer(answer: string): boolean {
-  const compact = answer
-    .trim()
-    .toLowerCase()
-    .replace(/[’']/g, "'")
-    .replace(/\s+/g, " ");
+  const compact = compactAnswerText(answer);
   if (!compact) return false;
-  const mentionsImageTool = /\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b/.test(compact);
+  const mentionsImageTool = new RegExp(`\\b${IMAGE_TOOL_NAME_SOURCE}\\b`).test(compact);
   if (!mentionsImageTool) return false;
   return /^(?:i(?:'m| am)?\s+)?(?:using|calling|invoking|running|used|called|invoked|ran)\b/.test(compact)
-    || /\b(?:using|calling|invoking|running|used|called|invoked|ran)\b.{0,40}\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b/.test(compact)
-    || /\b(?:imagegen|generate_image|image generation tool|image generator tool|image tool)\b.{0,40}\b(?:tool|to edit|to generate|to create|to draw|to render)\b/.test(compact);
+    || new RegExp(`\\b(?:using|calling|invoking|running|used|called|invoked|ran)\\b.{0,40}\\b${IMAGE_TOOL_NAME_SOURCE}\\b`).test(compact)
+    || new RegExp(`\\b${IMAGE_TOOL_NAME_SOURCE}\\b.{0,40}\\b(?:tool|to edit|to generate|to create|to draw|to render)\\b`).test(compact);
 }
 
 function appendGeneratedImageDemotedThinking(
@@ -474,6 +533,21 @@ export async function sendFinal(
   elapsedMs = 0,
   attachments: CreatedFileAttachment[] = [],
 ): Promise<void> {
+  const hasGeneratedImageAttachment = attachments
+    .slice(0, MAX_CREATED_FILES_PER_ANSWER)
+    .some((attachment) => attachment.origin === "generated_image");
+  const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImageAttachment);
+  const visibleThinking = appendGeneratedImageDemotedThinking(input.t, thinking, finalText.demotedReasoning);
+  await sendFinalVisible(input, visibleThinking, finalText.answer, elapsedMs, attachments);
+}
+
+async function sendFinalVisible(
+  input: TurnInput,
+  visibleThinking: string,
+  visibleAnswer: string,
+  elapsedMs: number,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
   if (attachments.length > outboundAttachments.length) {
     input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
@@ -483,10 +557,6 @@ export async function sendFinal(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const hasGeneratedImageAttachment = outboundAttachments.some((attachment) => attachment.origin === "generated_image");
-  const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImageAttachment);
-  const visibleAnswer = finalText.answer;
-  const visibleThinking = appendGeneratedImageDemotedThinking(input.t, thinking, finalText.demotedReasoning);
   const shouldSendFinalMessage = visibleAnswer.trim() || visibleThinking.trim();
   const messages = shouldSendFinalMessage
     ? renderFinal({
@@ -554,22 +624,41 @@ async function sendCreatedFileAttachments(
   if (!attachments.length) return;
   const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") === "document");
   const photos = attachments.filter((attachment) => attachment.delivery === "photo");
-  await sendDocumentAttachments(input, assistantMessage, documents);
-  await sendPhotoAttachments(input, assistantMessage, photos);
+  await sendAttachmentBatch(input, assistantMessage, documents, documentSendStrategy);
+  await sendAttachmentBatch(input, assistantMessage, photos, photoSendStrategy);
 }
 
-async function sendDocumentAttachments(
+interface AttachmentSendStrategy {
+  label: string;
+  sendOne(input: TurnInput, attachment: CreatedFileAttachment): Promise<SentTelegramFileMessage>;
+  sendGroup(input: TurnInput, attachments: CreatedFileAttachment[]): Promise<SentTelegramFileMessage[]>;
+}
+
+const documentSendStrategy: AttachmentSendStrategy = {
+  label: "created file attachment",
+  sendOne: sendDocumentWithThreadFallback,
+  sendGroup: sendDocumentMediaGroupWithThreadFallback,
+};
+
+const photoSendStrategy: AttachmentSendStrategy = {
+  label: "generated image photo",
+  sendOne: sendPhotoWithThreadFallback,
+  sendGroup: sendPhotoMediaGroupWithThreadFallback,
+};
+
+async function sendAttachmentBatch(
   input: TurnInput,
   assistantMessage: MessageRow,
   attachments: CreatedFileAttachment[],
+  strategy: AttachmentSendStrategy,
 ): Promise<void> {
   if (!attachments.length) return;
   if (attachments.length === 1) {
     const attachment = attachments[0]!;
     try {
-      const sent = await sendDocumentWithThreadFallback(input, attachment);
+      const sent = await strategy.sendOne(input, attachment);
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
-      input.logger.info("created file attachment sent", {
+      input.logger.info(`${strategy.label} sent`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
         fileId: attachment.fileId,
@@ -577,7 +666,7 @@ async function sendDocumentAttachments(
         name: attachment.name,
       });
     } catch (err) {
-      input.logger.warn("failed to send created file attachment", {
+      input.logger.warn(`failed to send ${strategy.label}`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
         fileId: attachment.fileId,
@@ -589,72 +678,19 @@ async function sendDocumentAttachments(
   }
 
   try {
-    const sent = await sendDocumentMediaGroupWithThreadFallback(input, attachments);
+    const sent = await strategy.sendGroup(input, attachments);
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index]!;
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
     }
-    input.logger.info("created file attachment media group sent", {
+    input.logger.info(`${strategy.label} media group sent`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
       files: attachments.length,
       telegramMessages: sent.map((message) => message.message_id),
     });
   } catch (err) {
-    input.logger.warn("failed to send created file attachment media group", {
-      threadId: input.thread.id,
-      messageId: assistantMessage.id,
-      files: attachments.length,
-      fileIds: attachments.map((attachment) => attachment.fileId),
-      err: String(err),
-    });
-  }
-}
-
-async function sendPhotoAttachments(
-  input: TurnInput,
-  assistantMessage: MessageRow,
-  attachments: CreatedFileAttachment[],
-): Promise<void> {
-  if (!attachments.length) return;
-  if (attachments.length === 1) {
-    const attachment = attachments[0]!;
-    try {
-      const sent = await sendPhotoWithThreadFallback(input, attachment);
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
-      input.logger.info("generated image photo sent", {
-        threadId: input.thread.id,
-        messageId: assistantMessage.id,
-        fileId: attachment.fileId,
-        telegramMessageId: sent.message_id,
-        name: attachment.name,
-      });
-    } catch (err) {
-      input.logger.warn("failed to send generated image photo", {
-        threadId: input.thread.id,
-        messageId: assistantMessage.id,
-        fileId: attachment.fileId,
-        name: attachment.name,
-        err: String(err),
-      });
-    }
-    return;
-  }
-
-  try {
-    const sent = await sendPhotoMediaGroupWithThreadFallback(input, attachments);
-    for (let index = 0; index < attachments.length; index += 1) {
-      const attachment = attachments[index]!;
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
-    }
-    input.logger.info("generated image photo media group sent", {
-      threadId: input.thread.id,
-      messageId: assistantMessage.id,
-      files: attachments.length,
-      telegramMessages: sent.map((message) => message.message_id),
-    });
-  } catch (err) {
-    input.logger.warn("failed to send generated image photo media group", {
+    input.logger.warn(`failed to send ${strategy.label} media group`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
       files: attachments.length,
@@ -674,105 +710,103 @@ async function rememberSentCreatedFileAttachment(
     displayName: attachment.name,
     caption: attachment.caption ?? null,
   });
-  const message = asRecord(sent);
-  const document = asRecord(message?.document);
-  const photo = largestTelegramPhotoFromMessage(sent);
-  const fileRecord = document ?? photo;
+  const fileRecord = sent?.document ?? largestTelegramPhoto(sent?.photo);
   await input.repos.files.rememberTelegramFileRef(attachment.fileId, {
-    fileUniqueId: stringField(fileRecord, "file_unique_id") ?? null,
-    telegramFileId: stringField(fileRecord, "file_id") ?? null,
+    fileUniqueId: fileRecord?.file_unique_id?.trim() || null,
+    telegramFileId: fileRecord?.file_id?.trim() || null,
   });
 }
+
+type SentTelegramPhotoSize = { file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number };
 
 type SentTelegramFileMessage = {
   message_id: number;
   document?: { file_id?: string; file_unique_id?: string };
-  photo?: Array<{ file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number }>;
+  photo?: SentTelegramPhotoSize[];
 };
 
-async function sendDocumentWithThreadFallback(
+function withThreadFallback<T>(
+  input: TurnInput,
+  warn: { message: string; fields?: Record<string, unknown> },
+  attempt: () => Promise<T>,
+  fallback: () => Promise<T>,
+): Promise<T> {
+  return withThreadNotFoundFallback(
+    {
+      messageThreadId: input.messageThreadId,
+      onFallback: () =>
+        input.logger.warn(warn.message, {
+          threadId: input.thread.id,
+          topicId: input.messageThreadId,
+          ...warn.fields,
+        }),
+    },
+    attempt,
+    fallback,
+  );
+}
+
+function sendDocumentWithThreadFallback(
   input: TurnInput,
   attachment: CreatedFileAttachment,
 ): Promise<SentTelegramFileMessage> {
-  const other = documentSendOptions(input.messageThreadId, attachment);
-  try {
-    return await input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), other);
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying created file without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-      fileId: attachment.fileId,
-    });
-    return input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), {
+  return withThreadFallback(
+    input,
+    {
+      message: "telegram topic send failed; retrying created file without message_thread_id",
+      fields: { fileId: attachment.fileId },
+    },
+    () => input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), documentSendOptions(input.messageThreadId, attachment)),
+    () => input.api.sendDocument(input.chatId, new InputFile(attachment.path, attachment.name), {
       ...documentSendOptions(undefined, attachment),
       caption: documentFallbackCaption(input.thread.title, attachment),
-    });
-  }
+    }),
+  );
 }
 
-async function sendPhotoWithThreadFallback(
+function sendPhotoWithThreadFallback(
   input: TurnInput,
   attachment: CreatedFileAttachment,
 ): Promise<SentTelegramFileMessage> {
-  const other = photoSendOptions(input.messageThreadId);
-  try {
-    return await input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), other);
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying generated image photo without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-      fileId: attachment.fileId,
-    });
-    return input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), {
-      ...photoSendOptions(undefined),
-    });
-  }
+  return withThreadFallback(
+    input,
+    {
+      message: "telegram topic send failed; retrying generated image photo without message_thread_id",
+      fields: { fileId: attachment.fileId },
+    },
+    () => input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), threadOnlySendOptions(input.messageThreadId)),
+    () => input.api.sendPhoto(input.chatId, new InputFile(attachment.path, attachment.name), { ...threadOnlySendOptions(undefined) }),
+  );
 }
 
-async function sendDocumentMediaGroupWithThreadFallback(
+function sendDocumentMediaGroupWithThreadFallback(
   input: TurnInput,
   attachments: CreatedFileAttachment[],
 ): Promise<SentTelegramFileMessage[]> {
-  try {
-    return await input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), mediaGroupSendOptions(input.messageThreadId));
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying created file media group without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-      files: attachments.length,
-      fileIds: attachments.map((attachment) => attachment.fileId),
-    });
-    return input.api.sendMediaGroup(
-      input.chatId,
-      documentMediaGroup(attachments, input.thread.title),
-      mediaGroupSendOptions(undefined),
-    );
-  }
+  return withThreadFallback(
+    input,
+    {
+      message: "telegram topic send failed; retrying created file media group without message_thread_id",
+      fields: { files: attachments.length, fileIds: attachments.map((attachment) => attachment.fileId) },
+    },
+    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId)),
+    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments, input.thread.title), threadOnlySendOptions(undefined)),
+  );
 }
 
-async function sendPhotoMediaGroupWithThreadFallback(
+function sendPhotoMediaGroupWithThreadFallback(
   input: TurnInput,
   attachments: CreatedFileAttachment[],
 ): Promise<SentTelegramFileMessage[]> {
-  try {
-    return await input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), mediaGroupSendOptions(input.messageThreadId));
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying generated image photo media group without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-      files: attachments.length,
-      fileIds: attachments.map((attachment) => attachment.fileId),
-    });
-    return input.api.sendMediaGroup(
-      input.chatId,
-      photoMediaGroup(attachments),
-      mediaGroupSendOptions(undefined),
-    );
-  }
+  return withThreadFallback(
+    input,
+    {
+      message: "telegram topic send failed; retrying generated image photo media group without message_thread_id",
+      fields: { files: attachments.length, fileIds: attachments.map((attachment) => attachment.fileId) },
+    },
+    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId)),
+    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(undefined)),
+  );
 }
 
 function documentSendOptions(
@@ -785,15 +819,7 @@ function documentSendOptions(
   };
 }
 
-function photoSendOptions(
-  messageThreadId: number | undefined,
-): Parameters<Api["sendPhoto"]>[2] {
-  return {
-    message_thread_id: messageThreadId,
-  };
-}
-
-function mediaGroupSendOptions(messageThreadId: number | undefined): Parameters<Api["sendMediaGroup"]>[2] {
+function threadOnlySendOptions(messageThreadId: number | undefined): { message_thread_id: number | undefined } {
   return {
     message_thread_id: messageThreadId,
   };
@@ -823,7 +849,7 @@ function photoMediaGroup(
 
 function documentFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
   const text = prefixPlainForThreadFallback(title, attachment.caption || attachment.name);
-  return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
+  return text.length <= TG_CAPTION_LIMIT ? text : `${text.slice(0, TG_CAPTION_LIMIT - 3)}...`;
 }
 
 function attachmentPersistedText(attachments: CreatedFileAttachment[]): string {
@@ -835,29 +861,21 @@ function attachmentPersistedText(attachments: CreatedFileAttachment[]): string {
   return `Attached file${files.length === 1 ? "" : "s"}: ${names}`;
 }
 
-function largestTelegramPhoto(value: unknown): Record<string, unknown> | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value
-    .map(asRecord)
-    .filter((photo): photo is Record<string, unknown> => Boolean(photo))
-    .sort((left, right) => telegramPhotoScore(right) - telegramPhotoScore(left))[0];
+function largestTelegramPhoto(photos: SentTelegramPhotoSize[] | undefined): SentTelegramPhotoSize | undefined {
+  if (!photos?.length) return undefined;
+  return [...photos].sort((left, right) => telegramPhotoScore(right) - telegramPhotoScore(left))[0];
 }
 
-function telegramPhotoScore(photo: Record<string, unknown>): number {
+function telegramPhotoScore(photo: SentTelegramPhotoSize): number {
   const size = typeof photo.file_size === "number" && Number.isFinite(photo.file_size) ? photo.file_size : 0;
   const width = typeof photo.width === "number" && Number.isFinite(photo.width) ? photo.width : 0;
   const height = typeof photo.height === "number" && Number.isFinite(photo.height) ? photo.height : 0;
   return Math.max(size, width * height);
 }
 
-function largestTelegramPhotoFromMessage(sent: SentTelegramFileMessage | undefined): Record<string, unknown> | undefined {
-  const message = asRecord(sent);
-  return largestTelegramPhoto(message?.photo);
-}
-
 async function sendRichWithFallback(
   input: TurnInput,
-  rich: { markdown?: string; html?: string },
+  rich: InputRichMessage,
 ): Promise<SentTelegramFileMessage[]> {
   const markdown = rich.markdown ?? rich.html ?? "";
   let lastRichError: unknown;
@@ -900,75 +918,50 @@ async function sendRichWithFallback(
   return ids.map((message_id) => ({ message_id }));
 }
 
-async function sendRichMessageWithThreadFallback(
+function sendRichMessageWithThreadFallback(
   input: TurnInput,
-  rich: { markdown?: string; html?: string },
+  rich: InputRichMessage,
 ): Promise<SentTelegramFileMessage> {
-  try {
-    return await sendRich(input.api, {
+  return withThreadFallback(
+    input,
+    { message: "telegram topic send failed; retrying final rich message without message_thread_id" },
+    () => sendRich(input.api, {
       chat_id: input.chatId,
       message_thread_id: input.messageThreadId,
-      rich_message: rich as never,
-    });
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying final rich message without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-    });
-    return sendRich(input.api, {
+      rich_message: rich,
+    }),
+    () => sendRich(input.api, {
       chat_id: input.chatId,
-      rich_message: prefixRichForThreadFallback(input.thread.title, rich) as never,
-    });
-  }
+      rich_message: prefixRichForThreadFallback(input.thread.title, rich),
+    }),
+  );
 }
 
-async function sendPlainWithThreadFallback(
+function sendPlainWithThreadFallback(
   input: TurnInput,
   text: string,
   other: Parameters<Api["sendMessage"]>[2] = {},
 ): Promise<{ message_id: number }> {
-  try {
-    return await input.api.sendMessage(input.chatId, text, {
+  return withThreadFallback(
+    input,
+    { message: "telegram topic send failed; retrying plain message without message_thread_id" },
+    () => input.api.sendMessage(input.chatId, text, {
       ...other,
       message_thread_id: input.messageThreadId,
-    });
-  } catch (err) {
-    if (!input.messageThreadId || !isThreadNotFound(err)) throw err;
-    input.logger.warn("telegram topic send failed; retrying plain message without message_thread_id", {
-      threadId: input.thread.id,
-      topicId: input.messageThreadId,
-    });
-    return input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text, other.parse_mode === "HTML"), other);
-  }
-}
-
-function prefixRichForThreadFallback(title: string, rich: { markdown?: string; html?: string }): { markdown?: string; html?: string } {
-  if (rich.markdown !== undefined) return { ...rich, markdown: `**${escapeMarkdownTitle(title)}**\n\n${rich.markdown}` };
-  return { ...rich, html: `<p><strong>${escapeHtml(title)}</strong></p>\n\n${rich.html ?? ""}` };
-}
-
-function prefixPlainForThreadFallback(title: string, text: string, html = false): string {
-  return `[${html ? escapeHtml(title) : title}]\n\n${text}`;
-}
-
-function escapeMarkdownTitle(title: string): string {
-  return title.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, "\\$1");
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }),
+    () => input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text, other.parse_mode === "HTML"), other),
+  );
 }
 
 function splitPlainText(text: string): string[] {
-  const max = 4096;
+  const max = TG_MESSAGE_LIMIT;
   if (text.length <= max) return [text || " "];
   const chunks: string[] = [];
   let rest = text;
   while (rest.length > max) {
     const head = rest.slice(0, max);
     const cut = Math.max(head.lastIndexOf("\n\n"), head.lastIndexOf("\n"), head.lastIndexOf(" "));
-    const end = cut > max * 0.5 ? cut : max;
+    const end = cut > max * MIN_SPLIT_RATIO ? cut : max;
     chunks.push(rest.slice(0, end));
     rest = rest.slice(end).trimStart();
   }
@@ -1007,7 +1000,14 @@ function fileIdFromToolInput(input: unknown): number | undefined {
 type StreamEvent = "content" | "tool-call" | "tool-result";
 
 export function handleStreamPart(shaper: StreamShaper, part: unknown, metadata?: ToolCallMetadata): StreamEvent | undefined {
-  const normalized = normalizeStreamPart(part);
+  return handleNormalizedStreamPart(shaper, normalizeStreamPart(part), metadata);
+}
+
+function handleNormalizedStreamPart(
+  shaper: StreamShaper,
+  normalized: NormalizedStreamPart | undefined,
+  metadata?: ToolCallMetadata,
+): StreamEvent | undefined {
   switch (normalized?.kind) {
     case "text":
       shaper.onTextDelta(normalized.text);
@@ -1100,15 +1100,6 @@ function isPendingToolResult(value: unknown): boolean {
   return asRecord(value)?.pending === true;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -1132,12 +1123,4 @@ function errorText(err: unknown): string {
     }
   }
   return parts.join("\n");
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

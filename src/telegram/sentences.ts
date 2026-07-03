@@ -22,14 +22,13 @@ export class SentenceAssembler {
     let inFence = false;
     let inMathBlock = false;
     for (let i = 0; i < this.remainder.length; i += 1) {
-      const here = this.remainder.slice(i);
-      if (here.startsWith("```")) {
+      if (this.remainder.startsWith("```", i)) {
         inFence = !inFence;
         i += 2;
         if (!inFence) return i + 1;
         continue;
       }
-      if (here.startsWith("$$")) {
+      if (this.remainder.startsWith("$$", i)) {
         inMathBlock = !inMathBlock;
         i += 1;
         continue;
@@ -63,9 +62,4 @@ export class SentenceAssembler {
     if (urlStart > lastSpace) return false;
     return next === "" || /\s/.test(next);
   }
-}
-
-export function insideOpenFence(md: string): boolean {
-  const matches = md.match(/```/g);
-  return Boolean(matches && matches.length % 2 === 1);
 }

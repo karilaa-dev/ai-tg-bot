@@ -1,4 +1,5 @@
 import type { BotCommand } from "grammy/types";
+import type { Locale } from "../db/types.js";
 
 const commands = [
   ["lang", { en: "🌐 Change language", ru: "🌐 Сменить язык" }],
@@ -10,6 +11,6 @@ const commands = [
   ["help", { en: "🧭 Show help", ru: "🧭 Показать справку" }],
 ] as const;
 
-export function localizedCommands(lang: "en" | "ru"): BotCommand[] {
+export function localizedCommands(lang: Locale): BotCommand[] {
   return commands.map(([command, description]) => ({ command, description: description[lang] }));
 }

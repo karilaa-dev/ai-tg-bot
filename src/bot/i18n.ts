@@ -1,7 +1,8 @@
 import path from "node:path";
 import { I18n } from "@grammyjs/i18n";
+import type { Locale } from "../db/types.js";
 
-export type Locale = "en" | "ru";
+export type { Locale } from "../db/types.js";
 
 export class Localizer {
   private readonly i18n: I18n;

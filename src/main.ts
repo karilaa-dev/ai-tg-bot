@@ -10,14 +10,14 @@ import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
+const db = createDatabase(config, logger);
 logger.info("bot process starting", {
   logLevel: logger.level,
-  db: config.DB_URL.startsWith("postgres") ? "postgres" : "sqlite",
+  db: db.dialect,
   inferenceProvider: "codex",
   model: config.CODEX_MODEL,
   compactionModel: config.CODEX_COMPACTION_MODEL,
 });
-const db = createDatabase(config, logger);
 
 try {
   logger.debug("running database migrations");

@@ -3,12 +3,28 @@ import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow } from "../db/types.js";
 import type { ImageCaptioner } from "../ai/provider.js";
 import type { Logger } from "../logger.js";
+import { imageMediaTypeFromName } from "../files/mediaType.js";
 import { persistEmbedding, type TextEmbedder } from "./embeddings.js";
 import { estimateTokens } from "./tokens.js";
+
+const DEFAULT_RECENT_WINDOW = 20;
+const MIN_COMPACTABLE_MESSAGES = 10;
+const GROUP_TOKEN_BUDGET = 3500;
+const FALLBACK_MESSAGE_CHAR_CAP = 500;
+const FALLBACK_SEGMENT_CHAR_CAP = 1800;
+const META_SUMMARY_CHAR_CAP = 2400;
+const IMAGE_DESCRIPTION_CHAR_CAP = 300;
+
+type CaptionOptions = { imageCaptioner?: ImageCaptioner; logger?: Logger };
 
 export interface ConversationSummarizer {
   summarizeSegment(input: { messages: CompactableMessage[] }): Promise<string>;
   mergeMeta(input: { previous: string | null; summaries: string[] }): Promise<string>;
+}
+
+export function formatMessageLine(message: { id: number; role: string; text_plain: string }, maxChars: number): string {
+  const text = message.text_plain.replace(/\s+/g, " ").slice(0, maxChars);
+  return `[#${message.id} ${message.role}] ${text}`;
 }
 
 export async function compactThread(
@@ -25,7 +41,7 @@ export async function compactThread(
   options.logger?.info("thread compaction starting", { threadId: thread.id, title: thread.title });
   const chain = await repos.threads.chain(thread);
   const messages = await repos.messages.listForThreadChain(chain);
-  const keep = options.recentWindowMessages ?? 20;
+  const keep = options.recentWindowMessages ?? DEFAULT_RECENT_WINDOW;
   const rawCompactable = messages.slice(0, Math.max(0, messages.length - keep));
   options.logger?.debug("thread compaction scope loaded", {
     threadId: thread.id,
@@ -34,7 +50,7 @@ export async function compactThread(
     keep,
     compactable: rawCompactable.length,
   });
-  if (rawCompactable.length < 10) {
+  if (rawCompactable.length < MIN_COMPACTABLE_MESSAGES) {
     options.logger?.info("thread compaction skipped; not enough old messages", {
       threadId: thread.id,
       compactable: rawCompactable.length,
@@ -43,7 +59,7 @@ export async function compactThread(
   }
   const compactable = await prepareMessagesForCompaction(repos, rawCompactable, options);
 
-  const groups = groupByTokenBudget(compactable, 3500);
+  const groups = groupByTokenBudget(compactable, GROUP_TOKEN_BUDGET);
   options.logger?.debug("thread compaction groups prepared", {
     threadId: thread.id,
     groups: groups.length,
@@ -92,7 +108,7 @@ type CompactableMessage = Awaited<ReturnType<Repos["messages"]["listThread"]>>[n
 async function prepareMessagesForCompaction(
   repos: Repos,
   messages: CompactableMessage[],
-  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+  options: CaptionOptions,
 ): Promise<CompactableMessage[]> {
   const prepared: CompactableMessage[] = [];
   for (const message of messages) {
@@ -108,7 +124,7 @@ async function prepareMessagesForCompaction(
 async function prepareImageMessageForCompaction(
   repos: Repos,
   message: CompactableMessage,
-  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+  options: CaptionOptions,
 ): Promise<CompactableMessage> {
   const images = (await repos.files.listForMessage(message.id)).filter((file) => file.type === "image");
   if (!images.length) return message;
@@ -127,7 +143,7 @@ async function prepareImageMessageForCompaction(
 async function ensureImageDescription(
   repos: Repos,
   image: FileRow,
-  options: { imageCaptioner?: ImageCaptioner; logger?: Logger },
+  options: CaptionOptions,
 ): Promise<string> {
   const existing = usableImageSummary(image);
   if (existing) {
@@ -144,7 +160,7 @@ async function ensureImageDescription(
     const caption = await options.imageCaptioner.caption({
       bytes,
       name: image.name,
-      mime: imageMediaType(image.name),
+      mime: imageMediaTypeFromName(image.name),
     });
     const generated = usableImageDescription(shortImageDescription(caption), image.name);
     if (!generated) return image.name;
@@ -174,7 +190,9 @@ function usableImageDescription(text: string | null | undefined, imageName: stri
 function shortImageDescription(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (!oneLine) return "image";
-  return oneLine.length > 300 ? `${oneLine.slice(0, 297)}...` : oneLine;
+  return oneLine.length > IMAGE_DESCRIPTION_CHAR_CAP
+    ? `${oneLine.slice(0, IMAGE_DESCRIPTION_CHAR_CAP - 3)}...`
+    : oneLine;
 }
 
 function stripImageCards(text: string): string {
@@ -183,13 +201,6 @@ function stripImageCards(text: string): string {
     .map((line) => line.trim())
     .filter((line) => line && !/^\[image #\d+:.+\]$/i.test(line))
     .join("\n");
-}
-
-function imageMediaType(name: string): string | undefined {
-  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
-  if (/\.png$/i.test(name)) return "image/png";
-  if (/\.webp$/i.test(name)) return "image/webp";
-  return undefined;
 }
 
 function groupByTokenBudget(messages: CompactableMessage[], tokenBudget: number): CompactableMessage[][] {
@@ -223,12 +234,9 @@ async function summarizeGroup(messages: CompactableMessage[], summarizer?: Conve
 
 function fallbackSummarizeGroup(messages: CompactableMessage[]): string {
   const body = messages
-    .map((message) => {
-      const text = message.text_plain.replace(/\s+/g, " ").slice(0, 500);
-      return `[#${message.id} ${message.role}] ${text}`;
-    })
+    .map((message) => formatMessageLine(message, FALLBACK_MESSAGE_CHAR_CAP))
     .join("\n");
-  return body.length > 1800 ? `${body.slice(0, 1800)}...` : body;
+  return body.length > FALLBACK_SEGMENT_CHAR_CAP ? `${body.slice(0, FALLBACK_SEGMENT_CHAR_CAP)}...` : body;
 }
 
 async function mergeMeta(
@@ -249,5 +257,5 @@ async function mergeMeta(
 
 function fallbackMergeMeta(previous: string | null, additions: string[]): string {
   const merged = [additions.join("\n\n"), previous ?? ""].filter((part) => part.trim()).join("\n\nPrevious memory:\n");
-  return merged.length > 2400 ? merged.slice(0, 2400) : merged;
+  return merged.length > META_SUMMARY_CHAR_CAP ? merged.slice(0, META_SUMMARY_CHAR_CAP) : merged;
 }

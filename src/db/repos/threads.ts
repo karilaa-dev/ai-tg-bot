@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { queryOne, type SqlExecutor } from "../sql.js";
+import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import type { ThreadRow } from "../types.js";
 
 export class ThreadsRepo {
@@ -27,14 +27,14 @@ export class ThreadsRepo {
     parentThreadId?: number | null;
     forkPointMessageId?: number | null;
   }): Promise<ThreadRow> {
-    return (await queryOne<ThreadRow>(
+    return insertReturning<ThreadRow>(
       this.db,
       sql`
         insert into threads(user_id, topic_id, parent_thread_id, fork_point_message_id, title, meta_summary, compacted_upto_message_id, archived, created_at)
         values (${input.userId}, ${input.topicId}, ${input.parentThreadId ?? null}, ${input.forkPointMessageId ?? null}, ${input.title}, null, null, 0, ${Date.now()})
         returning *
       `,
-    ))!;
+    );
   }
 
   async setCompacted(threadId: number, upto: number, summary: string): Promise<void> {

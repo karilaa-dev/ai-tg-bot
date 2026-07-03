@@ -21,6 +21,15 @@ export async function queryOne<T extends object>(
   return rows[0];
 }
 
+export async function insertReturning<T extends object>(
+  db: SqlExecutor,
+  statement: SQL,
+): Promise<T> {
+  const row = await queryOne<T>(db, statement);
+  if (!row) throw new Error("insert returned no row");
+  return row;
+}
+
 export function normalizeRows<T extends object>(rows: T[]): T[] {
   return rows.map((row) => {
     const normalized: Record<string, unknown> = {};

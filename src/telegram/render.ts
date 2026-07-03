@@ -1,5 +1,5 @@
 import type { InputRichMessage } from "./richApi.js";
-import { repairLadder, sanitize } from "./mdRepair.js";
+import { RICH_MESSAGE_BYTE_LIMIT, repairLadder, sanitize } from "./mdRepair.js";
 
 const SHOW_MORE_THRESHOLD = 3500;
 
@@ -30,7 +30,7 @@ export function renderDraft(input: RenderDraftInput): InputRichMessage {
     return { markdown: sanitize(input.t("thinking-placeholder")) };
   }
   const title = draftThinkingTitle(input.t, input.thinkingMd, input.elapsedMs);
-  const thinking = renderDraftThinking(input.thinkingMd, title);
+  const thinking = renderThinkingDetails(input.thinkingMd, title);
   const answer = input.answerMd.trim() ? `${thinking ? "" : "\n\n"}${input.answerMd}` : "";
   return { markdown: sanitize(`${thinking || title}${answer}`) };
 }
@@ -45,12 +45,6 @@ function withShowMore(md: string, threshold: number, t: (key: string) => string)
   const head = md.slice(0, cut).trimEnd();
   const tailText = md.slice(cut).trimStart();
   return `${head}\n\n<details><summary>${t("show-more")}</summary>\n\n${tailText}\n\n</details>`;
-}
-
-function renderDraftThinking(thinkingLog: string | undefined, title: string): string {
-  const trimmed = thinkingLog?.trim();
-  if (!trimmed) return "";
-  return renderThinkingDetails(trimmed, title);
 }
 
 function renderThinkingDetails(thinkingLog: string | undefined, title: string): string {
@@ -88,7 +82,7 @@ function linesWithEndings(text: string): string[] {
 }
 
 function splitRich(md: string): string[] {
-  const max = 32768;
+  const max = RICH_MESSAGE_BYTE_LIMIT;
   if (Buffer.byteLength(md, "utf8") <= max) return [md];
   const parts: string[] = [];
   let current = "";
@@ -136,7 +130,7 @@ function isGeneratingImageThinking(thinkingMd: string): boolean {
   return /(?:^|\n)\s*🖼️ Generating image\b/.test(thinkingMd);
 }
 
-export function formatElapsed(ms: number): string {
+function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   if (totalSeconds < 60) return `${totalSeconds}s`;
   const minutes = Math.floor(totalSeconds / 60);

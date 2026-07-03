@@ -3,6 +3,8 @@ import type { Logger } from "../logger.js";
 
 const DEFAULT_CODEX_CONTEXT_TOKENS = 128000;
 
+export const EMBEDDING_BATCH_SIZE = 96;
+
 export interface ImageCaptioner {
   caption(input: { bytes: Buffer; name: string; mime?: string }): Promise<string>;
 }
@@ -14,8 +16,8 @@ export async function embed(texts: string[], config: AppConfig, logger?: Logger)
     chars: texts.reduce((sum, text) => sum + text.length, 0),
     model: config.OPENROUTER_EMBEDDING_MODEL,
   });
-  for (let i = 0; i < texts.length; i += 96) {
-    const input = texts.slice(i, i + 96);
+  for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+    const input = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
     const res = await retryFetch("https://openrouter.ai/api/v1/embeddings", {
       method: "POST",
       headers: {
@@ -24,7 +26,19 @@ export async function embed(texts: string[], config: AppConfig, logger?: Logger)
       },
       body: JSON.stringify({ model: config.OPENROUTER_EMBEDDING_MODEL, input }),
     }, 3, logger, "openrouter embeddings");
+    if (!res.ok) {
+      logger?.warn("openrouter embeddings non-ok response", {
+        status: res.status,
+        body: await res.clone().text().catch(() => ""),
+      });
+    }
     const json = (await res.json()) as { data?: Array<{ embedding: number[] }> };
+    if ((json.data?.length ?? 0) < input.length) {
+      logger?.warn("openrouter embeddings returned fewer vectors than inputs", {
+        expected: input.length,
+        received: json.data?.length ?? 0,
+      });
+    }
     for (const row of json.data ?? []) batches.push(new Float32Array(row.embedding));
   }
   logger?.debug("embedding request complete", {
@@ -65,7 +79,9 @@ async function retryFetch(
         logger?.warn("http request failed; retrying", { label, err: String(err), attempt: i + 1, attempts });
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** i));
+    if (i < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** i));
+    }
   }
   throw last;
 }
