@@ -6,7 +6,7 @@ import readline from "node:readline";
 import type { ModelMessage } from "ai";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import type { ConversationSummarizer } from "../memory/compactor.js";
+import { formatMessageLine, type ConversationSummarizer } from "../memory/compactor.js";
 import type { ImageCaptioner } from "./provider.js";
 import {
   buildCodexToolSpecs,
@@ -16,6 +16,7 @@ import {
   type BotToolRegistry,
   type CodexToolContentItem,
 } from "./tools/index.js";
+import { asRecord, numberField as numberValue, rawStringField as stringValue, safeJson } from "../util/records.js";
 
 export interface CodexTransport {
   incoming: AsyncIterable<JsonRpcMessage>;
@@ -58,6 +59,12 @@ type CodexGeneratedImagePart = {
   status?: string | null;
 };
 
+const COMPACTION_TIMEOUT_MS = 120_000;
+const CAPTION_TIMEOUT_MS = 60_000;
+const ERROR_TEXT_PREVIEW_CHARS = 500;
+const IMAGE_DEDUPE_KEY_CHARS = 64;
+const SUMMARY_MESSAGE_MAX_CHARS = 1200;
+
 let transportFactoryForTests: CodexTransportFactory | undefined;
 
 export function setCodexTransportFactoryForTests(factory?: CodexTransportFactory): void {
@@ -68,14 +75,19 @@ export function codexServiceTier(config: AppConfig): string | null {
   return config.CODEX_SPEED_MODE === "fast" ? "fast" : null;
 }
 
+// Applied both as process-level -c overrides (ProcessCodexTransport spawn) and per-thread config in thread/start; keep the two in sync via this helper.
+function codexModelSettings(config: AppConfig): Record<string, string> {
+  return {
+    model_verbosity: config.CODEX_VERBOSITY,
+    model_reasoning_summary: config.REASONING_SUMMARY,
+  };
+}
+
 export function codexAppServerConfigArgs(config: AppConfig): string[] {
   return [
     "-c",
     'approvals_reviewer="guardian_subagent"',
-    "-c",
-    `model_verbosity=${tomlString(config.CODEX_VERBOSITY)}`,
-    "-c",
-    `model_reasoning_summary=${tomlString(config.REASONING_SUMMARY)}`,
+    ...Object.entries(codexModelSettings(config)).flatMap(([key, value]) => ["-c", `${key}=${tomlString(value)}`]),
   ];
 }
 
@@ -83,15 +95,25 @@ export function streamCodexTurn(input: CodexTurnInput): { fullStream: AsyncItera
   return { fullStream: runCodexTurn(input) };
 }
 
-export async function generateCodexText(input: CodexTurnInput): Promise<string> {
-  let text = "";
+function createCodexTextCollector(): { onPart(part: unknown): void; text(): string } {
+  let deltas = "";
   let finalText: string | undefined;
+  return {
+    onPart(part: unknown): void {
+      const record = asRecord(part);
+      if (record?.type === "text-delta") deltas += String(record.text ?? record.delta ?? "");
+      if (record?.type === "text-final") finalText = String(record.text ?? "");
+    },
+    text: () => finalText ?? deltas,
+  };
+}
+
+export async function generateCodexText(input: CodexTurnInput): Promise<string> {
+  const collector = createCodexTextCollector();
   for await (const part of runCodexTurn({ ...input, tools: input.tools ?? {} })) {
-    const record = asRecord(part);
-    if (record?.type === "text-delta") text += String(record.text ?? record.delta ?? "");
-    if (record?.type === "text-final") finalText = String(record.text ?? "");
+    collector.onPart(part);
   }
-  const trimmed = (finalText ?? text).trim();
+  const trimmed = collector.text().trim();
   if (!trimmed) throw new Error("empty Codex response");
   return trimmed;
 }
@@ -110,7 +132,7 @@ export function createCodexImageGenerator(config: AppConfig, logger?: Logger): B
       references: references.length,
       promptChars: prompt.length,
     });
-    let text = "";
+    const collector = createCodexTextCollector();
     let image: CodexGeneratedImagePart | undefined;
     const instructions = [
       "Generate exactly one image for this Telegram user.",
@@ -142,11 +164,11 @@ export function createCodexImageGenerator(config: AppConfig, logger?: Logger): B
     })) {
       const record = asRecord(part);
       if (record?.type === "image-generated") image = record as CodexGeneratedImagePart;
-      if (record?.type === "text-delta") text += String(record.text ?? record.delta ?? "");
-      if (record?.type === "text-final") text = String(record.text ?? "");
+      collector.onPart(part);
     }
     if (!image?.imageBase64) {
-      const detail = text.trim() ? `; Codex returned text instead: ${text.trim().slice(0, 500)}` : "";
+      const text = collector.text().trim();
+      const detail = text ? `; Codex returned text instead: ${text.slice(0, ERROR_TEXT_PREVIEW_CHARS)}` : "";
       throw new Error(`Codex image generation returned no image${detail}`);
     }
     logger?.info("Codex image generation complete", {
@@ -179,9 +201,9 @@ export function createCodexConversationSummarizer(config: AppConfig, logger?: Lo
         model: config.CODEX_COMPACTION_MODEL,
         system:
           "Summarize this Telegram conversation segment. Keep decisions, facts, names, numbers, file references (#file-id), open questions, and image descriptions. Cite source message ids like [#123]. Stay under 300 words.",
-        prompt: messages.map(formatMessageForSummary).join("\n"),
+        prompt: messages.map((message) => formatMessageLine(message, SUMMARY_MESSAGE_MAX_CHARS)).join("\n"),
         logger,
-        abortSignal: AbortSignal.timeout(120_000),
+        abortSignal: AbortSignal.timeout(COMPACTION_TIMEOUT_MS),
       });
       logger?.debug("Codex segment summarization complete", { messages: messages.length, chars: text.length });
       return text;
@@ -202,7 +224,7 @@ export function createCodexConversationSummarizer(config: AppConfig, logger?: Lo
           `New segment summaries:\n${summaries.join("\n\n")}`,
         ].join("\n\n"),
         logger,
-        abortSignal: AbortSignal.timeout(120_000),
+        abortSignal: AbortSignal.timeout(COMPACTION_TIMEOUT_MS),
       });
       logger?.info("Codex conversation memory summarized", { summaries: summaries.length, chars: text.length });
       return text;
@@ -227,7 +249,7 @@ export function createCodexImageCaptioner(config: AppConfig, logger?: Logger): I
             { type: "localImage", path: filePath },
           ],
           logger,
-          abortSignal: AbortSignal.timeout(60_000),
+          abortSignal: AbortSignal.timeout(CAPTION_TIMEOUT_MS),
         });
         logger?.debug("Codex image description complete", { name, chars: text.length });
         return text || `[image: ${name}]`;
@@ -256,6 +278,7 @@ async function* runCodexTurn(input: CodexTurnInput): AsyncIterable<unknown> {
 
 class CodexRpcSession {
   private nextId = 1;
+  private syntheticCallId = 1;
   private readonly pending = new Map<string | number, {
     resolve: (value: unknown) => void;
     reject: (err: unknown) => void;
@@ -306,18 +329,14 @@ class CodexRpcSession {
   }
 
   async startThread(input: CodexTurnInput): Promise<string> {
-    const toolSpecs = await buildCodexToolSpecs(this.tools);
-    const config: Record<string, unknown> = {
-      model_verbosity: input.config.CODEX_VERBOSITY,
-      model_reasoning_summary: input.config.REASONING_SUMMARY,
-    };
+    const toolSpecs = buildCodexToolSpecs(this.tools);
     const result = await this.request("thread/start", {
       model: input.model ?? input.config.CODEX_MODEL,
       serviceTier: codexServiceTier(input.config),
       cwd: input.cwd ?? process.cwd(),
       approvalPolicy: "never",
       sandbox: "read-only",
-      config,
+      config: codexModelSettings(input.config),
       dynamicTools: toolSpecs,
       baseInstructions: input.system ?? null,
       developerInstructions: null,
@@ -403,7 +422,7 @@ class CodexRpcSession {
       return;
     }
     const params = asRecord(message.params);
-    const callId = String(params?.callId ?? message.id ?? this.nextId);
+    const callId = String(params?.callId ?? message.id ?? `synthetic-${this.syntheticCallId++}`);
     const toolName = String(params?.tool ?? "");
     const toolInput = params?.arguments ?? {};
     this.emitToolCall(callId, toolName, toolInput);
@@ -531,7 +550,7 @@ class CodexRpcSession {
     }
     if (itemType === "dynamicToolCall") {
       const contentItems = Array.isArray(item.contentItems) ? item.contentItems as CodexToolContentItem[] : [];
-      this.emitToolResult(itemId ?? String(item.tool ?? "tool"), String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
+      this.emitToolResult(itemId ?? `synthetic-${this.syntheticCallId++}`, String(item.tool ?? "tool"), outputFromCodexContentItems(contentItems));
     }
   }
 
@@ -565,7 +584,7 @@ class CodexRpcSession {
   private emitGeneratedImage(item: Record<string, unknown>, itemId: string | undefined): void {
     const imageBase64 = stringValue(item, "result")?.trim();
     if (!imageBase64) return;
-    const key = itemId ?? imageBase64.slice(0, 64);
+    const key = itemId ?? imageBase64.slice(0, IMAGE_DEDUPE_KEY_CHARS);
     if (this.seenGeneratedImages.has(key)) return;
     this.seenGeneratedImages.add(key);
     this.stream.push({
@@ -806,32 +825,8 @@ function textPart(value: unknown): string | undefined {
   return stringValue(record, "text") ?? stringValue(record, "content");
 }
 
-function stringValue(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberValue(record: Record<string, unknown> | undefined, key: string): number | undefined {
-  const value = record?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function formatMessageForSummary(message: {
-  id: number;
-  role: string;
-  kind: string;
-  text_plain: string;
-}): string {
-  const text = message.text_plain.replace(/\s+/g, " ").slice(0, 1200);
-  return `[#${message.id} ${message.role}] ${text}`;
-}
-
 function safeFileName(name: string): string {
   return name.replace(/[^\w.-]+/g, "_") || "image";
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
 function errorMessage(value: unknown): string {
@@ -843,14 +838,6 @@ function errorMessage(value: unknown): string {
 
 function isRetryNotice(value: unknown): boolean {
   return errorMessage(value).startsWith("Reconnecting...");
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }
 
 function tomlString(value: string): string {

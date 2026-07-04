@@ -1,6 +1,5 @@
-import { nanoid } from "nanoid";
 import { sql } from "drizzle-orm";
-import { queryOne, type SqlExecutor } from "../sql.js";
+import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import type { InviteRow } from "../types.js";
 
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -15,7 +14,7 @@ export class InvitesRepo {
   createCode(): string {
     let code = "";
     for (let i = 0; i < 8; i += 1) code += alphabet[Math.floor(Math.random() * alphabet.length)];
-    return code || nanoid(8);
+    return code;
   }
 
   get(code: string): Promise<InviteRow | undefined> {
@@ -32,11 +31,14 @@ export class InvitesRepo {
     expiresAt: number | null;
     createdBy: number;
   }): Promise<InviteRow> {
-    await this.db.execute(sql`
-      insert into invites(code, max_uses, used_count, expires_at, revoked, created_by, created_at)
-      values (${input.code}, ${input.maxUses}, 0, ${input.expiresAt}, 0, ${input.createdBy}, ${Date.now()})
-    `);
-    return (await this.get(input.code))!;
+    return insertReturning<InviteRow>(
+      this.db,
+      sql`
+        insert into invites(code, max_uses, used_count, expires_at, revoked, created_by, created_at)
+        values (${input.code}, ${input.maxUses}, 0, ${input.expiresAt}, 0, ${input.createdBy}, ${Date.now()})
+        returning *
+      `,
+    );
   }
 
   async validate(code: string, now = Date.now()): Promise<InviteValidation> {

@@ -3,19 +3,19 @@ import { cosine, type EmbeddingKind } from "../db/repos/embeddings.js";
 import type { TextSearch } from "../db/search.js";
 import type { FileRow, ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
+import type { TextEmbedder } from "./embeddings.js";
 
 const vectorCacheMax = 10_000;
 const vectorCache = new Map<string, Float32Array>();
+
+const RRF_K = 60;
+const SCOPED_LEXICAL_FETCH_LIMIT = 1000;
+const VECTOR_TOP_K = 20;
 
 export type RetrievalHit =
   | { kind: "message"; ref_id: number; snippet: string; score: number }
   | { kind: "summary"; ref_id: number; snippet: string; score: number }
   | { kind: "chunk"; ref_id: number; snippet: string; score: number };
-
-export interface Embedder {
-  embed(texts: string[]): Promise<Float32Array[]>;
-  model?: string;
-}
 
 export async function hybridSearch(input: {
   search: TextSearch;
@@ -26,7 +26,7 @@ export async function hybridSearch(input: {
   fileIds?: number[];
   query: string;
   k: number;
-  embedder?: Embedder;
+  embedder?: TextEmbedder;
   embeddingModel?: string;
   logger?: Logger;
 }): Promise<RetrievalHit[]> {
@@ -45,11 +45,11 @@ export async function hybridSearch(input: {
   const add = (kind: RetrievalHit["kind"], refId: number, snippet: string, rank: number) => {
     const key = `${kind}:${refId}`;
     const existing = ranked.get(key);
-    const score = (existing?.score ?? 0) + 1 / (60 + rank);
+    const score = (existing?.score ?? 0) + 1 / (RRF_K + rank);
     ranked.set(key, { kind, ref_id: refId, snippet: existing?.snippet ?? snippet, score } as RetrievalHit);
   };
 
-  const scopedLimit = Math.max(input.k, 1000);
+  const scopedLimit = Math.max(input.k, SCOPED_LEXICAL_FETCH_LIMIT);
   const [messages, summaries, chunks] = await Promise.all([
     input.search.searchMessages(input.threadIds, input.query, allowedMessages ? scopedLimit : input.k),
     input.search.searchSummaries(input.threadIds, input.query, allowedSummaries ? scopedLimit : input.k),
@@ -94,10 +94,6 @@ export async function hybridSearch(input: {
   const results = [...ranked.values()].sort((a, b) => b.score - a.score).slice(0, input.k);
   input.logger?.debug("hybrid search complete", { results: results.length });
   return results;
-}
-
-export async function threadChainIds(repos: Repos, thread: ThreadRow): Promise<number[]> {
-  return (await repos.threads.chain(thread)).map((row) => row.id);
 }
 
 export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise<{
@@ -148,7 +144,8 @@ async function addEmbeddingHits(input: {
     input.repos.summaries.listForThreads(input.threadIds),
     input.fileIds?.length ? Promise.resolve([] as FileRow[]) : input.repos.files.listForThreads(input.threadIds),
   ]);
-  const summaries = input.summaryIds ? summaryRows.filter((row) => input.summaryIds!.includes(row.id)) : summaryRows;
+  const allowedSummaryIds = input.summaryIds && new Set(input.summaryIds);
+  const summaries = allowedSummaryIds ? summaryRows.filter((row) => allowedSummaryIds.has(row.id)) : summaryRows;
   const fileIds = input.fileIds ?? fileRows.map((file) => file.id);
   const chunkRows = fileIds.length ? await input.repos.files.chunksForFiles(fileIds) : [];
   const candidates: Array<{
@@ -180,7 +177,7 @@ async function addEmbeddingHits(input: {
         snippet: candidate.snippetById.get(row.ref_id) ?? "",
       }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, 20)
+      .slice(0, VECTOR_TOP_K)
       .forEach((hit, idx) => {
         if (hit.score > 0) input.add(candidate.hitKind, hit.refId, hit.snippet, idx);
       });

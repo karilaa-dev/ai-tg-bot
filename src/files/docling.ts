@@ -1,9 +1,11 @@
 import type { AppConfig } from "../config.js";
 import { relayAbort, throwIfAborted } from "./cancel.js";
 
+const DOCLING_HEALTHCHECK_TIMEOUT_MS = 5_000;
+
 export async function checkDocling(config: Pick<AppConfig, "DOCLING_URL">): Promise<boolean> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5_000);
+  const timer = setTimeout(() => controller.abort(), DOCLING_HEALTHCHECK_TIMEOUT_MS);
   try {
     const res = await fetch(`${config.DOCLING_URL}/docs`, { method: "GET", signal: controller.signal });
     return res.ok;

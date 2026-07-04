@@ -7,33 +7,6 @@ export async function up(db: SqlExecutor, dialect: DialectName): Promise<void> {
   else await postgres(db);
 }
 
-export async function down(db: SqlExecutor, dialect: DialectName): Promise<void> {
-  const tables = [
-    "embeddings",
-    "summaries",
-    "file_telegram_refs",
-    "message_files",
-    "file_chunks",
-    "files",
-    "messages",
-    "threads",
-    "invites",
-    "users",
-  ];
-  if (dialect === "sqlite") {
-    await db.execute(sql`drop table if exists messages_fts`);
-    await db.execute(sql`drop table if exists chunks_fts`);
-    await db.execute(sql`drop table if exists summaries_fts`);
-  } else {
-    await db.execute(sql`drop table if exists message_search`);
-    await db.execute(sql`drop table if exists chunk_search`);
-    await db.execute(sql`drop table if exists summary_search`);
-  }
-  for (const table of tables) {
-    await db.execute(sql.raw(`drop table if exists ${table}`));
-  }
-}
-
 async function sqlite(db: SqlExecutor): Promise<void> {
   await db.execute(sql`pragma journal_mode = wal`);
   await db.execute(sql`

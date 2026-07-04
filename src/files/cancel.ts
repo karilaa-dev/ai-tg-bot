@@ -1,6 +1,7 @@
 export class FileProcessingCancelledError extends Error {
   constructor() {
     super("file processing cancelled");
+    // Named "AbortError" so it interops with fetch/AbortController AbortErrors downstream.
     this.name = "AbortError";
   }
 }
@@ -10,9 +11,7 @@ export function throwIfAborted(signal?: AbortSignal): void {
 }
 
 export function isAbortError(err: unknown): boolean {
-  if (err instanceof FileProcessingCancelledError) return true;
-  if (err instanceof Error && err.name === "AbortError") return true;
-  return false;
+  return err instanceof Error && err.name === "AbortError";
 }
 
 export function relayAbort(signal: AbortSignal | undefined, abort: () => void): () => void {

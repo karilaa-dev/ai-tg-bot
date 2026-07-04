@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { nanoid } from "nanoid";
 import { parse } from "csv-parse/sync";
 import type { AppConfig } from "../config.js";
 import type { EmbeddingsRepo } from "../db/repos/embeddings.js";
@@ -8,11 +7,18 @@ import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
+import { EMBEDDING_BATCH_SIZE } from "../ai/provider.js";
 import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
 import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
+import { storeFileBytes } from "./storage.js";
+
+const APPROX_CHARS_PER_TOKEN = 4;
+const MIN_NATIVE_PDF_TEXT_CHARS = 500;
+const FILE_SUMMARY_MAX_CHARS = 180;
+const OUTLINE_PREVIEW_HEADINGS = 5;
 
 export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image";
 export type FileIngestStage = "extracting" | "indexing" | "embedding";
@@ -33,34 +39,7 @@ export function classifyFile(name: string, mime = ""): AcceptedFileType | "legac
   return null;
 }
 
-export async function ingestLocalFile(input: {
-  config: AppConfig;
-  repo: FilesRepo;
-  userId: number;
-  threadId: number;
-  messageId?: number | null;
-  telegramFileId?: string | null;
-  telegramFileUniqueId?: string | null;
-  sourcePath: string;
-  name: string;
-  mime?: string;
-}): Promise<{ fileId: number; card: string }> {
-  const bytes = await fs.readFile(input.sourcePath);
-  return ingestFileBytes({
-    config: input.config,
-    repo: input.repo,
-    userId: input.userId,
-    threadId: input.threadId,
-    messageId: input.messageId,
-    telegramFileId: input.telegramFileId,
-    telegramFileUniqueId: input.telegramFileUniqueId,
-    bytes,
-    name: input.name,
-    mime: input.mime,
-  });
-}
-
-export async function ingestFileBytes(input: {
+export interface FileIngestInput {
   config: AppConfig;
   repo: FilesRepo;
   userId: number;
@@ -78,7 +57,16 @@ export async function ingestFileBytes(input: {
   logger?: Logger;
   signal?: AbortSignal;
   onStage?: FileIngestStageReporter;
-}): Promise<{ fileId: number; card: string; inline: boolean; type: AcceptedFileType }> {
+}
+
+export interface FileIngestResult {
+  fileId: number;
+  card: string;
+  inline: boolean;
+  type: AcceptedFileType;
+}
+
+export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
   const type = classifyFile(input.name, input.mime);
   if (!type || type === "legacy-doc") throw new Error(`unsupported file type: ${type ?? "unknown"}`);
   const startedAt = Date.now();
@@ -90,41 +78,41 @@ export async function ingestFileBytes(input: {
     threadId: input.threadId,
   });
   const ext = path.extname(input.name).toLowerCase() || `.${type}`;
-  const outDir = path.resolve("data/files");
   let dest: string | undefined;
   let fileId: number | undefined;
-  let chunkIds: number[] = [];
+  const chunkIds: number[] = [];
   let completed = false;
   const cleanup = async () => {
     if (fileId !== undefined) {
       const existingChunkIds = await input.repo.deleteFile(fileId);
-      chunkIds = chunkIds.length ? chunkIds : existingChunkIds;
+      if (!chunkIds.length) chunkIds.push(...existingChunkIds);
     }
     if (input.embeddings && chunkIds.length) await input.embeddings.deleteRefs("chunk", chunkIds);
     if (dest) await fs.unlink(dest).catch(() => undefined);
   };
+  const finish = (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): FileIngestResult => {
+    completed = true;
+    input.logger?.info("file ingest complete", {
+      fileId: file.id,
+      name: input.name,
+      type,
+      inline,
+      ...logDetail,
+      ms: Date.now() - startedAt,
+    });
+    return { fileId: file.id, card, inline, type };
+  };
   try {
     throwIfAborted(input.signal);
-    await fs.mkdir(outDir, { recursive: true });
-    dest = path.join(outDir, `${nanoid()}${ext}`);
-    const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
-    const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
-    await fs.writeFile(dest, bytes);
+    const stored = await storeBytesToDisk(input, ext);
+    dest = stored.dest;
+    const { bytes, contentSha256 } = stored;
     input.logger?.debug("file bytes stored", { name: input.name, type, path: dest, bytes: bytes.length });
     throwIfAborted(input.signal);
 
     if (type === "image") {
       const file = await input.repo.insertFile({
-        userId: input.userId,
-        threadId: input.threadId,
-        messageId: input.messageId ?? null,
-        telegramFileId: input.telegramFileId ?? null,
-        telegramFileUniqueId: input.telegramFileUniqueId ?? null,
-        contentSha256,
-        type,
-        name: input.name,
-        path: dest,
-        size: bytes.length,
+        ...baseFileFields(input, dest, bytes, contentSha256, type),
         summary: input.imageSummary ?? null,
         isInline: true,
       });
@@ -147,7 +135,7 @@ export async function ingestFileBytes(input: {
     await reportStage(input.onStage, { stage: "extracting" }, input.signal);
     const content = await contentFor(type, input.name, bytes, input.config, input.logger, input.signal);
     throwIfAborted(input.signal);
-    const inline = content.length <= input.config.FILE_INLINE_TOKENS * 4;
+    const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
     const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
     input.logger?.debug("file content extracted", {
       name: input.name,
@@ -162,16 +150,7 @@ export async function ingestFileBytes(input: {
       total: inline ? 1 : Math.max(1, chunks.length),
     }, input.signal);
     const file = await input.repo.insertFile({
-      userId: input.userId,
-      threadId: input.threadId,
-      messageId: input.messageId ?? null,
-      telegramFileId: input.telegramFileId ?? null,
-      telegramFileUniqueId: input.telegramFileUniqueId ?? null,
-      contentSha256,
-      type,
-      name: input.name,
-      path: dest,
-      size: bytes.length,
+      ...baseFileFields(input, dest, bytes, contentSha256, type),
       contentMd: inline ? content : null,
       summary: firstLine(content),
       isInline: inline,
@@ -179,81 +158,17 @@ export async function ingestFileBytes(input: {
     fileId = file.id;
     input.logger?.debug("file row inserted", { fileId: file.id, name: input.name, inline });
     if (!inline) {
-      const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
-      const insertedChunks: Array<{ id: number; content: string }> = [];
-      const totalIndexingSteps = Math.max(1, chunks.length);
-      let completedIndexingSteps = 0;
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index]!;
-        throwIfAborted(input.signal);
-        const inserted = await input.repo.insertChunk({ fileId: file.id, idx: chunk.idx, headingPath: chunk.headingPath, content: chunk.content });
-        chunkIds.push(inserted.id);
-        insertedChunks.push({ id: inserted.id, content: inserted.content });
-        outline.push({ chunk_index: inserted.idx, heading_path: inserted.heading_path });
-        completedIndexingSteps += 1;
-        await reportStage(input.onStage, {
-          stage: "indexing",
-          completed: completedIndexingSteps,
-          total: totalIndexingSteps,
-        }, input.signal);
-      }
-      if (input.embeddings && input.embedder && insertedChunks.length) {
-        input.logger?.debug("file chunk embedding starting", {
-          fileId: file.id,
-          chunks: insertedChunks.length,
-          model: input.config.OPENROUTER_EMBEDDING_MODEL,
-        });
-        await reportStage(input.onStage, {
-          stage: "embedding",
-          completed: 0,
-          total: insertedChunks.length,
-        }, input.signal);
-        await persistChunkEmbeddings({
-          embeddings: input.embeddings,
-          chunks: insertedChunks,
-          embedder: input.embedder,
-          embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-          logger: input.logger,
-          signal: input.signal,
-          onProgress: (completed, total) => reportStage(input.onStage, {
-            stage: "embedding",
-            completed,
-            total,
-          }, input.signal),
-        });
-      }
+      const outline = await indexDocumentChunks(input, file, chunks, chunkIds);
       throwIfAborted(input.signal);
       await input.repo.setOutline(file.id, outline);
-      completed = true;
-      input.logger?.info("file ingest complete", {
-        fileId: file.id,
-        name: input.name,
-        type,
-        inline: false,
-        chunks: chunks.length,
-        ms: Date.now() - startedAt,
-      });
-      return {
-        fileId: file.id,
-        card: cardForFile(
-          { ...file, outline_json: JSON.stringify(outline) },
-          chunks.map((chunk) => ({ idx: chunk.idx, heading_path: chunk.headingPath })),
-          input.name,
-        ),
-        inline: false,
-        type,
-      };
+      const card = cardForFile(
+        { ...file, outline_json: JSON.stringify(outline) },
+        chunks.map((chunk) => ({ idx: chunk.idx, heading_path: chunk.headingPath })),
+        input.name,
+      );
+      return finish(file, card, false, { chunks: chunks.length });
     }
-    completed = true;
-    input.logger?.info("file ingest complete", {
-      fileId: file.id,
-      name: input.name,
-      type,
-      inline: true,
-      chars: content.length,
-      ms: Date.now() - startedAt,
-    });
-    return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
+    return finish(file, cardForFile(file, [], input.name), true, { chars: content.length });
   } catch (err) {
     if (!completed) {
       if (isAbortError(err) || input.signal?.aborted) {
@@ -270,6 +185,89 @@ export async function ingestFileBytes(input: {
     }
     throw err;
   }
+}
+
+async function storeBytesToDisk(
+  input: FileIngestInput,
+  ext: string,
+): Promise<{ dest: string; bytes: Buffer; contentSha256: string }> {
+  const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
+  const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
+  const dest = await storeFileBytes(bytes, ext);
+  return { dest, bytes, contentSha256 };
+}
+
+function baseFileFields(
+  input: FileIngestInput,
+  dest: string,
+  bytes: Buffer,
+  contentSha256: string,
+  type: AcceptedFileType,
+) {
+  return {
+    userId: input.userId,
+    threadId: input.threadId,
+    messageId: input.messageId ?? null,
+    telegramFileId: input.telegramFileId ?? null,
+    telegramFileUniqueId: input.telegramFileUniqueId ?? null,
+    contentSha256,
+    type,
+    name: input.name,
+    path: dest,
+    size: bytes.length,
+  };
+}
+
+async function indexDocumentChunks(
+  input: FileIngestInput,
+  file: FileRow,
+  chunks: Array<{ idx: number; headingPath: string | null; content: string }>,
+  chunkIds: number[],
+): Promise<Array<{ chunk_index: number; heading_path: string | null }>> {
+  const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
+  const insertedChunks: Array<{ id: number; content: string }> = [];
+  const totalIndexingSteps = Math.max(1, chunks.length);
+  let completedIndexingSteps = 0;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index]!;
+    throwIfAborted(input.signal);
+    const inserted = await input.repo.insertChunk({ fileId: file.id, idx: chunk.idx, headingPath: chunk.headingPath, content: chunk.content });
+    chunkIds.push(inserted.id);
+    insertedChunks.push({ id: inserted.id, content: inserted.content });
+    outline.push({ chunk_index: inserted.idx, heading_path: inserted.heading_path });
+    completedIndexingSteps += 1;
+    await reportStage(input.onStage, {
+      stage: "indexing",
+      completed: completedIndexingSteps,
+      total: totalIndexingSteps,
+    }, input.signal);
+  }
+  if (input.embeddings && input.embedder && insertedChunks.length) {
+    input.logger?.debug("file chunk embedding starting", {
+      fileId: file.id,
+      chunks: insertedChunks.length,
+      model: input.config.OPENROUTER_EMBEDDING_MODEL,
+    });
+    await reportStage(input.onStage, {
+      stage: "embedding",
+      completed: 0,
+      total: insertedChunks.length,
+    }, input.signal);
+    await persistChunkEmbeddings({
+      embeddings: input.embeddings,
+      chunks: insertedChunks,
+      embedder: input.embedder,
+      embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
+      logger: input.logger,
+      signal: input.signal,
+      onProgress: (completed, total) => reportStage(input.onStage, {
+        stage: "embedding",
+        completed,
+        total,
+      }, input.signal),
+    });
+  }
+  return outline;
 }
 
 export function cardForFile(
@@ -301,7 +299,7 @@ async function persistChunkEmbeddings(input: {
 }): Promise<void> {
   throwIfAborted(input.signal);
   try {
-    const batchSize = 96;
+    const batchSize = EMBEDDING_BATCH_SIZE;
     let completed = 0;
     input.logger?.debug("chunk embedding persistence starting", {
       chunks: input.chunks.length,
@@ -321,6 +319,7 @@ async function persistChunkEmbeddings(input: {
         const chunk = batch[i]!;
         const vector = vectors[i];
         if (vector) await input.embeddings.upsert("chunk", chunk.id, vector, input.embeddingModel);
+        else input.logger?.warn("chunk embedding missing vector", { chunkId: chunk.id, model: input.embeddingModel });
         completed += 1;
         await input.onProgress?.(completed, input.chunks.length);
       }
@@ -360,7 +359,7 @@ async function contentFor(
     try {
       logger?.debug("native PDF text extraction starting", { name, bytes: bytes.length });
       const native = await extractPdfText({ bytes, signal });
-      if (native.textChars >= 500) {
+      if (native.textChars >= MIN_NATIVE_PDF_TEXT_CHARS) {
         logger?.info("native PDF text extraction complete", {
           name,
           pages: native.pages,
@@ -399,18 +398,18 @@ async function reportStage(
 }
 
 function firstLine(text: string): string {
-  return text.split("\n").find((line) => line.trim())?.trim().slice(0, 180) ?? "";
+  return text.split("\n").find((line) => line.trim())?.trim().slice(0, FILE_SUMMARY_MAX_CHARS) ?? "";
 }
 
 function outlinePreview(outline: Array<{ chunk_index: number; heading_path: string | null }>): string {
   const headings = outline
     .map((entry) => entry.heading_path || `chunk ${entry.chunk_index}`)
     .filter((value, index, all) => all.indexOf(value) === index)
-    .slice(0, 5);
+    .slice(0, OUTLINE_PREVIEW_HEADINGS);
   return headings.length ? `Outline: ${headings.join(" | ")}.` : "";
 }
 
-function decodeOutline(raw: string | null): Array<{ chunk_index: number; heading_path: string | null }> | null {
+export function decodeOutline(raw: string | null): Array<{ chunk_index: number; heading_path: string | null }> | null {
   if (!raw) return null;
   try {
     const value = JSON.parse(raw) as unknown;

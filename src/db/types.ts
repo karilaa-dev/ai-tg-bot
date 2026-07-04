@@ -2,11 +2,19 @@ export type StoredFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "other";
 
 export type DialectName = "sqlite" | "postgres";
 
+export type Locale = "en" | "ru";
+
+export type MessageRole = "user" | "assistant" | "system";
+
+export type MessageKind = "text" | "image" | "file" | "system";
+
+export type SummaryLevel = 0 | 1;
+
 export interface UsersTable {
   tg_id: number;
   first_name: string | null;
   username: string | null;
-  lang: "en" | "ru";
+  lang: Locale;
   tz_offset_min: number | null;
   stream_mode: number;
   invited_with: string | null;
@@ -39,8 +47,8 @@ export interface ThreadsTable {
 export interface MessagesTable {
   id: number;
   thread_id: number;
-  role: "user" | "assistant" | "system";
-  kind: "text" | "image" | "file" | "system";
+  role: MessageRole;
+  kind: MessageKind;
   content_json: string;
   text_plain: string;
   thinking: string | null;
@@ -95,7 +103,7 @@ export interface MessageFilesTable {
 export interface SummariesTable {
   id: number;
   thread_id: number;
-  level: number;
+  level: SummaryLevel;
   from_message_id: number;
   to_message_id: number;
   content: string;
@@ -112,26 +120,11 @@ export interface EmbeddingsTable {
   created_at: number;
 }
 
-export interface DB {
-  users: UsersTable;
-  invites: InvitesTable;
-  threads: ThreadsTable;
-  messages: MessagesTable;
-  files: FilesTable;
-  file_telegram_refs: FileTelegramRefsTable;
-  message_files: MessageFilesTable;
-  file_chunks: FileChunksTable;
-  summaries: SummariesTable;
-  embeddings: EmbeddingsTable;
-}
-
 export type UserRow = UsersTable;
 export type InviteRow = InvitesTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
-export type FileTelegramRefRow = FileTelegramRefsTable;
-export type MessageFileRow = MessageFilesTable;
 export type FileChunkRow = FileChunksTable;
 export type SummaryRow = SummariesTable;
 export type EmbeddingRow = EmbeddingsTable;

@@ -1,4 +1,6 @@
 import { SentenceAssembler } from "../telegram/sentences.js";
+import { asRecord, numberField, stringField } from "../util/records.js";
+import { escapeHtml } from "../util/text.js";
 
 type ReasoningThinkingItem = {
   kind: "reasoning" | "demoted";
@@ -41,10 +43,30 @@ export class StreamShaper {
   thinking: ThinkingItem[] = [];
   private seg = new SentenceAssembler();
   private finalText: string | undefined;
-  private toolSummaries = new Map<string, string>();
-  private toolLabels = new Map<string, string>();
-  private toolOrder: string[] = [];
+  private toolStatus = new Map<string, { label: string; summary?: string }>();
   private toolCalls: ToolCallRecord[] = [];
+
+  private assembledText(): string {
+    return this.seg.completed.join("") + this.seg.remainder;
+  }
+
+  private registerTool(
+    name: string,
+    display: { key: string; label: string },
+    opts: { summary?: string; called: boolean },
+  ): void {
+    this.toolStatus.set(display.key, { label: display.label, summary: opts.summary });
+    this.toolCalls.push({ name, summaryLabel: toolLabel(name), summary: opts.summary, called: opts.called });
+    if (opts.called) {
+      const existing = this.thinking.find((item): item is ToolThinkingItem => item.kind === "tool" && item.key === display.key);
+      if (existing) {
+        existing.label = display.label;
+        existing.summary = undefined;
+        return;
+      }
+    }
+    this.thinking.push({ kind: "tool", name, key: display.key, label: display.label, summary: opts.summary });
+  }
 
   onReasoningDelta(text: string): void {
     const startsNewSection = /^\s*\n/.test(text);
@@ -67,21 +89,10 @@ export class StreamShaper {
   }
 
   onToolCall(name: string, input?: unknown, metadata: ToolCallMetadata = {}): void {
-    const text = this.seg.completed.join("") + this.seg.remainder;
+    const text = this.assembledText();
     if (text.trim()) this.thinking.push({ kind: "demoted", text });
     this.finalText = undefined;
-    const display = toolDisplay(name, input, metadata);
-    if (!this.toolOrder.includes(display.key)) this.toolOrder.push(display.key);
-    this.toolLabels.set(display.key, display.label);
-    this.toolSummaries.delete(display.key);
-    this.toolCalls.push({ name, summaryLabel: toolLabel(name), called: true });
-    const existing = this.thinking.find((item): item is ToolThinkingItem => item.kind === "tool" && item.key === display.key);
-    if (existing) {
-      existing.label = display.label;
-      existing.summary = undefined;
-    } else {
-      this.thinking.push({ kind: "tool", name, key: display.key, label: display.label });
-    }
+    this.registerTool(name, toolDisplay(name, input, metadata), { called: true });
     this.seg = new SentenceAssembler();
   }
 
@@ -91,23 +102,20 @@ export class StreamShaper {
     const tool = [...this.thinking].reverse().find((item) => item.kind === "tool" && item.name === name && !item.summary);
     if (tool?.kind === "tool") {
       tool.summary = summary;
-      this.toolSummaries.set(tool.key, summary);
+      const status = this.toolStatus.get(tool.key);
+      if (status) status.summary = summary;
+      else this.toolStatus.set(tool.key, { label: tool.label, summary });
       return;
     }
-    const display = toolDisplay(name);
-    if (!this.toolOrder.includes(display.key)) this.toolOrder.push(display.key);
-    this.toolLabels.set(display.key, display.label);
-    this.toolSummaries.set(display.key, summary);
-    this.toolCalls.push({ name, summaryLabel: toolLabel(name), summary, called: false });
-    this.thinking.push({ kind: "tool", name, key: display.key, label: display.label, summary });
+    this.registerTool(name, toolDisplay(name), { summary, called: false });
   }
 
   visibleAnswer(): string {
-    return this.seg.completed.join("") + this.seg.remainder;
+    return this.assembledText();
   }
 
   finalAnswer(): string {
-    return this.finalText ?? this.seg.completed.join("") + this.seg.remainder;
+    return this.finalText ?? this.assembledText();
   }
 
   thinkingMd(): string {
@@ -149,7 +157,7 @@ export class StreamShaper {
   }
 
   toolStatusMd(): string {
-    return this.toolOrder.map((key) => formatToolLine(this.toolLabels.get(key) ?? key, this.toolSummaries.get(key))).join("\n");
+    return [...this.toolStatus.values()].map(({ label, summary }) => formatToolLine(label, summary)).join("\n");
   }
 
   runSummary(): ThinkingRunSummary {
@@ -277,25 +285,7 @@ function fileIdSubject(record: Record<string, unknown> | undefined): string | un
   return fileId === undefined ? undefined : `#${fileId}`;
 }
 
-function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
-  const value = record?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
 function truncateSubject(value: string | undefined, max: number): string | undefined {
   if (!value || value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 3))}...`;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

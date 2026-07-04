@@ -1,3 +1,5 @@
+export const RICH_MESSAGE_BYTE_LIMIT = 32768;
+
 const allowedHtmlTags = new Set([
   "b",
   "strong",
@@ -77,10 +79,11 @@ export function sanitize(md: string, options: { allowThinking?: boolean; enforce
 
 export function repairLadder(md: string): string[] {
   const sanitized = sanitize(md);
+  const escaped = escapeAllHtml(md);
   return [
     sanitized,
-    escapeAllHtml(md),
-    neutralizeExotics(escapeAllHtml(md)),
+    escaped,
+    neutralizeExotics(escaped),
     fenceWholeBlocks(md),
   ];
 }
@@ -184,7 +187,10 @@ function flattenDeepNesting(md: string): string {
 }
 
 function enforceRichLimit(md: string): string {
-  const limit = 32768;
+  const limit = RICH_MESSAGE_BYTE_LIMIT;
   if (Buffer.byteLength(md, "utf8") <= limit) return md;
-  return Buffer.from(md, "utf8").subarray(0, limit - 32).toString("utf8") + "\n\n[truncated]";
+  const bytes = Buffer.from(md, "utf8");
+  let end = limit - 32;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8") + "\n\n[truncated]";
 }
