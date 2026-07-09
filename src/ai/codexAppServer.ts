@@ -360,7 +360,7 @@ class CodexRpcSession {
       model,
       serviceTier: codexServiceTier(input.config),
     };
-    if (model === input.config.CODEX_MODEL) params.effort = input.config.REASONING_EFFORT;
+    if (input.model === undefined) params.effort = input.config.REASONING_EFFORT;
     if (input.config.REASONING_SUMMARY !== "none") params.summary = input.config.REASONING_SUMMARY;
     void this.request("turn/start", params).catch((err) => this.stream.fail(err));
   }

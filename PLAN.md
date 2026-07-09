@@ -73,7 +73,7 @@ ai-tele-bot/
 | `TELEGRAM_ADMIN_ID` | required | **single** admin user id (number) |
 | `DB_URL` | `sqlite:./data/bot.db` | or `postgres://user:pass@host:5432/db` |
 | `CODEX_MODEL` | `gpt-5.6-sol` | normal chat model |
-| `CODEX_COMPACTION_MODEL` | `gpt-5.4-mini` | compaction summaries and image descriptions |
+| `CODEX_COMPACTION_MODEL` | `gpt-5.6-luna` | compaction summaries and image descriptions |
 | `CODEX_SPEED_MODE` | `fast` | `standard|fast`; `fast` maps to Codex `priority` service tier |
 | `REASONING_EFFORT` | `medium` | Normal-chat reasoning effort; helper-model turns use their model default |
 | `OPENROUTER_API_KEY` | required | embeddings only |

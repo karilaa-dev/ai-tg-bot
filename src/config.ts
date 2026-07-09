@@ -17,7 +17,7 @@ const ConfigSchema = z.object({
   TELEGRAM_ADMIN_ID: z.coerce.number().int(),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   CODEX_MODEL: z.string().default("gpt-5.6-sol"),
-  CODEX_COMPACTION_MODEL: z.string().default("gpt-5.4-mini"),
+  CODEX_COMPACTION_MODEL: z.string().default("gpt-5.6-luna"),
   CODEX_IMAGE_MODEL: z.string().default("gpt-image-2"),
   CODEX_IMAGE_QUALITY: CodexImageQualitySchema.default("low"),
   CODEX_IMAGE_TIMEOUT_MS: z.coerce.number().int().min(0).default(300_000),

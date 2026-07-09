@@ -90,7 +90,8 @@ describe("Codex app-server client", () => {
 
   it("omits the chat reasoning effort for helper-model turns", async () => {
     const config = loadTestConfig({
-      CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
+      CODEX_MODEL: "gpt-5.6-luna",
+      CODEX_COMPACTION_MODEL: "gpt-5.6-luna",
       REASONING_EFFORT: "ultra",
     });
     const partsPromise = collect(streamCodexTurn({
@@ -102,11 +103,11 @@ describe("Codex app-server client", () => {
     const initialize = await waitForSent(transport, (message) => message.method === "initialize");
     transport.emit({ id: initialize.id, result: {} });
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
-    expect(threadStart.params).toMatchObject({ model: "gpt-5.4-mini" });
+    expect(threadStart.params).toMatchObject({ model: "gpt-5.6-luna" });
     transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
 
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
-    expect(turnStart.params).toMatchObject({ model: "gpt-5.4-mini", summary: "detailed" });
+    expect(turnStart.params).toMatchObject({ model: "gpt-5.6-luna", summary: "detailed" });
     expect(turnStart.params).not.toHaveProperty("effort");
     transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
     transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });

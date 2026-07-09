@@ -137,11 +137,11 @@ Important optional values:
 
 - `DB_URL` defaults to `sqlite:./data/bot.db`.
 - `CODEX_MODEL` controls normal chat turns.
-- `CODEX_COMPACTION_MODEL` controls memory compaction and image descriptions.
+- `CODEX_COMPACTION_MODEL` controls memory compaction and image descriptions and defaults to `gpt-5.6-luna`.
 - `CODEX_IMAGE_MODEL`, `CODEX_IMAGE_QUALITY`, and `CODEX_IMAGE_TIMEOUT_MS` control generated-image turns.
 - `CODEX_SPEED_MODE=fast` maps to Codex Fast mode via `serviceTier: "priority"`.
 - `CODEX_VERBOSITY` is sent as Codex `model_verbosity`.
-- Normal chat defaults to `CODEX_MODEL=gpt-5.6-sol`, `REASONING_EFFORT=medium`, and `REASONING_SUMMARY=detailed`; all three can be overridden in `.env`. Helper-model turns omit the chat effort override.
+- Normal chat defaults to `CODEX_MODEL=gpt-5.6-sol`, `REASONING_EFFORT=medium`, and `REASONING_SUMMARY=detailed`; all three can be overridden in `.env`. Turns with an explicit model override, including compaction and image captions, omit the chat effort override.
 - `CODEX_TURN_TIMEOUT_MS` defaults to 15 minutes; set it to `0` to disable the hard cap.
 - `OPENROUTER_EMBEDDING_MODEL` defaults to `perplexity/pplx-embed-v1-0.6b`.
 - `DOCLING_URL` and `DOCLING_TIMEOUT_MS` control Docling conversion.

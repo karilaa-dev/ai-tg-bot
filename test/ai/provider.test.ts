@@ -18,6 +18,7 @@ describe("Codex provider helpers", () => {
     const config = loadTestConfig();
 
     expect(config.CODEX_MODEL).toBe("gpt-5.6-sol");
+    expect(config.CODEX_COMPACTION_MODEL).toBe("gpt-5.6-luna");
     expect(config.CODEX_SPEED_MODE).toBe("fast");
     expect(config.REASONING_EFFORT).toBe("medium");
     expect(config.REASONING_SUMMARY).toBe("detailed");
@@ -48,7 +49,7 @@ describe("Codex provider helpers", () => {
       TELEGRAM_ADMIN_ID: "1000",
       DB_URL: "sqlite::memory:",
       CODEX_MODEL: "gpt-5.6-terra",
-      CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
+      CODEX_COMPACTION_MODEL: "custom-compaction-model",
       CODEX_SPEED_MODE: "standard",
       CODEX_VERBOSITY: "high",
       REASONING_EFFORT: "high",
@@ -60,7 +61,7 @@ describe("Codex provider helpers", () => {
     });
 
     expect(config.CODEX_MODEL).toBe("gpt-5.6-terra");
-    expect(config.CODEX_COMPACTION_MODEL).toBe("gpt-5.4-mini");
+    expect(config.CODEX_COMPACTION_MODEL).toBe("custom-compaction-model");
     expect(config.CODEX_IMAGE_MODEL).toBe("gpt-image-2");
     expect(config.CODEX_IMAGE_QUALITY).toBe("low");
     expect(config.CODEX_IMAGE_TIMEOUT_MS).toBe(300_000);
