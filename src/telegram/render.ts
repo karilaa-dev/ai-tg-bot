@@ -2,6 +2,8 @@ import type { InputRichMessage } from "./richApi.js";
 import { RICH_MESSAGE_BYTE_LIMIT, repairLadder, sanitize } from "./mdRepair.js";
 
 const SHOW_MORE_THRESHOLD = 3500;
+const FINAL_THINKING_WRAPPER_RESERVE_BYTES = 1024;
+const THINKING_TRUNCATION_MARKER = "…";
 
 export type RenderT = (key: string, params?: Record<string, string | number>) => string;
 
@@ -20,7 +22,8 @@ export interface RenderDraftInput {
 }
 
 export function renderFinal(input: RenderFinalInput): InputRichMessage[] {
-  const thinking = renderThinkingDetails(input.thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs));
+  const thinkingLog = capFinalThinking(input.thinkingLog);
+  const thinking = renderThinkingDetails(thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs));
   const answer = withShowMore(sanitize(input.answerMd, { enforceLimit: false }), SHOW_MORE_THRESHOLD, input.t);
   return splitRich(`${thinking}${answer}`).map((markdown) => ({ markdown: sanitize(markdown) }));
 }
@@ -51,6 +54,23 @@ function renderThinkingDetails(thinkingLog: string | undefined, title: string): 
   const trimmed = thinkingLog?.trim();
   if (!trimmed) return "";
   return `<details>\n<summary>${title}</summary>\n\n${trimmed}\n\n</details>\n\n`;
+}
+
+function capFinalThinking(thinkingLog: string | undefined): string | undefined {
+  const sanitized = thinkingLog ? sanitize(thinkingLog, { enforceLimit: false }).trim() : "";
+  if (!sanitized) return undefined;
+  const maxBytes = RICH_MESSAGE_BYTE_LIMIT - FINAL_THINKING_WRAPPER_RESERVE_BYTES;
+  if (Buffer.byteLength(sanitized, "utf8") <= maxBytes) return sanitized;
+
+  const marker = `\n\n${THINKING_TRUNCATION_MARKER}`;
+  const blocks = sanitized.split(/\n{2,}/);
+  let capped = "";
+  for (const block of blocks) {
+    const candidate = capped ? `${capped}\n\n${block}` : block;
+    if (Buffer.byteLength(`${candidate}${marker}`, "utf8") > maxBytes) break;
+    capped = candidate;
+  }
+  return capped ? `${capped}${marker}` : THINKING_TRUNCATION_MARKER;
 }
 
 function findBlockBoundary(md: string, threshold: number): number {
