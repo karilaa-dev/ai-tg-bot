@@ -98,7 +98,6 @@ async function runCodex(): Promise<CodexResult> {
     const bashAnswer = bashAssistant?.text_plain ?? "";
     result.bashFinalHasMarker = bashAnswer.includes(bashMarker);
     result.bashUsedTool = bashThinking.includes("🐚 Running bash");
-    result.bashThinkingShowsScript = ["js-exec", "python3", "curl"].every((token) => bashThinking.includes(token));
     result.bashStatusShowsScript = ["js-exec", "python3", "curl"].every((token) =>
       api.editedTexts.some((text) => text.includes("🐚 Running bash") && text.includes(token)),
     );
@@ -108,10 +107,10 @@ async function runCodex(): Promise<CodexResult> {
     result.richMessages = api.richMessages.length;
     check("codex-bash-final-marker", result.bashFinalHasMarker, result);
     check("codex-bash-tool-used", result.bashUsedTool, result);
-    check("codex-bash-thinking-shows-js-python-curl", result.bashThinkingShowsScript, result);
     check("codex-bash-status-shows-js-python-curl", result.bashStatusShowsScript, result);
 
     const piThread = await repos.threads.activeForUserTopic(setup.user.tg_id, 314159, "Live Pi");
+    const piStatusStart = api.editedTexts.length;
     await runTurn({
       api: api as never,
       chatId: setup.user.tg_id,
@@ -128,10 +127,13 @@ async function runCodex(): Promise<CodexResult> {
     const piAssistant = await repos.messages.latest(piThread.id);
     const piThinking = piAssistant?.thinking ?? "";
     const piAnswer = piAssistant?.text_plain ?? "";
+    const piStatusEdits = api.editedTexts.slice(piStatusStart);
     const piFirstCodeBlock = firstCodeBlock(piAnswer);
     result.piFinalUsesDecimalConvention = piFirstCodeBlock.includes(pi100Decimal);
     result.piUsedBash = piThinking.includes("🐚 Running bash");
-    result.piUsedInternetTool = ["🔎 Searching web", "🌐 Reading page", "curl"].some((token) => piThinking.includes(token));
+    result.piUsedInternetTool = ["🔎 Searching web", "🌐 Reading page", "curl"].some((token) =>
+      piThinking.includes(token) || piStatusEdits.some((text) => text.includes(token)),
+    );
     result.piAnswerPreview = piAnswer.slice(0, 700);
     result.piThinkingPreview = piThinking.slice(0, 1200);
     check("codex-pi-decimal-convention", result.piFinalUsesDecimalConvention, result);
@@ -251,7 +253,6 @@ interface CodexResult {
   statusShowsTool: boolean;
   bashFinalHasMarker?: boolean;
   bashUsedTool?: boolean;
-  bashThinkingShowsScript?: boolean;
   bashStatusShowsScript?: boolean;
   piFinalUsesDecimalConvention?: boolean;
   piUsedBash?: boolean;

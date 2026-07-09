@@ -72,7 +72,7 @@ export function setCodexTransportFactoryForTests(factory?: CodexTransportFactory
 }
 
 export function codexServiceTier(config: AppConfig): string | null {
-  return config.CODEX_SPEED_MODE === "fast" ? "fast" : null;
+  return config.CODEX_SPEED_MODE === "fast" ? "priority" : null;
 }
 
 // Applied both as process-level -c overrides (ProcessCodexTransport spawn) and per-thread config in thread/start; keep the two in sync via this helper.

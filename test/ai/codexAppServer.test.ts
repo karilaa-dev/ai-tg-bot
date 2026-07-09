@@ -166,7 +166,7 @@ describe("Codex app-server client", () => {
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
     expect(threadStart.params).toMatchObject({
       model: "gpt-5.5",
-      serviceTier: "fast",
+      serviceTier: "priority",
       approvalPolicy: "never",
       sandbox: "read-only",
       config: {
@@ -193,7 +193,7 @@ describe("Codex app-server client", () => {
     expect(turnStart.params).toMatchObject({
       threadId: "thread-1",
       model: "gpt-5.5",
-      serviceTier: "fast",
+      serviceTier: "priority",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
     });
     expect(turnStart.params).not.toHaveProperty("summary");

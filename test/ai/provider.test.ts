@@ -14,6 +14,13 @@ describe("Codex provider helpers", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("defaults normal Codex turns to Terra on the fast service tier", () => {
+    const config = loadTestConfig();
+
+    expect(config.CODEX_MODEL).toBe("gpt-5.6-terra");
+    expect(config.CODEX_SPEED_MODE).toBe("fast");
+  });
+
   it("posts embedding requests to OpenRouter only for vectors", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       data: [

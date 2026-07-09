@@ -139,7 +139,7 @@ Important optional values:
 - `CODEX_MODEL` controls normal chat turns.
 - `CODEX_COMPACTION_MODEL` controls memory compaction and image descriptions.
 - `CODEX_IMAGE_MODEL`, `CODEX_IMAGE_QUALITY`, and `CODEX_IMAGE_TIMEOUT_MS` control generated-image turns.
-- `CODEX_SPEED_MODE=fast` maps to Codex `serviceTier: "fast"`.
+- `CODEX_SPEED_MODE=fast` maps to Codex Fast mode via `serviceTier: "priority"`.
 - `CODEX_VERBOSITY` is sent as Codex `model_verbosity`.
 - `REASONING_SUMMARY` defaults to `none`; set it to `auto`, `concise`, or `detailed` to stream Codex reasoning summaries into the thinking block.
 - `CODEX_TURN_TIMEOUT_MS` defaults to 15 minutes; set it to `0` to disable the hard cap.
@@ -196,7 +196,7 @@ Docker entrypoint and image checks:
 docker compose config
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml config
 docker compose build --pull bot
-docker compose build --build-arg CODEX_RELEASE=0.142.4 bot
+docker compose build --build-arg CODEX_RELEASE=0.144.0 bot
 docker compose run --rm bot codex --version
 docker compose run --rm bot codex login status
 ```
