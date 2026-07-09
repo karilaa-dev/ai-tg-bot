@@ -75,7 +75,7 @@ ai-tele-bot/
 | `CODEX_MODEL` | `gpt-5.6-sol` | normal chat model |
 | `CODEX_COMPACTION_MODEL` | `gpt-5.4-mini` | compaction summaries and image descriptions |
 | `CODEX_SPEED_MODE` | `fast` | `standard|fast`; `fast` maps to Codex `priority` service tier |
-| `REASONING_EFFORT` | `medium` | Codex reasoning effort; supported values depend on the selected model |
+| `REASONING_EFFORT` | `medium` | Normal-chat reasoning effort; helper-model turns use their model default |
 | `OPENROUTER_API_KEY` | required | embeddings only |
 | `OPENROUTER_EMBEDDING_MODEL` | `perplexity/pplx-embed-v1-0.6b` | retrieval vectors |
 | `TAVILY_API_KEY` | required | web search tool |

@@ -72,6 +72,7 @@ export function setCodexTransportFactoryForTests(factory?: CodexTransportFactory
 }
 
 export function codexServiceTier(config: AppConfig): string | null {
+  // Codex accepts "fast" as a legacy alias; "priority" is the canonical request value.
   return config.CODEX_SPEED_MODE === "fast" ? "priority" : null;
 }
 
@@ -349,16 +350,17 @@ class CodexRpcSession {
 
   startTurn(threadId: string, input: CodexTurnInput): void {
     const userInputs = input.userInputs ?? [{ type: "text" as const, text: promptText(input), text_elements: [] as [] }];
+    const model = input.model ?? input.config.CODEX_MODEL;
     const params: Record<string, unknown> = {
       threadId,
       input: userInputs,
       cwd: input.cwd ?? process.cwd(),
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
-      model: input.model ?? input.config.CODEX_MODEL,
+      model,
       serviceTier: codexServiceTier(input.config),
-      effort: input.config.REASONING_EFFORT,
     };
+    if (model === input.config.CODEX_MODEL) params.effort = input.config.REASONING_EFFORT;
     if (input.config.REASONING_SUMMARY !== "none") params.summary = input.config.REASONING_SUMMARY;
     void this.request("turn/start", params).catch((err) => this.stream.fail(err));
   }
