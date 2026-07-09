@@ -73,6 +73,59 @@ The default Compose stack uses SQLite, stores uploaded/generated files under `/a
 
 The bot does not mount host `~/.codex` by default. Secrets stay out of the image; `.env` is loaded only at runtime.
 
+## Setup On Unraid
+
+The v2 Unraid template runs `ghcr.io/karilaa-dev/ai-tg-bot:latest` with bridge networking, no privileged access, no WebUI, and no published ports. Telegram communication uses outbound long polling. The `latest` tag intentionally replaces the repository's obsolete Python image with the current TypeScript application.
+
+1. From an Unraid terminal, install the raw template into the user-template directory, then refresh the Docker page:
+
+   ```bash
+   mkdir -p /boot/config/plugins/dockerMan/templates-user
+   wget -O /boot/config/plugins/dockerMan/templates-user/my-ai-tg-bot.xml \
+     https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/ai-tg-bot.xml
+   ```
+
+2. Select **Add Container**, choose **ai-tg-bot** from the template list, and fill in `BOT_TOKEN`, `TELEGRAM_ADMIN_ID`, `OPENROUTER_API_KEY`, `TAVILY_API_KEY`, and `DOCLING_URL`. Open **Show more settings** to change optional runtime values.
+
+   Unraid saves environment values, including masked secrets, in its user-template XML under `/boot/config/plugins/dockerMan/templates-user` on the flash drive. They are not stored in the appdata mount, so protect Unraid flash backups accordingly.
+
+3. Keep the two persistent mounts unless your shares use different host paths:
+
+   | Host path | Container path | Contents |
+   | --- | --- | --- |
+   | `/mnt/user/appdata/ai-tg-bot` | `/app/data` | SQLite database and WAL files, Codex auth/config, and persistent home/cache state |
+   | `/mnt/user/ai-tg-bot` | `/app/data/files` | Telegram uploads, generated files, and virtual-shell workspaces |
+
+   The template sets `DB_URL=sqlite:/app/data/bot.db`, `CODEX_HOME=/app/data/codex`, `HOME=/app/data/home`, and `BASH_WORKSPACE_ROOT=/app/data/files/bash`. The database therefore stays in appdata, while just-bash workspaces and user files stay in the separate user share.
+
+4. Start the container and authenticate Codex once. Open the container's **Console** in the Unraid Docker page and run:
+
+   ```bash
+   codex login --device-auth
+   codex login status
+   ```
+
+   The equivalent Unraid terminal commands are:
+
+   ```bash
+   docker exec -it ai-tg-bot codex login --device-auth
+   docker exec -it ai-tg-bot codex login status
+   ```
+
+   Authentication persists under `/mnt/user/appdata/ai-tg-bot/codex` across container recreation.
+
+The template runs as Unraid's `99:100` (`nobody:users`) account. If startup reports permission errors, stop the container and repair ownership before restarting it:
+
+```bash
+mkdir -p /mnt/user/appdata/ai-tg-bot /mnt/user/ai-tg-bot
+chown -R 99:100 /mnt/user/appdata/ai-tg-bot /mnt/user/ai-tg-bot
+chmod -R u+rwX,g+rwX /mnt/user/appdata/ai-tg-bot /mnt/user/ai-tg-bot
+```
+
+No Docling container is included. For a third-party Docling container, place both containers on the same custom Docker network and set `DOCLING_URL=http://<docling-container-name>:5001`, or use its published LAN endpoint such as `http://192.168.1.10:5001`. Docling is required for DOCX conversion and low-text PDF fallback but is otherwise optional at runtime.
+
+Stop `ai-tg-bot` before backing up `/mnt/user/appdata/ai-tg-bot`; copying a live SQLite database without its matching WAL state can produce an inconsistent backup. Back up `/mnt/user/ai-tg-bot` separately when uploaded and generated user files should be retained.
+
 ## Docker With Postgres
 
 Use `docker-compose.postgres.yml` when the Docker bot should use Postgres instead of the default SQLite volume:

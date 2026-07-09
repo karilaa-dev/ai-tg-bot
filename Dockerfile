@@ -16,15 +16,15 @@ FROM node:22-bookworm-slim AS runtime
 
 ARG CODEX_RELEASE=0.144.0
 
+LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot" \
+      org.opencontainers.image.description="AI Telegram bot powered by Codex with OpenRouter, Tavily, and Docling integrations"
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN CODEX_NON_INTERACTIVE=1 \
-    CODEX_RELEASE=$CODEX_RELEASE \
-    CODEX_INSTALL_DIR=/usr/local/bin \
-    CODEX_HOME=/opt/codex-cli \
-    sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+RUN npm install --global "@openai/codex@${CODEX_RELEASE}" \
+    && npm cache clean --force
 
 WORKDIR /app
 
@@ -45,7 +45,5 @@ RUN mkdir -p /app/data /home/node/.codex \
     && chown -R node:node /app /home/node/.codex
 
 USER node
-
-VOLUME ["/app/data", "/home/node/.codex"]
 
 CMD ["node", "dist/src/main.js"]

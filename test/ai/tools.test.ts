@@ -1067,18 +1067,21 @@ describe("AI tools", () => {
       ),
       telegramFileId: "telegram-csv-id",
     });
-    const pdf = await attachFile({
-      repos,
-      config: searchableConfig,
-      userId: user.tg_id,
-      threadId: parent.id,
-      name: "book-section.pdf",
-      mime: "application/pdf",
-      bytes: makePdf(
-        "The compacted book section says SODIUM ORBIT 42 is the retrieval marker for the lifecycle chapter. ".repeat(12),
-      ),
-      telegramFileId: "telegram-pdf-id",
-    });
+    const pdfText =
+      "The compacted book section says SODIUM ORBIT 42 is the retrieval marker for the lifecycle chapter. ".repeat(12);
+    const pdf = await withMockFetch(
+      async () => new Response(JSON.stringify({ document: { md_content: pdfText } }), { status: 200 }),
+      () => attachFile({
+        repos,
+        config: searchableConfig,
+        userId: user.tg_id,
+        threadId: parent.id,
+        name: "book-section.pdf",
+        mime: "application/pdf",
+        bytes: makePdf(pdfText),
+        telegramFileId: "telegram-pdf-id",
+      }),
+    );
     const image = await attachFile({
       repos,
       config: searchableConfig,

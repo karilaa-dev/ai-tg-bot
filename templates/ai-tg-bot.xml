@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>ai-tg-bot</Name>
+  <Repository>ghcr.io/karilaa-dev/ai-tg-bot:latest</Repository>
+  <Registry>https://github.com/karilaa-dev/ai-tg-bot/pkgs/container/ai-tg-bot</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/karilaa-dev/ai-tg-bot/issues</Support>
+  <Project>https://github.com/karilaa-dev/ai-tg-bot</Project>
+  <Overview>Personal Telegram AI assistant powered by Codex app-server, with persistent conversation memory, file processing, web tools, image generation, and per-thread shell workspaces.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/ai-tg-bot.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/README.md</ReadMe>
+  <Icon>https://telegram.org/img/t_logo.png</Icon>
+  <ExtraParams>--user=99:100</ExtraParams>
+  <Requires>A Telegram bot token, OpenRouter API key, Tavily API key, and a reachable Docling server.</Requires>
+
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database, Codex authentication and configuration, home directory, and cache state." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="User Files" Target="/app/data/files" Default="/mnt/user/ai-tg-bot" Mode="rw" Description="Persistent Telegram uploads, generated files, and per-thread shell workspaces." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token used to receive updates and call Telegram APIs." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Telegram Admin ID" Target="TELEGRAM_ADMIN_ID" Default="" Description="Telegram numeric user ID allowed to administer the bot and bypass invite checks." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter API key used for embeddings and retrieval vectors." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily API key used by the web search and page extraction tools." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Docling URL" Target="DOCLING_URL" Default="http://docling:5001" Description="Base URL of a reachable Docling server. Use its container name on a shared custom network or its LAN address and exposed port." Type="Variable" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="Home Directory" Target="HOME" Default="/app/data/home" Description="Persistent home directory inside the appdata mount." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Database URL" Target="DB_URL" Default="sqlite:/app/data/bot.db" Description="SQLite database URL. Keep this path in appdata so the database and WAL files remain persistent." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Codex Home" Target="CODEX_HOME" Default="/app/data/codex" Description="Persistent Codex authentication and configuration directory." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Bash Workspace Root" Target="BASH_WORKSPACE_ROOT" Default="/app/data/files/bash" Description="Root directory for persistent per-thread just-bash virtual workspaces." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+
+  <Config Name="Codex Model" Target="CODEX_MODEL" Default="gpt-5.6-sol" Description="Codex app-server model for normal chat turns." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Compaction Model" Target="CODEX_COMPACTION_MODEL" Default="gpt-5.6-luna" Description="Codex model for compaction summaries and compaction-time image descriptions." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Image Model" Target="CODEX_IMAGE_MODEL" Default="gpt-image-2" Description="Codex image generation model." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Image Quality" Target="CODEX_IMAGE_QUALITY" Default="low" Description="Image generation quality: low, medium, high, or auto." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Image Timeout" Target="CODEX_IMAGE_TIMEOUT_MS" Default="300000" Description="Maximum milliseconds for one generated-image turn. Set to 0 to disable the hard cap." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Speed Mode" Target="CODEX_SPEED_MODE" Default="fast" Description="Codex service tier mode: standard or fast." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Verbosity" Target="CODEX_VERBOSITY" Default="high" Description="Codex model output verbosity: low, medium, or high." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Codex Turn Timeout" Target="CODEX_TURN_TIMEOUT_MS" Default="900000" Description="Maximum milliseconds for one Codex turn. Set to 0 to disable the hard cap." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Reasoning Effort" Target="REASONING_EFFORT" Default="medium" Description="Reasoning effort for normal chat turns: none, minimal, low, medium, high, xhigh, max, or ultra." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Reasoning Summary" Target="REASONING_SUMMARY" Default="detailed" Description="Reasoning summary verbosity: auto, concise, detailed, or none." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OpenRouter Embedding Model" Target="OPENROUTER_EMBEDDING_MODEL" Default="perplexity/pplx-embed-v1-0.6b" Description="OpenRouter model used for file, message, summary, and retrieval vectors." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Context Warning Ratio" Target="CONTEXT_WARN_RATIO" Default="0.85" Description="Fraction of usable context that triggers context-limit handling before a turn is sent." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Docling Timeout" Target="DOCLING_TIMEOUT_MS" Default="300000" Description="Docling conversion timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="File Inline Tokens" Target="FILE_INLINE_TOKENS" Default="6000" Description="Maximum estimated file tokens to inline before chunking and search indexing." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one just-bash tool execution." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Bash Max Output" Target="BASH_MAX_OUTPUT_CHARS" Default="12000" Description="Maximum characters returned for each bash stdout or stderr stream." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Draft Update Interval" Target="DRAFT_UPDATE_MS" Default="0" Description="Minimum milliseconds between streaming draft or status edits. Set to 0 to disable throttling." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Onboarding Timezone Delay" Target="ONBOARDING_TIMEZONE_DELAY_MS" Default="2000" Description="Delay in milliseconds before sending the onboarding timezone prompt." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Stream Delta Characters" Target="STREAM_DELTA_CHARS" Default="48" Description="Number of characters per text or reasoning stream chunk before draft rendering." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Recent Window Messages" Target="RECENT_WINDOW_MESSAGES" Default="20" Description="Number of newest messages preserved verbatim when compacting a thread." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Log Level" Target="LOG_LEVEL" Default="info" Description="Minimum logger level: debug, info, warn, or error." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>
