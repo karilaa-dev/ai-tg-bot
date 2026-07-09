@@ -412,23 +412,32 @@ function buildFinalThinkingSummary(input: {
   const summary = input.shaper.runSummary();
   const requestedFiles = input.attachments.length;
   const extraReasoning = (input.extraReasoning ?? []).map((item) => item.trim()).filter(Boolean);
-  const reasoningTitles = [...summary.reasoningTitles, ...extraReasoning];
-  if (!reasoningTitles.length && !summary.toolCallCount && !requestedFiles) return "";
+  const reasoningSummaries = [...summary.reasoningSummaries, ...extraReasoning];
+  if (!reasoningSummaries.length && !summary.toolCallCount && !requestedFiles) return "";
 
-  const lines = [
+  const counters = [
     input.t("thinking-final-tool-calls", {
       count: summary.toolCallCount,
     }),
   ];
 
-  if (reasoningTitles.length) {
-    lines.push(input.t("thinking-final-reasoning", { count: reasoningTitles.length }));
-    lines.push(...reasoningTitles.map((title) => `- ${title}`));
+  if (reasoningSummaries.length) {
+    counters.push(input.t("thinking-final-reasoning", { count: reasoningSummaries.length }));
+  }
+
+  const sections = [counters.join(" · ")];
+
+  if (reasoningSummaries.length) {
+    sections.push(reasoningSummaries.map(formatMarkdownListItem).join("\n\n"));
   }
 
   if (summary.toolCounts.length) {
-    lines.push(input.t("thinking-final-tools"));
-    lines.push(...summary.toolCounts.map((tool) => `- ${tool.label}: ${tool.count}`));
+    // Telegram can retain the preceding loose reasoning list without an explicit block boundary.
+    const toolsHeading = `<p>${escapeHtml(input.t("thinking-final-tools"))}</p>`;
+    sections.push([
+      toolsHeading,
+      summary.toolCounts.map((tool) => `- ${tool.label}: ${tool.count}`).join("\n"),
+    ].join("\n\n"));
   }
 
   if (requestedFiles) {
@@ -437,19 +446,23 @@ function buildFinalThinkingSummary(input: {
       .slice(0, sentFiles)
       .map((file) => `<code>${escapeHtml(file.name)}</code>`)
       .join(", ");
-    lines.push(
+    const filesLabel =
       requestedFiles > sentFiles
         ? input.t("thinking-final-files-capped", {
             sent: sentFiles,
             requested: requestedFiles,
             limit: MAX_CREATED_FILES_PER_ANSWER,
           })
-        : input.t("thinking-final-files", { count: sentFiles }),
-    );
-    if (sentNames) lines.push(sentNames);
+        : input.t("thinking-final-files", { count: sentFiles });
+    sections.push(sentNames ? `${filesLabel}\n\n${sentNames}` : filesLabel);
   }
 
-  return lines.join("\n");
+  return sections.join("\n\n");
+}
+
+function formatMarkdownListItem(text: string): string {
+  const [firstLine = "", ...continuation] = text.trim().split("\n");
+  return [`- ${firstLine}`, ...continuation.map((line) => line ? `  ${line}` : "")].join("\n");
 }
 
 function draftAnswerWhileGeneratingImage(answer: string, hasGenerateImageCall: boolean): string {
@@ -522,8 +535,8 @@ function appendGeneratedImageDemotedThinking(
 ): string {
   const note = demotedReasoning?.trim();
   if (!note) return thinking;
-  const section = `${t("thinking-final-reasoning", { count: 1 })}\n- ${note}`;
-  return thinking.trim() ? `${thinking.trimEnd()}\n${section}` : section;
+  const section = `${t("thinking-final-reasoning", { count: 1 })}\n\n${formatMarkdownListItem(note)}`;
+  return thinking.trim() ? `${thinking.trimEnd()}\n\n${section}` : section;
 }
 
 export async function sendFinal(

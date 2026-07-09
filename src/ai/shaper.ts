@@ -22,7 +22,7 @@ export type ToolCallMetadata = {
 };
 
 export type ThinkingRunSummary = {
-  reasoningTitles: string[];
+  reasoningSummaries: string[];
   toolCallCount: number;
   toolCounts: ToolCountSummary[];
 };
@@ -127,7 +127,7 @@ export class StreamShaper {
       .map((item) => {
         if (item.kind === "demoted") return "";
         if (item.kind === "tool") return formatToolLine(item.label, item.summary);
-        return item.text.trim();
+        return cleanReasoningMarkdown(item.text);
       })
       .filter(Boolean)
       .join("\n\n");
@@ -162,7 +162,11 @@ export class StreamShaper {
 
   runSummary(): ThinkingRunSummary {
     return {
-      reasoningTitles: this.thinking.flatMap((item) => item.kind === "reasoning" ? reasoningTitles(item.text) : []),
+      reasoningSummaries: this.thinking.flatMap((item) => {
+        if (item.kind !== "reasoning") return [];
+        const summary = cleanReasoningMarkdown(item.text);
+        return summary ? [summary] : [];
+      }),
       toolCallCount: this.toolCalls.filter((tool) => tool.called).length,
       toolCounts: aggregateToolCounts(this.toolCalls),
     };
@@ -179,13 +183,22 @@ function aggregateToolCounts(tools: ToolCallRecord[]): ToolCountSummary[] {
 }
 
 function reasoningTitles(text: string): string[] {
-  const title = text.split("\n").map((line) => normalizeReasoningTitle(line)).find(Boolean);
+  const title = cleanReasoningMarkdown(text).split("\n").map((line) => normalizeReasoningTitle(line)).find(Boolean);
   return title && looksLikeReasoningTitle(title) ? [title] : [];
 }
 
 function looksLikeReasoningTitle(line: string): boolean {
   if (!line || line.length > 120) return false;
   return !/[.!?]$/.test(line);
+}
+
+function cleanReasoningMarkdown(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]*<!--(?:[\s\S]*?-->|[\s\S]*$)[ \t]*/g, "\n\n")
+    .replace(/<(?:!|!-)?$/, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function normalizeReasoningTitle(line: string): string {

@@ -87,11 +87,22 @@ describe("runTurn with Codex app-server inference", () => {
     expect(editedTexts.some((text) => text.includes("💬 Searching chat <code>alpha</code> ("))).toBe(true);
     expect(editedTexts.at(-1)).toContain("✅ Done.\n\n💬 Searching chat <code>alpha</code>");
     expect(JSON.stringify(richPayloads)).toContain("Codex found alpha.");
+    expect(JSON.stringify(richPayloads)).toContain("Reasoning blocks: 1");
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Codex found alpha." });
-    expect(latest?.thinking).toContain("Tool calls: 1");
-    expect(latest?.thinking).toContain("- 💬 Searching chat: 1");
+    expect(latest?.thinking).toBe([
+      "Tool calls: 1 · Reasoning blocks: 1",
+      "",
+      "- **Considering the request**",
+      "",
+      "  I should search the thread for the requested detail.",
+      "",
+      "<p>Tools:</p>",
+      "",
+      "- 💬 Searching chat: 1",
+    ].join("\n"));
+    expect(latest?.thinking).not.toContain("<!--");
     expect(latest?.thinking).not.toContain("💬 Searching chat <code>alpha</code>");
     const embeddings = await repos.embeddings.list("message", [latest!.id]);
     expect(embeddings[0]?.model).toBe(config.OPENROUTER_EMBEDDING_MODEL);
@@ -228,6 +239,16 @@ class ScriptedCodexTransport implements CodexTransport {
     } else if (message.method === "turn/start") {
       queueMicrotask(() => {
         this.emit({ id: message.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+        this.emit({
+          method: "item/reasoning/summaryTextDelta",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "reason-1",
+            delta: "**Considering the request**<!-- -->I should search the thread for the requested detail.",
+            summaryIndex: 0,
+          },
+        });
         this.emit({
           id: 900,
           method: "item/tool/call",

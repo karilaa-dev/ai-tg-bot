@@ -59,7 +59,7 @@ describe("StreamShaper", () => {
     expect(s.thinkingMd()).not.toContain("web_search");
   });
 
-  it("compacts reasoning to block titles while preserving tool summaries", () => {
+  it("keeps full run summaries while preserving the compact title view", () => {
     const s = new StreamShaper();
     s.onReasoningDelta([
       "Comparing runtimes effectively",
@@ -71,6 +71,7 @@ describe("StreamShaper", () => {
       "Creating files and verification",
       "I need to create output files and verify them.",
     ].join("\n"));
+    s.onReasoningDelta("\n\n<!-- -->");
     s.onTextDelta("I will check this first.");
     s.onToolCall("web_search", { query: "alpha" });
     s.onToolResult("web_search", "5 results");
@@ -90,9 +91,33 @@ describe("StreamShaper", () => {
     expect(s.streamingThinkingMd()).toContain("🔎 Searching web <code>alpha</code> (5 results)");
     expect(s.streamingThinkingMd()).not.toContain("I will check this first");
     expect(s.runSummary()).toEqual({
-      reasoningTitles: ["Comparing runtimes effectively", "Creating files and verification"],
+      reasoningSummaries: [
+        "Comparing runtimes effectively\nFor comparing runtimes, I will inspect the available data.",
+        "Creating files and verification\nI need to create output files and verify them.",
+      ],
       toolCallCount: 1,
       toolCounts: [{ label: "🔎 Searching web", count: 1 }],
+    });
+  });
+
+  it("normalizes streamed reasoning comment separators before rendering and persistence", () => {
+    const s = new StreamShaper();
+    s.onReasoningDelta("**Planning file reading**<!");
+    expect(s.streamingThinkingMd()).toBe("**Planning file reading**");
+
+    s.onReasoningDelta("-- -->**Searching the chapter**<!-- -->**Summarizing results**");
+
+    const expected = [
+      "**Planning file reading**",
+      "**Searching the chapter**",
+      "**Summarizing results**",
+    ].join("\n\n");
+    expect(s.streamingThinkingMd()).toBe(expected);
+    expect(s.streamingThinkingMd()).not.toContain("<!--");
+    expect(s.runSummary()).toEqual({
+      reasoningSummaries: [expected],
+      toolCallCount: 0,
+      toolCounts: [],
     });
   });
 
@@ -144,7 +169,7 @@ describe("StreamShaper", () => {
     expect(s.thinkingMd()).toBe("🔎 Searching web <code>alpha</code> (2 results)");
     expect(s.thinkingMd()).not.toContain("x2");
     expect(s.runSummary()).toEqual({
-      reasoningTitles: [],
+      reasoningSummaries: [],
       toolCallCount: 2,
       toolCounts: [{ label: "🔎 Searching web", count: 2 }],
     });
@@ -156,7 +181,7 @@ describe("StreamShaper", () => {
     expect(s.toolStatusMd()).toBe("🔎 Searching web (5 results)");
     expect(s.thinkingMd()).toBe("🔎 Searching web (5 results)");
     expect(s.runSummary()).toEqual({
-      reasoningTitles: [],
+      reasoningSummaries: [],
       toolCallCount: 0,
       toolCounts: [],
     });
@@ -220,7 +245,7 @@ describe("StreamShaper", () => {
     expect(handleStreamPart(s, { type: "tool-result", toolName: "generate_image", output: { file_id: 12, name: "generated-image.png" } })).toBe("tool-result");
     expect(s.thinkingMd()).toContain("🖼️ Generating image <code>red square</code> (1 image)");
     expect(s.runSummary()).toEqual({
-      reasoningTitles: [],
+      reasoningSummaries: [],
       toolCallCount: 1,
       toolCounts: [{ label: "🖼️ Generating image", count: 1 }],
     });

@@ -23,12 +23,14 @@ try {
   logger.debug("running database migrations");
   await db.migrate();
   logger.debug("checking docling health", { url: config.DOCLING_URL });
-  if (!(await checkDocling(config))) {
+  try {
+    await checkDocling(config);
+    logger.info("docling healthcheck passed", { url: config.DOCLING_URL });
+  } catch (err) {
     logger.warn("docling healthcheck failed; pdf/docx ingestion will show the docling-down hint", {
       url: config.DOCLING_URL,
+      err: String(err),
     });
-  } else {
-    logger.info("docling healthcheck passed", { url: config.DOCLING_URL });
   }
   const bot = createBot({
     config,

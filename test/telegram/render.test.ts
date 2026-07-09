@@ -127,8 +127,21 @@ describe("renderFinal", () => {
   });
 
   it("renders final thinking with a final elapsed title instead of step counts", () => {
+    const thinkingLog = [
+      "Tool calls: 1",
+      "",
+      "Reasoning blocks: 1",
+      "",
+      "- **Considering the request**",
+      "",
+      "  I should search the thread for the requested detail.",
+      "",
+      "<p>Tools:</p>",
+      "",
+      "- 💬 Searching chat: 1",
+    ].join("\n");
     const [payload] = renderFinal({
-      thinkingLog: "First thought\nSecond thought",
+      thinkingLog,
       answerMd: "Answer.",
       elapsedMs: 65_000,
       t,
@@ -136,7 +149,28 @@ describe("renderFinal", () => {
     const markdown = payload?.markdown ?? "";
 
     expect(markdown).toContain("<details>\n<summary>Thought for 1m 05s</summary>");
+    expect(markdown).toContain(`${thinkingLog}\n\n</details>`);
     expect(markdown).not.toContain("steps");
+  });
+
+  it("caps oversized final thinking without splitting its details wrapper", () => {
+    const oversizedReasoning = `- ${"reasoning detail ".repeat(4000)}tail-marker`;
+    const parts = renderFinal({
+      thinkingLog: `Tool calls: 2 · Reasoning blocks: 1\n\n${oversizedReasoning}`,
+      answerMd: "Answer remains visible.",
+      elapsedMs: 12_000,
+      t,
+    });
+
+    expect(parts).toHaveLength(1);
+    const markdown = parts[0]?.markdown ?? "";
+    expect(markdown).toContain("Tool calls: 2 · Reasoning blocks: 1");
+    expect(markdown).toContain("…");
+    expect(markdown).not.toContain("tail-marker");
+    expect(markdown).toContain("Answer remains visible.");
+    expect(markdown.match(/<details>/g)).toHaveLength(1);
+    expect(markdown.match(/<\/details>/g)).toHaveLength(1);
+    expect(Buffer.byteLength(markdown, "utf8")).toBeLessThanOrEqual(32768);
   });
 
 });

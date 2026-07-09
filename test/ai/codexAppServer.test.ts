@@ -30,24 +30,26 @@ describe("Codex app-server client", () => {
       "-c",
       'model_verbosity="high"',
       "-c",
-      'model_reasoning_summary="none"',
+      'model_reasoning_summary="detailed"',
     ]);
     expect(codexAppServerConfigArgs(loadTestConfig({
-      REASONING_SUMMARY: "detailed",
+      REASONING_SUMMARY: "concise",
     }))).toEqual([
       "-c",
       'approvals_reviewer="guardian_subagent"',
       "-c",
       'model_verbosity="high"',
       "-c",
-      'model_reasoning_summary="detailed"',
+      'model_reasoning_summary="concise"',
     ]);
   });
 
-  it("passes the summary level through thread and turn start", async () => {
+  it("forwards configured model and reasoning controls", async () => {
     const config = loadTestConfig({
-      CODEX_MODEL: "gpt-5.5",
-      REASONING_SUMMARY: "detailed",
+      CODEX_MODEL: "gpt-5.6-terra",
+      CODEX_SPEED_MODE: "standard",
+      REASONING_EFFORT: "high",
+      REASONING_SUMMARY: "concise",
     });
     const partsPromise = collect(streamCodexTurn({
       config,
@@ -59,16 +61,21 @@ describe("Codex app-server client", () => {
     await waitForSent(transport, (message) => message.method === "initialized");
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
     expect(threadStart.params).toMatchObject({
-      model: "gpt-5.5",
+      model: "gpt-5.6-terra",
+      serviceTier: null,
       config: {
         model_verbosity: "high",
-        model_reasoning_summary: "detailed",
+        model_reasoning_summary: "concise",
       },
     });
     transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
-    expect(turnStart.params).toMatchObject({ model: "gpt-5.5", summary: "detailed" });
-    expect(turnStart.params).not.toHaveProperty("effort");
+    expect(turnStart.params).toMatchObject({
+      model: "gpt-5.6-terra",
+      serviceTier: null,
+      effort: "high",
+      summary: "concise",
+    });
     transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
     transport.emit({
       method: "item/reasoning/summaryTextDelta",
@@ -79,6 +86,33 @@ describe("Codex app-server client", () => {
     await expect(partsPromise).resolves.toEqual([
       { type: "reasoning-delta", text: "summary reasoning" },
     ]);
+  });
+
+  it("omits the chat reasoning effort for helper-model turns", async () => {
+    const config = loadTestConfig({
+      CODEX_MODEL: "gpt-5.6-luna",
+      CODEX_COMPACTION_MODEL: "gpt-5.6-luna",
+      REASONING_EFFORT: "ultra",
+    });
+    const partsPromise = collect(streamCodexTurn({
+      config,
+      model: config.CODEX_COMPACTION_MODEL,
+      prompt: "summarize helper input",
+    }).fullStream);
+
+    const initialize = await waitForSent(transport, (message) => message.method === "initialize");
+    transport.emit({ id: initialize.id, result: {} });
+    const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
+    expect(threadStart.params).toMatchObject({ model: "gpt-5.6-luna" });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
+
+    const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
+    expect(turnStart.params).toMatchObject({ model: "gpt-5.6-luna", summary: "detailed" });
+    expect(turnStart.params).not.toHaveProperty("effort");
+    transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+    transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+    await expect(partsPromise).resolves.toEqual([]);
   });
 
   it("starts streamed reasoning summary sections on their own lines", async () => {
@@ -145,10 +179,7 @@ describe("Codex app-server client", () => {
   });
 
   it("handshakes and sends ephemeral thread and turn payloads with dynamic tools", async () => {
-    const config = loadTestConfig({
-      CODEX_MODEL: "gpt-5.5",
-      CODEX_SPEED_MODE: "fast",
-    });
+    const config = loadTestConfig();
     const partsPromise = collect(streamCodexTurn({
       config,
       system: "system instructions",
@@ -165,13 +196,13 @@ describe("Codex app-server client", () => {
     await waitForSent(transport, (message) => message.method === "initialized");
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
     expect(threadStart.params).toMatchObject({
-      model: "gpt-5.5",
-      serviceTier: "fast",
+      model: "gpt-5.6-sol",
+      serviceTier: "priority",
       approvalPolicy: "never",
       sandbox: "read-only",
       config: {
         model_verbosity: "high",
-        model_reasoning_summary: "none",
+        model_reasoning_summary: "detailed",
       },
       baseInstructions: "system instructions",
       developerInstructions: null,
@@ -192,11 +223,12 @@ describe("Codex app-server client", () => {
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
     expect(turnStart.params).toMatchObject({
       threadId: "thread-1",
-      model: "gpt-5.5",
-      serviceTier: "fast",
+      model: "gpt-5.6-sol",
+      serviceTier: "priority",
+      effort: "medium",
+      summary: "detailed",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
     });
-    expect(turnStart.params).not.toHaveProperty("summary");
     transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
     transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
 
@@ -526,7 +558,7 @@ describe("Codex app-server client", () => {
   });
 
   it("ignores summary events when summaries are disabled", async () => {
-    const config = loadTestConfig();
+    const config = loadTestConfig({ REASONING_SUMMARY: "none" });
     const partsPromise = collect(streamCodexTurn({
       config,
       prompt: "hide reasoning summary",

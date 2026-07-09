@@ -327,7 +327,7 @@ describe("runTurn", () => {
     expect(latest).toMatchObject({ role: "assistant", text_plain: "First partial" });
   });
 
-  it("streams full reasoning drafts and compacts final reasoning to titles", async () => {
+  it("streams and retains full reasoning summaries in the completed response", async () => {
     const config = loadTestConfig({ DRAFT_UPDATE_MS: 0, REASONING_SUMMARY: "detailed" });
     const user = await repos.users.ensure({ tgId: 109, firstName: "CompactDraft", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
@@ -395,14 +395,18 @@ describe("runTurn", () => {
     expect(reasoningDraft!).toContain("combined bash command");
     expect(reasoningDraft!).not.toContain("\n\n...");
     const latest = await repos.messages.latest(thread.id);
-    expect(latest?.thinking).toContain("Reasoning blocks: 3");
+    expect(latest?.thinking).toContain("Tool calls: 0 · Reasoning blocks: 3");
     expect(latest?.thinking).toContain("Evaluating technical options");
     expect(latest?.thinking).toContain("Considering pi verification process");
     expect(latest?.thinking).toContain("Evaluating pi digit sources");
-    expect(latest?.thinking).not.toContain("explicit internet search");
-    expect(latest?.thinking).not.toContain("Planning file creation");
-    expect(latest?.thinking).not.toContain("combined bash command");
-    expect(latest?.thinking).not.toContain("reliable reference");
+    expect(latest?.thinking).toContain("explicit internet search");
+    expect(latest?.thinking).toContain("Planning file creation");
+    expect(latest?.thinking).toContain("combined bash command");
+    expect(latest?.thinking).toContain("reliable reference");
+    expect(latest?.thinking).toContain([
+      "- Evaluating technical options",
+      "  I need to figure out the best way to perform an explicit internet search.",
+    ].join("\n"));
   });
 
   it("persists the completed Codex agentMessage instead of provisional streamed text after tools", async () => {
@@ -1141,7 +1145,7 @@ describe("runTurn", () => {
 
     expect(richPayloads).toHaveLength(1);
     const markdown = richMarkdownOf(richPayloads[0]);
-    expect(markdown).toContain(`- ${toolUsageText}`);
+    expect(markdown).toContain(`Reasoning blocks: 1\n\n- ${toolUsageText}`);
     expect(markdown).toContain("Done — the image is ready.");
     const answerAfterThinking = markdown.slice(markdown.indexOf("</details>") + "</details>".length);
     expect(answerAfterThinking).toContain("Done — the image is ready.");

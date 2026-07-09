@@ -14,7 +14,7 @@ RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 
-ARG CODEX_RELEASE=0.142.4
+ARG CODEX_RELEASE=0.144.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

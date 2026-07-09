@@ -9,6 +9,12 @@ export interface PdfTextExtraction {
 
 export async function extractPdfText(input: { bytes: Buffer; signal?: AbortSignal }): Promise<PdfTextExtraction> {
   throwIfAborted(input.signal);
+  const incompatibleIntrinsic = frozenIntrinsicMissingUnpdfPolyfill();
+  if (incompatibleIntrinsic) {
+    throw new Error(
+      `native PDF extraction is unavailable with frozen Node.js intrinsics (${incompatibleIntrinsic} is missing)`,
+    );
+  }
   const result = await extractText(new Uint8Array(input.bytes), { mergePages: false });
   throwIfAborted(input.signal);
   const pages = Array.isArray(result.text) ? result.text : [result.text];
@@ -25,6 +31,19 @@ export async function extractPdfText(input: { bytes: Buffer; signal?: AbortSigna
     pages: result.totalPages,
     textChars,
   };
+}
+
+function frozenIntrinsicMissingUnpdfPolyfill(): string | undefined {
+  const requirements: Array<[object, string]> = [
+    [Promise, "try"],
+    [Map.prototype, "getOrInsertComputed"],
+    [Uint8Array.prototype, "toHex"],
+    [Math, "sumPrecise"],
+  ];
+  for (const [target, property] of requirements) {
+    if (!(property in target) && !Object.isExtensible(target)) return property;
+  }
+  return undefined;
 }
 
 function normalizeText(text: string): string {
