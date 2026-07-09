@@ -2010,7 +2010,17 @@ class ScriptedCodexTransport implements CodexTransport {
     if (message.method === "initialize") {
       queueMicrotask(() => this.emit({ id: message.id, result: {} }));
     } else if (message.method === "thread/start") {
-      queueMicrotask(() => this.emit({ id: message.id, result: { thread: { id: "thread-1" } } }));
+      const params = message.params as Record<string, unknown>;
+      const config = params.config as Record<string, unknown>;
+      queueMicrotask(() => this.emit({
+        id: message.id,
+        result: {
+          thread: { id: "thread-1" },
+          model: params.model,
+          serviceTier: params.serviceTier,
+          reasoningEffort: config.model_reasoning_effort,
+        },
+      }));
     } else if (message.method === "turn/start") {
       queueMicrotask(() => {
         this.emit({ id: message.id, result: { turn: { id: "turn-1", status: "inProgress" } } });

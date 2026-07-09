@@ -87,9 +87,12 @@ describe("runTurn with Codex app-server inference", () => {
     expect(editedTexts.some((text) => text.includes("💬 Searching chat <code>alpha</code> ("))).toBe(true);
     expect(editedTexts.at(-1)).toContain("✅ Done.\n\n💬 Searching chat <code>alpha</code>");
     expect(JSON.stringify(richPayloads)).toContain("Codex found alpha.");
+    expect(JSON.stringify(richPayloads)).toContain("Reasoning blocks: 1");
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Codex found alpha." });
+    expect(latest?.thinking).toContain("Reasoning blocks: 1");
+    expect(latest?.thinking).toContain("Using configured medium reasoning");
     expect(latest?.thinking).toContain("Tool calls: 1");
     expect(latest?.thinking).toContain("- 💬 Searching chat: 1");
     expect(latest?.thinking).not.toContain("💬 Searching chat <code>alpha</code>");
@@ -191,9 +194,12 @@ describe("runTurn with Codex app-server inference", () => {
     expect(editedTexts.some((text) => text.includes("(exit 0)"))).toBe(true);
     expect(editedTexts.at(-1)).toContain("✅ Done.\n\n🐚 Running bash");
     expect(JSON.stringify(richPayloads)).toContain("Pi verification used bash compact JSON.");
+    expect(JSON.stringify(richPayloads)).toContain("Reasoning blocks: 1");
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Pi verification used bash compact JSON." });
+    expect(latest?.thinking).toContain("Reasoning blocks: 1");
+    expect(latest?.thinking).toContain("Using configured medium reasoning");
     expect(latest?.thinking).toContain("Tool calls: 1");
     expect(latest?.thinking).toContain("- 🐚 Running bash: 1");
     expect(latest?.thinking).not.toContain("🐚 Running bash <code>js-exec");
@@ -224,10 +230,30 @@ class ScriptedCodexTransport implements CodexTransport {
     if (message.method === "initialize") {
       queueMicrotask(() => this.emit({ id: message.id, result: {} }));
     } else if (message.method === "thread/start") {
-      queueMicrotask(() => this.emit({ id: message.id, result: { thread: { id: "thread-1" } } }));
+      const params = message.params as Record<string, unknown>;
+      const config = params.config as Record<string, unknown>;
+      queueMicrotask(() => this.emit({
+        id: message.id,
+        result: {
+          thread: { id: "thread-1" },
+          model: params.model,
+          serviceTier: params.serviceTier,
+          reasoningEffort: config.model_reasoning_effort,
+        },
+      }));
     } else if (message.method === "turn/start") {
       queueMicrotask(() => {
         this.emit({ id: message.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
+        this.emit({
+          method: "item/reasoning/summaryTextDelta",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "reason-1",
+            delta: "Using configured medium reasoning",
+            summaryIndex: 0,
+          },
+        });
         this.emit({
           id: 900,
           method: "item/tool/call",

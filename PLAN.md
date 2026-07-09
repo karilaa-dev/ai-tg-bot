@@ -72,10 +72,10 @@ ai-tele-bot/
 | `BOT_TOKEN` | required | BotFather token |
 | `TELEGRAM_ADMIN_ID` | required | **single** admin user id (number) |
 | `DB_URL` | `sqlite:./data/bot.db` | or `postgres://user:pass@host:5432/db` |
-| `CODEX_MODEL` | `gpt-5.6-terra` | normal chat model |
+| `CODEX_MODEL` | `gpt-5.6-sol` | normal chat model |
 | `CODEX_COMPACTION_MODEL` | `gpt-5.4-mini` | compaction summaries and image descriptions |
 | `CODEX_SPEED_MODE` | `fast` | `standard|fast`; `fast` maps to Codex `priority` service tier |
-| `REASONING_EFFORT` | `low` | Codex effort: `none|minimal|low|medium|high|xhigh` |
+| `REASONING_EFFORT` | `medium` | Codex effort; Sol supports `low|medium|high|xhigh|max|ultra` |
 | `OPENROUTER_API_KEY` | required | embeddings only |
 | `OPENROUTER_EMBEDDING_MODEL` | `perplexity/pplx-embed-v1-0.6b` | retrieval vectors |
 | `TAVILY_API_KEY` | required | web search tool |

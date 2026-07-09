@@ -14,11 +14,13 @@ describe("Codex provider helpers", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("defaults normal Codex turns to Terra on the fast service tier", () => {
+  it("defaults normal Codex turns to Sol with medium visible reasoning on the fast service tier", () => {
     const config = loadTestConfig();
 
-    expect(config.CODEX_MODEL).toBe("gpt-5.6-terra");
+    expect(config.CODEX_MODEL).toBe("gpt-5.6-sol");
     expect(config.CODEX_SPEED_MODE).toBe("fast");
+    expect(config.REASONING_EFFORT).toBe("medium");
+    expect(config.REASONING_SUMMARY).toBe("detailed");
   });
 
   it("posts embedding requests to OpenRouter only for vectors", async () => {
@@ -49,6 +51,7 @@ describe("Codex provider helpers", () => {
       CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
       CODEX_SPEED_MODE: "fast",
       CODEX_VERBOSITY: "high",
+      REASONING_EFFORT: "high",
       REASONING_SUMMARY: "detailed",
       STREAM_DELTA_CHARS: "24",
       OPENROUTER_API_KEY: "test-openrouter",
@@ -63,6 +66,7 @@ describe("Codex provider helpers", () => {
     expect(config.CODEX_IMAGE_TIMEOUT_MS).toBe(300_000);
     expect(config.CODEX_SPEED_MODE).toBe("fast");
     expect(config.CODEX_VERBOSITY).toBe("high");
+    expect(config.REASONING_EFFORT).toBe("high");
     expect(config.REASONING_SUMMARY).toBe("detailed");
     expect(config.STREAM_DELTA_CHARS).toBe(24);
   });

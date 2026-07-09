@@ -5,6 +5,8 @@ export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b
 
 export const ReasoningSummarySchema = z.enum(["auto", "concise", "detailed", "none"]);
 export type ReasoningSummary = z.infer<typeof ReasoningSummarySchema>;
+export const ReasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
 export const CodexVerbositySchema = z.enum(["low", "medium", "high"]);
 export type CodexVerbosity = z.infer<typeof CodexVerbositySchema>;
 export const CodexImageQualitySchema = z.enum(["low", "medium", "high", "auto"]);
@@ -14,7 +16,7 @@ const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
   TELEGRAM_ADMIN_ID: z.coerce.number().int(),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
-  CODEX_MODEL: z.string().default("gpt-5.6-terra"),
+  CODEX_MODEL: z.string().default("gpt-5.6-sol"),
   CODEX_COMPACTION_MODEL: z.string().default("gpt-5.4-mini"),
   CODEX_IMAGE_MODEL: z.string().default("gpt-image-2"),
   CODEX_IMAGE_QUALITY: CodexImageQualitySchema.default("low"),
@@ -22,7 +24,8 @@ const ConfigSchema = z.object({
   CODEX_SPEED_MODE: z.enum(["standard", "fast"]).default("fast"),
   CODEX_VERBOSITY: CodexVerbositySchema.default("high"),
   CODEX_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(900_000),
-  REASONING_SUMMARY: ReasoningSummarySchema.default("none"),
+  REASONING_EFFORT: ReasoningEffortSchema.default("medium"),
+  REASONING_SUMMARY: ReasoningSummarySchema.default("detailed"),
   OPENROUTER_API_KEY: z.string().min(1),
   OPENROUTER_EMBEDDING_MODEL: z
     .string()

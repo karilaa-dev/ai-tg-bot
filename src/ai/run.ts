@@ -96,6 +96,7 @@ export const runTurn: TurnRunner = async (input) => {
       threadId: input.thread.id,
       provider: "codex",
       model: input.config.CODEX_MODEL,
+      reasoningEffort: input.config.REASONING_EFFORT,
       reasoningSummary: input.config.REASONING_SUMMARY,
     });
     const result = streamInference({
