@@ -23,19 +23,16 @@ describe("Codex app-server client", () => {
     setCodexTransportFactoryForTests(undefined);
   });
 
-  it("builds process-level app-server config overrides for reasoning controls", () => {
+  it("builds process-level app-server config overrides for reasoning summaries", () => {
     expect(codexAppServerConfigArgs(loadTestConfig())).toEqual([
       "-c",
       'approvals_reviewer="guardian_subagent"',
       "-c",
       'model_verbosity="high"',
       "-c",
-      'model_reasoning_effort="medium"',
-      "-c",
       'model_reasoning_summary="detailed"',
     ]);
     expect(codexAppServerConfigArgs(loadTestConfig({
-      REASONING_EFFORT: "high",
       REASONING_SUMMARY: "concise",
     }))).toEqual([
       "-c",
@@ -43,16 +40,16 @@ describe("Codex app-server client", () => {
       "-c",
       'model_verbosity="high"',
       "-c",
-      'model_reasoning_effort="high"',
-      "-c",
       'model_reasoning_summary="concise"',
     ]);
   });
 
-  it("passes the summary level through thread and turn start", async () => {
+  it("forwards configured model and reasoning controls", async () => {
     const config = loadTestConfig({
-      CODEX_MODEL: "gpt-5.5",
-      REASONING_SUMMARY: "detailed",
+      CODEX_MODEL: "gpt-5.6-terra",
+      CODEX_SPEED_MODE: "standard",
+      REASONING_EFFORT: "high",
+      REASONING_SUMMARY: "concise",
     });
     const partsPromise = collect(streamCodexTurn({
       config,
@@ -64,24 +61,21 @@ describe("Codex app-server client", () => {
     await waitForSent(transport, (message) => message.method === "initialized");
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
     expect(threadStart.params).toMatchObject({
-      model: "gpt-5.5",
+      model: "gpt-5.6-terra",
+      serviceTier: null,
       config: {
         model_verbosity: "high",
-        model_reasoning_effort: "medium",
-        model_reasoning_summary: "detailed",
+        model_reasoning_summary: "concise",
       },
     });
-    transport.emit({
-      id: threadStart.id,
-      result: {
-        thread: { id: "thread-1" },
-        model: "gpt-5.5",
-        serviceTier: "priority",
-        reasoningEffort: "medium",
-      },
-    });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
-    expect(turnStart.params).toMatchObject({ model: "gpt-5.5", effort: "medium", summary: "detailed" });
+    expect(turnStart.params).toMatchObject({
+      model: "gpt-5.6-terra",
+      serviceTier: null,
+      effort: "high",
+      summary: "concise",
+    });
     transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
     transport.emit({
       method: "item/reasoning/summaryTextDelta",
@@ -181,7 +175,6 @@ describe("Codex app-server client", () => {
       sandbox: "read-only",
       config: {
         model_verbosity: "high",
-        model_reasoning_effort: "medium",
         model_reasoning_summary: "detailed",
       },
       baseInstructions: "system instructions",
@@ -198,15 +191,7 @@ describe("Codex app-server client", () => {
       type: "object",
       properties: { query: { type: "string" } },
     });
-    transport.emit({
-      id: threadStart.id,
-      result: {
-        thread: { id: "thread-1" },
-        model: "gpt-5.6-sol",
-        serviceTier: "priority",
-        reasoningEffort: "medium",
-      },
-    });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
 
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
     expect(turnStart.params).toMatchObject({
@@ -221,34 +206,6 @@ describe("Codex app-server client", () => {
     transport.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
 
     await expect(partsPromise).resolves.toEqual([]);
-  });
-
-  it.each([
-    ["model", { model: "gpt-5.6-terra" }, "unexpected model"],
-    ["missing model", { model: undefined }, "unexpected model"],
-    ["service tier", { serviceTier: "standard" }, "unexpected service tier"],
-    ["missing service tier", { serviceTier: null }, "unexpected service tier"],
-    ["reasoning effort", { reasoningEffort: "low" }, "unexpected reasoning effort"],
-    ["missing reasoning effort", { reasoningEffort: null }, "unexpected reasoning effort"],
-  ])("rejects an unexpected effective %s from thread/start", async (_label, override, expectedError) => {
-    const config = loadTestConfig();
-    const partsPromise = collect(streamCodexTurn({ config, prompt: "verify effective settings" }).fullStream);
-
-    const initialize = await waitForSent(transport, (message) => message.method === "initialize");
-    transport.emit({ id: initialize.id, result: {} });
-    const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
-    transport.emit({
-      id: threadStart.id,
-      result: {
-        thread: { id: "thread-1" },
-        model: config.CODEX_MODEL,
-        serviceTier: "priority",
-        reasoningEffort: config.REASONING_EFFORT,
-        ...override,
-      },
-    });
-
-    await expect(partsPromise).rejects.toThrow(expectedError);
   });
 
   it("executes item/tool/call requests and collects summary, tool, and message events", async () => {
@@ -471,15 +428,7 @@ describe("Codex app-server client", () => {
     transport.emit({ id: initialize.id, result: {} });
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
     expect(threadStart.params).toMatchObject({ model: "gpt-5.5" });
-    transport.emit({
-      id: threadStart.id,
-      result: {
-        thread: { id: "thread-1" },
-        model: "gpt-5.5",
-        serviceTier: "priority",
-        reasoningEffort: "medium",
-      },
-    });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
     expect(turnStart.params).toMatchObject({ model: "gpt-5.5" });
     const turnInput = ((turnStart.params as Record<string, unknown>).input ?? []) as Array<Record<string, unknown>>;
@@ -750,17 +699,7 @@ describe("Codex app-server client", () => {
     const initialize = await waitForSent(transport, (message) => message.method === "initialize");
     transport.emit({ id: initialize.id, result: {} });
     const threadStart = await waitForSent(transport, (message) => message.method === "thread/start");
-    const threadParams = threadStart.params as Record<string, unknown>;
-    const threadConfig = threadParams.config as Record<string, unknown>;
-    transport.emit({
-      id: threadStart.id,
-      result: {
-        thread: { id: "thread-1" },
-        model: threadParams.model,
-        serviceTier: threadParams.serviceTier,
-        reasoningEffort: threadConfig.model_reasoning_effort,
-      },
-    });
+    transport.emit({ id: threadStart.id, result: { thread: { id: "thread-1" } } });
     const turnStart = await waitForSent(transport, (message) => message.method === "turn/start");
     transport.emit({ id: turnStart.id, result: { turn: { id: "turn-1", status: "inProgress" } } });
   }

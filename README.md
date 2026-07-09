@@ -141,8 +141,7 @@ Important optional values:
 - `CODEX_IMAGE_MODEL`, `CODEX_IMAGE_QUALITY`, and `CODEX_IMAGE_TIMEOUT_MS` control generated-image turns.
 - `CODEX_SPEED_MODE=fast` maps to Codex Fast mode via `serviceTier: "priority"`.
 - `CODEX_VERBOSITY` is sent as Codex `model_verbosity`.
-- `REASONING_EFFORT=medium` is sent to every Codex turn as `model_reasoning_effort` and `turn/start.effort`.
-- `REASONING_SUMMARY` defaults to `detailed`; normal chat summaries remain visible in the thinking block.
+- `CODEX_MODEL`, `REASONING_EFFORT`, and `REASONING_SUMMARY` default to `gpt-5.6-sol`, `medium`, and `detailed`; all three can be overridden in `.env`.
 - `CODEX_TURN_TIMEOUT_MS` defaults to 15 minutes; set it to `0` to disable the hard cap.
 - `OPENROUTER_EMBEDDING_MODEL` defaults to `perplexity/pplx-embed-v1-0.6b`.
 - `DOCLING_URL` and `DOCLING_TIMEOUT_MS` control Docling conversion.

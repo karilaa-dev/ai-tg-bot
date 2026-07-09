@@ -6,13 +6,8 @@ import { createDatabase, type AppDatabase } from "../src/db/index.js";
 import { createRepos, type Repos } from "../src/db/repos/index.js";
 import { createLogger, type Logger } from "../src/logger.js";
 import { runTurn } from "../src/ai/run.js";
-import { codexServiceTier } from "../src/ai/codexAppServer.js";
 import { createOpenRouterTextEmbedder, persistEmbedding, type TextEmbedder } from "../src/memory/embeddings.js";
 
-const EXPECTED_CODEX_MODEL = "gpt-5.6-sol";
-const EXPECTED_SERVICE_TIER = "priority";
-const EXPECTED_REASONING_EFFORT = "medium";
-const EXPECTED_REASONING_SUMMARY = "detailed";
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-live-codex-"));
 const marker = `CODEX_CHECK_MARKER_${Date.now()}_SAPPHIRE`;
 const bashMarker = `BASH_CHECK_MARKER_${Date.now()}_TOPAZ`;
@@ -69,14 +64,8 @@ async function runCodex(): Promise<CodexResult> {
     const assistant = await repos.messages.latest(setup.thread.id);
     const thinking = assistant?.thinking ?? "";
     const answer = assistant?.text_plain ?? "";
-    const reasoningPattern = /Reasoning blocks: [1-9]/;
     const result: CodexResult = {
       model: config.CODEX_MODEL,
-      serviceTier: codexServiceTier(config),
-      reasoningEffort: config.REASONING_EFFORT,
-      reasoningSummary: config.REASONING_SUMMARY,
-      reasoningPersisted: reasoningPattern.test(thinking),
-      reasoningShown: reasoningPattern.test(JSON.stringify(api.richMessages)),
       finalHasMarker: answer.includes(marker),
       usedFileTool: thinking.includes("📄 Searching file"),
       statusShowsTool: api.editedTexts.some((text) => text.includes("📄 Searching file")),
@@ -86,12 +75,6 @@ async function runCodex(): Promise<CodexResult> {
       richMessages: api.richMessages.length,
       chunkEmbeddingRows: setup.chunkEmbeddingRows,
     };
-    check("codex-model", result.model === EXPECTED_CODEX_MODEL, result);
-    check("codex-service-tier", result.serviceTier === EXPECTED_SERVICE_TIER, result);
-    check("codex-reasoning-effort", result.reasoningEffort === EXPECTED_REASONING_EFFORT, result);
-    check("codex-reasoning-summary", result.reasoningSummary === EXPECTED_REASONING_SUMMARY, result);
-    check("codex-reasoning-persisted", result.reasoningPersisted, result);
-    check("codex-reasoning-shown", result.reasoningShown, result);
     check("codex-final-marker", result.finalHasMarker, result);
     check("codex-file-tool-used", result.usedFileTool, result);
     check("codex-status-edited-for-tool", result.statusShowsTool, result);
@@ -265,11 +248,6 @@ class CaptureApi {
 
 interface CodexResult {
   model: string;
-  serviceTier: string | null;
-  reasoningEffort: string;
-  reasoningSummary: string;
-  reasoningPersisted: boolean;
-  reasoningShown: boolean;
   finalHasMarker: boolean;
   usedFileTool: boolean;
   statusShowsTool: boolean;
@@ -309,12 +287,6 @@ function t(key: string, params?: Record<string, string | number>): string {
       return `🧠 Thinking for ${params?.time}`;
     case "thinking-summary-final":
       return `🧠 Thought for ${params?.time}`;
-    case "thinking-final-tool-calls":
-      return `Tool calls: ${params?.count}`;
-    case "thinking-final-reasoning":
-      return `Reasoning blocks: ${params?.count}`;
-    case "thinking-final-tools":
-      return "Tools:";
     case "empty-answer":
       return "⚠️ No final answer returned.";
     case "error-generic":

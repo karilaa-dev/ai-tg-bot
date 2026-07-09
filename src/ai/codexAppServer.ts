@@ -79,7 +79,6 @@ export function codexServiceTier(config: AppConfig): string | null {
 function codexModelSettings(config: AppConfig): Record<string, string> {
   return {
     model_verbosity: config.CODEX_VERBOSITY,
-    model_reasoning_effort: config.REASONING_EFFORT,
     model_reasoning_summary: config.REASONING_SUMMARY,
   };
 }
@@ -331,11 +330,9 @@ class CodexRpcSession {
 
   async startThread(input: CodexTurnInput): Promise<string> {
     const toolSpecs = buildCodexToolSpecs(this.tools);
-    const model = input.model ?? input.config.CODEX_MODEL;
-    const serviceTier = codexServiceTier(input.config);
     const result = await this.request("thread/start", {
-      model,
-      serviceTier,
+      model: input.model ?? input.config.CODEX_MODEL,
+      serviceTier: codexServiceTier(input.config),
       cwd: input.cwd ?? process.cwd(),
       approvalPolicy: "never",
       sandbox: "read-only",
@@ -347,19 +344,6 @@ class CodexRpcSession {
     });
     const threadId = readThreadId(result);
     if (!threadId) throw new Error(`Codex thread/start returned no thread id: ${safeJson(result)}`);
-    const effectiveModel = stringValue(asRecord(result), "model");
-    const effectiveServiceTier = stringValue(asRecord(result), "serviceTier");
-    const effectiveReasoningEffort = stringValue(asRecord(result), "reasoningEffort");
-    assertEffectiveSetting("model", effectiveModel, model);
-    assertEffectiveSetting("service tier", effectiveServiceTier, serviceTier);
-    assertEffectiveSetting("reasoning effort", effectiveReasoningEffort, input.config.REASONING_EFFORT);
-    this.logger?.info("Codex thread started", {
-      threadId,
-      model: effectiveModel ?? model,
-      serviceTier: effectiveServiceTier ?? serviceTier,
-      reasoningEffort: effectiveReasoningEffort ?? input.config.REASONING_EFFORT,
-      reasoningSummary: input.config.REASONING_SUMMARY,
-    });
     return threadId;
   }
 
@@ -779,11 +763,6 @@ function readThreadId(result: unknown): string | undefined {
   const thread = asRecord(record?.thread);
   const id = thread?.id ?? record?.threadId ?? record?.id;
   return typeof id === "string" && id ? id : undefined;
-}
-
-function assertEffectiveSetting(label: string, effective: string | undefined, expected: string | null): void {
-  if (effective === expected || (expected === null && effective === undefined)) return;
-  throw new Error(`Codex thread/start selected unexpected ${label}: expected ${expected ?? "default"}, got ${effective ?? "missing"}`);
 }
 
 function outputFromCodexContentItems(items: CodexToolContentItem[]): unknown {

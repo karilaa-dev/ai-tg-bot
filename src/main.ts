@@ -16,9 +16,6 @@ logger.info("bot process starting", {
   db: db.dialect,
   inferenceProvider: "codex",
   model: config.CODEX_MODEL,
-  speedMode: config.CODEX_SPEED_MODE,
-  reasoningEffort: config.REASONING_EFFORT,
-  reasoningSummary: config.REASONING_SUMMARY,
   compactionModel: config.CODEX_COMPACTION_MODEL,
 });
 

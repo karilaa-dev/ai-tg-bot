@@ -14,7 +14,7 @@ describe("Codex provider helpers", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("defaults normal Codex turns to Sol with medium visible reasoning on the fast service tier", () => {
+  it("defaults Codex turns to Sol with medium detailed reasoning on the fast service tier", () => {
     const config = loadTestConfig();
 
     expect(config.CODEX_MODEL).toBe("gpt-5.6-sol");
@@ -47,27 +47,27 @@ describe("Codex provider helpers", () => {
       BOT_TOKEN: "TEST:TOKEN",
       TELEGRAM_ADMIN_ID: "1000",
       DB_URL: "sqlite::memory:",
-      CODEX_MODEL: "gpt-5.5",
+      CODEX_MODEL: "gpt-5.6-terra",
       CODEX_COMPACTION_MODEL: "gpt-5.4-mini",
-      CODEX_SPEED_MODE: "fast",
+      CODEX_SPEED_MODE: "standard",
       CODEX_VERBOSITY: "high",
       REASONING_EFFORT: "high",
-      REASONING_SUMMARY: "detailed",
+      REASONING_SUMMARY: "concise",
       STREAM_DELTA_CHARS: "24",
       OPENROUTER_API_KEY: "test-openrouter",
       OPENROUTER_EMBEDDING_MODEL: "perplexity/pplx-embed-v1-0.6b",
       TAVILY_API_KEY: "test-tavily",
     });
 
-    expect(config.CODEX_MODEL).toBe("gpt-5.5");
+    expect(config.CODEX_MODEL).toBe("gpt-5.6-terra");
     expect(config.CODEX_COMPACTION_MODEL).toBe("gpt-5.4-mini");
     expect(config.CODEX_IMAGE_MODEL).toBe("gpt-image-2");
     expect(config.CODEX_IMAGE_QUALITY).toBe("low");
     expect(config.CODEX_IMAGE_TIMEOUT_MS).toBe(300_000);
-    expect(config.CODEX_SPEED_MODE).toBe("fast");
+    expect(config.CODEX_SPEED_MODE).toBe("standard");
     expect(config.CODEX_VERBOSITY).toBe("high");
     expect(config.REASONING_EFFORT).toBe("high");
-    expect(config.REASONING_SUMMARY).toBe("detailed");
+    expect(config.REASONING_SUMMARY).toBe("concise");
     expect(config.STREAM_DELTA_CHARS).toBe(24);
   });
 });
