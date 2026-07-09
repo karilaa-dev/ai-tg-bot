@@ -91,10 +91,18 @@ describe("runTurn with Codex app-server inference", () => {
 
     const latest = await repos.messages.latest(thread.id);
     expect(latest).toMatchObject({ role: "assistant", text_plain: "Codex found alpha." });
-    expect(latest?.thinking).toContain("Reasoning blocks: 1");
-    expect(latest?.thinking).toContain("Considering the request");
-    expect(latest?.thinking).toContain("Tool calls: 1");
-    expect(latest?.thinking).toContain("- 💬 Searching chat: 1");
+    expect(latest?.thinking).toBe([
+      "Tool calls: 1 · Reasoning blocks: 1",
+      "",
+      "- **Considering the request**",
+      "",
+      "  I should search the thread for the requested detail.",
+      "",
+      "<p>Tools:</p>",
+      "",
+      "- 💬 Searching chat: 1",
+    ].join("\n"));
+    expect(latest?.thinking).not.toContain("<!--");
     expect(latest?.thinking).not.toContain("💬 Searching chat <code>alpha</code>");
     const embeddings = await repos.embeddings.list("message", [latest!.id]);
     expect(embeddings[0]?.model).toBe(config.OPENROUTER_EMBEDDING_MODEL);
@@ -237,7 +245,7 @@ class ScriptedCodexTransport implements CodexTransport {
             threadId: "thread-1",
             turnId: "turn-1",
             itemId: "reason-1",
-            delta: "Considering the request",
+            delta: "**Considering the request**<!-- -->I should search the thread for the requested detail.",
             summaryIndex: 0,
           },
         });
