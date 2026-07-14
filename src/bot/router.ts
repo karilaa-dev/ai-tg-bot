@@ -7,8 +7,6 @@ import type { AppDatabase } from "../db/index.js";
 import { createRepos, type Repos } from "../db/repos/index.js";
 import type { Locale, ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import { compactThread, type ConversationSummarizer } from "../memory/compactor.js";
-import type { ImageCaptioner } from "../ai/provider.js";
 import { runTurn, type TurnRunner } from "../ai/run.js";
 import { formatUtcOffset } from "./timezone.js";
 import type { BotContext, BotServices } from "./context.js";
@@ -20,6 +18,7 @@ import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
+import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
 import {
   clearInlineKeyboard,
   editOrReply,
@@ -28,7 +27,7 @@ import {
   threadExtra,
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
-import { handleUserText, retryLatestUnansweredTurn } from "./turns.js";
+import { handleUserText } from "./turns.js";
 import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } from "./batching.js";
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { authAndThread, isStopCommand, privateOnly } from "./auth.js";
@@ -44,8 +43,7 @@ interface InstallOptions {
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
   embedder?: TextEmbedder;
-  imageCaptioner?: ImageCaptioner;
-  summarizer?: ConversationSummarizer;
+  pi?: PiRuntimeService;
 }
 
 const moscowTimezoneOffsetMin = 180;
@@ -62,11 +60,17 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     hasCustomLocalizer: Boolean(options.localizer),
     hasCustomTurnRunner: Boolean(options.turnRunner),
     hasEmbedder: Boolean(options.embedder),
-    hasImageCaptioner: Boolean(options.imageCaptioner),
-    hasSummarizer: Boolean(options.summarizer),
+    hasPiRuntime: Boolean(options.pi),
   });
   const repos = options.repos ?? createRepos(options.db.db, options.db.search);
   const localizer = options.localizer ?? new Localizer();
+  const pi = options.pi ?? new PiRuntimeManager({
+    config: options.config,
+    db: options.db,
+    repos,
+    logger: options.logger,
+    embedder: options.embedder,
+  });
   const services: BotServices = {
     config: options.config,
     db: options.db,
@@ -75,8 +79,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     turnRunner: options.turnRunner ?? runTurn,
     downloadFile: options.downloadFile ?? downloadTelegramFile,
     embedder: options.embedder,
-    imageCaptioner: options.imageCaptioner,
-    summarizer: options.summarizer,
+    pi,
     routerState: createRouterState(),
   };
 
@@ -108,7 +111,13 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
-    await stopActiveFileProcessing(ctx);
+    const fileStopped = await stopActiveFileProcessing(ctx, true);
+    const turnStopped = ctx.thread ? await ctx.services.pi.abort(ctx.thread.id) : false;
+    if (!fileStopped && !turnStopped) {
+      await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
+    } else if (turnStopped) {
+      await replyWithThreadFallback(ctx, ctx.t("turn-stopping"), threadExtra(ctx.thread));
+    }
   });
   bot.command("lang", async (ctx) => {
     logCommand(ctx, "lang");
@@ -176,7 +185,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     await ctx.api
       .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
       .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
-    await retryLatestUnansweredTurn(ctx);
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");
@@ -198,6 +206,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       parentThreadId: ctx.thread.id,
       forkPointMessageId: latest?.id ?? null,
     });
+    await ctx.services.pi.fork(ctx.thread, fork, ctx.user, latest?.pi_entry_id);
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
       forkThreadId: fork.id,
       parentThreadId: ctx.thread.id,
@@ -206,15 +215,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
   });
   registerInviteHandlers(bot);
-  bot.callbackQuery("ctx:compact", async (ctx) => {
-    logCallback(ctx, "ctx:compact");
-    if (!ctx.thread) return;
-    await ctx.answerCallbackQuery();
-    const count = await runCompaction(ctx, ctx.thread);
-    await replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread));
-    await retryLatestUnansweredTurn(ctx);
-  });
-
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
     ctx.services.logger.debug("document message received", ctxLogMeta(ctx, {
@@ -314,15 +314,10 @@ function threadSequentializationKey(ctx: BotContext): string | undefined {
 }
 
 async function runCompaction(ctx: BotContext, thread: ThreadRow): Promise<number> {
-  const result = await compactThread(ctx.services.repos, thread, {
-    recentWindowMessages: ctx.services.config.RECENT_WINDOW_MESSAGES,
-    embedder: ctx.services.embedder,
-    summarizer: ctx.services.summarizer,
-    imageCaptioner: ctx.services.imageCaptioner,
-    logger: ctx.services.logger,
-  });
+  if (!ctx.user) return 0;
+  const count = await ctx.services.pi.compact(thread, ctx.user);
   ctx.thread = (await ctx.services.repos.threads.get(thread.id)) ?? thread;
-  return result.count;
+  return count;
 }
 
 const ignoredServiceMessageKeys = [

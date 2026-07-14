@@ -30,11 +30,6 @@ export function onboardingTimezoneKeyboard(t: (key: string) => string, includeMo
   return { inline_keyboard: rows };
 }
 
-export function contextLimitKeyboard(t: (key: string) => string) {
-  return {
-    inline_keyboard: [[{ text: t("btn-compact"), callback_data: "ctx:compact" }]],
-  };
-}
 
 export function inviteDraftKeyboard(t: Translate, uses: number, expiry: InviteExpiry) {
   return {

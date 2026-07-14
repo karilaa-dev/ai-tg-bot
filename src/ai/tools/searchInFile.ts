@@ -30,7 +30,6 @@ export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbe
         repos: input.repos,
         threadIds: [],
         messageIds: [],
-        summaryIds: [],
         fileIds: [file_id],
         query,
         k: limit,

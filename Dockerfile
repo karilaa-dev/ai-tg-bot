@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS build
+FROM node:22.19.0-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -12,19 +12,14 @@ COPY locales ./locales
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM node:22-bookworm-slim AS runtime
-
-ARG CODEX_RELEASE=0.144.0
+FROM node:22.19.0-bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot" \
-      org.opencontainers.image.description="AI Telegram bot powered by Codex with OpenRouter, Tavily, and Docling integrations"
+      org.opencontainers.image.description="Pi-powered Telegram agent with Codex OAuth and OpenRouter fallback"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-RUN npm install --global "@openai/codex@${CODEX_RELEASE}" \
-    && npm cache clean --force
 
 WORKDIR /app
 
@@ -32,8 +27,7 @@ ENV NODE_ENV=production \
     DB_URL=sqlite:/app/data/bot.db \
     BASH_WORKSPACE_ROOT=/app/data/bash \
     DOCLING_URL=http://docling:5001 \
-    CODEX_HOME=/home/node/.codex \
-    PATH=/usr/local/bin:$PATH
+    PI_CODING_AGENT_DIR=/app/data/pi
 
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
@@ -41,8 +35,8 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/locales ./locales
 COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
 
-RUN mkdir -p /app/data /home/node/.codex \
-    && chown -R node:node /app /home/node/.codex
+RUN mkdir -p /app/data/pi /app/data/bash /app/data/files \
+    && chown -R node:node /app
 
 USER node
 

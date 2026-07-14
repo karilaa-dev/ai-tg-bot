@@ -1,7 +1,5 @@
 import { z } from "zod";
-import { imageMediaTypeFromName } from "../../files/mediaType.js";
 import { threadChainScope } from "../../memory/retrieval.js";
-import { readCachedOrRedownloadImage } from "./helpers.js";
 import {
   MAX_LOADED_MESSAGE_CHARS,
   defineBotTool,
@@ -50,53 +48,10 @@ export function createLoadMessageTool(input: ToolBuildInput) {
             path: file.path,
             telegram_file_id: file.telegram_file_id,
             note: file.telegram_file_id
-              ? "image bytes are cached locally and can be redownloaded from Telegram if missing"
-              : "image bytes are available from the stored file path for reload",
+              ? "image bytes will be redownloaded from Telegram into transient Pi context"
+              : "image has no reusable Telegram file_id",
           })),
       };
-    },
-    toModelOutput: async ({ output }) => {
-      if ("error" in output) return { type: "json", value: output as never };
-      const result = output;
-      const imageParts = [];
-      for (const image of result.images ?? []) {
-        try {
-          const data = await readCachedOrRedownloadImage(input, image);
-          imageParts.push({ type: "image-data" as const, data: data.toString("base64"), mediaType: imageMediaTypeFromName(image.name) ?? "image/*" });
-        } catch (err) {
-          input.logger?.warn("tool load_message image reload failed", {
-            fileId: image.file_id,
-            err: String(err),
-          });
-          imageParts.push({
-            type: "text" as const,
-            text: `[image #${image.file_id} could not be reloaded: ${String(err)}]`,
-          });
-        }
-      }
-      if (!imageParts.length) return { type: "json", value: result as never };
-      return {
-        type: "content",
-        value: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              message_id: result.message_id,
-              role: result.role,
-              kind: result.kind,
-              text: result.text,
-              truncated: result.truncated,
-              files: result.files,
-              images: result.images?.map((image) => ({
-                file_id: image.file_id,
-                name: image.name,
-                caption: image.caption,
-              })),
-            }),
-          },
-          ...imageParts,
-        ],
-      } as never;
     },
   });
 }

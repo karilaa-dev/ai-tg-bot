@@ -2,13 +2,22 @@ import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "../sql.js";
 import type { DialectName } from "../types.js";
 
-export async function up(db: SqlExecutor, dialect: DialectName): Promise<void> {
-  if (dialect === "sqlite") await sqlite(db);
-  else await postgres(db);
+export interface MigrationResult {
+  piCutoverApplied: boolean;
+  deletedRows: Record<string, number>;
+}
+
+export async function up(db: SqlExecutor, dialect: DialectName): Promise<MigrationResult> {
+  if (dialect === "sqlite") await db.execute(sql`pragma journal_mode = wal`);
+  return db.transaction(async (tx) => {
+    if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
+    if (dialect === "sqlite") await sqlite(tx);
+    else await postgres(tx);
+    return piCutover(tx, dialect);
+  });
 }
 
 async function sqlite(db: SqlExecutor): Promise<void> {
-  await db.execute(sql`pragma journal_mode = wal`);
   await db.execute(sql`
     create table if not exists users (
       tg_id integer primary key,
@@ -21,10 +30,9 @@ async function sqlite(db: SqlExecutor): Promise<void> {
       created_at integer not null
     )
   `);
-  await commonTables(db, "integer primary key autoincrement", "integer", "blob");
+  await commonTables(db, "sqlite", "integer primary key autoincrement", "integer", "blob");
   await db.execute(sql`create virtual table if not exists messages_fts using fts5(text, message_id unindexed, thread_id unindexed)`);
   await db.execute(sql`create virtual table if not exists chunks_fts using fts5(text, chunk_id unindexed, file_id unindexed)`);
-  await db.execute(sql`create virtual table if not exists summaries_fts using fts5(text, summary_id unindexed, thread_id unindexed)`);
 }
 
 async function postgres(db: SqlExecutor): Promise<void> {
@@ -40,7 +48,7 @@ async function postgres(db: SqlExecutor): Promise<void> {
       created_at bigint not null
     )
   `);
-  await commonTables(db, "bigserial primary key", "bigint", "bytea");
+  await commonTables(db, "postgres", "bigserial primary key", "bigint", "bytea");
   await db.execute(sql`
     create table if not exists message_search (
       message_id bigint primary key references messages(id) on delete cascade,
@@ -61,20 +69,11 @@ async function postgres(db: SqlExecutor): Promise<void> {
   `);
   await db.execute(sql`create index if not exists chunk_search_ts_idx on chunk_search using gin(ts)`);
   await db.execute(sql`create index if not exists chunk_search_file_idx on chunk_search(file_id)`);
-  await db.execute(sql`
-    create table if not exists summary_search (
-      summary_id bigint primary key references summaries(id) on delete cascade,
-      thread_id bigint not null,
-      text text not null,
-      ts tsvector not null
-    )
-  `);
-  await db.execute(sql`create index if not exists summary_search_ts_idx on summary_search using gin(ts)`);
-  await db.execute(sql`create index if not exists summary_search_thread_idx on summary_search(thread_id)`);
 }
 
 async function commonTables(
   db: SqlExecutor,
+  dialect: DialectName,
   idType: string,
   intType: string,
   blobType: string,
@@ -98,8 +97,8 @@ async function commonTables(
       parent_thread_id ${intType},
       fork_point_message_id ${intType},
       title text not null,
-      meta_summary text,
-      compacted_upto_message_id ${intType},
+      pi_session_file text,
+      pi_session_id text,
       archived integer not null default 0,
       created_at ${intType} not null
     )
@@ -114,7 +113,7 @@ async function commonTables(
       text_plain text not null,
       thinking text,
       tg_message_id ${intType},
-      tokens_est integer,
+      pi_entry_id text,
       created_at ${intType} not null
     )
   `));
@@ -130,7 +129,7 @@ async function commonTables(
       telegram_file_unique_id text,
       content_sha256 text,
       name text not null,
-      path text not null,
+      path text,
       size integer not null,
       content_md text,
       summary text,
@@ -171,17 +170,6 @@ async function commonTables(
   `));
   await db.execute(sql.raw(`create index if not exists message_files_file_id_idx on message_files(file_id)`));
   await db.execute(sql.raw(`
-    create table if not exists summaries (
-      id ${idType},
-      thread_id ${intType} not null references threads(id),
-      level integer not null,
-      from_message_id ${intType} not null,
-      to_message_id ${intType} not null,
-      content text not null,
-      created_at ${intType} not null
-    )
-  `));
-  await db.execute(sql.raw(`
     create table if not exists embeddings (
       id ${idType},
       kind text not null,
@@ -193,9 +181,9 @@ async function commonTables(
     )
   `));
   await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
-  await addColumnIfMissing(db, "files", "telegram_file_id", "text");
-  await addColumnIfMissing(db, "files", "telegram_file_unique_id", "text");
-  await addColumnIfMissing(db, "files", "content_sha256", "text");
+  await addColumnIfMissing(db, dialect, "files", "telegram_file_id", "text");
+  await addColumnIfMissing(db, dialect, "files", "telegram_file_unique_id", "text");
+  await addColumnIfMissing(db, dialect, "files", "content_sha256", "text");
   await db.execute(sql.raw(`create unique index if not exists files_telegram_file_unique_id_idx on files(telegram_file_unique_id)`));
   await db.execute(sql.raw(`create index if not exists files_content_sha256_idx on files(content_sha256, type, size)`));
   await db.execute(sql`
@@ -218,19 +206,119 @@ async function commonTables(
         where mf.message_id = f.message_id and mf.file_id = f.id
       )
   `);
-  await addColumnIfMissing(db, "embeddings", "model", "text");
+  await addColumnIfMissing(db, dialect, "embeddings", "model", "text");
+  await addColumnIfMissing(db, dialect, "threads", "pi_session_file", "text");
+  await addColumnIfMissing(db, dialect, "threads", "pi_session_id", "text");
+  await addColumnIfMissing(db, dialect, "messages", "pi_entry_id", "text");
 }
 
-async function addColumnIfMissing(db: SqlExecutor, table: string, column: string, definition: string): Promise<void> {
-  try {
-    await db.execute(sql.raw(`alter table ${table} add column ${column} ${definition}`));
-  } catch (err) {
-    if (!/duplicate column|already exists/i.test(errorText(err))) throw err;
+async function piCutover(db: SqlExecutor, dialect: DialectName): Promise<MigrationResult> {
+  await db.execute(sql`
+    create table if not exists schema_migrations (
+      name text primary key,
+      applied_at bigint not null
+    )
+  `);
+  return piCutoverLocked(db, dialect);
+}
+
+async function piCutoverLocked(tx: SqlExecutor, dialect: DialectName): Promise<MigrationResult> {
+    const applied = await tx.query<{ name: string }>(sql`
+      select name from schema_migrations where name = 'pi_cutover_v2' limit 1
+    `);
+    if (applied.length) return { piCutoverApplied: false, deletedRows: {} };
+
+    const deletedRows: Record<string, number> = {};
+    for (const table of ["threads", "messages", "files", "file_chunks", "embeddings", "summaries"]) {
+      deletedRows[table] = await safeCount(tx, dialect, table);
+    }
+
+    if (dialect === "sqlite") {
+      await tx.execute(sql`delete from messages_fts`);
+      await tx.execute(sql`delete from chunks_fts`);
+      await tx.execute(sql.raw("drop table if exists summaries_fts"));
+    } else {
+      await tx.execute(sql`delete from message_search`);
+      await tx.execute(sql`delete from chunk_search`);
+      await tx.execute(sql.raw("drop table if exists summary_search"));
+    }
+    await tx.execute(sql`delete from message_files`);
+    await tx.execute(sql`delete from file_telegram_refs`);
+    await tx.execute(sql`delete from embeddings`);
+    await tx.execute(sql.raw("drop table if exists summaries"));
+    await tx.execute(sql`delete from file_chunks`);
+    await tx.execute(sql`delete from files`);
+    await tx.execute(sql`delete from messages`);
+    await tx.execute(sql`delete from threads`);
+    if (dialect === "sqlite") {
+      const columns = await tx.query<{ name: string; notnull: number }>(sql.raw("pragma table_info(files)"));
+      if (columns.find((column) => column.name === "path")?.notnull) {
+        await tx.execute(sql.raw("alter table files drop column path"));
+        await tx.execute(sql.raw("alter table files add column path text"));
+      }
+    } else {
+      await tx.execute(sql.raw("alter table files alter column path drop not null"));
+    }
+    await dropColumnIfExists(tx, dialect, "threads", "meta_summary");
+    await dropColumnIfExists(tx, dialect, "threads", "compacted_upto_message_id");
+    await dropColumnIfExists(tx, dialect, "messages", "tokens_est");
+    await tx.execute(sql`insert into schema_migrations(name, applied_at) values ('pi_cutover_v2', ${Date.now()})`);
+    return { piCutoverApplied: true, deletedRows };
+}
+
+async function safeCount(db: SqlExecutor, dialect: DialectName, table: string): Promise<number> {
+  if (!(await tableExists(db, dialect, table))) return 0;
+  const rows = await db.query<{ count: number }>(sql.raw(`select count(*) as count from ${table}`));
+  return Number(rows[0]?.count ?? 0);
+}
+
+async function dropColumnIfExists(
+  db: SqlExecutor,
+  dialect: DialectName,
+  table: string,
+  column: string,
+): Promise<void> {
+  if (!(await columnExists(db, dialect, table, column))) return;
+  await db.execute(sql.raw(`alter table ${table} drop column ${column}`));
+}
+
+async function addColumnIfMissing(
+  db: SqlExecutor,
+  dialect: DialectName,
+  table: string,
+  column: string,
+  definition: string,
+): Promise<void> {
+  if (await columnExists(db, dialect, table, column)) return;
+  await db.execute(sql.raw(`alter table ${table} add column ${column} ${definition}`));
+}
+
+async function tableExists(db: SqlExecutor, dialect: DialectName, table: string): Promise<boolean> {
+  if (dialect === "sqlite") {
+    const rows = await db.query<{ name: string }>(sql`
+      select name from sqlite_master where type = 'table' and name = ${table} limit 1
+    `);
+    return rows.length > 0;
   }
+  const rows = await db.query<{ exists: boolean }>(sql`
+    select exists(
+      select 1 from information_schema.tables
+      where table_schema = current_schema() and table_name = ${table}
+    ) as exists
+  `);
+  return Boolean(rows[0]?.exists);
 }
 
-function errorText(err: unknown): string {
-  if (!(err instanceof Error)) return String(err);
-  const cause = "cause" in err ? (err as { cause?: unknown }).cause : undefined;
-  return `${err.name}: ${err.message}${cause ? `\n${errorText(cause)}` : ""}`;
+async function columnExists(db: SqlExecutor, dialect: DialectName, table: string, column: string): Promise<boolean> {
+  if (dialect === "sqlite") {
+    const rows = await db.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+    return rows.some((row) => row.name === column);
+  }
+  const rows = await db.query<{ exists: boolean }>(sql`
+    select exists(
+      select 1 from information_schema.columns
+      where table_schema = current_schema() and table_name = ${table} and column_name = ${column}
+    ) as exists
+  `);
+  return Boolean(rows[0]?.exists);
 }

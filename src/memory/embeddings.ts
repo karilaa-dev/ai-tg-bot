@@ -2,7 +2,7 @@ import type { AppConfig } from "../config.js";
 import type { EmbeddingKind } from "../db/repos/embeddings.js";
 import type { Repos } from "../db/repos/index.js";
 import type { Logger } from "../logger.js";
-import { embed as openRouterEmbed } from "../ai/provider.js";
+import { embedForRetrieval } from "../pi/retrievalExtension.js";
 
 export interface TextEmbedder {
   embed(texts: string[]): Promise<Float32Array[]>;
@@ -12,7 +12,7 @@ export interface TextEmbedder {
 export function createOpenRouterTextEmbedder(config: AppConfig, logger?: Logger): TextEmbedder {
   return {
     model: config.OPENROUTER_EMBEDDING_MODEL,
-    embed: (texts) => openRouterEmbed(texts, config, logger),
+    embed: (texts) => embedForRetrieval(texts, config, logger),
   };
 }
 

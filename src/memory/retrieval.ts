@@ -14,7 +14,6 @@ const VECTOR_TOP_K = 20;
 
 export type RetrievalHit =
   | { kind: "message"; ref_id: number; snippet: string; score: number }
-  | { kind: "summary"; ref_id: number; snippet: string; score: number }
   | { kind: "chunk"; ref_id: number; snippet: string; score: number };
 
 export async function hybridSearch(input: {
@@ -22,7 +21,6 @@ export async function hybridSearch(input: {
   repos?: Repos;
   threadIds: number[];
   messageIds?: number[];
-  summaryIds?: number[];
   fileIds?: number[];
   query: string;
   k: number;
@@ -33,7 +31,6 @@ export async function hybridSearch(input: {
   input.logger?.debug("hybrid search starting", {
     threadIds: input.threadIds.length,
     messageScope: input.messageIds?.length ?? null,
-    summaryScope: input.summaryIds?.length ?? null,
     fileScope: input.fileIds?.length ?? null,
     queryChars: input.query.length,
     limit: input.k,
@@ -41,7 +38,6 @@ export async function hybridSearch(input: {
   });
   const ranked = new Map<string, RetrievalHit>();
   const allowedMessages = input.messageIds ? new Set(input.messageIds) : undefined;
-  const allowedSummaries = input.summaryIds ? new Set(input.summaryIds) : undefined;
   const add = (kind: RetrievalHit["kind"], refId: number, snippet: string, rank: number) => {
     const key = `${kind}:${refId}`;
     const existing = ranked.get(key);
@@ -50,24 +46,18 @@ export async function hybridSearch(input: {
   };
 
   const scopedLimit = Math.max(input.k, SCOPED_LEXICAL_FETCH_LIMIT);
-  const [messages, summaries, chunks] = await Promise.all([
+  const [messages, chunks] = await Promise.all([
     input.search.searchMessages(input.threadIds, input.query, allowedMessages ? scopedLimit : input.k),
-    input.search.searchSummaries(input.threadIds, input.query, allowedSummaries ? scopedLimit : input.k),
     input.fileIds?.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
   ]);
   input.logger?.debug("hybrid lexical search complete", {
     messages: messages.length,
-    summaries: summaries.length,
     chunks: chunks.length,
   });
   messages
     .filter((hit) => !allowedMessages || allowedMessages.has(hit.id))
     .slice(0, input.k)
     .forEach((hit, idx) => add("message", hit.id, hit.snippet, idx));
-  summaries
-    .filter((hit) => !allowedSummaries || allowedSummaries.has(hit.id))
-    .slice(0, input.k)
-    .forEach((hit, idx) => add("summary", hit.id, hit.snippet, idx));
   chunks.forEach((hit, idx) => add("chunk", hit.id, hit.snippet, idx));
 
   if (input.embedder && input.repos) {
@@ -80,7 +70,6 @@ export async function hybridSearch(input: {
         repos: input.repos,
         threadIds: input.threadIds,
         messageIds: input.messageIds,
-        summaryIds: input.summaryIds,
         fileIds: input.fileIds,
         queryVector,
         embeddingModel: input.embeddingModel ?? input.embedder.model,
@@ -99,7 +88,6 @@ export async function hybridSearch(input: {
 export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise<{
   threadIds: number[];
   messageIds: number[];
-  summaryIds: number[];
   fileIds: number[];
 }> {
   const chain = await repos.threads.chain(thread);
@@ -107,8 +95,6 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
   const messages = await repos.messages.listForThreadChainSearchScope(chain);
   const messageIds = messages.map((row) => row.id);
   const messageIdSet = new Set(messageIds);
-  const summaries = await repos.summaries.listForThreads(threadIds);
-  const summaryIds = summaries.filter((summary) => summaryWithinChain(summary.thread_id, summary.to_message_id, chain)).map((row) => row.id);
   const attachedFiles = await repos.files.listForMessages(messageIds);
   const legacyFiles = await repos.files.listForThreads(threadIds);
   const fileIds = [
@@ -119,33 +105,22 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
         .map((file) => file.id),
     ]),
   ];
-  return { threadIds, messageIds, summaryIds, fileIds };
-}
-
-function summaryWithinChain(threadId: number, toMessageId: number, chain: ThreadRow[]): boolean {
-  const index = chain.findIndex((thread) => thread.id === threadId);
-  if (index === -1) return false;
-  const child = chain[index + 1];
-  return !(child?.parent_thread_id === threadId && child.fork_point_message_id !== null && toMessageId > child.fork_point_message_id);
+  return { threadIds, messageIds, fileIds };
 }
 
 async function addEmbeddingHits(input: {
   repos: Repos;
   threadIds: number[];
   messageIds?: number[];
-  summaryIds?: number[];
   fileIds?: number[];
   queryVector: Float32Array;
   embeddingModel?: string;
   add: (kind: RetrievalHit["kind"], refId: number, snippet: string, rank: number) => void;
 }): Promise<void> {
-  const [messageIds, summaryRows, fileRows] = await Promise.all([
+  const [messageIds, fileRows] = await Promise.all([
     input.messageIds ? Promise.resolve(input.messageIds) : input.repos.messages.idsForThreads(input.threadIds),
-    input.repos.summaries.listForThreads(input.threadIds),
-    input.fileIds?.length ? Promise.resolve([] as FileRow[]) : input.repos.files.listForThreads(input.threadIds),
+    input.fileIds !== undefined ? Promise.resolve([] as FileRow[]) : input.repos.files.listForThreads(input.threadIds),
   ]);
-  const allowedSummaryIds = input.summaryIds && new Set(input.summaryIds);
-  const summaries = allowedSummaryIds ? summaryRows.filter((row) => allowedSummaryIds.has(row.id)) : summaryRows;
   const fileIds = input.fileIds ?? fileRows.map((file) => file.id);
   const chunkRows = fileIds.length ? await input.repos.files.chunksForFiles(fileIds) : [];
   const candidates: Array<{
@@ -155,12 +130,6 @@ async function addEmbeddingHits(input: {
     snippetById: Map<number, string>;
   }> = [
     { kind: "message", hitKind: "message", refIds: messageIds, snippetById: await input.repos.messages.snippets(messageIds) },
-    {
-      kind: "summary",
-      hitKind: "summary",
-      refIds: summaries.map((row) => row.id),
-      snippetById: new Map(summaries.map((row) => [row.id, row.content.slice(0, 240)])),
-    },
     {
       kind: "chunk",
       hitKind: "chunk",

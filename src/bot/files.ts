@@ -3,6 +3,7 @@ import path from "node:path";
 import type { FileRow } from "../db/types.js";
 import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { sha256Hex } from "../files/hash.js";
+import { detectImageMediaType } from "../files/mediaType.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { escapeHtml } from "../util/text.js";
@@ -30,17 +31,18 @@ interface PreparedTelegramFile {
   type: AcceptedFileType;
 }
 
-export async function stopActiveFileProcessing(ctx: BotContext): Promise<void> {
+export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): Promise<boolean> {
   const key = activeFileJobKey(ctx);
   const job = key ? ctx.services.routerState.activeFileJobs.get(key) : undefined;
   if (!job) {
     ctx.services.logger.info("file stop requested with no active job", ctxLogMeta(ctx));
-    await replyWithThreadFallback(ctx, ctx.t("file-stop-none"), threadExtra(ctx.thread));
-    return;
+    if (!quiet) await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
+    return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
   await job.status.updateKey("file-processing-stopping");
   job.controller.abort();
+  return true;
 }
 
 function activeFileJobKey(ctx: BotContext): string | undefined {
@@ -171,6 +173,31 @@ async function ingestTelegramFile(
     const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, signal, status, bytes);
     if (hashReused === "too-big") return "too-big";
     if (hashReused) return { outcome: "reused-hash", prepared: hashReused };
+  }
+  if (input.type === "image") {
+    const mimeType = detectImageMediaType(bytes) ?? input.mime ?? "image/jpeg";
+    const summary = await ctx.services.pi.captionImage(bytes, mimeType, input.caption);
+    const file = await ctx.services.repos.files.insertFile({
+      userId: ctx.user.tg_id,
+      threadId: ctx.thread.id,
+      type: "image",
+      telegramFileId: input.fileId,
+      telegramFileUniqueId: input.fileUniqueId ?? null,
+      contentSha256,
+      name: input.name,
+      path: null,
+      size: bytes.length,
+      summary,
+      isInline: true,
+    });
+    await ctx.services.repos.files.rememberTelegramFileRef(file.id, {
+      fileUniqueId: input.fileUniqueId ?? null,
+      telegramFileId: input.fileId,
+    });
+    return {
+      outcome: "ingested",
+      prepared: { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type: "image" },
+    };
   }
   const ingested = await ingestFileBytes({
     config: ctx.services.config,
@@ -325,7 +352,7 @@ async function prepareCachedTelegramFile(
   status?: FileProcessingStatus,
   restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
-  if (!(await fileExists(cached.path))) {
+  if (cached.type !== "image" && (!cached.path || !(await fileExists(cached.path)))) {
     ctx.services.logger.warn("cached file missing on disk; restoring", ctxLogMeta(ctx, {
       fileId: cached.id,
       path: cached.path,
@@ -352,6 +379,7 @@ async function prepareCachedTelegramFile(
       else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return "too-big";
     }
+    if (!cached.path) throw new Error(`Cached file #${cached.id} has no storage path.`);
     await fs.mkdir(path.dirname(cached.path), { recursive: true });
     await fs.writeFile(cached.path, bytes);
     ctx.services.logger.info("cached file restored on disk", ctxLogMeta(ctx, {

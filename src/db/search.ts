@@ -15,12 +15,10 @@ export interface SearchHit {
 export interface TextSearch {
   indexMessage(id: number, threadId: number, text: string): Promise<void>;
   indexChunk(id: number, fileId: number, text: string): Promise<void>;
-  indexSummary(id: number, threadId: number, text: string): Promise<void>;
   removeMessage(id: number): Promise<void>;
   removeChunksForFile(fileId: number): Promise<void>;
   searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]>;
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]>;
-  searchSummaries(threadIds: number[], q: string, limit: number): Promise<SearchHit[]>;
 }
 
 interface SearchTarget {
@@ -33,7 +31,6 @@ interface SearchTarget {
 const TARGETS = {
   message: { sqliteTable: "messages_fts", pgTable: "message_search", idColumn: "message_id", scopeColumn: "thread_id" },
   chunk: { sqliteTable: "chunks_fts", pgTable: "chunk_search", idColumn: "chunk_id", scopeColumn: "file_id" },
-  summary: { sqliteTable: "summaries_fts", pgTable: "summary_search", idColumn: "summary_id", scopeColumn: "thread_id" },
 } satisfies Record<string, SearchTarget>;
 
 export function createTextSearch(db: SqlExecutor, dialect: DialectName): TextSearch {
@@ -51,10 +48,6 @@ class SqliteTextSearch implements TextSearch {
     return this.index(TARGETS.chunk, id, fileId, text);
   }
 
-  indexSummary(id: number, threadId: number, text: string): Promise<void> {
-    return this.index(TARGETS.summary, id, threadId, text);
-  }
-
   removeMessage(id: number): Promise<void> {
     return this.removeById(TARGETS.message, id);
   }
@@ -69,10 +62,6 @@ class SqliteTextSearch implements TextSearch {
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
     return this.search(TARGETS.chunk, fileIds, q, limit);
-  }
-
-  searchSummaries(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.summary, threadIds, q, limit);
   }
 
   private async index(target: SearchTarget, id: number, scopeId: number, text: string): Promise<void> {
@@ -125,10 +114,6 @@ class PgTextSearch implements TextSearch {
     return this.index(TARGETS.chunk, id, fileId, text);
   }
 
-  indexSummary(id: number, threadId: number, text: string): Promise<void> {
-    return this.index(TARGETS.summary, id, threadId, text);
-  }
-
   removeMessage(id: number): Promise<void> {
     return this.removeById(TARGETS.message, id);
   }
@@ -143,10 +128,6 @@ class PgTextSearch implements TextSearch {
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
     return this.search(TARGETS.chunk, fileIds, q, limit);
-  }
-
-  searchSummaries(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.summary, threadIds, q, limit);
   }
 
   private async index(target: SearchTarget, id: number, scopeId: number, text: string): Promise<void> {

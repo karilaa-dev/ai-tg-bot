@@ -2,7 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { valueList, type SqlExecutor } from "../sql.js";
 import type { EmbeddingRow } from "../types.js";
 
-export type EmbeddingKind = "message" | "chunk" | "summary";
+export type EmbeddingKind = "message" | "chunk";
 
 export class EmbeddingsRepo {
   constructor(private readonly db: SqlExecutor) {}

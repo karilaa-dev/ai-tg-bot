@@ -17,7 +17,7 @@ export function createBashTool(input: ToolBuildInput) {
       args: z.array(z.string().max(4096)).max(32).default([]),
       raw_script: z.boolean().default(false),
     }),
-    execute: async ({ script, cwd = "/", stdin = "", args = [], raw_script = false }) => {
+    execute: async ({ script, cwd = "/", stdin = "", args = [], raw_script = false }, signal) => {
       input.logger?.info("tool bash starting", {
         threadId: input.thread.id,
         scriptChars: script.length,
@@ -30,7 +30,7 @@ export function createBashTool(input: ToolBuildInput) {
         stdin,
         args,
         rawScript: raw_script,
-      });
+      }, signal);
       input.logger?.info("tool bash complete", {
         threadId: input.thread.id,
         exitCode: result.exit_code,
@@ -59,6 +59,7 @@ async function runBashTool(
     args: string[];
     rawScript: boolean;
   },
+  externalSignal?: AbortSignal,
 ): Promise<{
   stdout: string;
   stderr: string;
@@ -100,7 +101,7 @@ async function runBashTool(
       env: { TZ: "UTC" },
       replaceEnv: true,
       rawScript: command.rawScript,
-      signal: controller.signal,
+      signal: externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal,
       stdin: command.stdin,
     });
     const stdout = truncateBashOutput(result.stdout, input.config.BASH_MAX_OUTPUT_CHARS);

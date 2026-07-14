@@ -4,7 +4,7 @@ import { loadConfig, type AppConfig } from "../src/config.js";
 import { createDatabase } from "../src/db/index.js";
 import { createRepos, type Repos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
-import { buildTools } from "../src/ai/tools/index.js";
+import { buildToolRegistry } from "../src/ai/tools/index.js";
 import { ingestFileBytes } from "../src/files/ingest.js";
 
 const sampleDir = process.argv[2] ?? "/tmp/ai-tg-bot-samples";
@@ -61,7 +61,7 @@ try {
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 515151, firstName: "ExternalSamples", lang: "en" });
   const thread = await repos.threads.activeForUserTopic(user.tg_id, null, "External samples");
-  const tools = buildTools({
+  const tools = buildToolRegistry({
     config,
     db,
     repos,
@@ -139,8 +139,5 @@ async function ingestSample(
 }
 
 async function execTool<T>(tool: unknown, input: unknown): Promise<T> {
-  return (tool as { execute(args: unknown, options?: unknown): Promise<T> }).execute(input, {
-    toolCallId: "external-sample-tool",
-    messages: [],
-  });
+  return (tool as { execute(args: unknown): Promise<T> }).execute(input);
 }

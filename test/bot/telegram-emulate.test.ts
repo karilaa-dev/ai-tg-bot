@@ -261,12 +261,6 @@ describe("Telegram bot with grammy-emulate", () => {
     ]);
   });
 
-  it("handles the context compaction callback", async () => {
-    await onboard("CTXCODE");
-    const compact = await env.bot.clickButton(env.user, env.chat, "ctx:compact");
-    expect(compact.text).toContain("Compacted");
-  });
-
   it("warns when /fork is used before private topics are enabled", async () => {
     await onboard("FORKOFF");
     const res = await env.bot.sendCommand(env.user, env.chat, "/fork");
@@ -358,105 +352,6 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(sendMessagePayloads[0]?.message_thread_id).toBe(99);
     expect(sendMessagePayloads[1]?.message_thread_id).toBeUndefined();
   });
-
-  it("auto-retries the latest unanswered user message after compacting", async () => {
-    await env.dispose();
-    let calls = 0;
-    env = await createGrammyEmulator({
-      config: { RECENT_WINDOW_MESSAGES: 1 },
-      turnRunner: async (input: TurnInput) => {
-        calls += 1;
-        if (calls === 1) {
-          await input.repos.messages.insert({
-            threadId: input.thread.id,
-            role: "user",
-            content: { text: input.text },
-            textPlain: input.text,
-          });
-          await input.api.sendMessage(input.chatId, input.t("ctx-limit"), {
-            reply_markup: {
-              inline_keyboard: [[{ text: input.t("btn-compact"), callback_data: "ctx:compact" }]],
-            },
-          });
-          return;
-        }
-        await sendFinal(input, "", `Recovered: ${input.text}`);
-      },
-    });
-    await onboard("AUTORETRY");
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    for (let i = 0; i < 12; i += 1) {
-      await env.repos.messages.insert({
-        threadId: thread.id,
-        role: i % 2 ? "assistant" : "user",
-        content: { text: `old context ${i}` },
-        textPlain: `old context ${i}`,
-      });
-    }
-
-    const limited = await env.bot.sendMessage(env.user, env.chat, "retry me after compact");
-    expect(limited.getInlineButtonByData("ctx:compact")).toBeDefined();
-    const compacted = await env.bot.clickButton(env.user, env.chat, "ctx:compact");
-
-    expect(calls).toBe(2);
-    expectRichCall(compacted, "Recovered: retry me after compact");
-    const rows = await env.repos.messages.listThread(thread.id);
-    expect(rows.filter((row) => row.text_plain === "retry me after compact" && row.role === "user")).toHaveLength(1);
-    expect(rows.at(-1)?.role).toBe("assistant");
-  }, 10_000);
-
-  it("auto-retries after compacting when the latest assistant row is empty", async () => {
-    await env.dispose();
-    let calls = 0;
-    env = await createGrammyEmulator({
-      config: { RECENT_WINDOW_MESSAGES: 1 },
-      turnRunner: async (input: TurnInput) => {
-        calls += 1;
-        if (calls === 1) {
-          await input.repos.messages.insert({
-            threadId: input.thread.id,
-            role: "user",
-            content: { text: input.text },
-            textPlain: input.text,
-          });
-          await input.repos.messages.insert({
-            threadId: input.thread.id,
-            role: "assistant",
-            content: { text: "" },
-            textPlain: "",
-            thinking: "tool work without a final answer",
-          });
-          await input.api.sendMessage(input.chatId, input.t("ctx-limit"), {
-            reply_markup: {
-              inline_keyboard: [[{ text: input.t("btn-compact"), callback_data: "ctx:compact" }]],
-            },
-          });
-          return;
-        }
-        await sendFinal(input, "", `Recovered empty final: ${input.text}`);
-      },
-    });
-    await onboard("EMPTYRETRY");
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    for (let i = 0; i < 12; i += 1) {
-      await env.repos.messages.insert({
-        threadId: thread.id,
-        role: i % 2 ? "assistant" : "user",
-        content: { text: `old context ${i}` },
-        textPlain: `old context ${i}`,
-      });
-    }
-
-    const limited = await env.bot.sendMessage(env.user, env.chat, "retry empty answer");
-    expect(limited.getInlineButtonByData("ctx:compact")).toBeDefined();
-    const compacted = await env.bot.clickButton(env.user, env.chat, "ctx:compact");
-
-    expect(calls).toBe(2);
-    expectRichCall(compacted, "Recovered empty final: retry empty answer");
-    const rows = await env.repos.messages.listThread(thread.id);
-    expect(rows.filter((row) => row.text_plain === "retry empty answer" && row.role === "user")).toHaveLength(1);
-    expect(rows.at(-1)?.text_plain).toBe("Recovered empty final: retry empty answer");
-  }, 10_000);
 
   it("ingests accepted text documents and passes an inline file block to the turn runner", async () => {
     await onboard("FILECODE");
@@ -630,7 +525,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const chunksBefore = await env.repos.files.chunks(file!.id);
     expect(chunksBefore.length).toBeGreaterThan(0);
-    await fs.rm(file!.path, { force: true });
+    await fs.rm(file!.path!, { force: true });
 
     const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -640,7 +535,7 @@ describe("Telegram bot with grammy-emulate", () => {
 
     expect(downloads).toBe(2);
     expect(expectResponseSurface(second!)).toContain("Reused cached file <code>restore-b.txt</code>.");
-    await expect(fs.readFile(file!.path)).resolves.toEqual(bytes);
+    await expect(fs.readFile(file!.path!)).resolves.toEqual(bytes);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
     const chunksAfter = await env.repos.files.chunks(file!.id);
@@ -728,7 +623,8 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
-    expect(files[0]?.summary).toBeNull();
+    expect(files[0]?.summary).toBe("Telegram image");
+    expect(files[0]?.path).toBeNull();
     const rows = await env.repos.messages.listThread(thread.id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     const userMessage = rows.find((row) => row.role === "user");
@@ -738,7 +634,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(files[0]?.message_id).toBe(userMessage?.id);
   });
 
-  it("does not use the image captioner when photos are uploaded", async () => {
+  it("captions each newly uploaded image once", async () => {
     await env.dispose();
     const seenSizes: number[] = [];
     env = await createGrammyEmulator({
@@ -756,11 +652,12 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from([5, 6, 7, 8, 9]),
     });
 
-    expect(seenSizes).toEqual([]);
+    expect(seenSizes).toEqual([5]);
     expectRichCall(res, "Echo:");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
-    expect(file?.summary).toBeNull();
+    expect(file?.summary).toBe("a sketched system diagram");
+    expect(file?.path).toBeNull();
   });
 
   it("does not expose one user's image caption when another user reuses the cached image", async () => {
@@ -780,7 +677,7 @@ describe("Telegram bot with grammy-emulate", () => {
     ]);
     const ownerThread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [ownerFile] = await env.repos.files.listForThreads([ownerThread.id]);
-    expect(ownerFile?.summary).toBeNull();
+    expect(ownerFile?.summary).toBe("Telegram image");
 
     const secondPhotos = env.bot.server.fileState.storePhoto(640, 480, {
       content: Buffer.from([9, 8, 7, 6]),
@@ -800,7 +697,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(otherRows.find((row) => row.kind === "image")?.text_plain).toContain("bob caption beta");
     const [otherFile] = await env.repos.files.listForThreads([otherThread.id]);
     expect(otherFile?.id).toBe(ownerFile?.id);
-    expect(otherFile?.summary).toBeNull();
+    expect(otherFile?.summary).toBe("Telegram image");
   });
 
   it("chunks large text files into searchable file chunks", async () => {
@@ -980,7 +877,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await started.promise;
 
     const stop = await env.bot.sendCommand(env.user, env.chat, "/stop", { messageThreadId: 52 });
-    expect(stop.text).toContain("No active file processing");
+    expect(stop.text).toContain("No active task");
 
     release.resolve();
     const [fileRes] = await filePromise;

@@ -18,7 +18,7 @@ export class FilesRepo {
     telegramFileUniqueId?: string | null;
     contentSha256?: string | null;
     name: string;
-    path: string;
+    path?: string | null;
     size: number;
     contentMd?: string | null;
     summary?: string | null;
@@ -38,7 +38,7 @@ export class FilesRepo {
           ${input.telegramFileUniqueId ?? null},
           ${input.contentSha256 ?? null},
           ${input.name},
-          ${input.path},
+          ${input.path ?? null},
           ${input.size},
           ${input.contentMd ?? null},
           ${input.summary ?? null},

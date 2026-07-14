@@ -20,8 +20,8 @@ const thread: ThreadRow = {
   parent_thread_id: null,
   fork_point_message_id: null,
   title: "General",
-  meta_summary: null,
-  compacted_upto_message_id: null,
+  pi_session_file: null,
+  pi_session_id: null,
   archived: 0,
   created_at: 1,
 };

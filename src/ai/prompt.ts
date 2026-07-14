@@ -1,6 +1,23 @@
 import fs from "node:fs/promises";
 import type { ThreadRow, UserRow } from "../db/types.js";
 import { formatUtcOffset } from "../bot/timezone.js";
+import type { Repos } from "../db/repos/index.js";
+import { threadChainScope } from "../memory/retrieval.js";
+
+export async function renderThreadSystemPrompt(input: {
+  repos: Repos;
+  user: UserRow;
+  thread: ThreadRow;
+  now?: Date;
+}): Promise<string> {
+  const scope = await threadChainScope(input.repos, input.thread);
+  const files = await input.repos.files.listByIds(scope.fileIds);
+  const filesOverview = files.map((file) => {
+    const mode = file.type === "image" ? "Telegram reference" : file.is_inline ? "inline" : "searchable";
+    return `- #${file.id} ${file.name} (${file.type}, ${mode})${file.summary ? ` — ${file.summary.split("\n")[0]}` : ""}`;
+  }).join("\n");
+  return renderSystemPrompt({ ...input, filesOverview });
+}
 
 export async function renderSystemPrompt(input: {
   user: UserRow;

@@ -2,26 +2,34 @@ import { loadConfig } from "./config.js";
 import { run } from "@grammyjs/runner";
 import { createLogger } from "./logger.js";
 import { createDatabase } from "./db/index.js";
+import { createRepos } from "./db/repos/index.js";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { createConversationSummarizer, createImageCaptioner } from "./ai/inference.js";
 import { checkDocling } from "./files/docling.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
+import { PiRuntimeManager } from "./pi/runtime.js";
+import { clearManagedFiles } from "./files/storage.js";
+import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "./pi/authMigration.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
+let pi: PiRuntimeManager | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
-  inferenceProvider: "codex",
+  inferenceProvider: "pi",
   model: config.CODEX_MODEL,
-  compactionModel: config.CODEX_COMPACTION_MODEL,
+  fallbackModel: config.OPENROUTER_MAIN_MODEL,
 });
 
 try {
   logger.debug("running database migrations");
-  await db.migrate();
+  const migration = await db.migrate();
+  if (migration.piCutoverApplied) {
+    const deletedFiles = await clearManagedFiles();
+    logger.info("Pi cutover cleanup complete", { deletedRows: migration.deletedRows, deletedFiles, preserved: config.BASH_WORKSPACE_ROOT });
+  }
   logger.debug("checking docling health", { url: config.DOCLING_URL });
   try {
     await checkDocling(config);
@@ -32,13 +40,21 @@ try {
       err: String(err),
     });
   }
+  const repos = createRepos(db.db, db.search);
+  const embedder = createOpenRouterTextEmbedder(config, logger);
+  await migrateLegacyCodexAuth({
+    agentDir: config.PI_CODING_AGENT_DIR,
+    logger,
+    legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
+  });
+  pi = new PiRuntimeManager({ config, db, repos, logger, embedder });
   const bot = createBot({
     config,
     db,
     logger,
-    embedder: createOpenRouterTextEmbedder(config, logger),
-    imageCaptioner: createImageCaptioner(config, logger),
-    summarizer: createConversationSummarizer(config, logger),
+    repos,
+    embedder,
+    pi,
   });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
@@ -59,6 +75,7 @@ try {
   logger.error("bot stopped", { err: String(err) });
   process.exitCode = 1;
 } finally {
+  await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   logger.debug("destroying database connection");
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
 }

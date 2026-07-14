@@ -7,7 +7,7 @@ import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
-import { EMBEDDING_BATCH_SIZE } from "../ai/provider.js";
+import { EMBEDDING_BATCH_SIZE } from "../pi/retrievalExtension.js";
 import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
 import { convertWithDocling } from "./docling.js";
@@ -77,6 +77,31 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     userId: input.userId,
     threadId: input.threadId,
   });
+  if (type === "image") {
+    throwIfAborted(input.signal);
+    const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
+    const file = await input.repo.insertFile({
+      userId: input.userId,
+      threadId: input.threadId,
+      messageId: input.messageId ?? null,
+      telegramFileId: input.telegramFileId ?? null,
+      telegramFileUniqueId: input.telegramFileUniqueId ?? null,
+      contentSha256: input.contentSha256 ?? sha256Hex(bytes),
+      type,
+      name: input.name,
+      path: null,
+      size: bytes.length,
+      summary: input.imageSummary ?? null,
+      isInline: true,
+    });
+    input.logger?.info("image ingest complete without local persistence", {
+      fileId: file.id,
+      name: input.name,
+      bytes: bytes.length,
+      ms: Date.now() - startedAt,
+    });
+    return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
+  }
   const ext = path.extname(input.name).toLowerCase() || `.${type}`;
   let dest: string | undefined;
   let fileId: number | undefined;
@@ -109,28 +134,6 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     const { bytes, contentSha256 } = stored;
     input.logger?.debug("file bytes stored", { name: input.name, type, path: dest, bytes: bytes.length });
     throwIfAborted(input.signal);
-
-    if (type === "image") {
-      const file = await input.repo.insertFile({
-        ...baseFileFields(input, dest, bytes, contentSha256, type),
-        summary: input.imageSummary ?? null,
-        isInline: true,
-      });
-      fileId = file.id;
-      completed = true;
-      input.logger?.info("image ingest complete", {
-        fileId: file.id,
-        name: input.name,
-        bytes: bytes.length,
-        ms: Date.now() - startedAt,
-      });
-      return {
-        fileId: file.id,
-        card: cardForFile(file, [], input.name),
-        inline: true,
-        type,
-      };
-    }
 
     await reportStage(input.onStage, { stage: "extracting" }, input.signal);
     const content = await contentFor(type, input.name, bytes, input.config, input.logger, input.signal);

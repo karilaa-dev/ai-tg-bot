@@ -7,7 +7,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { buildTools } from "../../src/ai/tools/index.js";
+import { buildToolRegistry } from "../../src/ai/tools/index.js";
 
 type BashResultForTests = {
   stdout: string;
@@ -284,7 +284,7 @@ describe("just-bash coverage through the bot bash tool", () => {
     });
     const user = await repos.users.ensure({ tgId: 860, firstName: "BashCoverage", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    return buildTools({ config, db, repos, user, thread }).bash as unknown as BashToolForTests;
+    return buildToolRegistry({ config, db, repos, user, thread }).bash as unknown as BashToolForTests;
   }
 });
 

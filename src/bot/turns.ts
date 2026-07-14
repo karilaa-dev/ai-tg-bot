@@ -51,15 +51,17 @@ export async function handleUserText(
       userMessageKind: options.userMessageKind,
       userMessageContent: options.userMessageContent,
       onUserMessagePersisted: options.onUserMessagePersisted,
-      redownloadFile: async (file) => {
+      redownloadFile: async (file, signal) => {
         if (!file.telegram_file_id) throw new Error("missing Telegram file_id");
         return (await ctx.services.downloadFile({
           api: ctx.api,
           config: ctx.services.config,
           fileId: file.telegram_file_id,
+          signal,
         })).bytes;
       },
       embedder: ctx.services.embedder,
+      pi: ctx.services.pi,
       t: ctx.t,
     });
   } finally {
@@ -68,21 +70,5 @@ export async function handleUserText(
       kind: options.userMessageKind ?? "text",
       ms: Date.now() - startedAt,
     }));
-  }
-}
-
-export async function retryLatestUnansweredTurn(ctx: BotContext): Promise<void> {
-  if (!ctx.user || !ctx.thread || !ctx.chat) return;
-  ctx.services.logger.debug("looking for latest unanswered turn", ctxLogMeta(ctx));
-  const messages = await ctx.services.repos.messages.listThread(ctx.thread.id);
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]!;
-    if (message.role === "assistant" && message.text_plain.trim()) return;
-    if (message.role === "user") {
-      if (message.kind === "image") return;
-      ctx.services.logger.info("retrying latest unanswered turn", ctxLogMeta(ctx, { messageId: message.id }));
-      await handleUserText(ctx, message.text_plain);
-      return;
-    }
   }
 }

@@ -5,12 +5,11 @@ import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
 import type { ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import type { ImageCaptioner } from "../ai/provider.js";
 import type { TurnRunner } from "../ai/run.js";
 import type { TelegramFileDownloader } from "../files/telegram.js";
 import type { AcceptedFileType } from "../files/ingest.js";
-import type { ConversationSummarizer } from "../memory/compactor.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
+import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
 
 export interface ActiveFileJob {
@@ -67,8 +66,7 @@ export interface BotServices {
   turnRunner: TurnRunner;
   downloadFile: TelegramFileDownloader;
   embedder?: TextEmbedder;
-  imageCaptioner?: ImageCaptioner;
-  summarizer?: ConversationSummarizer;
+  pi: PiRuntimeService;
   routerState: RouterState;
 }
 

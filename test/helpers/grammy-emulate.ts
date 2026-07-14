@@ -6,11 +6,10 @@ import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { installBot } from "../../src/bot/router.js";
 import type { BotContext } from "../../src/bot/context.js";
-import type { ImageCaptioner } from "../../src/ai/provider.js";
 import { sendFinal, type TurnRunner } from "../../src/ai/run.js";
-import type { ConversationSummarizer } from "../../src/memory/compactor.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
 import type { TextEmbedder } from "../../src/memory/embeddings.js";
+import type { PiRuntimeService } from "../../src/pi/runtime.js";
 
 export interface GrammyEmulator {
   bot: TestBot<BotContext>;
@@ -27,8 +26,8 @@ export async function createGrammyEmulator(options: {
   config?: Partial<AppConfig>;
   turnRunner?: TurnRunner;
   privateTopics?: boolean;
-  imageCaptioner?: ImageCaptioner;
-  summarizer?: ConversationSummarizer;
+  imageCaptioner?: { caption(input: { bytes: Buffer; name: string; mime?: string }): Promise<string> };
+  pi?: PiRuntimeService;
   downloadFile?: TelegramFileDownloader;
   embedder?: TextEmbedder;
 } = {}): Promise<GrammyEmulator> {
@@ -69,14 +68,23 @@ export async function createGrammyEmulator(options: {
       await input.onUserMessagePersisted?.(message);
       await sendFinal(input, "", `Echo: ${input.text}`);
     });
+  const pi: PiRuntimeService = options.pi ?? {
+    runtime: async () => { throw new Error("Pi runtime is not used by the echo test runner"); },
+    compact: async () => 0,
+    fork: async () => undefined,
+    captionImage: async (bytes, mimeType) => options.imageCaptioner
+      ? options.imageCaptioner.caption({ bytes, name: "telegram-image", mime: mimeType })
+      : "Telegram image",
+    abort: async () => false,
+    dispose: async () => undefined,
+  };
   installBot(bot as unknown as any, {
     config,
     db,
     logger,
     repos,
     turnRunner,
-    imageCaptioner: options.imageCaptioner,
-    summarizer: options.summarizer,
+    pi,
     embedder: options.embedder,
     downloadFile: options.downloadFile ?? (async ({ fileId }) => {
       const content = bot.server.fileState.getFileContent(fileId);

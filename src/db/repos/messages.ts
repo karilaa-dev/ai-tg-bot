@@ -19,12 +19,12 @@ export class MessagesRepo {
     textPlain: string;
     thinking?: string | null;
     tgMessageId?: number | null;
-    tokensEst?: number | null;
+    piEntryId?: string | null;
   }): Promise<MessageRow> {
     const inserted = await insertReturning<MessageRow>(
       this.db,
       sql`
-        insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, tokens_est, created_at)
+        insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, pi_entry_id, created_at)
         values (
           ${input.threadId},
           ${input.role},
@@ -33,7 +33,7 @@ export class MessagesRepo {
           ${input.textPlain},
           ${input.thinking ?? null},
           ${input.tgMessageId ?? null},
-          ${input.tokensEst ?? null},
+          ${input.piEntryId ?? null},
           ${Date.now()}
         )
         returning *
@@ -43,21 +43,24 @@ export class MessagesRepo {
     return inserted;
   }
 
+  async setPiEntryId(messageId: number, entryId: string): Promise<void> {
+    await this.db.execute(sql`update messages set pi_entry_id = ${entryId} where id = ${messageId}`);
+  }
+
   listThread(threadId: number): Promise<MessageRow[]> {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }
 
   async listForThreadChain(threads: ThreadRow[]): Promise<MessageRow[]> {
-    return this.listForThreadChainRows(threads, { excludeCompacted: true });
+    return this.listForThreadChainRows(threads);
   }
 
   async listForThreadChainSearchScope(threads: ThreadRow[]): Promise<MessageRow[]> {
-    return this.listForThreadChainRows(threads, { excludeCompacted: false });
+    return this.listForThreadChainRows(threads);
   }
 
   private async listForThreadChainRows(
     threads: ThreadRow[],
-    options: { excludeCompacted: boolean },
   ): Promise<MessageRow[]> {
     const rows: MessageRow[] = [];
     for (let i = 0; i < threads.length; i += 1) {
@@ -66,9 +69,6 @@ export class MessagesRepo {
       const filters: SQL[] = [sql`thread_id = ${thread.id}`];
       if (child?.parent_thread_id === thread.id && child.fork_point_message_id !== null) {
         filters.push(sql`id <= ${child.fork_point_message_id}`);
-      }
-      if (options.excludeCompacted && thread.compacted_upto_message_id !== null) {
-        filters.push(sql`id > ${thread.compacted_upto_message_id}`);
       }
       rows.push(...(await this.db.query<MessageRow>(sql`select * from messages where ${sql.join(filters, sql` and `)} order by id asc`)));
     }

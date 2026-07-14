@@ -8,8 +8,6 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type MessageKind = "text" | "image" | "file" | "system";
 
-export type SummaryLevel = 0 | 1;
-
 export interface UsersTable {
   tg_id: number;
   first_name: string | null;
@@ -38,8 +36,8 @@ export interface ThreadsTable {
   parent_thread_id: number | null;
   fork_point_message_id: number | null;
   title: string;
-  meta_summary: string | null;
-  compacted_upto_message_id: number | null;
+  pi_session_file: string | null;
+  pi_session_id: string | null;
   archived: number;
   created_at: number;
 }
@@ -53,7 +51,7 @@ export interface MessagesTable {
   text_plain: string;
   thinking: string | null;
   tg_message_id: number | null;
-  tokens_est: number | null;
+  pi_entry_id: string | null;
   created_at: number;
 }
 
@@ -67,7 +65,7 @@ export interface FilesTable {
   telegram_file_unique_id: string | null;
   content_sha256: string | null;
   name: string;
-  path: string;
+  path: string | null;
   size: number;
   content_md: string | null;
   summary: string | null;
@@ -100,19 +98,9 @@ export interface MessageFilesTable {
   created_at: number;
 }
 
-export interface SummariesTable {
-  id: number;
-  thread_id: number;
-  level: SummaryLevel;
-  from_message_id: number;
-  to_message_id: number;
-  content: string;
-  created_at: number;
-}
-
 export interface EmbeddingsTable {
   id: number;
-  kind: "message" | "chunk" | "summary";
+  kind: "message" | "chunk";
   ref_id: number;
   model: string | null;
   dim: number;
@@ -126,5 +114,4 @@ export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
 export type FileChunkRow = FileChunksTable;
-export type SummaryRow = SummariesTable;
 export type EmbeddingRow = EmbeddingsTable;

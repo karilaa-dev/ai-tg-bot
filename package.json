@@ -10,25 +10,26 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
-    "dev:streamdump": "tsx scripts/dump-stream-parts.ts",
-    "live:codex-check": "tsx scripts/live-codex-check.ts"
+    "live:pi-check": "tsx scripts/live-pi-check.ts",
+    "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.19.0"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
     "@grammyjs/auto-retry": "^2.0.2",
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",
     "@grammyjs/runner": "^2.0.3",
     "@tavily/core": "^0.7.6",
-    "ai": "^6.0.204",
     "csv-parse": "^6.2.1",
     "date-fns": "^4.4.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^1.0.0-beta.22",
     "grammy": "^1.43.0",
-    "js-tiktoken": "^1.0.21",
     "just-bash": "^3.0.1",
     "nanoid": "^5.1.11",
     "pg": "^8.21.0",

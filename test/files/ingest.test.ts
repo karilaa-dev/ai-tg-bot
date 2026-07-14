@@ -27,6 +27,30 @@ describe("file ingestion", () => {
     expect(classifyFile("notes.txt", "text/plain")).toBe("txt");
   });
 
+  it("keeps image bytes out of managed disk storage", async () => {
+    const user = await repos.users.ensure({ tgId: 220, firstName: "Image", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const result = await ingestFileBytes({
+      config: loadTestConfig(),
+      repo: repos.files,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "telegram.png",
+      mime: "image/png",
+      bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      telegramFileId: "AgAC-ingest",
+      telegramFileUniqueId: "unique-ingest",
+      imageSummary: "a transient Telegram image",
+    });
+
+    expect(result.type).toBe("image");
+    await expect(repos.files.get(result.fileId)).resolves.toMatchObject({
+      path: null,
+      telegram_file_id: "AgAC-ingest",
+      telegram_file_unique_id: "unique-ingest",
+    });
+  });
+
   it("ingests csv files with trailing blank lines", async () => {
     const user = await repos.users.ensure({ tgId: 221, firstName: "Csv", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);

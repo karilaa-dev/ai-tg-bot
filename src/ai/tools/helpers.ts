@@ -4,7 +4,6 @@ import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
 import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
-import { detectImageMediaType, imageMediaTypeFromName } from "../../files/mediaType.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { sha256Hex } from "../../files/hash.js";
 import { storeFileBytes } from "../../files/storage.js";
@@ -12,12 +11,8 @@ import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
   MAX_FILE_MB,
-  MAX_TELEGRAM_PHOTO_BYTES,
   type CreatedFileAttachment,
   type CreatedFileDeliveryPreference,
-  type ImageGenerationReference,
-  type ImageGenerationRequest,
-  type ImageGenerationResult,
   type ToolBuildInput,
 } from "./types.js";
 
@@ -52,136 +47,6 @@ export async function getScopedFile(input: ToolBuildInput, fileId: number): Prom
   const scope = await threadChainScope(input.repos, input.thread);
   if (!file || !scope.fileIds.includes(file.id)) return undefined;
   return file;
-}
-
-export async function createGeneratedImageAttachment(
-  input: ToolBuildInput,
-  params: {
-    promptText: string;
-    generatedInput: ImageGenerationRequest;
-    caption?: string;
-    usedBefore: number;
-  },
-): Promise<{ attachment: CreatedFileAttachment; revisedPrompt: string | null }> {
-  input.logger?.info("tool generate_image starting", {
-    threadId: input.thread.id,
-    promptChars: params.promptText.length,
-    references: params.generatedInput.references.length,
-    model: params.generatedInput.model,
-    quality: params.generatedInput.quality,
-    size: params.generatedInput.size,
-  });
-  if (!input.imageGenerator) throw new Error("image generator is unavailable");
-  const generated = await input.imageGenerator(params.generatedInput);
-  const hasInlineImageData = Boolean(generated.imageBase64?.trim());
-  if (!hasInlineImageData) throw new Error("Codex image generation returned no base64 image data");
-  const generatedBytes = generatedImageBytes(generated);
-  const bytes = generatedBytes.bytes;
-  if (!bytes.length) throw new Error("image generator returned empty image data");
-  if (bytes.length > MAX_TELEGRAM_PHOTO_BYTES) {
-    throw new Error(`generated image is too large to send as a Telegram photo (${formatBytes(bytes.length)})`);
-  }
-  const mediaType = normalizeGeneratedImageMediaType(generated.mediaType ?? generatedBytes.mediaType, bytes);
-  const name = generatedImageName(mediaType);
-  const revisedPrompt = generated.revisedPrompt?.trim() || null;
-  const summary = revisedPrompt || params.promptText;
-  const ingested = await ingestFileBytes({
-    config: input.config,
-    repo: input.repos.files,
-    userId: input.user.tg_id,
-    threadId: input.thread.id,
-    bytes,
-    name,
-    mime: mediaType,
-    imageSummary: summary,
-    embeddings: input.repos.embeddings,
-    embedder: input.embedder,
-    logger: input.logger,
-  });
-  const stored = await input.repos.files.get(ingested.fileId);
-  if (!stored) throw new Error(`generated image was not stored: ${ingested.fileId}`);
-  const attachment: CreatedFileAttachment = {
-    fileId: ingested.fileId,
-    type: ingested.type,
-    name: stored.name,
-    path: stored.path,
-    size: stored.size,
-    caption: params.caption?.trim() || null,
-    inline: ingested.inline,
-    card: ingested.card,
-    delivery: "photo",
-    origin: "generated_image",
-  };
-  const used = params.usedBefore + 1;
-  input.logger?.info("tool generate_image complete", {
-    threadId: input.thread.id,
-    fileId: attachment.fileId,
-    bytes: attachment.size,
-    references: params.generatedInput.references.length,
-    filesUsed: used,
-    filesLimit: MAX_CREATED_FILES_PER_ANSWER,
-  });
-  return { attachment, revisedPrompt };
-}
-
-export async function resolveImageGenerationReferences(
-  input: ToolBuildInput,
-  fileIds: number[],
-): Promise<ImageGenerationReference[]> {
-  if (!fileIds.length) return [];
-  const requestedIds = [...new Set(fileIds)];
-  const scope = await threadChainScope(input.repos, input.thread);
-  const scopedIds = new Set(scope.fileIds);
-  const files = await input.repos.files.listByIds(requestedIds);
-  const byId = new Map(files.map((file) => [file.id, file]));
-  const references: ImageGenerationReference[] = [];
-  for (const fileId of requestedIds) {
-    const file = byId.get(fileId);
-    if (!file || !scopedIds.has(file.id)) throw new Error(`reference image #${fileId} was not found in this thread`);
-    if (file.type !== "image") throw new Error(`reference file #${fileId} is ${file.type}, not an image`);
-    await readCachedOrRedownloadImage(input, { file_id: file.id, path: file.path });
-    references.push({
-      fileId: file.id,
-      name: file.name,
-      path: file.path,
-      mimeType: referenceImageMediaType(file),
-    });
-  }
-  return references;
-}
-
-function normalizeGeneratedImageMediaType(value: string | null | undefined, bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" {
-  const normalized = value?.toLowerCase().trim();
-  if (normalized === "image/jpeg" || normalized === "image/png" || normalized === "image/webp") return normalized;
-  const detected = detectImageMediaType(bytes);
-  return detected ?? "image/png";
-}
-
-function generatedImageBytes(generated: ImageGenerationResult): { bytes: Buffer; mediaType?: string | null } {
-  const inline = generated.imageBase64?.trim();
-  if (inline) {
-    const dataUrl = inline.match(/^data:([^;,]+);base64,(.+)$/i);
-    return {
-      bytes: Buffer.from(dataUrl?.[2] ?? inline, "base64"),
-      mediaType: dataUrl?.[1] ?? generated.mediaType,
-    };
-  }
-  return { bytes: Buffer.alloc(0), mediaType: generated.mediaType };
-}
-
-function generatedImageName(mediaType: "image/png" | "image/jpeg" | "image/webp"): string {
-  switch (mediaType) {
-    case "image/jpeg":
-      return "generated-image.jpg";
-    case "image/webp":
-      return "generated-image.webp";
-    case "image/png":
-      return "generated-image.png";
-  }
-}
-
-function referenceImageMediaType(file: FileRow): string {
-  return imageMediaTypeFromName(file.name) ?? imageMediaTypeFromName(file.path) ?? "image/*";
 }
 
 export async function prepareCreatedFile(
@@ -232,7 +97,8 @@ export async function prepareCreatedFile(
         fileId: ingested.fileId,
         type: ingested.type,
         name: stored.name,
-        path: stored.path,
+        path: stored.path ?? undefined,
+        data: ingested.type === "image" && !stored.path ? bytes : undefined,
         size: stored.size,
         caption: file.caption?.trim() || null,
         inline: ingested.inline,
@@ -256,7 +122,7 @@ export async function prepareCreatedFile(
     fileId: stored.id,
     type: stored.type,
     name: stored.name,
-    path: stored.path,
+    path: stored.path ?? undefined,
     size: stored.size,
     caption: file.caption?.trim() || null,
     inline: Boolean(stored.is_inline),
@@ -393,31 +259,6 @@ function isPathInside(parent: string, child: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-export async function readCachedOrRedownloadImage(
-  input: {
-    repos: Repos;
-    logger?: Logger;
-    redownloadFile?: (file: FileRow) => Promise<Buffer>;
-  },
-  image: { file_id: number; path: string },
-): Promise<Buffer> {
-  try {
-    return await fs.readFile(image.path);
-  } catch (err) {
-    input.logger?.debug("cached image missing; attempting Telegram redownload", {
-      fileId: image.file_id,
-      err: String(err),
-    });
-    const file = await input.repos.files.get(image.file_id);
-    if (!file || !input.redownloadFile) throw err;
-    const bytes = await input.redownloadFile(file);
-    await fs.mkdir(path.dirname(image.path), { recursive: true });
-    await fs.writeFile(image.path, bytes);
-    input.logger?.info("cached image restored from Telegram", { fileId: image.file_id, bytes: bytes.length });
-    return bytes;
-  }
-}
-
 export function normalizeBashCwd(value: string): string {
   const normalized = path.posix.normalize(value);
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
@@ -493,7 +334,7 @@ function isRawDataUrl(value: string): boolean {
 export async function enrichThreadHits(
   repos: Repos,
   fileIds: number[],
-  hits: Array<{ kind: "message" | "summary" | "chunk"; ref_id: number; snippet: string; score: number }>,
+  hits: Array<{ kind: "message" | "chunk"; ref_id: number; snippet: string; score: number }>,
 ): Promise<unknown[]> {
   const chunks = fileIds.length ? await repos.files.chunksForFiles(fileIds) : [];
   const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
@@ -521,9 +362,9 @@ export async function enrichThreadHits(
           score: hit.score,
         };
       }
-      return { kind: "summary", summary_id: hit.ref_id, snippet: hit.snippet, score: hit.score };
+      return undefined;
     }),
-  );
+  ).then((items) => items.filter((item) => item !== undefined));
 }
 
 export function normalizeTavilyExtractResponse(value: unknown, maxCharsPerUrl: number): {
