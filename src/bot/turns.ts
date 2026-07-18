@@ -51,15 +51,7 @@ export async function handleUserText(
       userMessageKind: options.userMessageKind,
       userMessageContent: options.userMessageContent,
       onUserMessagePersisted: options.onUserMessagePersisted,
-      redownloadFile: async (file, signal) => {
-        if (!file.telegram_file_id) throw new Error("missing Telegram file_id");
-        return (await ctx.services.downloadFile({
-          api: ctx.api,
-          config: ctx.services.config,
-          fileId: file.telegram_file_id,
-          signal,
-        })).bytes;
-      },
+      resolveFile: (file, signal) => ctx.services.fileResolver.resolveFile(file, signal),
       embedder: ctx.services.embedder,
       pi: ctx.services.pi,
       t: ctx.t,

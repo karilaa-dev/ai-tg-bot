@@ -61,9 +61,9 @@ export interface FilesTable {
   thread_id: number;
   message_id: number | null;
   type: StoredFileType;
-  telegram_file_id: string | null;
-  telegram_file_unique_id: string | null;
   content_sha256: string | null;
+  mime_type: string | null;
+  extraction_status: "pending" | "ready" | "failed";
   name: string;
   path: string | null;
   size: number;
@@ -74,10 +74,15 @@ export interface FilesTable {
   created_at: number;
 }
 
-export interface FileTelegramRefsTable {
-  file_unique_id: string;
+export interface FileSourcesTable {
+  id: number;
   file_id: number;
-  telegram_file_id: string | null;
+  transport: string;
+  connection_key: string;
+  remote_key: string;
+  locator_json: string;
+  mime_type: string | null;
+  last_verified_at: number | null;
   created_at: number;
 }
 
@@ -113,5 +118,6 @@ export type InviteRow = InvitesTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
+export type FileSourceRow = FileSourcesTable;
 export type FileChunkRow = FileChunksTable;
 export type EmbeddingRow = EmbeddingsTable;

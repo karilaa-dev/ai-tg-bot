@@ -27,7 +27,7 @@ describe("Pi safe tool adapters", () => {
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Adapter" });
     const createdFiles: CreatedFileAttachment[] = [];
     const buildInput = (): ToolBuildInput => ({ config, db: db!, repos, user, thread, createdFiles });
-    const tools = createPiToolAdapters({ buildInput, stageImages: () => undefined });
+    const tools = createPiToolAdapters({ buildInput });
     const bash = tools.find((tool) => tool.name === "bash")!;
     const createFile = tools.find((tool) => tool.name === "create_file")!;
 
@@ -40,8 +40,99 @@ describe("Pi safe tool adapters", () => {
 
     expect(result.details).toMatchObject({ type: "image", caption: "Pi-created image" });
     expect(createdFiles).toHaveLength(1);
-    expect(createdFiles[0]).toMatchObject({ delivery: "photo", path: undefined, caption: "Pi-created image" });
+    expect(createdFiles[0]).toMatchObject({ delivery: "photo", caption: "Pi-created image" });
+    expect(createdFiles[0]).not.toHaveProperty("path");
     expect(createdFiles[0]?.data).toEqual(Buffer.from("image-bytes"));
     await expect(repos.files.get(createdFiles[0]!.fileId)).resolves.toMatchObject({ path: null, type: "image" });
   });
+
+  it("mounts scoped chat attachment bytes only in memory for Python and JavaScript", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-input-image-"));
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    db = createDatabase(config);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9902, firstName: "InputImage", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Input image" });
+    const image = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "image",
+      mimeType: "image/png",
+      name: "telegram.png",
+      path: null,
+      size: 20,
+      summary: "a Telegram image",
+      isInline: true,
+    });
+    const bytes = Buffer.from([
+      255, 0, 0,
+      200, 10, 10,
+      0, 0, 255,
+    ]);
+    let downloads = 0;
+    const buildInput = (): ToolBuildInput => ({
+      config,
+      db: db!,
+      repos,
+      user,
+      thread,
+      resolveFile: async (file) => {
+        downloads += 1;
+        expect(file.id).toBe(image.id);
+        return resolvedFile(bytes, file.id);
+      },
+    });
+    const bash = createPiToolAdapters({ buildInput })
+      .find((tool) => tool.name === "bash")!;
+    const virtualPath = `/attachments/${image.id}`;
+    const result = await bash.execute("bash-input", {
+      script: [
+        `python3 -c 'd=open("${virtualPath}", "rb").read(); print(sum(1 for i in range(0,len(d),3) if d[i] > d[i+1]*2 and d[i] > d[i+2]*2))'`,
+        `js-exec -m -c "import fs from 'fs'; const d=fs.readFileSync('${virtualPath}'); let n=0; for(let i=0;i<d.length;i+=3){const r=d.readUInt8(i),g=d.readUInt8(i+1),b=d.readUInt8(i+2); if(r>g*2&&r>b*2)n++} console.log(n)"`,
+        `printenv CHAT_FILE_${image.id}`,
+        "printf persistent > /kept.txt",
+      ].join("; "),
+      input_file_ids: [image.id],
+    }, undefined, undefined, {} as never);
+
+    expect(result.details).toMatchObject({
+      exit_code: 0,
+      input_files: [{ file_id: image.id, path: virtualPath, name: "telegram.png", size: bytes.length }],
+    });
+    expect((result.details as { stdout: string }).stdout).toBe(`2\n2\n${virtualPath}\n`);
+    expect(downloads).toBe(1);
+    await expect(fs.readFile(path.join(config.BASH_WORKSPACE_ROOT, `thread-${thread.id}`, "kept.txt"), "utf8"))
+      .resolves.toBe("persistent");
+    await expect(fs.access(path.join(config.BASH_WORKSPACE_ROOT, `thread-${thread.id}`, "attachments")))
+      .rejects.toThrow();
+
+    const otherThread = await repos.threads.create({ userId: user.tg_id, topicId: 22, title: "Other" });
+    const otherImage = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: otherThread.id,
+      type: "image",
+      name: "other.png",
+      path: null,
+      size: 5,
+      summary: "out of scope",
+      isInline: true,
+    });
+    await expect(bash.execute("bash-cross-thread", {
+      script: "wc -c /attachments/input",
+      input_file_ids: [otherImage.id],
+    }, undefined, undefined, {} as never)).rejects.toThrow("not available in this thread");
+  });
 });
+
+function resolvedFile(bytes: Buffer, fileId: number) {
+  return {
+    path: "",
+    bytes,
+    mimeType: "image/png",
+    size: bytes.length,
+    contentSha256: "test-hash",
+    expiresAt: Number.POSITIVE_INFINITY,
+    source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
+  };
+}

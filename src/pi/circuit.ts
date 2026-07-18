@@ -60,8 +60,8 @@ export function retryableCodexError(input: { status?: number; message?: string }
   const status = input.status;
   const text = input.message?.toLowerCase() ?? "";
   if (/context|maximum.*tokens|content policy|safety|invalid request|tool.*(error|failed)/i.test(text)) return false;
-  if (status === 401 || status === 403 || status === 408 || status === 409 || status === 429) return true;
-  if (status !== undefined && status >= 500 && status <= 599) return true;
+  if (status === 401 || status === 403 || status === 408 || status === 429) return true;
+  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
   if (!text) return false;
   return /rate.?limit|quota|usage limit|refresh token|oauth|unauthori[sz]ed|forbidden|network|fetch failed|socket|timeout|timed out|econn|enotfound|service unavailable|gateway/i.test(text);
 }

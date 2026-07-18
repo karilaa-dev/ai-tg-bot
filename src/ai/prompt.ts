@@ -13,7 +13,7 @@ export async function renderThreadSystemPrompt(input: {
   const scope = await threadChainScope(input.repos, input.thread);
   const files = await input.repos.files.listByIds(scope.fileIds);
   const filesOverview = files.map((file) => {
-    const mode = file.type === "image" ? "Telegram reference" : file.is_inline ? "inline" : "searchable";
+    const mode = file.type === "image" ? "chat reference" : file.is_inline ? "inline" : "searchable";
     return `- #${file.id} ${file.name} (${file.type}, ${mode})${file.summary ? ` — ${file.summary.split("\n")[0]}` : ""}`;
   }).join("\n");
   return renderSystemPrompt({ ...input, filesOverview });

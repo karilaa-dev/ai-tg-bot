@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { FileRow } from "../db/types.js";
 import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { sha256Hex } from "../files/hash.js";
@@ -12,6 +10,7 @@ import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import { handleUserText } from "./turns.js";
 import { enqueueMediaGroup } from "./batching.js";
+import { telegramFileSource } from "../files/telegramSource.js";
 
 interface TelegramFileInput {
   fileId: string;
@@ -115,9 +114,8 @@ async function ingestTelegramFile(
   if (!ctx.user || !ctx.thread || !ctx.chat) return undefined;
   const { signal, status, logLabel } = opts;
   const withType = logLabel === "file";
-  const cached = input.fileUniqueId
-    ? await ctx.services.repos.files.findByTelegramFileUniqueId(input.fileUniqueId)
-    : undefined;
+  const source = telegramFileSource({ fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime });
+  const cached = await ctx.services.repos.files.findBySource(source);
   if (cached) {
     ctx.services.logger.debug(withType ? "telegram file cache hit by unique id" : "image cache hit by unique id", ctxLogMeta(ctx, {
       fileId: cached.id,
@@ -125,7 +123,7 @@ async function ingestTelegramFile(
       ...(withType ? { type: cached.type } : {}),
     }));
   }
-  const reused = cached?.type === input.type
+  const reused = cached?.type === input.type && cached.extraction_status === "ready"
     ? await prepareCachedTelegramFile(ctx, input, cached, signal, status)
     : undefined;
   if (reused === "too-big") return "too-big";
@@ -136,12 +134,7 @@ async function ingestTelegramFile(
     name: input.name,
     ...(withType ? { type: input.type } : {}),
   }));
-  const downloaded = await ctx.services.downloadFile({
-    api: ctx.api,
-    config: ctx.services.config,
-    fileId: input.fileId,
-    signal,
-  });
+  const downloaded = await ctx.services.fileResolver.resolveSource(source, signal);
   throwIfAborted(signal);
   const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
   ctx.services.logger.debug(withType ? "telegram file download complete" : "telegram image download complete", ctxLogMeta(ctx, {
@@ -181,19 +174,15 @@ async function ingestTelegramFile(
       userId: ctx.user.tg_id,
       threadId: ctx.thread.id,
       type: "image",
-      telegramFileId: input.fileId,
-      telegramFileUniqueId: input.fileUniqueId ?? null,
       contentSha256,
+      mimeType,
       name: input.name,
       path: null,
       size: bytes.length,
       summary,
       isInline: true,
     });
-    await ctx.services.repos.files.rememberTelegramFileRef(file.id, {
-      fileUniqueId: input.fileUniqueId ?? null,
-      telegramFileId: input.fileId,
-    });
+    await ctx.services.repos.files.rememberSource(file.id, { ...source, mimeType });
     return {
       outcome: "ingested",
       prepared: { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type: "image" },
@@ -207,8 +196,6 @@ async function ingestTelegramFile(
     bytes,
     name: input.name,
     mime: input.mime,
-    telegramFileId: input.fileId,
-    telegramFileUniqueId: input.fileUniqueId ?? null,
     contentSha256,
     embeddings: opts.withEmbeddings ? ctx.services.repos.embeddings : undefined,
     embedder: opts.withEmbeddings ? ctx.services.embedder : undefined,
@@ -217,10 +204,7 @@ async function ingestTelegramFile(
     onStage: status ? (stage) => status.updateIngestStage(stage) : undefined,
   });
   throwIfAborted(signal);
-  await ctx.services.repos.files.rememberTelegramFileRef(ingested.fileId, {
-    fileUniqueId: input.fileUniqueId ?? null,
-    telegramFileId: input.fileId,
-  });
+  await ctx.services.repos.files.rememberSource(ingested.fileId, source);
   return { outcome: "ingested", prepared: ingested };
 }
 
@@ -350,48 +334,14 @@ async function prepareCachedTelegramFile(
   cached: FileRow,
   signal: AbortSignal | undefined,
   status?: FileProcessingStatus,
-  restoreBytes?: Buffer,
+  _restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
-  if (cached.type !== "image" && (!cached.path || !(await fileExists(cached.path)))) {
-    ctx.services.logger.warn("cached file missing on disk; restoring", ctxLogMeta(ctx, {
-      fileId: cached.id,
-      path: cached.path,
-      name: input.name,
-    }));
-    let bytes = restoreBytes;
-    if (!bytes) {
-      await status?.updateKey("file-processing-downloading");
-      const downloaded = await ctx.services.downloadFile({
-        api: ctx.api,
-        config: ctx.services.config,
-        fileId: input.fileId,
-        signal,
-      });
-      bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
-    }
-    throwIfAborted(signal);
-    if ((input.size ?? bytes.length) > MAX_FILE_BYTES) {
-      ctx.services.logger.warn("restored cached file rejected; too large", ctxLogMeta(ctx, {
-        fileId: cached.id,
-        bytes: bytes.length,
-      }));
-      if (status) await status.updateText(ctx.t("file-too-big"));
-      else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
-      return "too-big";
-    }
-    if (!cached.path) throw new Error(`Cached file #${cached.id} has no storage path.`);
-    await fs.mkdir(path.dirname(cached.path), { recursive: true });
-    await fs.writeFile(cached.path, bytes);
-    ctx.services.logger.info("cached file restored on disk", ctxLogMeta(ctx, {
-      fileId: cached.id,
-      bytes: bytes.length,
-    }));
-  }
   throwIfAborted(signal);
-  await ctx.services.repos.files.rememberTelegramFileRef(cached.id, {
-    fileUniqueId: input.fileUniqueId ?? null,
-    telegramFileId: input.fileId,
-  });
+  await ctx.services.repos.files.rememberSource(cached.id, telegramFileSource({
+    fileId: input.fileId,
+    fileUniqueId: input.fileUniqueId,
+    mimeType: input.mime,
+  }));
   const chunks = cached.is_inline ? [] : await ctx.services.repos.files.chunks(cached.id);
   ctx.services.logger.debug("prepared cached telegram file", ctxLogMeta(ctx, {
     fileId: cached.id,
@@ -446,13 +396,4 @@ async function handlePreparedTelegramFile(
       });
     },
   });
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
 }

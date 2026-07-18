@@ -25,6 +25,7 @@ describe("Pi cutover migration", () => {
 
     const first = await db.migrate();
     expect(first.piCutoverApplied).toBe(true);
+    expect(first.fileSourcesApplied).toBe(true);
     expect(first.deletedRows).toMatchObject({ threads: 1, messages: 1, files: 1, file_chunks: 1, embeddings: 1, summaries: 1 });
     expect(await count(db, "users")).toBe(1);
     expect(await count(db, "invites")).toBe(1);
@@ -42,9 +43,16 @@ describe("Pi cutover migration", () => {
     expect(messageColumns).toContain("pi_entry_id");
     expect(messageColumns).not.toContain("tokens_est");
     expect(fileColumns.find((column) => column.name === "path")?.notnull).toBe(0);
+    expect(fileColumns.map((column) => column.name)).not.toContain("telegram_file_id");
+    expect(await tableExists(db, "file_sources")).toBe(true);
 
     const second = await db.migrate();
-    expect(second).toEqual({ piCutoverApplied: false, deletedRows: {} });
+    expect(second).toEqual({
+      piCutoverApplied: false,
+      deletedRows: {},
+      fileSourcesApplied: false,
+      migratedFileSources: 0,
+    });
     expect(await count(db, "users")).toBe(1);
     expect(await count(db, "invites")).toBe(1);
   });
@@ -62,6 +70,36 @@ describe("Pi cutover migration", () => {
     expect(await clearManagedFiles(filesDir)).toBe(2);
     expect(await fs.readdir(filesDir)).toEqual([]);
     expect(await fs.readFile(bashFile, "utf8")).toBe("keep");
+  });
+
+  it("backfills Telegram locators after the Pi cutover without deleting current conversations", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-source-backfill-"));
+    db = createDatabase(loadTestConfig({ DB_URL: `sqlite:${path.join(tempDir, "legacy-sources.db")}` }));
+    await installPiSchemaWithLegacyFileRefs(db);
+
+    const result = await db.migrate();
+
+    expect(result).toMatchObject({
+      piCutoverApplied: false,
+      fileSourcesApplied: true,
+      migratedFileSources: 2,
+    });
+    expect(await count(db, "threads")).toBe(1);
+    expect(await count(db, "messages")).toBe(1);
+    expect(await count(db, "files")).toBe(1);
+    const sources = await db.db.query<{
+      transport: string;
+      connection_key: string;
+      remote_key: string;
+      locator_json: string;
+    }>(sql.raw("select transport, connection_key, remote_key, locator_json from file_sources order by remote_key"));
+    expect(sources).toHaveLength(2);
+    expect(sources.every((source) => source.transport === "telegram" && source.connection_key === "default")).toBe(true);
+    expect(sources.map((source) => source.remote_key)).toEqual(["legacy-unique-a", "legacy-unique-b"]);
+    expect(JSON.parse(sources[0]!.locator_json)).toMatchObject({ file_id: "telegram-file-a" });
+    expect(await tableExists(db, "file_telegram_refs")).toBe(false);
+    expect(await columns(db, "files")).not.toContain("telegram_file_id");
+    expect((await db.migrate()).fileSourcesApplied).toBe(false);
   });
 
   it("rolls back the entire SQLite cutover when a destructive step fails", async () => {
@@ -108,6 +146,25 @@ async function installLegacySchema(database: AppDatabase): Promise<void> {
     `insert into embeddings values (1, 'summary', 1, 1, x'00000000', 1)`,
     `insert into summaries values (1, 1, 0, 1, 1, 'legacy summary', 1)`,
     `insert into summaries_fts(text, summary_id, thread_id) values ('legacy summary', 1, 1)`,
+  ];
+  for (const statement of statements) await database.db.execute(sql.raw(statement));
+}
+
+async function installPiSchemaWithLegacyFileRefs(database: AppDatabase): Promise<void> {
+  const statements = [
+    `create table users (tg_id integer primary key, first_name text, username text, lang text not null, tz_offset_min integer, stream_mode integer not null, invited_with text, created_at integer not null)`,
+    `create table invites (code text primary key, max_uses integer not null, used_count integer not null, expires_at integer, revoked integer not null, created_by integer not null, created_at integer not null)`,
+    `create table threads (id integer primary key autoincrement, user_id integer not null, topic_id integer, parent_thread_id integer, fork_point_message_id integer, title text not null, pi_session_file text, pi_session_id text, archived integer not null, created_at integer not null)`,
+    `create table messages (id integer primary key autoincrement, thread_id integer not null, role text not null, kind text not null, content_json text not null, text_plain text not null, thinking text, tg_message_id integer, pi_entry_id text, created_at integer not null)`,
+    `create table files (id integer primary key autoincrement, user_id integer not null, thread_id integer not null, message_id integer, type text not null, content_sha256 text, mime_type text, telegram_file_id text, telegram_file_unique_id text, name text not null, path text, size integer not null, content_md text, summary text, outline_json text, is_inline integer not null, created_at integer not null)`,
+    `create table file_telegram_refs (file_id integer not null, file_unique_id text not null, telegram_file_id text, created_at integer not null)`,
+    `create table schema_migrations (name text primary key, applied_at integer not null)`,
+    `insert into schema_migrations values ('pi_cutover_v2', 1)`,
+    `insert into users values (44, 'Current', 'current', 'en', null, 1, null, 1)`,
+    `insert into threads values (1, 44, null, null, null, 'Current thread', '/tmp/pi.jsonl', 'pi-session', 0, 1)`,
+    `insert into messages values (1, 1, 'user', 'file', '{}', 'current file', null, 101, 'entry-1', 1)`,
+    `insert into files values (1, 44, 1, 1, 'image', 'abc', 'image/png', 'telegram-file-a', 'legacy-unique-a', 'current.png', null, 3, null, 'current image', null, 1, 1)`,
+    `insert into file_telegram_refs values (1, 'legacy-unique-b', 'telegram-file-b', 2)`,
   ];
   for (const statement of statements) await database.db.execute(sql.raw(statement));
 }

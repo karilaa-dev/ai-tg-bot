@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { nanoid } from "nanoid";
+import type { FilesRepo } from "../db/repos/files.js";
 
 export const FILES_DIR = "data/files";
 
@@ -12,17 +12,25 @@ export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise
   return count;
 }
 
-export async function storeFileBytes(bytes: Buffer | Uint8Array, ext: string): Promise<string> {
-  const outDir = path.resolve(FILES_DIR);
-  await fs.mkdir(outDir, { recursive: true });
-  const dest = path.join(outDir, `${nanoid()}${ext}`);
-  try {
-    await fs.writeFile(dest, bytes);
-  } catch (err) {
-    await fs.unlink(dest).catch(() => undefined);
-    throw err;
+export async function clearRemoteBackedManagedFiles(
+  files: FilesRepo,
+  root = path.resolve(FILES_DIR),
+): Promise<number> {
+  const managedRoot = path.resolve(root);
+  const rows = await files.remoteBackedFilesWithPaths();
+  let removed = 0;
+  for (const row of rows) {
+    if (!row.path) continue;
+    const filePath = path.resolve(row.path);
+    const relative = path.relative(managedRoot, filePath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    await fs.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await files.clearPath(row.id);
+    removed += 1;
   }
-  return dest;
+  return removed;
 }
 
 async function countFiles(root: string): Promise<number> {

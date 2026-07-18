@@ -6,11 +6,11 @@ import type { Repos } from "../db/repos/index.js";
 import type { ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TurnRunner } from "../ai/run.js";
-import type { TelegramFileDownloader } from "../files/telegram.js";
 import type { AcceptedFileType } from "../files/ingest.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
+import type { FileResolver } from "../files/resolver.js";
 
 export interface ActiveFileJob {
   controller: AbortController;
@@ -64,7 +64,7 @@ export interface BotServices {
   repos: Repos;
   logger: Logger;
   turnRunner: TurnRunner;
-  downloadFile: TelegramFileDownloader;
+  fileResolver: FileResolver;
   embedder?: TextEmbedder;
   pi: PiRuntimeService;
   routerState: RouterState;

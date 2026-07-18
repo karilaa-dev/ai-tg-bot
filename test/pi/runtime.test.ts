@@ -10,7 +10,7 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -23,6 +23,7 @@ describe("PiRuntimeManager", () => {
   let tempDir: string | undefined;
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await db?.destroy();
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
@@ -44,7 +45,7 @@ describe("PiRuntimeManager", () => {
       name: "telegram.png",
       path: null,
       size: imageBytes.length,
-      telegramFileId: "AgAC-runtime",
+      mimeType: "image/png",
       summary: "a Telegram image marker",
       isInline: true,
     });
@@ -60,22 +61,30 @@ describe("PiRuntimeManager", () => {
     const first = await firstManager.runtime(parent, user);
     expect(first.session.model?.contextWindow).toBe(config.MODEL_CONTEXT_TOKENS);
     expect(first.session.settingsManager.getCompactionSettings().enabled).toBe(true);
+    let telegramDownloads = 0;
     first.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      redownloadFile: async (file) => {
-        expect(file.telegram_file_id).toBe("AgAC-runtime");
-        return imageBytes;
+      resolveFile: async (file) => {
+        telegramDownloads += 1;
+        expect(file.id).toBe(image.id);
+        return resolvedFile(imageBytes, "image/png", image.id);
       },
     });
-    first.bridge.stageImages([image.id]);
-    await first.session.prompt("persist this marker", { expandPromptTemplates: false, source: "extension" });
+    await first.session.prompt(`persist this marker [[chat-file:${image.id}]]`, { expandPromptTemplates: false, source: "extension" });
     const appended = first.session.sessionManager.getEntries().flatMap((entry) =>
       entry.type === "message" ? [{ id: entry.id, role: entry.message.role }] : []);
 
     expect(appended.some((entry) => entry.role === "user")).toBe(true);
     expect(appended.some((entry) => entry.role === "assistant")).toBe(true);
     expect(providerImageCount).toBe(1);
+    const bash = first.session.getToolDefinition("bash")!;
+    const bashResult = await bash.execute("mounted-image", {
+      script: `wc -c /attachments/${image.id}`,
+      input_file_ids: [image.id],
+    }, undefined, undefined, {} as never);
+    expect(bashResult.details).toMatchObject({ exit_code: 0, input_files: [{ file_id: image.id }] });
+    expect(telegramDownloads).toBe(1);
     const storedParent = await repos.threads.get(parent.id);
     expect(storedParent?.pi_session_file).toBeTruthy();
     const sessionText = await fs.readFile(storedParent!.pi_session_file!, "utf8");
@@ -103,7 +112,7 @@ describe("PiRuntimeManager", () => {
     childRuntime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      redownloadFile: async () => Buffer.from("unused"),
+      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
     });
     expect(userText(childRuntime.session.messages)).toContain("persist this marker");
     await childRuntime.session.prompt("child-only marker", { expandPromptTemplates: false, source: "extension" });
@@ -143,7 +152,7 @@ describe("PiRuntimeManager", () => {
     runtime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      redownloadFile: async () => Buffer.from("unused"),
+      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
     });
 
     await runtime.session.prompt("run the bash tool", { expandPromptTemplates: false, source: "extension" });
@@ -155,6 +164,196 @@ describe("PiRuntimeManager", () => {
       .toContain("pi-tool-ok");
     expect(runtime.session.messages.at(-1)?.role).toBe("assistant");
     expect(userText(runtime.session.messages)).toContain("run the bash tool");
+    await manager.dispose();
+  }, 20_000);
+
+  it("verifies and materializes an inline remote document only in live provider context", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-inline-file-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9129, firstName: "InlineFile", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline file" });
+    const bytes = Buffer.from("portable extracted document bytes");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      contentSha256: "test-hash",
+      mimeType: "text/plain",
+      name: "portable.txt",
+      path: null,
+      size: bytes.length,
+      contentMd: "portable extracted document text",
+      summary: "portable extracted document text",
+      isInline: true,
+    });
+    let liveText = "";
+    const stream = ((model: Model<Api>, context: Context) => {
+      liveText = context.messages.flatMap((entry) => entry.role === "user" && Array.isArray(entry.content)
+        ? entry.content.filter((part) => part.type === "text").map((part) => part.text)
+        : []).join("\n");
+      return successStream(model, "Document inspected");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    let remoteLoads = 0;
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      resolveFile: async () => {
+        remoteLoads += 1;
+        return resolvedFile(bytes, "text/plain", file.id);
+      },
+    });
+
+    await runtime.session.prompt(`inspect [[chat-file:${file.id}]]`, { expandPromptTemplates: false, source: "extension" });
+
+    expect(remoteLoads).toBe(1);
+    expect(liveText).toContain('<attachment id="');
+    expect(liveText).toContain("portable extracted document text");
+    const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
+    expect(sessionText).not.toContain("portable extracted document text");
+    expect(sessionText).not.toContain(bytes.toString("base64"));
+    await manager.dispose();
+  }, 20_000);
+
+  it("rehydrates a compacted-away image when load_message restores its marker", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-reload-file-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9128, firstName: "ReloadTest", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload attachment" });
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      kind: "image",
+      content: { text: "an older image" },
+      textPlain: "an older image",
+    });
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    const image = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      messageId: message.id,
+      type: "image",
+      contentSha256: "test-hash",
+      mimeType: "image/png",
+      name: "older.png",
+      path: null,
+      size: bytes.length,
+      summary: "an older image",
+      isInline: true,
+    });
+    await repos.files.attachToMessage(message.id, image.id);
+    let providerCalls = 0;
+    let rehydratedImages = 0;
+    const stream = ((model: Model<Api>, context: Context) => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "load-old-message",
+          name: "load_message",
+          arguments: { message_id: message.id },
+        });
+      }
+      rehydratedImages = context.messages.flatMap((entry) =>
+        entry.role === "toolResult" ? entry.content.filter((part) => part.type === "image") : []).length;
+      return successStream(model, "Older image loaded");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    let remoteLoads = 0;
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      resolveFile: async (file) => {
+        remoteLoads += 1;
+        expect(file.id).toBe(image.id);
+        return resolvedFile(bytes, "image/png", image.id);
+      },
+    });
+
+    await runtime.session.prompt("Load that old image", { expandPromptTemplates: false, source: "extension" });
+
+    expect(providerCalls).toBe(2);
+    expect(rehydratedImages).toBe(1);
+    expect(remoteLoads).toBe(1);
+    const toolResult = runtime.session.messages.find((entry) => entry.role === "toolResult");
+    expect(toolResult?.role === "toolResult" && toolResult.content[0]?.type === "text"
+      ? toolResult.content[0].text
+      : "").toContain(`[[chat-file:${image.id}]]`);
+    const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
+    expect(sessionText).not.toContain(bytes.toString("base64"));
+    await manager.dispose();
+  }, 20_000);
+
+  it("terminates after successful image generation without a follow-up provider call", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-terminal-image-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9127, firstName: "ImageTool", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Terminal image" });
+    let providerCalls = 0;
+    const stream = ((model: Model<Api>) => {
+      providerCalls += 1;
+      return providerCalls === 1
+        ? toolStream(model, {
+            type: "toolCall",
+            id: "generate-call",
+            name: "generate_image",
+            arguments: { prompt: "a red square", output_format: "png" },
+          })
+        : successStream(model, "unexpected follow-up");
+    }) as PiProviderStreamOverrides["openRouter"];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      data: [{ b64_json: Buffer.from("generated-image").toString("base64"), media_type: "image/png" }],
+    })));
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
+    });
+
+    await runtime.session.prompt("generate the image", { expandPromptTemplates: false, source: "extension" });
+
+    expect(providerCalls).toBe(1);
+    expect(runtime.bridge.attachments).toHaveLength(1);
+    expect(runtime.bridge.attachments[0]).toMatchObject({ origin: "generated_image", data: Buffer.from("generated-image") });
+    const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
+    expect(sessionText).not.toContain(Buffer.from("generated-image").toString("base64"));
     await manager.dispose();
   }, 20_000);
 
@@ -193,7 +392,7 @@ describe("PiRuntimeManager", () => {
     runtime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      redownloadFile: async () => Buffer.from("unused"),
+      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
     });
     const prompt = runtime.session.prompt("start a cancellable turn", {
       expandPromptTemplates: false,
@@ -233,7 +432,7 @@ describe("PiRuntimeManager", () => {
     runtime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      redownloadFile: async () => Buffer.from("unused"),
+      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
     });
     await runtime.session.prompt(`durable-start ${"context ".repeat(100)} durable-end`, {
       expandPromptTemplates: false,
@@ -322,4 +521,16 @@ function userText(messages: AgentMessage[]): string {
       ? [String((part as { text?: unknown }).text ?? "")]
       : []);
   }).join("\n");
+}
+
+function resolvedFile(bytes: Buffer, mimeType: string | null, fileId: number) {
+  return {
+    path: "",
+    bytes,
+    mimeType,
+    size: bytes.length,
+    contentSha256: "test-hash",
+    expiresAt: Number.POSITIVE_INFINITY,
+    source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
+  };
 }

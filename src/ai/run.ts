@@ -26,6 +26,8 @@ import type { PiRuntimeService } from "../pi/runtime.js";
 import { renderThreadSystemPrompt } from "./prompt.js";
 import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
+import type { ResolvedChatFile } from "../files/source.js";
+import { telegramFileSource } from "../files/telegramSource.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
@@ -46,7 +48,7 @@ export interface TurnInput {
   userMessageKind?: MessageKind;
   userMessageContent?: unknown;
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
-  redownloadFile?: (file: FileRow, signal?: AbortSignal) => Promise<Buffer>;
+  resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   embedder?: TextEmbedder;
   pi?: Pick<PiRuntimeService, "runtime">;
   t: (key: string, params?: Record<string, string | number>) => string;
@@ -65,6 +67,7 @@ export const runTurn: TurnRunner = async (input) => {
   });
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
+  let generatedImageDelivered = false;
 
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
@@ -75,12 +78,11 @@ export const runTurn: TurnRunner = async (input) => {
       api: input.api,
       chatId: input.chatId,
       messageThreadId: input.messageThreadId,
-      redownloadFile: async (file, signal) => {
-        if (!input.redownloadFile) throw new Error("Telegram image redownload is unavailable.");
-        return input.redownloadFile(file, signal);
+      resolveFile: async (file, signal) => {
+        if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
+        return input.resolveFile(file, signal);
       },
     });
-    runtime.bridge.stageImages(imageFileIds(input.userMessageContent));
     runtime.session.agent.state.systemPrompt = await renderThreadSystemPrompt({
       repos: input.repos,
       user: input.user,
@@ -138,7 +140,7 @@ export const runTurn: TurnRunner = async (input) => {
     if (stats.counts.generateImageToolCalls > 0 && !hasGeneratedImage) {
       throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
     }
-    const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImage);
+    const finalText = normalizeGeneratedImageFinalText(input.t, hasGeneratedImage ? "" : answer, hasGeneratedImage);
     let finalAnswer = finalText.answer;
     if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
       input.logger.warn("turn produced empty final answer", {
@@ -154,7 +156,20 @@ export const runTurn: TurnRunner = async (input) => {
       attachments: createdFiles,
       extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
     });
-    await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
+    if (hasGeneratedImage) {
+      const delivered = await sendGeneratedImageAttachmentsEarly(input, createdFiles);
+      generatedImageDelivered = delivered > 0;
+      streamer?.stop();
+      input.logger.info("generated image delivered after tool completion", {
+        threadId: input.thread.id,
+        images: delivered,
+        postToolDeliveryMs: stats.counts.generateImageReadyAt
+          ? Math.max(0, Date.now() - stats.counts.generateImageReadyAt)
+          : undefined,
+      });
+    } else {
+      await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
+    }
     const assistantEntry = [...piEntries].reverse().find((entry) => entry.role === "assistant");
     await sendFinalVisible(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles, assistantEntry?.id);
     await status?.finish(shaper.toolStatusMd());
@@ -166,6 +181,15 @@ export const runTurn: TurnRunner = async (input) => {
     });
   } catch (err) {
     input.logger.error("turn failed", { threadId: input.thread.id, err: String(err), ms: Date.now() - startedAt });
+    if (generatedImageDelivered) {
+      streamer?.stop();
+      await status?.finish(shaper.toolStatusMd());
+      input.logger.warn("turn finalization failed after generated image delivery; suppressing misleading error reply", {
+        threadId: input.thread.id,
+        err: String(err),
+      });
+      return;
+    }
     await status?.finish(shaper.toolStatusMd());
     await streamer?.finish();
     await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
@@ -173,15 +197,6 @@ export const runTurn: TurnRunner = async (input) => {
     stop();
   }
 };
-
-function imageFileIds(content: unknown): number[] {
-  const files = asRecord(content)?.files;
-  if (!Array.isArray(files)) return [];
-  return files.flatMap((value) => {
-    const file = asRecord(value);
-    return file?.type === "image" && typeof file.id === "number" ? [file.id] : [];
-  });
-}
 
 async function runPiPromptWithTimeout(
   session: Awaited<ReturnType<PiRuntimeService["runtime"]>>["session"],
@@ -285,6 +300,7 @@ interface TurnStreamStats {
   toolResults: number;
   generateImageToolCalls: number;
   generateImageToolError: string | undefined;
+  generateImageReadyAt: number | undefined;
 }
 
 function createPiStreamLoop(
@@ -299,6 +315,7 @@ function createPiStreamLoop(
     toolResults: 0,
     generateImageToolCalls: 0,
     generateImageToolError: undefined,
+    generateImageReadyAt: undefined,
   };
   const updatePresenter = () => {
     streamer?.update({
@@ -337,6 +354,7 @@ function createPiStreamLoop(
       counts.toolResults += 1;
       if (event.toolName === "generate_image") {
         counts.generateImageToolError = toolErrorText(event.result) ?? counts.generateImageToolError;
+        if (!event.isError) counts.generateImageReadyAt = Date.now();
       }
       input.logger.info("Pi tool call finished", {
         threadId: input.thread.id,
@@ -682,7 +700,9 @@ async function sendFinalVisible(
       : { text: persistedText },
     textPlain: persistedText,
     thinking: visibleThinking,
-    tgMessageId: ids.find((id) => id > 0) ?? null,
+    tgMessageId: ids.find((id) => id > 0)
+      ?? outboundAttachments.map((attachment) => attachment.telegramDelivery?.messageId).find((id) => typeof id === "number" && id > 0)
+      ?? null,
     piEntryId: piEntryId ?? null,
   });
   await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
@@ -715,6 +735,42 @@ async function sendCreatedFileAttachments(
   await sendAttachmentBatch(input, assistantMessage, photos, photoSendStrategy);
 }
 
+async function sendGeneratedImageAttachmentsEarly(
+  input: TurnInput,
+  attachments: CreatedFileAttachment[],
+): Promise<number> {
+  const generated = attachments
+    .slice(0, MAX_CREATED_FILES_PER_ANSWER)
+    .filter((attachment) => attachment.origin === "generated_image" && attachment.delivery === "photo");
+  let delivered = 0;
+  for (const attachment of generated) {
+    if (attachment.telegramDelivery) {
+      delivered += 1;
+      continue;
+    }
+    try {
+      const sent = await sendPhotoWithThreadFallback(input, attachment);
+      attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+      delivered += 1;
+      await rememberTelegramDeliverySource(input, attachment).catch((err: unknown) => {
+        input.logger.warn("failed to persist early generated image Telegram reference", {
+          threadId: input.thread.id,
+          fileId: attachment.fileId,
+          telegramMessageId: attachment.telegramDelivery?.messageId,
+          err: String(err),
+        });
+      });
+    } catch (err) {
+      input.logger.warn("early generated image delivery failed; retrying during final attachment delivery", {
+        threadId: input.thread.id,
+        fileId: attachment.fileId,
+        err: String(err),
+      });
+    }
+  }
+  return delivered;
+}
+
 interface AttachmentSendStrategy {
   label: string;
   sendOne(input: TurnInput, attachment: CreatedFileAttachment): Promise<SentTelegramFileMessage>;
@@ -740,8 +796,14 @@ async function sendAttachmentBatch(
   strategy: AttachmentSendStrategy,
 ): Promise<void> {
   if (!attachments.length) return;
-  if (attachments.length === 1) {
-    const attachment = attachments[0]!;
+  const delivered = attachments.filter((attachment) => attachment.telegramDelivery);
+  for (const attachment of delivered) {
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
+  }
+  const pending = attachments.filter((attachment) => !attachment.telegramDelivery);
+  if (!pending.length) return;
+  if (pending.length === 1) {
+    const attachment = pending[0]!;
     try {
       const sent = await strategy.sendOne(input, attachment);
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
@@ -765,23 +827,23 @@ async function sendAttachmentBatch(
   }
 
   try {
-    const sent = await strategy.sendGroup(input, attachments);
-    for (let index = 0; index < attachments.length; index += 1) {
-      const attachment = attachments[index]!;
+    const sent = await strategy.sendGroup(input, pending);
+    for (let index = 0; index < pending.length; index += 1) {
+      const attachment = pending[index]!;
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
     }
     input.logger.info(`${strategy.label} media group sent`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
-      files: attachments.length,
+      files: pending.length,
       telegramMessages: sent.map((message) => message.message_id),
     });
   } catch (err) {
     input.logger.warn(`failed to send ${strategy.label} media group`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
-      files: attachments.length,
-      fileIds: attachments.map((attachment) => attachment.fileId),
+      files: pending.length,
+      fileIds: pending.map((attachment) => attachment.fileId),
       err: String(err),
     });
   }
@@ -797,11 +859,19 @@ async function rememberSentCreatedFileAttachment(
     displayName: attachment.name,
     caption: attachment.caption ?? null,
   });
-  const fileRecord = sent?.document ?? largestTelegramPhoto(sent?.photo);
-  await input.repos.files.rememberTelegramFileRef(attachment.fileId, {
-    fileUniqueId: fileRecord?.file_unique_id?.trim() || null,
-    telegramFileId: fileRecord?.file_id?.trim() || null,
-  });
+  const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
+  if (delivery) attachment.telegramDelivery = delivery;
+  await rememberTelegramDeliverySource(input, attachment);
+}
+
+async function rememberTelegramDeliverySource(input: TurnInput, attachment: CreatedFileAttachment): Promise<void> {
+  const delivery = attachment.telegramDelivery;
+  if (!delivery?.fileId) return;
+  await input.repos.files.rememberSource(attachment.fileId, telegramFileSource({
+    fileId: delivery.fileId,
+    fileUniqueId: delivery.fileUniqueId,
+    mimeType: attachment.type === "image" ? "image/jpeg" : null,
+  }));
 }
 
 type SentTelegramPhotoSize = { file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number };
@@ -811,6 +881,15 @@ type SentTelegramFileMessage = {
   document?: { file_id?: string; file_unique_id?: string };
   photo?: SentTelegramPhotoSize[];
 };
+
+function telegramDeliveryFromSent(sent: SentTelegramFileMessage): NonNullable<CreatedFileAttachment["telegramDelivery"]> {
+  const fileRecord = sent.document ?? largestTelegramPhoto(sent.photo);
+  return {
+    messageId: sent.message_id,
+    fileId: fileRecord?.file_id?.trim() || null,
+    fileUniqueId: fileRecord?.file_unique_id?.trim() || null,
+  };
+}
 
 function withThreadFallback<T>(
   input: TurnInput,

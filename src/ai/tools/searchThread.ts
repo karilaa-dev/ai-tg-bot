@@ -7,7 +7,7 @@ import { defineBotTool, type ToolBuildInput } from "./types.js";
 export function createSearchThreadTool(input: ToolBuildInput, embedder: TextEmbedder) {
   return defineBotTool({
     description:
-      "Search Telegram messages and file chunks in this thread and its fork ancestry. Use before claiming something was not discussed, when the user asks about prior chat details, or to find message ids for load_message.",
+      "Search chat messages and file chunks in this thread and its fork ancestry. Use before claiming something was not discussed, when the user asks about prior chat details, or to find message ids for load_message.",
     inputSchema: z.object({ query: z.string(), limit: z.number().max(20).default(8) }),
     execute: async ({ query, limit }) => {
       input.logger?.debug("tool search_thread starting", {

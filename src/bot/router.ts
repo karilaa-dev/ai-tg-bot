@@ -33,6 +33,9 @@ import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { authAndThread, isStopCommand, privateOnly } from "./auth.js";
 import { sendWelcome, timezoneConversation } from "./onboarding.js";
 import { registerInviteHandlers } from "./invites.js";
+import { FileByteCache } from "../files/cache.js";
+import { FileResolver } from "../files/resolver.js";
+import { TelegramFileSourceAdapter } from "../files/telegramSource.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -42,6 +45,7 @@ interface InstallOptions {
   localizer?: Localizer;
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
+  fileResolver?: FileResolver;
   embedder?: TextEmbedder;
   pi?: PiRuntimeService;
 }
@@ -71,13 +75,20 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logger: options.logger,
     embedder: options.embedder,
   });
+  const downloadFile = options.downloadFile ?? downloadTelegramFile;
+  const fileResolver = options.fileResolver ?? new FileResolver(repos.files, new FileByteCache(options.config));
+  fileResolver.registry.register(new TelegramFileSourceAdapter({
+    api: bot.api,
+    config: options.config,
+    download: downloadFile,
+  }));
   const services: BotServices = {
     config: options.config,
     db: options.db,
     repos,
     logger: options.logger,
     turnRunner: options.turnRunner ?? runTurn,
-    downloadFile: options.downloadFile ?? downloadTelegramFile,
+    fileResolver,
     embedder: options.embedder,
     pi,
     routerState: createRouterState(),

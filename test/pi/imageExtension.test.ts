@@ -4,7 +4,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { createGenerateImagePiTool, type TelegramImageBridge } from "../../src/pi/imageExtension.js";
+import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/imageExtension.js";
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
 
@@ -31,10 +31,16 @@ describe("Pi generate_image extension", () => {
       name: "telegram-reference.png",
       path: null,
       size: 8,
-      telegramFileId: "AgAC-reference",
-      telegramFileUniqueId: "unique-reference",
+      mimeType: "image/png",
       summary: "a Telegram reference",
       isInline: false,
+    });
+    await repos.files.rememberSource(reference.id, {
+      transport: "telegram",
+      connectionKey: "default",
+      remoteKey: "unique-reference",
+      locator: { file_id: "AgAC-reference", file_unique_id: "unique-reference" },
+      mimeType: "image/png",
     });
     const outputBytes = Buffer.from("generated-image-bytes");
     let requestBody: Record<string, unknown> | undefined;
@@ -50,7 +56,7 @@ describe("Pi generate_image extension", () => {
     }));
 
     const model = backendModel();
-    const bridge: TelegramImageBridge = {
+    const bridge: ChatImageBridge = {
       config,
       repos,
       user,
@@ -68,7 +74,7 @@ describe("Pi generate_image extension", () => {
         codexConfigured: () => false,
       } satisfies PiProviderRouter,
       resolveImage: async (file) => {
-        expect(file.telegram_file_id).toBe("AgAC-reference");
+        expect(file.id).toBe(reference.id);
         expect(file.path).toBeNull();
         return { bytes: Buffer.from("reference-bytes"), mimeType: "image/png" };
       },
@@ -95,9 +101,11 @@ describe("Pi generate_image extension", () => {
     expect(bridge.attachments).toHaveLength(1);
     expect(bridge.attachments[0]?.data).toEqual(outputBytes);
     expect(bridge.attachments[0]?.caption).toBe("finished");
+    expect(result.terminate).toBe(true);
+    expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
     const generated = await repos.files.get(bridge.attachments[0]!.fileId);
     expect(generated?.path).toBeNull();
-    expect(generated?.telegram_file_id).toBeNull();
+    await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
     const persisted = JSON.stringify({ generated, result });
     expect(persisted).not.toContain(outputBytes.toString("base64"));
     expect(persisted).not.toContain("reference-bytes");
@@ -129,7 +137,7 @@ describe("Pi generate_image extension", () => {
       });
     }));
     const model = backendModel();
-    const bridge: TelegramImageBridge = {
+    const bridge: ChatImageBridge = {
       config,
       repos,
       user,
@@ -165,6 +173,52 @@ describe("Pi generate_image extension", () => {
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 
+  it("accepts the hosted Codex partial image when the completed item omits its result", async () => {
+    const config = loadTestConfig();
+    db = createDatabase(config);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 819, firstName: "CodexStream" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex stream" });
+    const accessToken = jwtWithAccount("account-stream");
+    const partial = Buffer.from("latest-codex-partial").toString("base64");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      `data: ${JSON.stringify({
+        type: "response.image_generation_call.partial_image",
+        partial_image_index: 0,
+        partial_image_b64: partial,
+        output_format: "jpeg",
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "image_generation_call", id: "ig_stream", status: "completed", result: null },
+      })}`,
+    ].join(""), { headers: { "content-type": "text/event-stream" } })));
+    const model = backendModel();
+    const bridge: ChatImageBridge = {
+      config,
+      repos,
+      user,
+      thread,
+      attachments: [],
+      modelRegistry: {
+        hasConfiguredAuth: () => true,
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: accessToken }),
+      } as unknown as ModelRegistry,
+      providerRouter: providerRouter(model),
+      resolveImage: async () => { throw new Error("no reference expected"); },
+    };
+
+    await createGenerateImagePiTool(bridge).execute("tool-call", {
+      prompt: "stream a codex image",
+      output_format: "jpeg",
+    }, undefined, undefined, {} as never);
+
+    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("latest-codex-partial"));
+    const stored = await repos.files.get(bridge.attachments[0]!.fileId);
+    expect(stored?.mime_type).toBe("image/jpeg");
+  });
+
   it("falls back from retryable Codex image failures through the shared circuit", async () => {
     const config = loadTestConfig();
     db = createDatabase(config);
@@ -180,7 +234,7 @@ describe("Pi generate_image extension", () => {
     }));
     const model = backendModel();
     const router = providerRouter(model);
-    const bridge: TelegramImageBridge = {
+    const bridge: ChatImageBridge = {
       config,
       repos,
       user,
@@ -221,7 +275,7 @@ describe("Pi generate_image extension", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("invalid", { status: 400 })));
     const model = backendModel();
     const router = { ...providerRouter(model), circuit };
-    const bridge: TelegramImageBridge = {
+    const bridge: ChatImageBridge = {
       config,
       repos,
       user,

@@ -3,7 +3,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { classifyFile, ingestFileBytes } from "../../src/files/ingest.js";
+import { classifyFile, ingestFileBytes, refreshExtractedFileBytes } from "../../src/files/ingest.js";
 
 describe("file ingestion", () => {
   let db: AppDatabase;
@@ -27,7 +27,7 @@ describe("file ingestion", () => {
     expect(classifyFile("notes.txt", "text/plain")).toBe("txt");
   });
 
-  it("keeps image bytes out of managed disk storage", async () => {
+  it("keeps attachment bytes out of managed disk storage", async () => {
     const user = await repos.users.ensure({ tgId: 220, firstName: "Image", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const result = await ingestFileBytes({
@@ -38,16 +38,13 @@ describe("file ingestion", () => {
       name: "telegram.png",
       mime: "image/png",
       bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-      telegramFileId: "AgAC-ingest",
-      telegramFileUniqueId: "unique-ingest",
       imageSummary: "a transient Telegram image",
     });
 
     expect(result.type).toBe("image");
     await expect(repos.files.get(result.fileId)).resolves.toMatchObject({
       path: null,
-      telegram_file_id: "AgAC-ingest",
-      telegram_file_unique_id: "unique-ingest",
+      mime_type: "image/png",
     });
   });
 
@@ -67,7 +64,9 @@ describe("file ingestion", () => {
 
     expect(result.inline).toBe(true);
     expect(result.type).toBe("csv");
-    expect(result.card).toContain("1 rows");
+    expect(result.card).toContain("[[chat-file:");
+    const file = await repos.files.get(result.fileId);
+    expect(file?.content_md).toContain("1 rows");
   });
 
   it("persists embeddings for chunks of searchable files", async () => {
@@ -95,6 +94,45 @@ describe("file ingestion", () => {
     expect(outline[0]?.chunk_index).toBe(chunks[0]?.idx);
     const embeddings = await repos.embeddings.list("chunk", chunks.map((chunk) => chunk.id));
     expect(embeddings).toHaveLength(chunks.length);
+  });
+
+  it("rebuilds durable chunks and embeddings when remote bytes change", async () => {
+    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 225, firstName: "Refresh", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const embedder = { embed: async (texts: string[]) => texts.map((text) => new Float32Array([text.length, 7])) };
+    const initial = await ingestFileBytes({
+      config,
+      repo: repos.files,
+      embeddings: repos.embeddings,
+      embedder,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "changing.txt",
+      mime: "text/plain",
+      bytes: Buffer.from("# Old\n\n" + "old indexed phrase ".repeat(300)),
+    });
+    const file = (await repos.files.get(initial.fileId))!;
+    const oldChunks = await repos.files.chunks(file.id);
+
+    const refreshed = await refreshExtractedFileBytes({
+      config,
+      repo: repos.files,
+      file,
+      bytes: Buffer.from("# New\n\n" + "new indexed phrase ".repeat(300)),
+      mime: "text/plain",
+      embeddings: repos.embeddings,
+      embedder,
+    });
+    const newChunks = await repos.files.chunks(file.id);
+
+    expect(refreshed.extraction_status).toBe("ready");
+    expect(refreshed.content_sha256).not.toBe(file.content_sha256);
+    expect(newChunks.map((chunk) => chunk.id)).not.toEqual(oldChunks.map((chunk) => chunk.id));
+    expect(newChunks.map((chunk) => chunk.content).join("\n")).toContain("new indexed phrase");
+    await expect(repos.embeddings.list("chunk", oldChunks.map((chunk) => chunk.id))).resolves.toEqual([]);
+    await expect(repos.embeddings.list("chunk", newChunks.map((chunk) => chunk.id)))
+      .resolves.toHaveLength(newChunks.length);
   });
 
   it("reports chunk indexing separately from vector embedding", async () => {

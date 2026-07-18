@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { threadChainScope } from "../../memory/retrieval.js";
+import { chatFileMarker } from "../../files/contextMarker.js";
 import {
   MAX_LOADED_MESSAGE_CHARS,
   defineBotTool,
@@ -10,7 +11,7 @@ import {
 export function createLoadMessageTool(input: ToolBuildInput) {
   return defineBotTool<{ message_id: number }, LoadMessageResult>({
     description:
-      "Load one previous message by numeric id from search_thread results or a user reference. Use when an exact earlier message, attached file metadata, or image context is needed.",
+      "Load one previous chat message by numeric id from search_thread results or a user reference. Use when an exact earlier message or its transient attachment context is needed.",
     inputSchema: z.object({ message_id: z.number() }),
     execute: async ({ message_id }): Promise<LoadMessageResult> => {
       input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
@@ -34,6 +35,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
         truncated: row.text_plain.length > MAX_LOADED_MESSAGE_CHARS,
         files: files.map((file) => ({
           file_id: file.id,
+          marker: chatFileMarker(file.id),
           type: file.type,
           name: file.name,
           summary: file.summary,
@@ -43,13 +45,10 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           .filter((file) => file.type === "image")
           .map((file) => ({
             file_id: file.id,
+            marker: chatFileMarker(file.id),
             name: file.name,
             caption: file.summary,
-            path: file.path,
-            telegram_file_id: file.telegram_file_id,
-            note: file.telegram_file_id
-              ? "image bytes will be redownloaded from Telegram into transient Pi context"
-              : "image has no reusable Telegram file_id",
+            note: "image bytes will be resolved from its chat source into transient Pi context",
           })),
       };
     },

@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
 import type { AppConfig } from "../config.js";
@@ -13,7 +12,7 @@ import { isAbortError, throwIfAborted } from "./cancel.js";
 import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
-import { storeFileBytes } from "./storage.js";
+import { chatFileMarker } from "./contextMarker.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
 const MIN_NATIVE_PDF_TEXT_CHARS = 500;
@@ -45,8 +44,6 @@ export interface FileIngestInput {
   userId: number;
   threadId: number;
   messageId?: number | null;
-  telegramFileId?: string | null;
-  telegramFileUniqueId?: string | null;
   contentSha256?: string | null;
   bytes: Buffer | Uint8Array;
   name: string;
@@ -64,6 +61,18 @@ export interface FileIngestResult {
   card: string;
   inline: boolean;
   type: AcceptedFileType;
+}
+
+export interface FileRefreshInput {
+  config: AppConfig;
+  repo: FilesRepo;
+  file: FileRow;
+  bytes: Buffer | Uint8Array;
+  mime?: string | null;
+  embeddings?: EmbeddingsRepo;
+  embedder?: TextEmbedder;
+  logger?: Logger;
+  signal?: AbortSignal;
 }
 
 export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
@@ -84,9 +93,8 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       userId: input.userId,
       threadId: input.threadId,
       messageId: input.messageId ?? null,
-      telegramFileId: input.telegramFileId ?? null,
-      telegramFileUniqueId: input.telegramFileUniqueId ?? null,
       contentSha256: input.contentSha256 ?? sha256Hex(bytes),
+      mimeType: input.mime ?? null,
       type,
       name: input.name,
       path: null,
@@ -102,8 +110,6 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   }
-  const ext = path.extname(input.name).toLowerCase() || `.${type}`;
-  let dest: string | undefined;
   let fileId: number | undefined;
   const chunkIds: number[] = [];
   let completed = false;
@@ -113,7 +119,6 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       if (!chunkIds.length) chunkIds.push(...existingChunkIds);
     }
     if (input.embeddings && chunkIds.length) await input.embeddings.deleteRefs("chunk", chunkIds);
-    if (dest) await fs.unlink(dest).catch(() => undefined);
   };
   const finish = (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): FileIngestResult => {
     completed = true;
@@ -129,10 +134,8 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
   };
   try {
     throwIfAborted(input.signal);
-    const stored = await storeBytesToDisk(input, ext);
-    dest = stored.dest;
-    const { bytes, contentSha256 } = stored;
-    input.logger?.debug("file bytes stored", { name: input.name, type, path: dest, bytes: bytes.length });
+    const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
+    const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
     throwIfAborted(input.signal);
 
     await reportStage(input.onStage, { stage: "extracting" }, input.signal);
@@ -153,7 +156,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       total: inline ? 1 : Math.max(1, chunks.length),
     }, input.signal);
     const file = await input.repo.insertFile({
-      ...baseFileFields(input, dest, bytes, contentSha256, type),
+      ...baseFileFields(input, bytes, contentSha256, type),
       contentMd: inline ? content : null,
       summary: firstLine(content),
       isInline: inline,
@@ -190,19 +193,84 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
   }
 }
 
-async function storeBytesToDisk(
-  input: FileIngestInput,
-  ext: string,
-): Promise<{ dest: string; bytes: Buffer; contentSha256: string }> {
+export async function refreshExtractedFileBytes(input: FileRefreshInput): Promise<FileRow> {
+  const type = classifyFile(input.file.name, input.mime ?? input.file.mime_type ?? "");
+  if (!type || type === "legacy-doc" || type !== input.file.type) {
+    throw new Error(`File #${input.file.id} cannot be re-extracted as ${type ?? "unknown"}.`);
+  }
   const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
-  const contentSha256 = input.contentSha256 ?? sha256Hex(bytes);
-  const dest = await storeFileBytes(bytes, ext);
-  return { dest, bytes, contentSha256 };
+  const contentSha256 = sha256Hex(bytes);
+  if (type === "image") {
+    return input.repo.updateExtraction(input.file.id, {
+      contentSha256,
+      mimeType: input.mime ?? input.file.mime_type,
+      size: bytes.length,
+      contentMd: null,
+      summary: input.file.summary,
+      outline: null,
+      isInline: true,
+      status: "ready",
+    });
+  }
+
+  await input.repo.updateExtractionStatus(input.file.id, "pending");
+  const insertedChunkIds: number[] = [];
+  let replacementStarted = false;
+  try {
+    const content = await contentFor(type, input.file.name, bytes, input.config, input.logger, input.signal);
+    throwIfAborted(input.signal);
+    const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
+    const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
+    const oldChunkIds = await input.repo.clearChunks(input.file.id);
+    replacementStarted = true;
+    if (input.embeddings && oldChunkIds.length) await input.embeddings.deleteRefs("chunk", oldChunkIds);
+    let refreshed = await input.repo.updateExtraction(input.file.id, {
+      contentSha256,
+      mimeType: input.mime ?? input.file.mime_type,
+      size: bytes.length,
+      contentMd: inline ? content : null,
+      summary: firstLine(content),
+      outline: null,
+      isInline: inline,
+      status: "pending",
+    });
+    if (!inline) {
+      const outline = await indexDocumentChunks({
+        config: input.config,
+        repo: input.repo,
+        userId: refreshed.user_id,
+        threadId: refreshed.thread_id,
+        bytes,
+        name: refreshed.name,
+        mime: input.mime ?? refreshed.mime_type ?? undefined,
+        embeddings: input.embeddings,
+        embedder: input.embedder,
+        logger: input.logger,
+        signal: input.signal,
+      }, refreshed, chunks, insertedChunkIds);
+      await input.repo.setOutline(refreshed.id, outline);
+    }
+    await input.repo.updateExtractionStatus(refreshed.id, "ready");
+    refreshed = (await input.repo.get(refreshed.id)) ?? refreshed;
+    input.logger?.info("chat file extracted content refreshed", {
+      fileId: refreshed.id,
+      bytes: bytes.length,
+      inline,
+      chunks: chunks.length,
+    });
+    return refreshed;
+  } catch (error) {
+    if (replacementStarted) {
+      const removed = await input.repo.clearChunks(input.file.id);
+      if (input.embeddings && removed.length) await input.embeddings.deleteRefs("chunk", removed);
+    }
+    await input.repo.updateExtractionStatus(input.file.id, "failed");
+    throw error;
+  }
 }
 
 function baseFileFields(
   input: FileIngestInput,
-  dest: string,
   bytes: Buffer,
   contentSha256: string,
   type: AcceptedFileType,
@@ -211,12 +279,11 @@ function baseFileFields(
     userId: input.userId,
     threadId: input.threadId,
     messageId: input.messageId ?? null,
-    telegramFileId: input.telegramFileId ?? null,
-    telegramFileUniqueId: input.telegramFileUniqueId ?? null,
     contentSha256,
+    mimeType: input.mime ?? null,
     type,
     name: input.name,
-    path: dest,
+    path: null,
     size: bytes.length,
   };
 }
@@ -278,14 +345,15 @@ export function cardForFile(
   chunks: Pick<FileChunkRow, "idx" | "heading_path">[] = [],
   displayName = file.name,
 ): string {
-  if (file.type === "image") return `[image #${file.id}: ${file.summary ?? displayName}]`;
-  if (file.is_inline) return `\`\`\`${file.type} name=${displayName}\n${file.content_md ?? ""}\n\`\`\``;
+  const marker = chatFileMarker(file.id);
+  if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
+  if (file.is_inline) return `${marker} File #${file.id}: ${displayName} (${file.type}, inline).`;
   const outline = decodeOutline(file.outline_json) ?? chunks.map((chunk) => ({
     chunk_index: chunk.idx,
     heading_path: chunk.heading_path,
   }));
   return [
-    `File #${file.id}: ${displayName} (${file.type}, ${chunks.length} chunks). ${file.summary ?? ""}`.trim(),
+    `${marker} File #${file.id}: ${displayName} (${file.type}, ${chunks.length} chunks). ${file.summary ?? ""}`.trim(),
     outlinePreview(outline),
     "Use search_in_file or read_file_section.",
   ].filter(Boolean).join(" ");

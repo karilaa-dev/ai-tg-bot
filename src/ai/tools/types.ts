@@ -5,6 +5,7 @@ import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType, ThreadRow, UserRow } from "../../db/types.js";
 import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
+import type { ResolvedChatFile } from "../../files/source.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 
 export interface ToolBuildInput {
@@ -15,7 +16,7 @@ export interface ToolBuildInput {
   thread: ThreadRow;
   logger?: Logger;
   embedder?: TextEmbedder;
-  redownloadFile?: (file: FileRow) => Promise<Buffer>;
+  resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   createdFiles?: CreatedFileAttachment[];
   pendingCreatedFiles?: PendingCreatedFile[];
 }
@@ -32,6 +33,11 @@ export interface CreatedFileAttachment {
   card: string;
   delivery?: "document" | "photo";
   origin?: "created_file" | "generated_image";
+  telegramDelivery?: {
+    messageId: number;
+    fileId: string | null;
+    fileUniqueId: string | null;
+  };
 }
 
 export type PendingCreatedFile = Promise<{ attachment?: CreatedFileAttachment; revisedPrompt?: string | null; error?: string }>;
@@ -55,6 +61,7 @@ export function defineBotTool<Input, Output>(definition: BotToolDefinition<Input
 
 export interface LoadMessageFileEntry {
   file_id: number;
+  marker: string;
   type: StoredFileType;
   name: string;
   summary: string | null;
@@ -63,10 +70,9 @@ export interface LoadMessageFileEntry {
 
 export interface LoadMessageImageEntry {
   file_id: number;
+  marker: string;
   name: string;
   caption: string | null;
-  path: string | null;
-  telegram_file_id: string | null;
   note: string;
 }
 

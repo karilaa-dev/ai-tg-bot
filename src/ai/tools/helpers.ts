@@ -6,7 +6,7 @@ import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { sha256Hex } from "../../files/hash.js";
-import { storeFileBytes } from "../../files/storage.js";
+import { chatFileMarker } from "../../files/contextMarker.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
@@ -97,8 +97,7 @@ export async function prepareCreatedFile(
         fileId: ingested.fileId,
         type: ingested.type,
         name: stored.name,
-        path: stored.path ?? undefined,
-        data: ingested.type === "image" && !stored.path ? bytes : undefined,
+        data: bytes,
         size: stored.size,
         caption: file.caption?.trim() || null,
         inline: ingested.inline,
@@ -122,11 +121,11 @@ export async function prepareCreatedFile(
     fileId: stored.id,
     type: stored.type,
     name: stored.name,
-    path: stored.path ?? undefined,
+    data: bytes,
     size: stored.size,
     caption: file.caption?.trim() || null,
     inline: Boolean(stored.is_inline),
-    card: `File #${stored.id}: ${stored.name} (${formatBytes(stored.size)}).`,
+    card: `${chatFileMarker(stored.id)} File #${stored.id}: ${stored.name} (${formatBytes(stored.size)}).`,
     delivery,
     origin: "created_file",
   };
@@ -147,15 +146,13 @@ async function storeOtherCreatedFile(
   input: ToolBuildInput,
   file: { bytes: Buffer; name: string },
 ): Promise<FileRow> {
-  const ext = path.extname(file.name).toLowerCase();
-  const dest = await storeFileBytes(file.bytes, ext);
   return input.repos.files.insertFile({
     userId: input.user.tg_id,
     threadId: input.thread.id,
     type: "other",
     contentSha256: sha256Hex(file.bytes),
     name: file.name,
-    path: dest,
+    path: null,
     size: file.bytes.length,
     summary: `Outbound file ${file.name}`,
     isInline: false,
