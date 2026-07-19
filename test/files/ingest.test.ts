@@ -1,16 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes } from "../../src/files/ingest.js";
 
+let bashRoot: string;
+
 describe("file ingestion", () => {
   let db: AppDatabase;
   let repos: Repos;
 
   beforeEach(async () => {
-    const config = loadTestConfig();
+    bashRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-ingest-test-"));
+    const config = testConfig();
     db = createDatabase(config, createLogger(config));
     await db.migrate();
     repos = createRepos(db.db, db.search);
@@ -19,6 +25,7 @@ describe("file ingestion", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db.destroy();
+    await fs.rm(bashRoot, { recursive: true, force: true });
   });
 
   it("classifies text/csv as csv before generic text", () => {
@@ -27,11 +34,11 @@ describe("file ingestion", () => {
     expect(classifyFile("notes.txt", "text/plain")).toBe("txt");
   });
 
-  it("keeps attachment bytes out of managed disk storage", async () => {
+  it("persists attachment bytes in the managed chat-file store", async () => {
     const user = await repos.users.ensure({ tgId: 220, firstName: "Image", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const result = await ingestFileBytes({
-      config: loadTestConfig(),
+      config: testConfig(),
       repo: repos.files,
       userId: user.tg_id,
       threadId: thread.id,
@@ -42,10 +49,14 @@ describe("file ingestion", () => {
     });
 
     expect(result.type).toBe("image");
-    await expect(repos.files.get(result.fileId)).resolves.toMatchObject({
-      path: null,
+    const stored = await repos.files.get(result.fileId);
+    expect(stored).toMatchObject({
       mime_type: "image/png",
     });
+    expect(stored?.path).toBe(path.join(bashRoot, ".chat-files", String(result.fileId), "content"));
+    await expect(fs.readFile(stored!.path!)).resolves.toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    expect((await fs.stat(path.dirname(stored!.path!))).mode & 0o777).toBe(0o700);
+    expect((await fs.stat(stored!.path!)).mode & 0o777).toBe(0o600);
   });
 
   it("ingests csv files with trailing blank lines", async () => {
@@ -53,7 +64,7 @@ describe("file ingestion", () => {
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
 
     const result = await ingestFileBytes({
-      config: loadTestConfig(),
+      config: testConfig(),
       repo: repos.files,
       userId: user.tg_id,
       threadId: thread.id,
@@ -70,7 +81,7 @@ describe("file ingestion", () => {
   });
 
   it("persists embeddings for chunks of searchable files", async () => {
-    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
     const user = await repos.users.ensure({ tgId: 222, firstName: "File", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
 
@@ -97,7 +108,7 @@ describe("file ingestion", () => {
   });
 
   it("rebuilds durable chunks and embeddings when remote bytes change", async () => {
-    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
     const user = await repos.users.ensure({ tgId: 225, firstName: "Refresh", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const embedder = { embed: async (texts: string[]) => texts.map((text) => new Float32Array([text.length, 7])) };
@@ -135,8 +146,51 @@ describe("file ingestion", () => {
       .resolves.toHaveLength(newChunks.length);
   });
 
+  it("preserves the previous extraction and vectors when replacement embedding fails", async () => {
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 226, firstName: "RefreshFailure", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const initial = await ingestFileBytes({
+      config,
+      repo: repos.files,
+      embeddings: repos.embeddings,
+      embedder: { embed: async (texts) => texts.map((text) => new Float32Array([text.length, 11])) },
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "stable.txt",
+      mime: "text/plain",
+      bytes: Buffer.from("# Stable\n\n" + "keep this searchable phrase ".repeat(300)),
+    });
+    const before = (await repos.files.get(initial.fileId))!;
+    const chunksBefore = await repos.files.chunks(before.id);
+    const embeddingsBefore = await repos.embeddings.list("chunk", chunksBefore.map((chunk) => chunk.id));
+
+    await expect(refreshExtractedFileBytes({
+      config,
+      repo: repos.files,
+      file: before,
+      bytes: Buffer.from("# Replacement\n\n" + "replacement phrase ".repeat(300)),
+      mime: "text/plain",
+      embeddings: repos.embeddings,
+      embedder: { embed: async () => { throw new Error("embedding provider unavailable"); } },
+    })).rejects.toThrow("embedding provider unavailable");
+
+    const after = await repos.files.get(before.id);
+    const chunksAfter = await repos.files.chunks(before.id);
+    const embeddingsAfter = await repos.embeddings.list("chunk", chunksAfter.map((chunk) => chunk.id));
+    expect(after).toMatchObject({
+      content_sha256: before.content_sha256,
+      extraction_status: "ready",
+      content_md: before.content_md,
+      summary: before.summary,
+      outline_json: before.outline_json,
+    });
+    expect(chunksAfter).toEqual(chunksBefore);
+    expect(embeddingsAfter).toEqual(embeddingsBefore);
+  });
+
   it("reports chunk indexing separately from vector embedding", async () => {
-    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
     const user = await repos.users.ensure({ tgId: 223, firstName: "Progress", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const progress: Array<{ stage: string; completed?: number; total?: number }> = [];
@@ -169,7 +223,7 @@ describe("file ingestion", () => {
       throw new Error("docling should not be called for native text PDFs");
     });
     vi.stubGlobal("fetch", fetchMock);
-    const config = loadTestConfig({ FILE_INLINE_TOKENS: 1 });
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
     const user = await repos.users.ensure({ tgId: 333, firstName: "Pdf", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const pdfText = [
@@ -194,6 +248,10 @@ describe("file ingestion", () => {
     expect(chunks.map((chunk) => chunk.content).join("\n")).toMatch(/Kotlin Android activity/i);
   });
 });
+
+function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
+  return loadTestConfig({ BASH_WORKSPACE_ROOT: bashRoot, ...overrides });
+}
 
 function makePdf(text: string): Buffer {
   const words = text.split(/\s+/);

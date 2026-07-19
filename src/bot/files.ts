@@ -11,6 +11,7 @@ import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import { handleUserText } from "./turns.js";
 import { enqueueMediaGroup } from "./batching.js";
 import { telegramFileSource } from "../files/telegramSource.js";
+import { ManagedFileStore, persistManagedFile } from "../files/storage.js";
 
 interface TelegramFileInput {
   fileId: string;
@@ -182,10 +183,19 @@ async function ingestTelegramFile(
       summary,
       isInline: true,
     });
-    await ctx.services.repos.files.rememberSource(file.id, { ...source, mimeType });
+    try {
+      await persistManagedFile(ctx.services.config, ctx.services.repos.files, file.id, bytes);
+    } catch (error) {
+      ctx.services.logger.warn("inbound image snapshot persistence failed; Telegram recovery remains available", ctxLogMeta(ctx, {
+        fileId: file.id,
+        name: input.name,
+        error: String(error),
+      }));
+    }
+    const canonical = await claimTelegramSource(ctx, file, { ...source, mimeType });
     return {
       outcome: "ingested",
-      prepared: { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type: "image" },
+      prepared: await preparedTelegramFile(ctx, input, canonical),
     };
   }
   const ingested = await ingestFileBytes({
@@ -204,8 +214,13 @@ async function ingestTelegramFile(
     onStage: status ? (stage) => status.updateIngestStage(stage) : undefined,
   });
   throwIfAborted(signal);
-  await ctx.services.repos.files.rememberSource(ingested.fileId, source);
-  return { outcome: "ingested", prepared: ingested };
+  const stored = await ctx.services.repos.files.get(ingested.fileId);
+  if (!stored) throw new Error(`Ingested file #${ingested.fileId} disappeared before source registration.`);
+  const canonical = await claimTelegramSource(ctx, stored, source);
+  return {
+    outcome: "ingested",
+    prepared: canonical.id === ingested.fileId ? ingested : await preparedTelegramFile(ctx, input, canonical),
+  };
 }
 
 export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Promise<void> {
@@ -334,26 +349,85 @@ async function prepareCachedTelegramFile(
   cached: FileRow,
   signal: AbortSignal | undefined,
   status?: FileProcessingStatus,
-  _restoreBytes?: Buffer,
+  restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
   throwIfAborted(signal);
-  await ctx.services.repos.files.rememberSource(cached.id, telegramFileSource({
+  const claimed = await ctx.services.repos.files.rememberSource(cached.id, telegramFileSource({
     fileId: input.fileId,
     fileUniqueId: input.fileUniqueId,
     mimeType: input.mime,
   }));
-  const chunks = cached.is_inline ? [] : await ctx.services.repos.files.chunks(cached.id);
+  const canonical = await ctx.services.repos.files.get(claimed.file_id);
+  if (!canonical) throw new Error(`Canonical file #${claimed.file_id} is missing.`);
+  assertCompatibleTelegramFile(canonical, input);
+  try {
+    if (restoreBytes && canonical.id === cached.id) {
+      await persistManagedFile(ctx.services.config, ctx.services.repos.files, canonical.id, restoreBytes);
+    } else {
+      await ctx.services.fileResolver.resolveFile(canonical, signal);
+    }
+  } catch (error) {
+    ctx.services.logger.warn("reused inbound file snapshot restoration failed; source locator was retained", ctxLogMeta(ctx, {
+      fileId: canonical.id,
+      name: input.name,
+      error: String(error),
+    }));
+  }
+  const prepared = await preparedTelegramFile(ctx, input, canonical);
   ctx.services.logger.debug("prepared cached telegram file", ctxLogMeta(ctx, {
-    fileId: cached.id,
-    inline: Boolean(cached.is_inline),
-    chunks: chunks.length,
+    fileId: canonical.id,
+    inline: prepared.inline,
   }));
+  return prepared;
+}
+
+async function claimTelegramSource(
+  ctx: BotContext,
+  candidate: FileRow,
+  source: ReturnType<typeof telegramFileSource>,
+): Promise<FileRow> {
+  const claimed = await ctx.services.repos.files.rememberSource(candidate.id, source);
+  const canonical = await ctx.services.repos.files.get(claimed.file_id);
+  if (!canonical) throw new Error(`Canonical file #${claimed.file_id} is missing.`);
+  if (canonical.id === candidate.id) return canonical;
+  if (canonical.type !== candidate.type || canonical.extraction_status !== "ready") {
+    throw new Error(`Telegram source already belongs to incompatible file #${canonical.id}.`);
+  }
+  const removedChunkIds = await ctx.services.repos.files.deleteFile(candidate.id);
+  if (removedChunkIds.length) await ctx.services.repos.embeddings.deleteRefs("chunk", removedChunkIds);
+  await new ManagedFileStore(ctx.services.config).remove(candidate.id).catch((error) => {
+    ctx.services.logger.warn("duplicate chat file snapshot cleanup failed", ctxLogMeta(ctx, {
+      fileId: candidate.id,
+      canonicalFileId: canonical.id,
+      error: String(error),
+    }));
+  });
+  ctx.services.logger.info("reused canonical Telegram source owner", ctxLogMeta(ctx, {
+    duplicateFileId: candidate.id,
+    canonicalFileId: canonical.id,
+  }));
+  return canonical;
+}
+
+async function preparedTelegramFile(
+  ctx: BotContext,
+  input: TelegramFileInput,
+  file: FileRow,
+): Promise<PreparedTelegramFile> {
+  assertCompatibleTelegramFile(file, input);
+  const chunks = file.is_inline ? [] : await ctx.services.repos.files.chunks(file.id);
   return {
-    fileId: cached.id,
-    card: cardForFile(cached, chunks, input.name),
-    inline: Boolean(cached.is_inline),
+    fileId: file.id,
+    card: cardForFile(file, chunks, input.name),
+    inline: Boolean(file.is_inline),
     type: input.type,
   };
+}
+
+function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): void {
+  if (file.type !== input.type || file.extraction_status !== "ready") {
+    throw new Error(`Telegram source resolves to incompatible file #${file.id}.`);
+  }
 }
 
 async function handlePreparedTelegramFile(

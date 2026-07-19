@@ -8,7 +8,7 @@ import { createBot } from "./bot/router.js";
 import { checkDocling } from "./files/docling.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
-import { clearManagedFiles, clearRemoteBackedManagedFiles } from "./files/storage.js";
+import { clearManagedFiles } from "./files/storage.js";
 import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "./pi/authMigration.js";
 
 const config = loadConfig();
@@ -44,8 +44,6 @@ try {
     });
   }
   const repos = createRepos(db.db, db.search);
-  const removedRemoteCopies = await clearRemoteBackedManagedFiles(repos.files);
-  if (removedRemoteCopies) logger.info("removed persistent copies of remotely backed files", { files: removedRemoteCopies });
   const embedder = createOpenRouterTextEmbedder(config, logger);
   await migrateLegacyCodexAuth({
     agentDir: config.PI_CODING_AGENT_DIR,

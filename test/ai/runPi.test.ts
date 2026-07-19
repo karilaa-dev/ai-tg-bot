@@ -9,7 +9,7 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runTurn } from "../../src/ai/run.js";
+import { runTurn, sendFinal } from "../../src/ai/run.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -123,9 +123,130 @@ describe("runTurn with Pi", () => {
     expect(JSON.stringify(richMessages[0])).toContain("Pi runtime is not configured");
   });
 
+  it("preserves an image MIME type when Telegram receives it as a document", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-document-image-"));
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7004, firstName: "DocumentImage", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Document image" });
+    const bytes = Buffer.from("png-original-bytes");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "image",
+      mimeType: "image/png",
+      name: "original.png",
+      path: null,
+      size: bytes.length,
+      isInline: false,
+    });
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9020,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "DocumentImage" },
+        }),
+      },
+      sendDocument: async () => ({
+        message_id: 9021,
+        document: { file_id: "BQAC-original-png", file_unique_id: "unique-original-png" },
+      }),
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here is the original image.", 0, [{
+      fileId: file.id,
+      type: "image",
+      name: file.name,
+      mimeType: "image/png",
+      data: bytes,
+      size: bytes.length,
+      inline: false,
+      card: "original image",
+      delivery: "document",
+      origin: "created_file",
+    }]);
+
+    const [source] = await repos.files.listSources(file.id);
+    expect(source).toMatchObject({ mime_type: "image/png", remote_key: "unique-original-png" });
+    expect(JSON.parse(source!.locator_json)).toMatchObject({ file_id: "BQAC-original-png" });
+  });
+
+  it("removes an undelivered attachment that has no durable path or transport source", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7005, firstName: "FailedDelivery", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Failed delivery" });
+    const bytes = Buffer.from("turn-local-only");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "other",
+      name: "undelivered.bin",
+      path: null,
+      size: bytes.length,
+      isInline: false,
+    });
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9030,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "FailedDelivery" },
+        }),
+      },
+      sendDocument: async () => { throw new Error("Telegram delivery failed"); },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "The attachment could not be delivered.", 0, [{
+      fileId: file.id,
+      type: "other",
+      name: file.name,
+      data: bytes,
+      size: bytes.length,
+      inline: false,
+      card: "undelivered attachment",
+      delivery: "document",
+      origin: "created_file",
+    }]);
+
+    await expect(repos.files.get(file.id)).resolves.toBeUndefined();
+  });
+
   it("sends a terminal generated image before final text and stores its Telegram file id once", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-image-"));
-    const config = loadTestConfig({ PI_CODING_AGENT_DIR: path.join(tempDir, "pi") });
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+    });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
     await db.migrate();
@@ -202,13 +323,15 @@ describe("runTurn with Pi", () => {
     expect(files).toHaveLength(1);
     expect(files[0]).toMatchObject({
       type: "image",
-      path: null,
     });
-    await expect(repos.files.listSources(files[0]!.id)).resolves.toMatchObject([{
+    expect(files[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
+    const sources = await repos.files.listSources(files[0]!.id);
+    expect(sources).toMatchObject([{
       transport: "telegram",
       connection_key: "default",
       remote_key: "unique-sent-image",
     }]);
+    expect(JSON.parse(sources[0]!.locator_json)).toMatchObject({ file_id: "AgAC-sent-image" });
     const messages = await repos.messages.listThread(thread.id);
     expect(messages.at(-1)).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
   }, 20_000);

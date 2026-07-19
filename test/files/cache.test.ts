@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileByteCache } from "../../src/files/cache.js";
 
@@ -28,6 +29,10 @@ describe("chat file byte cache", () => {
     expect(first.bytes.toString()).toBe("matrix attachment");
     expect(path.basename(first.path)).toMatch(/^[a-f0-9]{64}$/);
     expect(first.path).not.toContain("private-secret");
+    await expect(cache.get(identity)).resolves.toMatchObject({
+      path: first.path,
+      bytes: Buffer.from("matrix attachment"),
+    });
   });
 
   it("reloads expired entries and sweeps abandoned partial files", async () => {
@@ -49,18 +54,41 @@ describe("chat file byte cache", () => {
     await expect(fs.access(partial)).rejects.toThrow();
   });
 
-  it("removes cache symlinks instead of following them", async () => {
-    const root = await temporaryRoot();
-    const target = path.join(root, "outside.txt");
-    const symlink = path.join(root, "malicious-link");
+  it("replaces a symlinked hashed entry without touching its external target", async () => {
+    const parent = await temporaryRoot();
+    const root = path.join(parent, "cache");
+    const target = path.join(parent, "outside.txt");
+    const identity = "telegram\0bot\0symlinked-entry";
+    const symlink = path.join(root, createHash("sha256").update(identity).digest("hex"));
+    await fs.mkdir(root);
     await fs.writeFile(target, "outside");
     await fs.symlink(target, symlink);
     const cache = new FileByteCache({ FILE_CACHE_DIR: root, FILE_CACHE_TTL_MS: 3_600_000 });
+    const loader = vi.fn(async () => Buffer.from("safe cache bytes"));
 
-    await cache.sweep();
+    const loaded = await cache.getOrLoad(identity, loader);
 
-    await expect(fs.lstat(symlink)).rejects.toThrow();
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(loaded.path).toBe(symlink);
+    await expect(fs.lstat(symlink)).resolves.toMatchObject({});
+    expect((await fs.lstat(symlink)).isSymbolicLink()).toBe(false);
+    await expect(fs.readFile(symlink, "utf8")).resolves.toBe("safe cache bytes");
     await expect(fs.readFile(target, "utf8")).resolves.toBe("outside");
+  });
+
+  it("rejects a symlinked cache root without traversing or chmodding its target", async () => {
+    const parent = await temporaryRoot();
+    const target = path.join(parent, "outside");
+    const root = path.join(parent, "cache");
+    const untouched = path.join(target, "untouched.txt");
+    await fs.mkdir(target);
+    await fs.writeFile(untouched, "outside");
+    await fs.symlink(target, root);
+    const cache = new FileByteCache({ FILE_CACHE_DIR: root, FILE_CACHE_TTL_MS: 3_600_000 });
+
+    await expect(cache.sweep()).rejects.toThrow("File cache root must be a real directory");
+    await expect(fs.readFile(untouched, "utf8")).resolves.toBe("outside");
+    expect((await fs.lstat(root)).isSymbolicLink()).toBe(true);
   });
 
   it("honors cancellation before starting a remote fetch", async () => {

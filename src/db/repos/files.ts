@@ -1,8 +1,9 @@
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
-import type { TextSearch } from "../search.js";
+import { createTextSearch, type TextSearch } from "../search.js";
 import type { FileChunkRow, FileRow, FileSourceRow, StoredFileType } from "../types.js";
 import type { ChatFileSource } from "../../files/source.js";
+import { vectorToBuffer } from "./embeddings.js";
 
 export class FilesRepo {
   constructor(
@@ -187,6 +188,67 @@ export class FilesRepo {
     return updated;
   }
 
+  async replaceDocumentExtraction(fileId: number, input: {
+    contentSha256: string;
+    mimeType: string | null;
+    size: number;
+    contentMd: string | null;
+    summary: string | null;
+    isInline: boolean;
+    chunks: Array<{
+      idx: number;
+      headingPath: string | null;
+      content: string;
+      vector?: Float32Array;
+    }>;
+    embeddingModel: string | null;
+  }): Promise<FileRow> {
+    return this.db.transaction(async (tx) => {
+      const transactionalSearch = createTextSearch(tx, tx.dialect);
+      const oldChunks = await tx.query<FileChunkRow>(sql`
+        select * from file_chunks where file_id = ${fileId} order by idx asc
+      `);
+      await transactionalSearch.removeChunksForFile(fileId);
+      if (oldChunks.length) {
+        await tx.execute(sql`delete from embeddings where kind = 'chunk' and ref_id in (${valueList(oldChunks.map((chunk) => chunk.id))})`);
+      }
+      await tx.execute(sql`delete from file_chunks where file_id = ${fileId}`);
+      const outline = input.chunks.map((chunk) => ({
+        chunk_index: chunk.idx,
+        heading_path: chunk.headingPath,
+      }));
+      await tx.execute(sql`
+        update files set
+          content_sha256 = ${input.contentSha256},
+          mime_type = ${input.mimeType},
+          size = ${input.size},
+          content_md = ${input.contentMd},
+          summary = ${input.summary},
+          outline_json = ${outline.length ? JSON.stringify(outline) : null},
+          is_inline = ${input.isInline ? 1 : 0},
+          extraction_status = 'ready'
+        where id = ${fileId}
+      `);
+      for (const chunk of input.chunks) {
+        const inserted = await insertReturning<FileChunkRow>(tx, sql`
+          insert into file_chunks(file_id, idx, heading_path, content, created_at)
+          values (${fileId}, ${chunk.idx}, ${chunk.headingPath}, ${chunk.content}, ${Date.now()})
+          returning *
+        `);
+        await transactionalSearch.indexChunk(inserted.id, fileId, inserted.content);
+        if (chunk.vector) {
+          await tx.execute(sql`
+            insert into embeddings(kind, ref_id, model, dim, vector, created_at)
+            values ('chunk', ${inserted.id}, ${input.embeddingModel}, ${chunk.vector.length}, ${vectorToBuffer(chunk.vector)}, ${Date.now()})
+          `);
+        }
+      }
+      const updated = await queryOne<FileRow>(tx, sql`select * from files where id = ${fileId}`);
+      if (!updated) throw new Error(`File #${fileId} disappeared while replacing its extracted content.`);
+      return updated;
+    });
+  }
+
   async updateSummary(fileId: number, summary: string | null): Promise<void> {
     await this.db.execute(sql`update files set summary = ${summary} where id = ${fileId}`);
   }
@@ -206,7 +268,6 @@ export class FilesRepo {
         ${Date.now()}
       )
       on conflict(transport, connection_key, remote_key) do update set
-        file_id = excluded.file_id,
         locator_json = excluded.locator_json,
         mime_type = coalesce(excluded.mime_type, file_sources.mime_type),
         last_verified_at = excluded.last_verified_at
@@ -230,14 +291,8 @@ export class FilesRepo {
     await this.db.execute(sql`update files set path = null where id = ${fileId}`);
   }
 
-  remoteBackedFilesWithPaths(): Promise<Array<Pick<FileRow, "id" | "path">>> {
-    return this.db.query<Pick<FileRow, "id" | "path">>(sql`
-      select distinct f.id, f.path
-      from files f
-      join file_sources s on s.file_id = f.id
-      where f.path is not null
-      order by f.id
-    `);
+  async setPath(fileId: number, filePath: string): Promise<void> {
+    await this.db.execute(sql`update files set path = ${filePath} where id = ${fileId}`);
   }
 
   async setOutline(fileId: number, outline: unknown): Promise<void> {

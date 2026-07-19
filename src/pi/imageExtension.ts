@@ -12,6 +12,7 @@ import { chatFileMarker } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
+import { persistManagedFile } from "../files/storage.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -114,10 +115,22 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
         summary: generated.revisedPrompt ?? prompt,
         isInline: false,
       });
+      let persistedPath: string | undefined;
+      try {
+        persistedPath = await persistManagedFile(bridge.config, bridge.repos.files, file.id, generated.bytes);
+      } catch (error) {
+        bridge.logger?.warn("generated image snapshot persistence failed; Telegram recovery will be recorded after delivery", {
+          fileId: file.id,
+          name,
+          error: String(error),
+        });
+      }
       bridge.attachments.push({
         fileId: file.id,
         type: "image",
         name,
+        mimeType: generated.mimeType,
+        path: persistedPath,
         data: generated.bytes,
         size: generated.bytes.length,
         caption: params.caption?.trim() || null,
@@ -318,6 +331,7 @@ async function parseCodexImageSse(
   const decoder = new TextDecoder();
   let buffer = "";
   let latestPartial: { data: string; mimeType: string; revisedPrompt?: string } | undefined;
+  let imageCompleted = false;
   const consume = (chunk: string): { data: string; mimeType: string; revisedPrompt?: string } | undefined => {
     const data = chunk.split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
@@ -331,6 +345,9 @@ async function parseCodexImageSse(
       return undefined;
     }
     const item = imageItem(event.item) ?? imageItem(event) ?? responseImageItem(event.response);
+    if (item?.status === "completed" || event.type === "response.image_generation_call.completed") {
+      imageCompleted = true;
+    }
     const raw = typeof item?.result === "string" ? item.result : typeof item?.b64_json === "string" ? item.b64_json : undefined;
     if (raw && (item?.status === undefined || item.status === "completed")) {
       return {
@@ -374,8 +391,8 @@ async function parseCodexImageSse(
   // The hosted Codex endpoint can omit the base64 result from output_item.done
   // after streaming a usable final partial image. Keep only the newest partial
   // in memory and return it once the stream has completed.
-  if (latestPartial) return latestPartial;
-  throw new Error("Codex returned no completed image_generation result.");
+  if (imageCompleted && latestPartial) return latestPartial;
+  throw new Error("Codex image network stream ended before a completed image_generation result.");
 }
 
 function imageItem(value: unknown): Record<string, unknown> | undefined {

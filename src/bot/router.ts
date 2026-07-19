@@ -35,7 +35,8 @@ import { sendWelcome, timezoneConversation } from "./onboarding.js";
 import { registerInviteHandlers } from "./invites.js";
 import { FileByteCache } from "../files/cache.js";
 import { FileResolver } from "../files/resolver.js";
-import { TelegramFileSourceAdapter } from "../files/telegramSource.js";
+import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
+import { ManagedFileStore } from "../files/storage.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -76,12 +77,18 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     embedder: options.embedder,
   });
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
-  const fileResolver = options.fileResolver ?? new FileResolver(repos.files, new FileByteCache(options.config));
-  fileResolver.registry.register(new TelegramFileSourceAdapter({
-    api: bot.api,
-    config: options.config,
-    download: downloadFile,
-  }));
+  const fileResolver = options.fileResolver ?? new FileResolver(
+    repos.files,
+    new FileByteCache(options.config),
+    new ManagedFileStore(options.config),
+  );
+  if (!fileResolver.registry.get({ transport: "telegram", connectionKey: TELEGRAM_CONNECTION_KEY })) {
+    fileResolver.registry.register(new TelegramFileSourceAdapter({
+      api: bot.api,
+      config: options.config,
+      download: downloadFile,
+    }));
+  }
   const services: BotServices = {
     config: options.config,
     db: options.db,

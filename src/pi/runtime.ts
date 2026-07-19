@@ -37,6 +37,7 @@ export interface PiTurnTransport {
   chatId: number;
   messageThreadId?: number;
   resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile>;
+  currentFileIds?: number[];
 }
 
 export interface PiThreadRuntime {
@@ -278,6 +279,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   pendingCreatedFiles: PendingCreatedFile[] = [];
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
+  private readonly contextFileIds = new Set<number>();
 
   constructor(input: {
     config: AppConfig;
@@ -307,6 +309,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.attachments = [];
     this.pendingCreatedFiles = [];
     this.turnFileCache.clear();
+    this.contextFileIds.clear();
+    for (const fileId of input.currentFileIds ?? []) this.contextFileIds.add(fileId);
   }
 
   buildInput(): ToolBuildInput {
@@ -319,6 +323,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       logger: this.logger,
       embedder: this.embedder,
       resolveFile: (file, signal) => this.resolveFile(file, signal),
+      selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       createdFiles: this.attachments,
       pendingCreatedFiles: this.pendingCreatedFiles,
     };
@@ -343,6 +348,14 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     const resolved = await this.resolveFile(file, signal);
     return { bytes: resolved.bytes, mimeType: resolved.mimeType ?? "image/jpeg" };
   }
+
+  selectContextFiles(fileIds: number[]): void {
+    for (const fileId of fileIds) this.contextFileIds.add(fileId);
+  }
+
+  selectedContextFileIds(): ReadonlySet<number> {
+    return this.contextFileIds;
+  }
 }
 
 function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
@@ -354,12 +367,15 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
         const scope = await threadChainScope(bridge.repos, bridge.thread);
         const allowedIds = new Set(scope.fileIds);
         let changed = false;
-        for (let index = 0; index < messages.length; index += 1) {
+        const injectedIds = new Set<number>();
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
           if (!message || (message.role !== "user" && message.role !== "toolResult")) continue;
           const textParts = messageTextParts(message);
           const fileIds = [...new Set(textParts.flatMap((part) => chatFileIdsFromText(part.text)))]
-            .filter((id) => allowedIds.has(id));
+            .filter((id) => allowedIds.has(id)
+              && bridge.selectedContextFileIds().has(id)
+              && !injectedIds.has(id));
           if (!fileIds.length) continue;
           const rows = await bridge.repos.files.listByIds(fileIds);
           const byId = new Map(rows.map((file) => [file.id, file]));
@@ -368,6 +384,7 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
             let file = byId.get(fileId);
             if (!file) continue;
             try {
+              injectedIds.add(fileId);
               const resolved = await bridge.resolveFile(file);
               const contentChanged = Boolean(resolved.contentSha256
                 && file.content_sha256 !== resolved.contentSha256);
@@ -395,6 +412,11 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
                     threadId: bridge.thread.id,
                     error: String(error),
                   });
+                  additions.push({
+                    type: "text",
+                    text: `\n\n[Attachment #${file.id} could not be refreshed from its chat source.]`,
+                  });
+                  continue;
                 }
               }
               if (file.type === "image") {
@@ -403,13 +425,8 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
                   data: resolved.bytes.toString("base64"),
                   mimeType: resolved.mimeType ?? "image/jpeg",
                 });
-              } else if (file.is_inline && file.content_md) {
-                additions.push({ type: "text", text: `\n\n<attachment id="${file.id}" name="${file.name}">\n${file.content_md}\n</attachment>` });
               } else {
-                additions.push({
-                  type: "text",
-                  text: `\n\n[Attachment #${file.id} ${file.name} is indexed. ${file.summary ?? ""} Use search_in_file or read_file_section for its full extracted content.]`,
-                });
+                additions.push(durableDocumentContext(file));
               }
             } catch (error) {
               bridge.logger.warn("chat file context materialization failed", {
@@ -417,7 +434,9 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
                 threadId: bridge.thread.id,
                 error: String(error),
               });
-              additions.push({ type: "text", text: `\n\n[Attachment #${file.id} is currently unavailable from its chat source.]` });
+              additions.push(file.type !== "image" && file.extraction_status === "ready"
+                ? durableDocumentContext(file)
+                : { type: "text", text: `\n\n[Attachment #${file.id} is currently unavailable from its chat source.]` });
             }
           }
           if (!additions.length) continue;
@@ -427,6 +446,16 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
         return changed ? { messages } : undefined;
       });
     },
+  };
+}
+
+function durableDocumentContext(file: FileRow): TextContent {
+  if (file.is_inline && file.content_md) {
+    return { type: "text", text: `\n\n<attachment id="${file.id}" name="${file.name}">\n${file.content_md}\n</attachment>` };
+  }
+  return {
+    type: "text",
+    text: `\n\n[Attachment #${file.id} ${file.name} is indexed. ${file.summary ?? ""} Use search_in_file or read_file_section for its full extracted content.]`,
   };
 }
 

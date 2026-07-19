@@ -17,6 +17,7 @@ export interface ToolBuildInput {
   logger?: Logger;
   embedder?: TextEmbedder;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
+  selectContextFiles?: (fileIds: number[]) => void;
   createdFiles?: CreatedFileAttachment[];
   pendingCreatedFiles?: PendingCreatedFile[];
 }
@@ -25,6 +26,7 @@ export interface CreatedFileAttachment {
   fileId: number;
   type: StoredFileType;
   name: string;
+  mimeType?: string | null;
   path?: string;
   data?: Buffer;
   size: number;
@@ -66,6 +68,7 @@ export interface LoadMessageFileEntry {
   name: string;
   summary: string | null;
   inline: boolean;
+  bash_path: string;
 }
 
 export interface LoadMessageImageEntry {
@@ -86,4 +89,5 @@ export type LoadMessageResult =
       truncated: boolean;
       files: LoadMessageFileEntry[];
       images: LoadMessageImageEntry[];
+      materialized_file_ids: number[];
     };

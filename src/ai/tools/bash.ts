@@ -1,8 +1,9 @@
 import path from "node:path";
 import fs from "node:fs/promises";
-import { Bash, InMemoryFs, MountableFs, ReadWriteFs } from "just-bash";
+import { Bash, MountableFs, ReadWriteFs } from "just-bash";
 import { z } from "zod";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
+import { LazyAttachmentFs } from "../../files/lazyAttachmentFs.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd, truncateBashOutput } from "./helpers.js";
@@ -20,7 +21,7 @@ type MountedInputFile = {
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per chat thread. To process exact bytes from chat attachments, pass their numeric ids in input_file_ids; each file is mounted only for this call at /attachments/<file_id> and exposed as CHAT_FILE_<file_id>. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
+      "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per chat thread. Every authorized chat file is visible at /attachments/<file_id> and through CHAT_FILE_<file_id>; listing or statting entries does not fetch bytes, and reading one path restores only that file. input_file_ids optionally validates and eagerly loads up to five files before the script. Attachment edits are copy-on-write for this call and never change the canonical snapshot. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -89,10 +90,24 @@ async function runBashTool(
   const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
   await fs.mkdir(root, { recursive: true });
   const cwd = normalizeBashCwd(command.cwd);
-  const mounted = await mountChatFiles(input, root, command.inputFileIds, externalSignal);
+  const controller = new AbortController();
+  let timedOut = false;
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, input.config.BASH_TIMEOUT_MS);
+  const signal = externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal;
+  let mounted: Awaited<ReturnType<typeof mountChatFiles>>;
+  try {
+    mounted = await mountChatFiles(input, root, command.inputFileIds, signal);
+  } catch (error) {
+    clearTimeout(timeout);
+    throw error;
+  }
   const env = {
     TZ: "UTC",
-    ...Object.fromEntries(mounted.files.map((file) => [`CHAT_FILE_${file.file_id}`, file.path])),
+    ...Object.fromEntries(mounted.availableFiles.map((file) => [`CHAT_FILE_${file.file_id}`, file.path])),
   };
   const bash = new Bash({
     fs: mounted.fs,
@@ -108,13 +123,6 @@ async function runBashTool(
     },
     defenseInDepth: true,
   });
-  const controller = new AbortController();
-  let timedOut = false;
-  const startedAt = Date.now();
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, input.config.BASH_TIMEOUT_MS);
   try {
     const result = await bash.exec(command.script, {
       args: command.args,
@@ -122,7 +130,7 @@ async function runBashTool(
       env,
       replaceEnv: true,
       rawScript: command.rawScript,
-      signal: externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal,
+      signal,
       stdin: command.stdin,
     });
     const stdout = truncateBashOutput(result.stdout, input.config.BASH_MAX_OUTPUT_CHARS);
@@ -162,24 +170,37 @@ async function mountChatFiles(
   root: string,
   requestedIds: number[],
   signal?: AbortSignal,
-): Promise<{ fs: MountableFs; files: MountedInputFile[] }> {
+): Promise<{ fs: MountableFs; files: MountedInputFile[]; availableFiles: MountedInputFile[] }> {
   const ids = [...new Set(requestedIds)];
-  const memory = new InMemoryFs();
+  const scope = await threadChainScope(input.repos, input.thread);
+  const rows = await input.repos.files.listByIds(scope.fileIds);
+  const byId = new Map(rows.map((file) => [file.id, file]));
+  const memory = new LazyAttachmentFs(rows.map((file) => ({
+    id: file.id,
+    size: file.size,
+    createdAt: file.created_at,
+    load: async (loadSignal?: AbortSignal) => {
+      if (!input.resolveFile) throw new Error("Chat attachment byte access is unavailable.");
+      const bytes = (await input.resolveFile!(file, loadSignal)).bytes;
+      if (bytes.length > MAX_FILE_BYTES) throw new Error(`Input file #${file.id} exceeds the file size limit.`);
+      return bytes;
+    },
+  })), signal);
+  const availableFiles = rows.map((file) => ({
+    file_id: file.id,
+    path: `/attachments/${file.id}`,
+    name: file.name,
+    size: file.size,
+  }));
   const files: MountedInputFile[] = [];
   if (ids.length) {
     if (!input.resolveFile) throw new Error("Chat attachment byte access is unavailable.");
-    const scope = await threadChainScope(input.repos, input.thread);
-    const allowedIds = new Set(scope.fileIds);
-    const rows = await input.repos.files.listByIds(ids);
-    const byId = new Map(rows.map((file) => [file.id, file]));
     for (const id of ids) {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Tool execution aborted", "AbortError");
       const file = byId.get(id);
-      if (!file || !allowedIds.has(id)) throw new Error(`Input file #${id} is not available in this thread.`);
-      const bytes = (await input.resolveFile(file, signal)).bytes;
-      if (bytes.length > MAX_FILE_BYTES) throw new Error(`Input file #${id} exceeds the file size limit.`);
+      if (!file) throw new Error(`Input file #${id} is not available in this thread.`);
       const virtualPath = `/attachments/${id}`;
-      await memory.writeFile(`/${id}`, bytes);
+      const bytes = await memory.readFileBuffer(`/${id}`);
       files.push({ file_id: id, path: virtualPath, name: file.name, size: bytes.length });
     }
   }
@@ -189,5 +210,6 @@ async function mountChatFiles(
       mounts: [{ mountPoint: "/attachments", filesystem: memory }],
     }),
     files,
+    availableFiles,
   };
 }

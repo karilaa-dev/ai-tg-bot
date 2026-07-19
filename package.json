@@ -11,7 +11,8 @@
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
-    "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts"
+    "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
+    "live:telegram-restore": "tsx scripts/live-telegram-restore.ts"
   },
   "engines": {
     "node": ">=22.19.0"

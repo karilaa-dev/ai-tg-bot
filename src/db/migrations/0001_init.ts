@@ -297,7 +297,7 @@ async function migrateFileSourcesLocked(
     for (const row of rows) {
       const telegramFileId = row.telegram_file_id?.trim() || null;
       const uniqueId = row.telegram_file_unique_id?.trim() || null;
-      const remoteKey = uniqueId ?? (telegramFileId ? `file:${telegramFileId}` : null);
+      const remoteKey = uniqueId ?? telegramFileId;
       if (!remoteKey) continue;
       await insertMigratedTelegramSource(tx, {
         fileId: row.id,
@@ -362,7 +362,6 @@ async function insertMigratedTelegramSource(
       ${input.createdAt}
     )
     on conflict(transport, connection_key, remote_key) do update set
-      file_id = excluded.file_id,
       locator_json = excluded.locator_json,
       mime_type = coalesce(excluded.mime_type, file_sources.mime_type)
   `);

@@ -13,6 +13,7 @@ import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
 import { chatFileMarker } from "./contextMarker.js";
+import { persistManagedFile } from "./storage.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
 const MIN_NATIVE_PDF_TEXT_CHARS = 500;
@@ -73,6 +74,7 @@ export interface FileRefreshInput {
   embedder?: TextEmbedder;
   logger?: Logger;
   signal?: AbortSignal;
+  onStage?: FileIngestStageReporter;
 }
 
 export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
@@ -89,7 +91,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
   if (type === "image") {
     throwIfAborted(input.signal);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
-    const file = await input.repo.insertFile({
+    let file = await input.repo.insertFile({
       userId: input.userId,
       threadId: input.threadId,
       messageId: input.messageId ?? null,
@@ -102,10 +104,12 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       summary: input.imageSummary ?? null,
       isInline: true,
     });
-    input.logger?.info("image ingest complete without local persistence", {
+    file = await persistSnapshot(input, file, bytes);
+    input.logger?.info("image ingest complete", {
       fileId: file.id,
       name: input.name,
       bytes: bytes.length,
+      persisted: Boolean(file.path),
       ms: Date.now() - startedAt,
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
@@ -120,17 +124,19 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     }
     if (input.embeddings && chunkIds.length) await input.embeddings.deleteRefs("chunk", chunkIds);
   };
-  const finish = (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): FileIngestResult => {
+  const finish = async (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): Promise<FileIngestResult> => {
+    const stored = await persistSnapshot(input, file, input.bytes);
     completed = true;
     input.logger?.info("file ingest complete", {
-      fileId: file.id,
+      fileId: stored.id,
       name: input.name,
       type,
       inline,
+      persisted: Boolean(stored.path),
       ...logDetail,
       ms: Date.now() - startedAt,
     });
-    return { fileId: file.id, card, inline, type };
+    return { fileId: stored.id, card, inline, type };
   };
   try {
     throwIfAborted(input.signal);
@@ -172,9 +178,9 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
         chunks.map((chunk) => ({ idx: chunk.idx, heading_path: chunk.headingPath })),
         input.name,
       );
-      return finish(file, card, false, { chunks: chunks.length });
+      return await finish(file, card, false, { chunks: chunks.length });
     }
-    return finish(file, cardForFile(file, [], input.name), true, { chars: content.length });
+    return await finish(file, cardForFile(file, [], input.name), true, { chars: content.length });
   } catch (err) {
     if (!completed) {
       if (isAbortError(err) || input.signal?.aborted) {
@@ -190,6 +196,20 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       await cleanup();
     }
     throw err;
+  }
+}
+
+async function persistSnapshot(input: FileIngestInput, file: FileRow, bytes: Buffer | Uint8Array): Promise<FileRow> {
+  try {
+    const filePath = await persistManagedFile(input.config, input.repo, file.id, bytes);
+    return { ...file, path: filePath };
+  } catch (error) {
+    input.logger?.warn("chat file snapshot persistence failed; remote recovery remains available", {
+      fileId: file.id,
+      name: file.name,
+      error: String(error),
+    });
+    return file;
   }
 }
 
@@ -213,60 +233,54 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  await input.repo.updateExtractionStatus(input.file.id, "pending");
-  const insertedChunkIds: number[] = [];
-  let replacementStarted = false;
-  try {
-    const content = await contentFor(type, input.file.name, bytes, input.config, input.logger, input.signal);
-    throwIfAborted(input.signal);
-    const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
-    const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
-    const oldChunkIds = await input.repo.clearChunks(input.file.id);
-    replacementStarted = true;
-    if (input.embeddings && oldChunkIds.length) await input.embeddings.deleteRefs("chunk", oldChunkIds);
-    let refreshed = await input.repo.updateExtraction(input.file.id, {
-      contentSha256,
-      mimeType: input.mime ?? input.file.mime_type,
-      size: bytes.length,
-      contentMd: inline ? content : null,
-      summary: firstLine(content),
-      outline: null,
-      isInline: inline,
-      status: "pending",
-    });
-    if (!inline) {
-      const outline = await indexDocumentChunks({
-        config: input.config,
-        repo: input.repo,
-        userId: refreshed.user_id,
-        threadId: refreshed.thread_id,
-        bytes,
-        name: refreshed.name,
-        mime: input.mime ?? refreshed.mime_type ?? undefined,
-        embeddings: input.embeddings,
+  const content = await contentFor(type, input.file.name, bytes, input.config, input.logger, input.signal);
+  throwIfAborted(input.signal);
+  const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
+  const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
+  for (let index = 0; index < chunks.length; index += 1) {
+    await reportStage(input.onStage, {
+      stage: "indexing",
+      completed: index + 1,
+      total: chunks.length,
+    }, input.signal);
+  }
+  const vectors = input.embeddings && input.embedder && chunks.length
+    ? await embedChunksStrict({
+        chunks: chunks.map((chunk) => chunk.content),
         embedder: input.embedder,
+        embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
         logger: input.logger,
         signal: input.signal,
-      }, refreshed, chunks, insertedChunkIds);
-      await input.repo.setOutline(refreshed.id, outline);
-    }
-    await input.repo.updateExtractionStatus(refreshed.id, "ready");
-    refreshed = (await input.repo.get(refreshed.id)) ?? refreshed;
-    input.logger?.info("chat file extracted content refreshed", {
-      fileId: refreshed.id,
-      bytes: bytes.length,
-      inline,
-      chunks: chunks.length,
-    });
-    return refreshed;
-  } catch (error) {
-    if (replacementStarted) {
-      const removed = await input.repo.clearChunks(input.file.id);
-      if (input.embeddings && removed.length) await input.embeddings.deleteRefs("chunk", removed);
-    }
-    await input.repo.updateExtractionStatus(input.file.id, "failed");
-    throw error;
-  }
+        onProgress: (completed, total) => reportStage(input.onStage, {
+          stage: "embedding",
+          completed,
+          total,
+        }, input.signal),
+      })
+    : undefined;
+  throwIfAborted(input.signal);
+  const refreshed = await input.repo.replaceDocumentExtraction(input.file.id, {
+    contentSha256,
+    mimeType: input.mime ?? input.file.mime_type,
+    size: bytes.length,
+    contentMd: inline ? content : null,
+    summary: firstLine(content),
+    isInline: inline,
+    chunks: chunks.map((chunk, index) => ({
+      idx: chunk.idx,
+      headingPath: chunk.headingPath,
+      content: chunk.content,
+      vector: vectors?.[index],
+    })),
+    embeddingModel: vectors ? input.config.OPENROUTER_EMBEDDING_MODEL : null,
+  });
+  input.logger?.info("chat file extracted content refreshed", {
+    fileId: refreshed.id,
+    bytes: bytes.length,
+    inline,
+    chunks: chunks.length,
+  });
+  return refreshed;
 }
 
 function baseFileFields(
@@ -357,6 +371,36 @@ export function cardForFile(
     outlinePreview(outline),
     "Use search_in_file or read_file_section.",
   ].filter(Boolean).join(" ");
+}
+
+async function embedChunksStrict(input: {
+  chunks: string[];
+  embedder: TextEmbedder;
+  embeddingModel: string;
+  logger?: Logger;
+  signal?: AbortSignal;
+  onProgress?: (completed: number, total: number) => void | Promise<void>;
+}): Promise<Float32Array[]> {
+  throwIfAborted(input.signal);
+  const vectors: Float32Array[] = [];
+  await input.onProgress?.(0, input.chunks.length);
+  for (let start = 0; start < input.chunks.length; start += EMBEDDING_BATCH_SIZE) {
+    const batch = input.chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
+    input.logger?.debug("replacement chunk embedding batch starting", {
+      start,
+      count: batch.length,
+      total: input.chunks.length,
+      model: input.embeddingModel,
+    });
+    const batchVectors = await input.embedder.embed(batch);
+    throwIfAborted(input.signal);
+    if (batchVectors.length !== batch.length || batchVectors.some((vector) => !vector)) {
+      throw new Error("Replacement chunk embedding returned an incomplete vector batch.");
+    }
+    vectors.push(...batchVectors);
+    await input.onProgress?.(vectors.length, input.chunks.length);
+  }
+  return vectors;
 }
 
 async function persistChunkEmbeddings(input: {

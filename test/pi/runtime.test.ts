@@ -30,7 +30,10 @@ describe("PiRuntimeManager", () => {
 
   it("persists, reopens, maps, and forks text-only Pi sessions", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-"));
-    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+    });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
     await db.migrate();
@@ -65,6 +68,7 @@ describe("PiRuntimeManager", () => {
     first.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
+      currentFileIds: [image.id],
       resolveFile: async (file) => {
         telegramDownloads += 1;
         expect(file.id).toBe(image.id);
@@ -109,13 +113,20 @@ describe("PiRuntimeManager", () => {
     const storedChild = await repos.threads.get(child.id);
     expect(storedChild?.pi_session_file).toBeTruthy();
     const childRuntime = await secondManager.runtime(storedChild!, user);
+    let historicalLoads = 0;
     childRuntime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
-      resolveFile: async () => resolvedFile(Buffer.from("unused"), null, -1),
+      resolveFile: async () => {
+        historicalLoads += 1;
+        return resolvedFile(Buffer.from("unused"), null, -1);
+      },
     });
     expect(userText(childRuntime.session.messages)).toContain("persist this marker");
+    providerImageCount = 0;
     await childRuntime.session.prompt("child-only marker", { expandPromptTemplates: false, source: "extension" });
+    expect(historicalLoads).toBe(0);
+    expect(providerImageCount).toBe(0);
     expect(userText(childRuntime.session.messages)).toContain("child-only marker");
     expect(userText(reopened.session.messages)).not.toContain("child-only marker");
     await secondManager.dispose();
@@ -209,6 +220,7 @@ describe("PiRuntimeManager", () => {
     runtime.bridge.beginTurn({
       api: {} as never,
       chatId: user.tg_id,
+      currentFileIds: [file.id],
       resolveFile: async () => {
         remoteLoads += 1;
         return resolvedFile(bytes, "text/plain", file.id);
@@ -223,6 +235,120 @@ describe("PiRuntimeManager", () => {
     const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
     expect(sessionText).not.toContain("portable extracted document text");
     expect(sessionText).not.toContain(bytes.toString("base64"));
+    await manager.dispose();
+  }, 20_000);
+
+  it("uses durable extracted document text when the remote source is unavailable", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-durable-file-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9130, firstName: "DurableFile", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Durable file" });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      contentSha256: "durable-hash",
+      mimeType: "text/plain",
+      name: "durable.txt",
+      path: null,
+      size: 20,
+      contentMd: "durable extracted text remains available",
+      summary: "durable extracted text",
+      isInline: true,
+    });
+    let liveText = "";
+    const stream = ((model: Model<Api>, context: Context) => {
+      liveText = context.messages.flatMap((entry) => entry.role === "user" && Array.isArray(entry.content)
+        ? entry.content.filter((part) => part.type === "text").map((part) => part.text)
+        : []).join("\n");
+      return successStream(model, "Durable document inspected");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    let remoteLoads = 0;
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      currentFileIds: [file.id],
+      resolveFile: async () => {
+        remoteLoads += 1;
+        throw new Error("Telegram is unavailable");
+      },
+    });
+
+    await runtime.session.prompt(`inspect [[chat-file:${file.id}]]`, { expandPromptTemplates: false, source: "extension" });
+
+    expect(remoteLoads).toBe(1);
+    expect(liveText).toContain("durable extracted text remains available");
+    expect(liveText).not.toContain("currently unavailable from its chat source");
+    await manager.dispose();
+  }, 20_000);
+
+  it("does not inject stale extracted content when a changed document refresh fails", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-refresh-failure-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, FILE_INLINE_TOKENS: 1 });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9131, firstName: "RefreshFailure", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Refresh failure" });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      contentSha256: "old-hash",
+      mimeType: "text/plain",
+      name: "changing.txt",
+      path: null,
+      size: 10,
+      contentMd: "stale extracted content",
+      summary: "stale summary",
+      isInline: true,
+    });
+    let liveText = "";
+    const stream = ((model: Model<Api>, context: Context) => {
+      liveText = context.messages.flatMap((entry) => entry.role === "user" && Array.isArray(entry.content)
+        ? entry.content.filter((part) => part.type === "text").map((part) => part.text)
+        : []).join("\n");
+      return successStream(model, "Refresh failure handled");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      embedder: { embed: async () => { throw new Error("embedding unavailable"); } },
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    const changedBytes = Buffer.from("# Changed\n\n" + "new content ".repeat(300));
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      currentFileIds: [file.id],
+      resolveFile: async () => resolvedFile(changedBytes, "text/plain", file.id),
+    });
+
+    await runtime.session.prompt(`inspect [[chat-file:${file.id}]]`, { expandPromptTemplates: false, source: "extension" });
+
+    expect(liveText).toContain(`Attachment #${file.id} could not be refreshed`);
+    expect(liveText).not.toContain("stale extracted content");
+    await expect(repos.files.get(file.id)).resolves.toMatchObject({
+      content_sha256: "old-hash",
+      extraction_status: "ready",
+      content_md: "stale extracted content",
+    });
     await manager.dispose();
   }, 20_000);
 
@@ -266,7 +392,7 @@ describe("PiRuntimeManager", () => {
           type: "toolCall",
           id: "load-old-message",
           name: "load_message",
-          arguments: { message_id: message.id },
+          arguments: { message_id: message.id, file_ids: [image.id] },
         });
       }
       rehydratedImages = context.messages.flatMap((entry) =>
@@ -291,6 +417,13 @@ describe("PiRuntimeManager", () => {
         return resolvedFile(bytes, "image/png", image.id);
       },
     });
+
+    const loadMessage = runtime.session.getToolDefinition("load_message")!;
+    const metadataOnly = await loadMessage.execute("metadata-only", {
+      message_id: message.id,
+    }, undefined, undefined, {} as never);
+    expect(metadataOnly.details).toMatchObject({ materialized_file_ids: [] });
+    expect(remoteLoads).toBe(0);
 
     await runtime.session.prompt("Load that old image", { expandPromptTemplates: false, source: "extension" });
 

@@ -37,7 +37,14 @@ export async function createGrammyEmulator(options: {
   const ownsCacheDir = !options.config?.FILE_CACHE_DIR;
   const cacheDir = options.config?.FILE_CACHE_DIR
     ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-files-"));
-  const config = loadTestConfig({ ...options.config, FILE_CACHE_DIR: cacheDir });
+  const ownsBashRoot = !options.config?.BASH_WORKSPACE_ROOT;
+  const bashRoot = options.config?.BASH_WORKSPACE_ROOT
+    ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-bash-"));
+  const config = loadTestConfig({
+    ...options.config,
+    FILE_CACHE_DIR: cacheDir,
+    BASH_WORKSPACE_ROOT: bashRoot,
+  });
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
   await db.migrate();
@@ -126,6 +133,7 @@ export async function createGrammyEmulator(options: {
       bot.dispose();
       await db.destroy();
       if (ownsCacheDir) await fs.rm(cacheDir, { recursive: true, force: true });
+      if (ownsBashRoot) await fs.rm(bashRoot, { recursive: true, force: true });
     },
   };
 }

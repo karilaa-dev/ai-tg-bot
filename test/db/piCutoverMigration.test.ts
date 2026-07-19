@@ -82,21 +82,23 @@ describe("Pi cutover migration", () => {
     expect(result).toMatchObject({
       piCutoverApplied: false,
       fileSourcesApplied: true,
-      migratedFileSources: 2,
+      migratedFileSources: 3,
     });
     expect(await count(db, "threads")).toBe(1);
     expect(await count(db, "messages")).toBe(1);
-    expect(await count(db, "files")).toBe(1);
+    expect(await count(db, "files")).toBe(2);
     const sources = await db.db.query<{
       transport: string;
       connection_key: string;
       remote_key: string;
       locator_json: string;
     }>(sql.raw("select transport, connection_key, remote_key, locator_json from file_sources order by remote_key"));
-    expect(sources).toHaveLength(2);
+    expect(sources).toHaveLength(3);
     expect(sources.every((source) => source.transport === "telegram" && source.connection_key === "default")).toBe(true);
-    expect(sources.map((source) => source.remote_key)).toEqual(["legacy-unique-a", "legacy-unique-b"]);
+    expect(sources.map((source) => source.remote_key)).toEqual(["legacy-unique-a", "legacy-unique-b", "telegram-file-c"]);
     expect(JSON.parse(sources[0]!.locator_json)).toMatchObject({ file_id: "telegram-file-a" });
+    expect(JSON.parse(sources[1]!.locator_json)).toMatchObject({ file_id: "telegram-file-b" });
+    expect(JSON.parse(sources[2]!.locator_json)).toMatchObject({ file_id: "telegram-file-c" });
     expect(await tableExists(db, "file_telegram_refs")).toBe(false);
     expect(await columns(db, "files")).not.toContain("telegram_file_id");
     expect((await db.migrate()).fileSourcesApplied).toBe(false);
@@ -164,6 +166,7 @@ async function installPiSchemaWithLegacyFileRefs(database: AppDatabase): Promise
     `insert into threads values (1, 44, null, null, null, 'Current thread', '/tmp/pi.jsonl', 'pi-session', 0, 1)`,
     `insert into messages values (1, 1, 'user', 'file', '{}', 'current file', null, 101, 'entry-1', 1)`,
     `insert into files values (1, 44, 1, 1, 'image', 'abc', 'image/png', 'telegram-file-a', 'legacy-unique-a', 'current.png', null, 3, null, 'current image', null, 1, 1)`,
+    `insert into files values (2, 44, 1, null, 'image', 'def', 'image/jpeg', 'telegram-file-c', null, 'current-c.jpg', null, 3, null, 'current image c', null, 1, 2)`,
     `insert into file_telegram_refs values (1, 'legacy-unique-b', 'telegram-file-b', 2)`,
   ];
   for (const statement of statements) await database.db.execute(sql.raw(statement));

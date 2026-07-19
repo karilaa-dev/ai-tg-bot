@@ -63,9 +63,9 @@ function toolLabel(name: string): string {
 
 function toolSnippet(name: string): string {
   switch (name) {
-    case "bash": return "Run commands inside the persistent just-bash workspace, with chat attachments mounted by input_file_ids when needed.";
+    case "bash": return "Run commands inside the persistent just-bash workspace; scoped chat files are lazy paths under /attachments/<file_id>.";
     case "search_thread": return "Search prior chat messages semantically and lexically.";
-    case "load_message": return "Load one prior chat message and expose its attachment markers to transient Pi context.";
+    case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";
     case "read_file_section": return "Read exact indexed sections from an uploaded file.";
     case "create_file": return "Create a file for delivery through the active chat.";

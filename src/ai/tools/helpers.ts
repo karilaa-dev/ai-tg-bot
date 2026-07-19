@@ -7,6 +7,7 @@ import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { sha256Hex } from "../../files/hash.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
+import { persistManagedFile } from "../../files/storage.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
@@ -97,6 +98,8 @@ export async function prepareCreatedFile(
         fileId: ingested.fileId,
         type: ingested.type,
         name: stored.name,
+        mimeType: stored.mime_type,
+        path: stored.path ?? undefined,
         data: bytes,
         size: stored.size,
         caption: file.caption?.trim() || null,
@@ -115,12 +118,14 @@ export async function prepareCreatedFile(
     }
   }
 
-  const stored = await storeOtherCreatedFile(input, { bytes, name: displayName });
+  const stored = await storeOtherCreatedFile(input, { bytes, name: displayName, mime: file.mime });
   const delivery = createdFileDeliveryFor(stored.type, requestedDelivery, stored.name);
   return {
     fileId: stored.id,
     type: stored.type,
     name: stored.name,
+    mimeType: stored.mime_type,
+    path: stored.path ?? undefined,
     data: bytes,
     size: stored.size,
     caption: file.caption?.trim() || null,
@@ -144,19 +149,31 @@ function createdFileDeliveryFor(
 
 async function storeOtherCreatedFile(
   input: ToolBuildInput,
-  file: { bytes: Buffer; name: string },
+  file: { bytes: Buffer; name: string; mime?: string },
 ): Promise<FileRow> {
-  return input.repos.files.insertFile({
+  const stored = await input.repos.files.insertFile({
     userId: input.user.tg_id,
     threadId: input.thread.id,
     type: "other",
     contentSha256: sha256Hex(file.bytes),
+    mimeType: file.mime?.trim() || null,
     name: file.name,
     path: null,
     size: file.bytes.length,
     summary: `Outbound file ${file.name}`,
     isInline: false,
   });
+  try {
+    const filePath = await persistManagedFile(input.config, input.repos.files, stored.id, file.bytes);
+    return { ...stored, path: filePath };
+  } catch (error) {
+    input.logger?.warn("created file snapshot persistence failed; Telegram recovery will be recorded after delivery", {
+      fileId: stored.id,
+      name: stored.name,
+      error: String(error),
+    });
+    return stored;
+  }
 }
 
 function assertAllowedOutboundFile(name: string, mime: string | undefined, bytes: Buffer): void {

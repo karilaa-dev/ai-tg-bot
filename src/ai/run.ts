@@ -73,6 +73,7 @@ export const runTurn: TurnRunner = async (input) => {
   try {
     if (!input.pi) throw new Error("Pi runtime is not configured.");
     const userMessage = await resolveTurnUserMessage(input);
+    const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
     const runtime = await input.pi.runtime(input.thread, input.user);
     runtime.bridge.beginTurn({
       api: input.api,
@@ -82,6 +83,7 @@ export const runTurn: TurnRunner = async (input) => {
         if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
         return input.resolveFile(file, signal);
       },
+      currentFileIds: currentFiles.map((file) => file.id),
     });
     runtime.session.agent.state.systemPrompt = await renderThreadSystemPrompt({
       repos: input.repos,
@@ -822,6 +824,7 @@ async function sendAttachmentBatch(
         name: attachment.name,
         err: String(err),
       });
+      await removeUnresolvableUndeliveredAttachment(input, attachment);
     }
     return;
   }
@@ -845,6 +848,34 @@ async function sendAttachmentBatch(
       files: pending.length,
       fileIds: pending.map((attachment) => attachment.fileId),
       err: String(err),
+    });
+    for (const attachment of pending) await removeUnresolvableUndeliveredAttachment(input, attachment);
+  }
+}
+
+async function removeUnresolvableUndeliveredAttachment(
+  input: TurnInput,
+  attachment: CreatedFileAttachment,
+): Promise<void> {
+  if (attachment.path || attachment.telegramDelivery?.fileId) return;
+  try {
+    const stored = await input.repos.files.get(attachment.fileId);
+    if (!stored || stored.path) return;
+    const sources = await input.repos.files.listSources(attachment.fileId);
+    if (sources.length) return;
+    const chunkIds = await input.repos.files.deleteFile(attachment.fileId);
+    if (chunkIds.length) await input.repos.embeddings.deleteRefs("chunk", chunkIds);
+    input.logger.warn("removed undelivered attachment without a durable recovery source", {
+      threadId: input.thread.id,
+      fileId: attachment.fileId,
+      name: attachment.name,
+    });
+  } catch (error) {
+    input.logger.warn("failed to remove unresolvable undelivered attachment", {
+      threadId: input.thread.id,
+      fileId: attachment.fileId,
+      name: attachment.name,
+      error: String(error),
     });
   }
 }
@@ -870,7 +901,9 @@ async function rememberTelegramDeliverySource(input: TurnInput, attachment: Crea
   await input.repos.files.rememberSource(attachment.fileId, telegramFileSource({
     fileId: delivery.fileId,
     fileUniqueId: delivery.fileUniqueId,
-    mimeType: attachment.type === "image" ? "image/jpeg" : null,
+    mimeType: attachment.type === "image"
+      ? attachment.delivery === "photo" ? "image/jpeg" : attachment.mimeType ?? null
+      : null,
   }));
 }
 

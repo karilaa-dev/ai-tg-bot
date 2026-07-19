@@ -38,7 +38,7 @@ export class FileByteCache {
   ): Promise<CachedFileBytes> {
     await this.ensureInitialized();
     throwIfAborted(signal);
-    const key = createHash("sha256").update(identity).digest("hex");
+    const key = cacheKey(identity);
     let inflight = this.inflight.get(key);
     if (!inflight) {
       const controller = new AbortController();
@@ -67,8 +67,18 @@ export class FileByteCache {
     }
   }
 
+  async get(identity: string, signal?: AbortSignal): Promise<CachedFileBytes | undefined> {
+    await this.ensureInitialized();
+    throwIfAborted(signal);
+    return this.readFresh(path.join(this.root, cacheKey(identity)), signal);
+  }
+
   async sweep(now = Date.now()): Promise<number> {
     await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
+    const rootStat = await fs.lstat(this.root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      throw new Error("File cache root must be a real directory.");
+    }
     await fs.chmod(this.root, 0o700);
     const entries = await fs.readdir(this.root, { withFileTypes: true }).catch(() => []);
     let removed = 0;
@@ -138,6 +148,10 @@ export class FileByteCache {
     throwIfAborted(signal);
     return cachedResult(filePath, bytes, expiresAt);
   }
+}
+
+function cacheKey(identity: string): string {
+  return createHash("sha256").update(identity).digest("hex");
 }
 
 function cachedResult(filePath: string, bytes: Buffer, expiresAt: number): CachedFileBytes {
