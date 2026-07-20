@@ -383,6 +383,10 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
           for (const fileId of fileIds) {
             let file = byId.get(fileId);
             if (!file) continue;
+            if (file.is_inline && file.content_md && containsInlineAttachment(textParts, file.id)) {
+              injectedIds.add(file.id);
+              continue;
+            }
             try {
               injectedIds.add(fileId);
               const resolved = await bridge.resolveFile(file);
@@ -457,6 +461,10 @@ function durableDocumentContext(file: FileRow): TextContent {
     type: "text",
     text: `\n\n[Attachment #${file.id} ${file.name} is indexed. ${file.summary ?? ""} Use search_in_file or read_file_section for its full extracted content.]`,
   };
+}
+
+function containsInlineAttachment(parts: TextContent[], fileId: number): boolean {
+  return parts.some((part) => part.text.includes(`<attachment id="${fileId}"`));
 }
 
 function messageTextParts(message: AgentMessage): TextContent[] {

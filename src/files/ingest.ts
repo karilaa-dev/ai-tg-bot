@@ -361,7 +361,14 @@ export function cardForFile(
 ): string {
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
-  if (file.is_inline) return `${marker} File #${file.id}: ${displayName} (${file.type}, inline).`;
+  if (file.is_inline) {
+    return [
+      `${marker} File #${file.id}: ${displayName} (${file.type}, inline).`,
+      `<attachment id="${file.id}" name="${displayName}">`,
+      file.content_md ?? "",
+      "</attachment>",
+    ].join("\n");
+  }
   const outline = decodeOutline(file.outline_json) ?? chunks.map((chunk) => ({
     chunk_index: chunk.idx,
     heading_path: chunk.heading_path,

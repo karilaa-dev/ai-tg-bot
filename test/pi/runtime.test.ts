@@ -15,6 +15,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
+import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
 
@@ -235,6 +236,61 @@ describe("PiRuntimeManager", () => {
     const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
     expect(sessionText).not.toContain("portable extracted document text");
     expect(sessionText).not.toContain(bytes.toString("base64"));
+    await manager.dispose();
+  }, 20_000);
+
+  it("does not reload or duplicate inline content already present in the searchable message card", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-inline-card-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9132, firstName: "InlineCard", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline card" });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      contentSha256: "inline-card-hash",
+      mimeType: "text/plain",
+      name: "searchable.txt",
+      path: null,
+      size: 26,
+      contentMd: "searchable inline sentinel",
+      summary: "searchable inline sentinel",
+      isInline: true,
+    });
+    let liveText = "";
+    const stream = ((model: Model<Api>, context: Context) => {
+      liveText = context.messages.flatMap((entry) => entry.role === "user" && Array.isArray(entry.content)
+        ? entry.content.filter((part) => part.type === "text").map((part) => part.text)
+        : []).join("\n");
+      return successStream(model, "Inline card inspected");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    let remoteLoads = 0;
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      currentFileIds: [file.id],
+      resolveFile: async () => {
+        remoteLoads += 1;
+        return resolvedFile(Buffer.from("unused"), "text/plain", file.id);
+      },
+    });
+
+    await runtime.session.prompt(cardForFile(file), { expandPromptTemplates: false, source: "extension" });
+
+    expect(remoteLoads).toBe(0);
+    expect(liveText.match(/searchable inline sentinel/g)).toHaveLength(1);
     await manager.dispose();
   }, 20_000);
 

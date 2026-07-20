@@ -28,7 +28,7 @@ Main, helper, and image calls share one Codex circuit breaker. While open, reque
 - The Codex path uses the hosted Responses `image_generation` tool with Pi's existing Codex credentials.
 - The fallback path uses OpenRouter's dedicated image endpoint.
 - Reference images are resolved from their recorded chat source into memory and sent as data URLs.
-- Generated originals are atomically saved under `BASH_WORKSPACE_ROOT/.chat-files/<file_id>/content` and also remain in the current turn's delivery outbox. A successful `generate_image` result terminates Pi's tool loop, and the photo is sent before final text/draft cleanup. After Telegram accepts the photo, its `file_id` and `file_unique_id` are retained as recovery sources. If the local original is manually deleted, a later Telegram photo restoration may be a recompressed JPEG.
+- By design, generated originals are atomically saved under `BASH_WORKSPACE_ROOT/.chat-files/<file_id>/content`; they are not transient-only. A successful `generate_image` result terminates Pi's tool loop, and the photo is sent from the current turn's delivery outbox before final text/draft cleanup. After Telegram accepts the photo, its `file_id` and `file_unique_id` are retained as recovery sources. If the local original is manually deleted, a later Telegram photo restoration may be a recompressed JPEG.
 - Pi JSONL and tool results contain text metadata, never image base64.
 - Incoming images are captioned once by an isolated Pi helper session. A Pi context hook injects bytes only for attachments newly received in the current turn or exact IDs explicitly selected with `load_message(file_ids: [...])`. Historical markers remain text-only, including after compaction.
 

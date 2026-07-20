@@ -76,8 +76,20 @@ describe("file ingestion", () => {
     expect(result.inline).toBe(true);
     expect(result.type).toBe("csv");
     expect(result.card).toContain("[[chat-file:");
+    expect(result.card).toContain('"JAN"');
     const file = await repos.files.get(result.fileId);
     expect(file?.content_md).toContain("1 rows");
+
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: result.card },
+      textPlain: result.card,
+    });
+    await repos.files.setMessageId(result.fileId, message.id);
+    await expect(db.search.searchMessages([thread.id], "JAN", 10)).resolves.toEqual([
+      expect.objectContaining({ id: message.id }),
+    ]);
   });
 
   it("persists embeddings for chunks of searchable files", async () => {

@@ -46,7 +46,8 @@ describe("Pi safe tool adapters", () => {
     expect(createdFiles).toHaveLength(1);
     expect(createdFiles[0]).toMatchObject({ delivery: "photo", caption: "Pi-created image" });
     expect(createdFiles[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(createdFiles[0]?.fileId), "content"));
-    expect(createdFiles[0]?.data).toEqual(Buffer.from("image-bytes"));
+    expect(createdFiles[0]?.data).toBeUndefined();
+    await expect(fs.readFile(createdFiles[0]!.path!)).resolves.toEqual(Buffer.from("image-bytes"));
     await expect(repos.files.get(createdFiles[0]!.fileId)).resolves.toMatchObject({ path: createdFiles[0]?.path, type: "image" });
   });
 
