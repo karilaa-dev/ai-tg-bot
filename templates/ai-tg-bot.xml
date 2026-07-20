@@ -38,6 +38,7 @@
   <Config Name="Model Context Tokens" Target="MODEL_CONTEXT_TOKENS" Default="128000" Description="Context window advertised for both internal Pi routing models." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Pi Thinking Level" Target="PI_THINKING_LEVEL" Default="medium" Description="Pi thinking level: off, minimal, low, medium, high, xhigh, or max." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Pi Turn Timeout" Target="PI_TURN_TIMEOUT_MS" Default="900000" Description="Maximum milliseconds for a Pi turn. Set to 0 to disable the hard cap." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Thread Title Timeout" Target="THREAD_TITLE_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for an isolated helper-model topic-title call. Set to 0 to disable the hard cap." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Image Timeout" Target="IMAGE_TIMEOUT_MS" Default="300000" Description="Maximum milliseconds for Codex or OpenRouter image generation. Set to 0 to disable the hard cap." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="Docling Timeout" Target="DOCLING_TIMEOUT_MS" Default="300000" Description="Docling conversion timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>

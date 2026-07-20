@@ -46,6 +46,7 @@ describe("Pi cutover migration", () => {
     const messageColumns = await columns(db, "messages");
     const fileColumns = await db.db.query<{ name: string; notnull: number }>(sql.raw("pragma table_info(files)"));
     expect(threadColumns).toContain("pi_session_file");
+    expect(threadColumns).toEqual(expect.arrayContaining(["title_source", "title_attempts", "topic_title_synced"]));
     expect(threadColumns).not.toContain("meta_summary");
     expect(messageColumns).toContain("pi_entry_id");
     expect(messageColumns).not.toContain("tokens_est");
@@ -132,6 +133,17 @@ describe("Pi cutover migration", () => {
       inviteRemovalApplied: true,
     });
     expect(await count(db, "threads")).toBe(1);
+    expect((await db.db.query<{
+      title: string;
+      title_source: string;
+      title_attempts: number;
+      topic_title_synced: number;
+    }>(sql.raw("select title, title_source, title_attempts, topic_title_synced from threads where id = 1")))[0]).toEqual({
+      title: "Current thread",
+      title_source: "explicit",
+      title_attempts: 0,
+      topic_title_synced: 1,
+    });
     expect(await count(db, "messages")).toBe(1);
     expect(await count(db, "files")).toBe(2);
     const sources = await db.db.query<{

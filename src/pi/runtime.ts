@@ -29,6 +29,11 @@ import type { ResolvedChatFile } from "../files/source.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
+import {
+  buildThreadTitlePrompt,
+  THREAD_TITLE_SYSTEM_PROMPT,
+  type ThreadTitlePromptInput,
+} from "./threadTitle.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -51,6 +56,7 @@ export interface PiRuntimeService {
   compact(thread: ThreadRow, user: UserRow): Promise<number>;
   fork(source: ThreadRow, target: ThreadRow, user: UserRow, entryId?: string | null): Promise<void>;
   captionImage(bytes: Buffer, mimeType: string, userCaption?: string): Promise<string>;
+  generateThreadTitle(input: ThreadTitlePromptInput): Promise<string>;
   abort(threadId: number): Promise<boolean>;
   dispose(): Promise<void>;
 }
@@ -181,6 +187,36 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   async captionImage(bytes: Buffer, mimeType: string, userCaption?: string): Promise<string> {
+    const prompt = userCaption?.trim()
+      ? `Describe this image. The Telegram caption was: ${userCaption.trim()}`
+      : "Describe this image for later conversation recall.";
+    return this.runIsolatedHelper({
+      systemPrompt: "Describe the supplied image accurately in one compact paragraph for durable conversation memory. Mention visible text and details likely to matter later. Return only the description.",
+      prompt,
+      images: [{ type: "image", data: bytes.toString("base64"), mimeType }],
+      timeoutMs: this.input.config.PI_TURN_TIMEOUT_MS,
+    });
+  }
+
+  generateThreadTitle(input: ThreadTitlePromptInput): Promise<string> {
+    return this.runIsolatedHelper({
+      systemPrompt: THREAD_TITLE_SYSTEM_PROMPT,
+      prompt: buildThreadTitlePrompt(input),
+      timeoutMs: this.input.config.THREAD_TITLE_TIMEOUT_MS,
+    });
+  }
+
+  async dispose(): Promise<void> {
+    for (const runtime of this.runtimes.values()) runtime.session.dispose();
+    this.runtimes.clear();
+  }
+
+  private async runIsolatedHelper(input: {
+    systemPrompt: string;
+    prompt: string;
+    images?: ImageContent[];
+    timeoutMs: number;
+  }): Promise<string> {
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
@@ -195,7 +231,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: "Describe the supplied image accurately in one compact paragraph for durable conversation memory. Mention visible text and details likely to matter later. Return only the description.",
+      systemPrompt: input.systemPrompt,
     });
     await resourceLoader.reload();
     const { session } = await createAgentSession({
@@ -211,27 +247,19 @@ export class PiRuntimeManager implements PiRuntimeService {
       settingsManager,
     });
     try {
-      const prompt = userCaption?.trim()
-        ? `Describe this image. The Telegram caption was: ${userCaption.trim()}`
-        : "Describe this image for later conversation recall.";
       await withSessionTimeout(
         session,
-        session.prompt(prompt, {
-          images: [{ type: "image", data: bytes.toString("base64"), mimeType }],
+        session.prompt(input.prompt, {
+          images: input.images,
           expandPromptTemplates: false,
           source: "extension",
         }),
-        this.input.config.PI_TURN_TIMEOUT_MS,
+        input.timeoutMs,
       );
       return lastAssistantText(session.messages).trim();
     } finally {
       session.dispose();
     }
-  }
-
-  async dispose(): Promise<void> {
-    for (const runtime of this.runtimes.values()) runtime.session.dispose();
-    this.runtimes.clear();
   }
 
   private async openSessionManager(thread: ThreadRow): Promise<SessionManager> {

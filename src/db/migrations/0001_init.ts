@@ -93,6 +93,9 @@ async function commonTables(
       parent_thread_id ${intType},
       fork_point_message_id ${intType},
       title text not null,
+      title_source text not null default 'explicit',
+      title_attempts integer not null default 0,
+      topic_title_synced integer not null default 1,
       pi_session_file text,
       pi_session_id text,
       archived integer not null default 0,
@@ -200,6 +203,9 @@ async function commonTables(
   await addColumnIfMissing(db, dialect, "embeddings", "model", "text");
   await addColumnIfMissing(db, dialect, "threads", "pi_session_file", "text");
   await addColumnIfMissing(db, dialect, "threads", "pi_session_id", "text");
+  await addColumnIfMissing(db, dialect, "threads", "title_source", "text not null default 'explicit'");
+  await addColumnIfMissing(db, dialect, "threads", "title_attempts", "integer not null default 0");
+  await addColumnIfMissing(db, dialect, "threads", "topic_title_synced", "integer not null default 1");
   await addColumnIfMissing(db, dialect, "messages", "pi_entry_id", "text");
 }
 

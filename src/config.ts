@@ -14,6 +14,7 @@ const ConfigSchema = z.object({
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
   PI_THINKING_LEVEL: PiThinkingLevelSchema.default("medium"),
   PI_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(900_000),
+  THREAD_TITLE_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
   CODEX_MODEL: z.string().default("gpt-5.6-sol"),
   CODEX_HELPER_MODEL: z.string().default("gpt-5.6-luna"),
   OPENROUTER_MAIN_MODEL: z.string().default("openai/gpt-5.6-sol"),

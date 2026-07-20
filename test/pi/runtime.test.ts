@@ -133,6 +133,77 @@ describe("PiRuntimeManager", () => {
     await secondManager.dispose();
   }, 20_000);
 
+  it("generates titles in an isolated tool-free helper session", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-title-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      THREAD_TITLE_TIMEOUT_MS: 5_000,
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    let helperModel = "";
+    let helperContext: Context | undefined;
+    const stream = ((model: Model<Api>, context: Context) => {
+      helperModel = model.id;
+      helperContext = context;
+      return successStream(model, "Focused Helper Titles");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+
+    const title = await manager.generateThreadTitle({
+      userText: "u".repeat(700),
+      assistantText: "A useful answer",
+    });
+
+    expect(title).toBe("Focused Helper Titles");
+    expect(helperModel).toBe(config.OPENROUTER_HELPER_MODEL);
+    expect(helperContext?.tools ?? []).toHaveLength(0);
+    expect(helperContext?.systemPrompt).toContain("3-5 word noun-phrase title");
+    const prompt = helperContext?.messages.find((message) => message.role === "user");
+    const promptText = prompt?.role === "user"
+      ? typeof prompt.content === "string"
+        ? prompt.content
+        : prompt.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+      : "";
+    const payload = JSON.parse(promptText.split("\n")[1]!) as { user_message: string; assistant_message: string };
+    expect(Array.from(payload.user_message)).toHaveLength(500);
+    expect(payload.assistant_message).toBe("A useful answer");
+    await manager.dispose();
+  }, 20_000);
+
+  it("aborts title generation at its dedicated timeout", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-title-timeout-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      THREAD_TITLE_TIMEOUT_MS: 20,
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const stream = (() => createAssistantMessageEventStream()) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+
+    await expect(manager.generateThreadTitle({ userText: "timeout title", assistantText: "waiting" }))
+      .rejects.toThrow("timed out after 20 ms");
+    await manager.dispose();
+  }, 20_000);
+
   it("continues the Pi loop after executing a project-scoped tool", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-tools-"));
     const config = loadTestConfig({

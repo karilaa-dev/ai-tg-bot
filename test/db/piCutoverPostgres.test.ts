@@ -51,6 +51,9 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     expect(await count("messages")).toBe(0);
     expect(await tableExists("summaries")).toBe(false);
     expect(await columnExists("threads", "pi_session_file")).toBe(true);
+    expect(await columnExists("threads", "title_source")).toBe(true);
+    expect(await columnExists("threads", "title_attempts")).toBe(true);
+    expect(await columnExists("threads", "topic_title_synced")).toBe(true);
     expect(await columnExists("threads", "meta_summary")).toBe(false);
     expect(await columnNullable("files", "path")).toBe(true);
     expect(await db.migrate()).toEqual({
@@ -81,6 +84,50 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     expect(await db.db.query<{ kind: string; ref_id: number }>(
       sql.raw("select kind, ref_id from embeddings order by kind, ref_id"),
     )).toEqual([{ kind: "chunk", ref_id: 202 }]);
+  });
+
+  it("preserves a current pre-title thread as explicit", async () => {
+    const titleSchema = `thread_titles_${randomUUID().replaceAll("-", "")}`;
+    await admin.db.execute(sql.raw(`create schema ${titleSchema}`));
+    const url = new URL(postgresUrl!);
+    url.searchParams.set("options", `-c search_path=${titleSchema}`);
+    const titleDb = createDatabase(loadTestConfig({ DB_URL: url.toString() }));
+    try {
+      await titleDb.db.execute(sql.raw(`
+        create table users (
+          tg_id bigint primary key, first_name text, username text, lang text not null,
+          tz_offset_min integer, stream_mode integer not null, created_at bigint not null
+        )
+      `));
+      await titleDb.db.execute(sql.raw(`
+        create table threads (
+          id bigserial primary key, user_id bigint not null, topic_id integer,
+          parent_thread_id bigint, fork_point_message_id bigint, title text not null,
+          pi_session_file text, pi_session_id text, archived integer not null, created_at bigint not null
+        )
+      `));
+      await titleDb.db.execute(sql.raw("create table schema_migrations (name text primary key, applied_at bigint not null)"));
+      await titleDb.db.execute(sql.raw("insert into schema_migrations values ('pi_cutover_v2', 1)"));
+      await titleDb.db.execute(sql.raw("insert into users values (77, 'Current', 'current', 'en', null, 1, 1)"));
+      await titleDb.db.execute(sql.raw("insert into threads values (1, 77, 55, null, null, 'Manual legacy topic', null, null, 0, 1)"));
+
+      await titleDb.migrate();
+
+      expect((await titleDb.db.query<{
+        title: string;
+        title_source: string;
+        title_attempts: number;
+        topic_title_synced: number;
+      }>(sql.raw("select title, title_source, title_attempts, topic_title_synced from threads where id = 1")))[0]).toEqual({
+        title: "Manual legacy topic",
+        title_source: "explicit",
+        title_attempts: 0,
+        topic_title_synced: 1,
+      });
+    } finally {
+      await titleDb.destroy();
+      await admin.db.execute(sql.raw(`drop schema if exists ${titleSchema} cascade`));
+    }
   });
 
   async function count(table: string): Promise<number> {

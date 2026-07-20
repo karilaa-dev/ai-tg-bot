@@ -8,6 +8,8 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type MessageKind = "text" | "image" | "file" | "system";
 
+export type ThreadTitleSource = "placeholder" | "explicit" | "generated";
+
 export interface UsersTable {
   tg_id: number;
   first_name: string | null;
@@ -25,6 +27,9 @@ export interface ThreadsTable {
   parent_thread_id: number | null;
   fork_point_message_id: number | null;
   title: string;
+  title_source: ThreadTitleSource;
+  title_attempts: number;
+  topic_title_synced: number;
   pi_session_file: string | null;
   pi_session_id: string | null;
   archived: number;

@@ -36,6 +36,7 @@ import { FileByteCache } from "../files/cache.js";
 import { FileResolver } from "../files/resolver.js";
 import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
 import { ManagedFileStore } from "../files/storage.js";
+import { ThreadTitleCoordinator } from "./threadTitles.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -97,6 +98,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     fileResolver,
     embedder: options.embedder,
     pi,
+    threadTitles: new ThreadTitleCoordinator({ repos, pi, logger: options.logger }),
     routerState: createRouterState(),
   };
 

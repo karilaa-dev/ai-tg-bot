@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import { sendFinal, type TurnInput } from "../../src/ai/run.js";
 import type { ThreadRow } from "../../src/db/types.js";
+import type { PiRuntimeService } from "../../src/pi/runtime.js";
 
 describe("Telegram bot with grammy-emulate", () => {
   let env: GrammyEmulator;
@@ -237,6 +238,7 @@ describe("Telegram bot with grammy-emulate", () => {
       parent_thread_id: parent.id,
       fork_point_message_id: latestParentMessage?.id,
       topic_id: 2,
+      title_source: "explicit",
     });
   });
 
@@ -282,7 +284,174 @@ describe("Telegram bot with grammy-emulate", () => {
     const question = await env.bot.sendMessage(env.user, env.chat, "first question in manual topic", { messageThreadId: 88 });
     expectRichCall(question, "Echo: first question in manual topic");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, 88);
+    expect(thread).toMatchObject({ title: "Manual topic", title_source: "explicit", title_attempts: 0 });
     expect((await env.repos.messages.listThread(thread.id)).map((row) => row.text_plain)).toContain("first question in manual topic");
+  });
+
+  it("generates and synchronizes a short title for a new implicit topic", async () => {
+    await env.dispose();
+    let titleInput: { userText: string; assistantText?: string } | undefined;
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: piWithTitleGenerator(async (input) => {
+        titleInput = input;
+        return "**Telegram Thread Naming Logic.**";
+      }),
+    });
+    await createTopic(env, 89, "New topic", true);
+
+    const response = await env.bot.sendMessage(env.user, env.chat, "research useful thread titles", { messageThreadId: 89 });
+    expectRichCall(response, "Echo: research useful thread titles");
+    await env.services.threadTitles.waitForIdle();
+
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, 89);
+    expect(thread).toMatchObject({
+      title: "Telegram Thread Naming Logic",
+      title_source: "generated",
+      title_attempts: 1,
+      topic_title_synced: 1,
+    });
+    expect(titleInput).toEqual({
+      userText: "research useful thread titles",
+      assistantText: "Echo: research useful thread titles",
+    });
+    expect(env.bot.server.chatState.get(env.chat.id)?.forumTopics.get(89)?.topic.name)
+      .toBe("Telegram Thread Naming Logic");
+  });
+
+  it("retries failed helper calls up to a later successful turn", async () => {
+    await env.dispose();
+    let calls = 0;
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: piWithTitleGenerator(async () => {
+        calls += 1;
+        if (calls < 3) throw new Error("helper unavailable");
+        return "Recovered Topic Title";
+      }),
+    });
+    await createTopic(env, 90, "New topic", true);
+
+    for (const text of ["first request", "second request", "third request"]) {
+      await env.bot.sendMessage(env.user, env.chat, text, { messageThreadId: 90 });
+      await env.services.threadTitles.waitForIdle();
+    }
+
+    expect(calls).toBe(3);
+    expect(await env.repos.threads.activeForUserTopic(env.user.id, 90)).toMatchObject({
+      title: "Recovered Topic Title",
+      title_source: "generated",
+      title_attempts: 3,
+      topic_title_synced: 1,
+    });
+  });
+
+  it("retries Telegram synchronization without calling the helper again", async () => {
+    await env.dispose();
+    let helperCalls = 0;
+    let editCalls = 0;
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: piWithTitleGenerator(async () => {
+        helperCalls += 1;
+        return "Durable Generated Topic";
+      }),
+    });
+    await createTopic(env, 91, "New topic", true);
+    env.bot.api.config.use(async (prev, method, payload, signal) => {
+      if (method === "editForumTopic") {
+        editCalls += 1;
+        if (editCalls === 1) {
+          return { ok: false, error_code: 400, description: "Bad Request: forced title sync failure" } as never;
+        }
+      }
+      return prev(method, payload, signal);
+    });
+
+    await env.bot.sendMessage(env.user, env.chat, "durable naming", { messageThreadId: 91 });
+    await env.services.threadTitles.waitForIdle();
+    expect(await env.repos.threads.activeForUserTopic(env.user.id, 91)).toMatchObject({
+      title_source: "generated",
+      topic_title_synced: 0,
+    });
+
+    await env.bot.sendMessage(env.user, env.chat, "retry the sync", { messageThreadId: 91 });
+    await env.services.threadTitles.waitForIdle();
+    expect(helperCalls).toBe(1);
+    expect(editCalls).toBe(2);
+    expect(await env.repos.threads.activeForUserTopic(env.user.id, 91)).toMatchObject({
+      title: "Durable Generated Topic",
+      topic_title_synced: 1,
+    });
+  });
+
+  it("does not overwrite a manual rename that arrives while the helper is running", async () => {
+    await env.dispose();
+    let startGeneration!: () => void;
+    let releaseGeneration!: (title: string) => void;
+    const started = new Promise<void>((resolve) => { startGeneration = resolve; });
+    const generated = new Promise<string>((resolve) => { releaseGeneration = resolve; });
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: piWithTitleGenerator(async () => {
+        startGeneration();
+        return generated;
+      }),
+    });
+    await createTopic(env, 92, "New topic", true);
+    await env.bot.sendMessage(env.user, env.chat, "rename race", { messageThreadId: 92 });
+    await started;
+
+    const edit = env.bot.server.updateFactory.createForumTopicCreated(
+      env.user,
+      env.chat,
+      { name: "Manual Choice", icon_color: 0x6fb9f0 },
+      92,
+    );
+    const message = edit.message as typeof edit.message & Record<string, unknown>;
+    delete message.forum_topic_created;
+    message.forum_topic_edited = { name: "Manual Choice" };
+    const state = env.bot.server.chatState.get(env.chat.id);
+    if (state) state.forumTopics.get(92)!.topic.name = "Manual Choice";
+    await env.bot.processUpdatesConcurrently([edit]);
+
+    releaseGeneration("Model Generated Topic");
+    await env.services.threadTitles.waitForIdle();
+    expect(await env.repos.threads.activeForUserTopic(env.user.id, 92)).toMatchObject({
+      title: "Manual Choice",
+      title_source: "explicit",
+      topic_title_synced: 1,
+    });
+    expect(state?.forumTopics.get(92)?.topic.name).toBe("Manual Choice");
+  });
+
+  it("deduplicates title generation while a helper job is in flight", async () => {
+    await env.dispose();
+    let calls = 0;
+    let startGeneration!: () => void;
+    let releaseGeneration!: (title: string) => void;
+    const started = new Promise<void>((resolve) => { startGeneration = resolve; });
+    const generated = new Promise<string>((resolve) => { releaseGeneration = resolve; });
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: piWithTitleGenerator(async () => {
+        calls += 1;
+        startGeneration();
+        return generated;
+      }),
+    });
+    await createTopic(env, 93, "New topic", true);
+    await env.bot.sendMessage(env.user, env.chat, "first naming request", { messageThreadId: 93 });
+    await started;
+    await env.bot.sendMessage(env.user, env.chat, "second naming request", { messageThreadId: 93 });
+
+    releaseGeneration("Only One Title Call");
+    await env.services.threadTitles.waitForIdle();
+    expect(calls).toBe(1);
+    expect(await env.repos.threads.activeForUserTopic(env.user.id, 93)).toMatchObject({
+      title: "Only One Title Call",
+      title_attempts: 1,
+    });
   });
 
   it("retries command replies without a stale private topic id", async () => {
@@ -941,6 +1110,40 @@ function deferred<T>(): { promise: Promise<T>; resolve(value?: T | PromiseLike<T
     resolve: (value?: T | PromiseLike<T>) => resolve(value as T),
     reject,
   };
+}
+
+function piWithTitleGenerator(generateThreadTitle: PiRuntimeService["generateThreadTitle"]): PiRuntimeService {
+  return {
+    runtime: async () => { throw new Error("persistent Pi runtime is not used by this test"); },
+    compact: async () => 0,
+    fork: async () => undefined,
+    captionImage: async () => "Telegram image",
+    generateThreadTitle,
+    abort: async () => false,
+    dispose: async () => undefined,
+  };
+}
+
+async function createTopic(
+  env: GrammyEmulator,
+  topicId: number,
+  name: string,
+  implicit: boolean,
+): Promise<void> {
+  const state = env.bot.server.chatState.get(env.chat.id);
+  if (!state) throw new Error("test chat state is unavailable");
+  state.forumTopics.set(topicId, {
+    topic: { message_thread_id: topicId, name, icon_color: 0x6fb9f0 },
+    isClosed: false,
+    isPinned: false,
+  });
+  const update = env.bot.server.updateFactory.createForumTopicCreated(
+    env.user,
+    env.chat,
+    { name, icon_color: 0x6fb9f0, ...(implicit ? { is_name_implicit: true as const } : {}) },
+    topicId,
+  );
+  await env.bot.processUpdatesConcurrently([update]);
 }
 
 function wait(ms: number): Promise<void> {

@@ -8,7 +8,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { installBot } from "../../src/bot/router.js";
-import type { BotContext } from "../../src/bot/context.js";
+import type { BotContext, BotServices } from "../../src/bot/context.js";
 import { sendFinal, type TurnRunner } from "../../src/ai/run.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
 import type { TextEmbedder } from "../../src/memory/embeddings.js";
@@ -19,6 +19,7 @@ export interface GrammyEmulator {
   config: AppConfig;
   db: AppDatabase;
   repos: Repos;
+  services: BotServices;
   user: User;
   chat: Chat.PrivateChat;
   dispose(): Promise<void>;
@@ -87,10 +88,11 @@ export async function createGrammyEmulator(options: {
     captionImage: async (bytes, mimeType) => options.imageCaptioner
       ? options.imageCaptioner.caption({ bytes, name: "telegram-image", mime: mimeType })
       : "Telegram image",
+    generateThreadTitle: async () => "Generated Thread Title",
     abort: async () => false,
     dispose: async () => undefined,
   };
-  installBot(bot as unknown as any, {
+  const services = installBot(bot as unknown as any, {
     config,
     db,
     logger,
@@ -124,9 +126,11 @@ export async function createGrammyEmulator(options: {
     config,
     db,
     repos,
+    services,
     user,
     chat,
     dispose: async () => {
+      await services.threadTitles.waitForIdle();
       bot.dispose();
       await db.destroy();
       if (ownsCacheDir) await fs.rm(cacheDir, { recursive: true, force: true });
