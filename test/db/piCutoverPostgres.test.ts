@@ -27,7 +27,7 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     await admin?.destroy();
   });
 
-  it("preserves users/invites, removes legacy conversations, and is idempotent", async () => {
+  it("preserves user settings, removes legacy conversations and invites, and is idempotent", async () => {
     for (const statement of legacyPostgresStatements()) await db.db.execute(sql.raw(statement));
     const contender = createDatabase(loadTestConfig({ DB_URL: schemaUrl }));
     const results = await Promise.all([db.migrate(), contender.migrate()]);
@@ -35,12 +35,17 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     const first = results.find((result) => result.piCutoverApplied);
     expect(results.filter((result) => result.piCutoverApplied)).toHaveLength(1);
     expect(results.filter((result) => !result.piCutoverApplied)).toHaveLength(1);
+    expect(results.filter((result) => result.inviteRemovalApplied)).toHaveLength(1);
     expect(first).toBeDefined();
     if (!first) throw new Error("No PostgreSQL cutover contender applied the migration.");
     expect(first.piCutoverApplied).toBe(true);
     expect(first.deletedRows).toMatchObject({ threads: 1, messages: 1, files: 1, summaries: 1 });
     expect(await count("users")).toBe(1);
-    expect(await count("invites")).toBe(1);
+    expect(await tableExists("invites")).toBe(false);
+    expect(await columnExists("users", "invited_with")).toBe(false);
+    expect((await db.db.query<{ lang: string; tz_offset_min: number; stream_mode: number }>(
+      sql.raw("select lang, tz_offset_min, stream_mode from users where tg_id = 42"),
+    ))[0]).toEqual({ lang: "en", tz_offset_min: 120, stream_mode: 0 });
     expect(await count("threads")).toBe(0);
     expect(await count("messages")).toBe(0);
     expect(await tableExists("summaries")).toBe(false);
@@ -52,6 +57,7 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
       deletedRows: {},
       fileSourcesApplied: false,
       migratedFileSources: 0,
+      inviteRemovalApplied: false,
     });
   });
 
@@ -97,7 +103,7 @@ function legacyPostgresStatements(): string[] {
     `create table file_chunks (id bigserial primary key, file_id bigint not null, idx integer not null, heading_path text, content text not null, created_at bigint not null)`,
     `create table embeddings (id bigserial primary key, kind text not null, ref_id bigint not null, dim integer not null, vector bytea not null, created_at bigint not null)`,
     `create table summaries (id bigserial primary key, thread_id bigint not null, level integer not null, from_message_id bigint, to_message_id bigint, content text not null, created_at bigint not null)`,
-    `insert into users values (42, 'Legacy', 'legacy', 'en', null, 1, null, 1)`,
+    `insert into users values (42, 'Legacy', 'legacy', 'en', 120, 0, 'KEEP-ME', 1)`,
     `insert into invites values ('KEEP-ME', 2, 1, null, 0, 42, 1)`,
     `insert into threads values (1, 42, null, null, null, 'Legacy thread', 'old summary', 1, 0, 1)`,
     `insert into messages values (1, 1, 'user', 'text', '{}', 'legacy message', null, 100, 10, 1)`,

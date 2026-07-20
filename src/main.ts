@@ -33,6 +33,9 @@ try {
   if (migration.fileSourcesApplied) {
     logger.info("chat file source migration complete", { migratedSources: migration.migratedFileSources });
   }
+  if (migration.inviteRemovalApplied) {
+    logger.info("built-in invite access schema removed");
+  }
   logger.debug("checking docling health", { url: config.DOCLING_URL });
   try {
     await checkDocling(config);

@@ -9,7 +9,6 @@ const baseUser: UserRow = {
   lang: "en",
   tz_offset_min: null,
   stream_mode: 1,
-  invited_with: null,
   created_at: 1,
 };
 

@@ -2,6 +2,8 @@
 
 A private Telegram agent built on persistent [Pi](https://github.com/earendil-works/pi) sessions. Pi owns inference, tool loops, conversation persistence, branching, cancellation, retries, and compaction. Codex OAuth is preferred; OpenRouter is the automatic fallback and the vector-embedding backend. Attachment storage is transport-neutral so another chat interface can supply remote locators without changing the Pi runtime.
 
+Telegram controls who can reach the bot; there is no application-level allowlist. The bot accepts any sender delivered to its private chat and rejects group or supergroup use.
+
 ## Runtime model
 
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`. The database stores the session path/id and maps Telegram messages to Pi entry ids.
@@ -69,7 +71,7 @@ PI_CODING_AGENT_DIR=./data/pi npx pi
 
 Enter `/login` in Pi and choose the OpenAI Codex provider. If no Codex credentials are present, the bot remains fully operational through OpenRouter.
 
-Required `.env` values are `BOT_TOKEN`, `TELEGRAM_ADMIN_ID`, `OPENROUTER_API_KEY`, and `TAVILY_API_KEY`. The Pi/model defaults are:
+Required `.env` values are `BOT_TOKEN`, `OPENROUTER_API_KEY`, and `TAVILY_API_KEY`. The Pi/model defaults are:
 
 ```dotenv
 PI_CODING_AGENT_DIR=./data/pi
@@ -91,7 +93,7 @@ See [.env.example](./.env.example) for file, Docling, bash, draft, onboarding, a
 
 ## Migration warning
 
-The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, invites, settings stored on users, and `data/bash` workspaces. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
+The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
 
 SQLite is the default. PostgreSQL is selected when `DB_URL` begins with `postgres://` or `postgresql://`.
 

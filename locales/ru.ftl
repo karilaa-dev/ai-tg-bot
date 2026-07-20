@@ -10,41 +10,6 @@ start-welcome =
 lang-pick = 🌐 Выберите язык. Автоматически выбран: { $lang }.
 lang-auto-note = 🌐 Язык выбран по профилю Telegram.
 lang-set = ✅ Язык переключен на русский.
-invite-ask = 🎟️ Отправьте инвайт-код, чтобы продолжить.
-invite-invalid-unknown = ❓ Инвайт-код не найден.
-invite-invalid-expired = ⏳ Инвайт-код истек.
-invite-invalid-exhausted = 🚫 Инвайт-код уже использован.
-invite-invalid-revoked = 🗑️ Инвайт-код был отозван.
-invite-created =
-    🎟️ <b>Инвайт создан</b>
-
-    Код: <code>{ $code }</code>
-    Использований: <b>{ $uses }</b>
-    Истекает: <b>{ $expires }</b>
-
-    { $link }
-invite-created-toast = 🎟️ Инвайт создан
-invite-draft =
-    🎟️ Настройки инвайта
-
-    Использований: { $uses }
-    Истекает: { $expires }
-
-    Настройте кнопками и создайте инвайт.
-invite-btn-uses = 🔢 Использований { $uses }
-invite-btn-exp-7d = 📅 7 дней
-invite-btn-exp-30d = 📅 30 дней
-invite-btn-exp-never = ♾️ Без срока
-invite-btn-create = ✅ Создать инвайт
-invite-btn-open = 🔗 Открыть инвайт
-invite-btn-revoke = 🗑️ Отозвать { $code }
-invite-exp-never = ♾️ никогда
-invite-status-active = ✅ активен
-invite-status-expired = ⏳ истек
-invite-status-revoked = 🗑️ отозван
-invite-revoked-toast = 🗑️ Инвайт отозван
-invite-revoked = 🗑️ Инвайт отозван.
-invites-empty = 📭 Инвайтов пока нет.
 tz-ask =
     🕒 *Установка часового пояса*
 

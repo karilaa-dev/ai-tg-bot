@@ -21,7 +21,6 @@
   <Config Name="Managed Files" Target="/app/data/files" Default="/mnt/user/ai-tg-bot" Mode="rw" Description="Extracted Telegram document data. The Pi cutover migration clears this directory once; image bytes are never stored here." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token used to receive updates and call Telegram APIs." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Telegram Admin ID" Target="TELEGRAM_ADMIN_ID" Default="" Description="Telegram numeric user ID allowed to administer the bot and bypass invite checks." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter key used for inference fallback, fallback image generation, and retrieval embeddings." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily key used by web search and page extraction tools." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Docling URL" Target="DOCLING_URL" Default="http://docling:5001" Description="Base URL of a reachable Docling server." Type="Variable" Display="always" Required="true" Mask="false"/>
