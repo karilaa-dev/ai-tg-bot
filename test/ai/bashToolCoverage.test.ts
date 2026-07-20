@@ -1,13 +1,15 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getCommandNames, getJavaScriptCommandNames, getNetworkCommandNames, getPythonCommandNames } from "just-bash";
+import { unzipSync } from "fflate";
+import { EMPTY_BYTES, InMemoryFs, getCommandNames, getJavaScriptCommandNames, getNetworkCommandNames, getPythonCommandNames } from "just-bash";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { buildToolRegistry } from "../../src/ai/tools/index.js";
+import { zipCommand } from "../../src/ai/tools/zipCommand.js";
 
 type BashResultForTests = {
   stdout: string;
@@ -208,6 +210,68 @@ describe("just-bash coverage through the bot bash tool", () => {
       expect(result.exit_code).not.toBe(0);
     });
     expect(privateFetchCalls).toBe(0);
+  }, 60_000);
+
+  it("creates a recursive ZIP archive with the bash zip command", async () => {
+    const bash = await createBashTool({ timeoutMs: 30_000, maxOutputChars: 100_000 });
+    const result = await bash.execute({
+      script: [
+        "mkdir -p bundle/nested bundle/empty",
+        "printf root-file > bundle/root.txt",
+        "printf nested-file > bundle/nested/item.txt",
+        "zip -rq archive.zip bundle",
+        "base64 archive.zip",
+      ].join("; "),
+    });
+
+    expect(result).toMatchObject({ exit_code: 0, timed_out: false, stderr: "" });
+    const archive = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
+    const files = unzipSync(archive);
+    expect(Object.keys(files).sort()).toEqual([
+      "bundle/",
+      "bundle/empty/",
+      "bundle/nested/",
+      "bundle/nested/item.txt",
+      "bundle/root.txt",
+    ]);
+    expect(Buffer.from(files["bundle/root.txt"]!).toString()).toBe("root-file");
+    expect(Buffer.from(files["bundle/nested/item.txt"]!).toString()).toBe("nested-file");
+  }, 60_000);
+
+  it("keeps recursive junk-path ZIP archives flat without directory collisions", async () => {
+    const bash = await createBashTool({ timeoutMs: 30_000, maxOutputChars: 100_000 });
+    const result = await bash.execute({
+      script: [
+        "mkdir -p left/shared right/shared",
+        "printf left-file > left/shared/left.txt",
+        "printf right-file > right/shared/right.txt",
+        "zip -jrq flat.zip left right",
+        "base64 flat.zip",
+      ].join("; "),
+    });
+
+    expect(result).toMatchObject({ exit_code: 0, timed_out: false, stderr: "" });
+    const archive = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
+    const files = unzipSync(archive);
+    expect(Object.keys(files).sort()).toEqual(["left.txt", "right.txt"]);
+    expect(Buffer.from(files["left.txt"]!).toString()).toBe("left-file");
+    expect(Buffer.from(files["right.txt"]!).toString()).toBe("right-file");
+  }, 60_000);
+
+  it("cancels asynchronous ZIP compression without writing a partial archive", async () => {
+    const virtualFs = new InMemoryFs({ "/large.bin": new Uint8Array(1024 * 1024) });
+    const controller = new AbortController();
+    const resultPromise = zipCommand.execute(["archive.zip", "large.bin"], {
+      fs: virtualFs,
+      cwd: "/",
+      env: new Map(),
+      stdin: EMPTY_BYTES,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 0);
+
+    await expect(resultPromise).resolves.toMatchObject({ exitCode: 1, stderr: expect.stringMatching(/abort/i) });
+    await expect(virtualFs.exists("/archive.zip")).resolves.toBe(false);
   }, 60_000);
 
   it("covers shell features and tool input options used by agents", async () => {
