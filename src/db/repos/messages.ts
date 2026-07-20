@@ -1,9 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
-import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
+import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import type { TextSearch } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
-
-const MESSAGE_SNIPPET_MAX_CHARS = 240;
 
 export class MessagesRepo {
   constructor(
@@ -73,18 +71,6 @@ export class MessagesRepo {
       rows.push(...(await this.db.query<MessageRow>(sql`select * from messages where ${sql.join(filters, sql` and `)} order by id asc`)));
     }
     return rows.sort((a, b) => a.id - b.id);
-  }
-
-  async idsForThreads(threadIds: number[]): Promise<number[]> {
-    if (!threadIds.length) return [];
-    const rows = await this.db.query<{ id: number }>(sql`select id from messages where thread_id in (${valueList(threadIds)})`);
-    return rows.map((row) => row.id);
-  }
-
-  async snippets(ids: number[]): Promise<Map<number, string>> {
-    if (!ids.length) return new Map();
-    const rows = await this.db.query<{ id: number; text_plain: string }>(sql`select id, text_plain from messages where id in (${valueList(ids)})`);
-    return new Map(rows.map((row) => [row.id, row.text_plain.slice(0, MESSAGE_SNIPPET_MAX_CHARS)]));
   }
 
   latest(threadId: number): Promise<MessageRow | undefined> {

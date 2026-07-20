@@ -399,7 +399,7 @@ async function embedChunksStrict(input: {
       total: input.chunks.length,
       model: input.embeddingModel,
     });
-    const batchVectors = await input.embedder.embed(batch);
+    const batchVectors = await input.embedder.embed(batch, input.signal);
     throwIfAborted(input.signal);
     if (batchVectors.length !== batch.length || batchVectors.some((vector) => !vector)) {
       throw new Error("Replacement chunk embedding returned an incomplete vector batch.");
@@ -435,7 +435,7 @@ async function persistChunkEmbeddings(input: {
         count: batch.length,
         total: input.chunks.length,
       });
-      const vectors = await input.embedder.embed(batch.map((chunk) => chunk.content));
+      const vectors = await input.embedder.embed(batch.map((chunk) => chunk.content), input.signal);
       throwIfAborted(input.signal);
       for (let i = 0; i < batch.length; i += 1) {
         const chunk = batch[i]!;

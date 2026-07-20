@@ -36,6 +36,11 @@ try {
   if (migration.inviteRemovalApplied) {
     logger.info("built-in invite access schema removed");
   }
+  if (migration.messageEmbeddingCleanupApplied) {
+    logger.info("obsolete message embeddings removed", {
+      deleted: migration.deletedMessageEmbeddings,
+    });
+  }
   logger.debug("checking docling health", { url: config.DOCLING_URL });
   try {
     await checkDocling(config);

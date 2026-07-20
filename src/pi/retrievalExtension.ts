@@ -9,6 +9,7 @@ export async function embedForRetrieval(
   texts: string[],
   config: AppConfig,
   logger?: Logger,
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
   const vectors: Float32Array[] = [];
   logger?.debug("embedding request starting", {
@@ -25,6 +26,7 @@ export async function embedForRetrieval(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ model: config.OPENROUTER_EMBEDDING_MODEL, input }),
+      signal,
     }, 3, logger, "OpenRouter embeddings");
     if (!response.ok) {
       const body = await response.clone().text().catch(() => "");

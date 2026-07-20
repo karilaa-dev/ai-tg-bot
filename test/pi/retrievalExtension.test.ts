@@ -45,4 +45,17 @@ describe("Pi retrieval embedding extension", () => {
     await stalledRejection;
     expect(fetch).toHaveBeenCalledTimes(3);
   });
+
+  it("aborts an in-flight embedding request without retrying", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    })));
+
+    const request = embedForRetrieval(["cancel me"], loadTestConfig(), undefined, controller.signal);
+    controller.abort(new DOMException("cancelled", "AbortError"));
+
+    await expect(request).rejects.toThrow("cancelled");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
 });

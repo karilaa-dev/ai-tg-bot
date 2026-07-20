@@ -8,6 +8,8 @@ export interface MigrationResult {
   fileSourcesApplied: boolean;
   migratedFileSources: number;
   inviteRemovalApplied: boolean;
+  messageEmbeddingCleanupApplied: boolean;
+  deletedMessageEmbeddings: number;
 }
 
 export async function up(db: SqlExecutor, dialect: DialectName): Promise<MigrationResult> {
@@ -19,7 +21,8 @@ export async function up(db: SqlExecutor, dialect: DialectName): Promise<Migrati
     const cutover = await piCutover(tx, dialect);
     const fileSources = await migrateFileSourcesLocked(tx, dialect);
     const inviteRemoval = await removeInvitesLocked(tx, dialect);
-    return { ...cutover, ...fileSources, ...inviteRemoval };
+    const messageEmbeddingCleanup = await removeMessageEmbeddingsLocked(tx);
+    return { ...cutover, ...fileSources, ...inviteRemoval, ...messageEmbeddingCleanup };
   });
 }
 
@@ -339,6 +342,27 @@ async function removeInvitesLocked(
   await dropColumnIfExists(tx, dialect, "users", "invited_with");
   await tx.execute(sql`insert into schema_migrations(name, applied_at) values ('remove_invites_v1', ${Date.now()})`);
   return { inviteRemovalApplied: true };
+}
+
+async function removeMessageEmbeddingsLocked(
+  tx: SqlExecutor,
+): Promise<Pick<MigrationResult, "messageEmbeddingCleanupApplied" | "deletedMessageEmbeddings">> {
+  const applied = await tx.query<{ name: string }>(sql`
+    select name from schema_migrations where name = 'remove_message_embeddings_v1' limit 1
+  `);
+  if (applied.length) {
+    return { messageEmbeddingCleanupApplied: false, deletedMessageEmbeddings: 0 };
+  }
+
+  const rows = await tx.query<{ count: number }>(sql`
+    select count(*) as count from embeddings where kind = 'message'
+  `);
+  const deletedMessageEmbeddings = Number(rows[0]?.count ?? 0);
+  await tx.execute(sql`delete from embeddings where kind = 'message'`);
+  await tx.execute(sql`
+    insert into schema_migrations(name, applied_at) values ('remove_message_embeddings_v1', ${Date.now()})
+  `);
+  return { messageEmbeddingCleanupApplied: true, deletedMessageEmbeddings };
 }
 
 async function insertMigratedTelegramSource(

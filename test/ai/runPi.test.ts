@@ -39,11 +39,13 @@ describe("runTurn with Pi", () => {
     const user = await repos.users.ensure({ tgId: 7001, firstName: "Runner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi run" });
     const stream = ((model: Model<Api>) => textStream(model, "Pi answered the Telegram turn.")) as PiProviderStreamOverrides["openRouter"];
+    const embed = vi.fn(async () => [new Float32Array([1, 0])]);
     manager = new PiRuntimeManager({
       config,
       db,
       repos,
       logger,
+      embedder: { model: "test-embed", embed },
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     const richMessages: unknown[] = [];
@@ -85,6 +87,7 @@ describe("runTurn with Pi", () => {
     expect(messages[0]?.pi_entry_id).not.toBe(messages[1]?.pi_entry_id);
     expect(drafts.length).toBeGreaterThan(0);
     expect(richMessages).toHaveLength(1);
+    expect(embed).not.toHaveBeenCalled();
   }, 20_000);
 
   it("reports Pi setup failures through the normal Telegram error boundary", async () => {

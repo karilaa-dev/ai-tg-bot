@@ -52,7 +52,6 @@ export async function handleUserText(
       userMessageContent: options.userMessageContent,
       onUserMessagePersisted: options.onUserMessagePersisted,
       resolveFile: (file, signal) => ctx.services.fileResolver.resolveFile(file, signal),
-      embedder: ctx.services.embedder,
       pi: ctx.services.pi,
       t: ctx.t,
     });

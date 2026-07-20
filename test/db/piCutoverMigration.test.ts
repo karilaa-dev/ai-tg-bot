@@ -27,6 +27,8 @@ describe("Pi cutover migration", () => {
     expect(first.piCutoverApplied).toBe(true);
     expect(first.fileSourcesApplied).toBe(true);
     expect(first.inviteRemovalApplied).toBe(true);
+    expect(first.messageEmbeddingCleanupApplied).toBe(true);
+    expect(first.deletedMessageEmbeddings).toBe(0);
     expect(first.deletedRows).toMatchObject({ threads: 1, messages: 1, files: 1, file_chunks: 1, embeddings: 1, summaries: 1 });
     expect(await count(db, "users")).toBe(1);
     expect(await tableExists(db, "invites")).toBe(false);
@@ -58,6 +60,8 @@ describe("Pi cutover migration", () => {
       fileSourcesApplied: false,
       migratedFileSources: 0,
       inviteRemovalApplied: false,
+      messageEmbeddingCleanupApplied: false,
+      deletedMessageEmbeddings: 0,
     });
     expect(await count(db, "users")).toBe(1);
     expect(await tableExists(db, "invites")).toBe(false);
@@ -71,9 +75,32 @@ describe("Pi cutover migration", () => {
     const result = await db.migrate();
 
     expect(result.inviteRemovalApplied).toBe(true);
+    expect(result.messageEmbeddingCleanupApplied).toBe(true);
     expect(await tableExists(db, "invites")).toBe(false);
     expect(await columns(db, "users")).not.toContain("invited_with");
     expect((await db.migrate()).inviteRemovalApplied).toBe(false);
+  });
+
+  it("removes only obsolete message embeddings and applies the cleanup once", async () => {
+    db = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await db.migrate();
+    await db.db.execute(sql`delete from schema_migrations where name = 'remove_message_embeddings_v1'`);
+    await db.db.execute(sql.raw(`
+      insert into embeddings(kind, ref_id, model, dim, vector, created_at) values
+        ('message', 101, 'test-embed', 1, x'00000000', 1),
+        ('chunk', 202, 'test-embed', 1, x'00000000', 1)
+    `));
+
+    const first = await db.migrate();
+
+    expect(first.messageEmbeddingCleanupApplied).toBe(true);
+    expect(first.deletedMessageEmbeddings).toBe(1);
+    expect(await db.db.query<{ kind: string; ref_id: number }>(
+      sql.raw("select kind, ref_id from embeddings order by kind, ref_id"),
+    )).toEqual([{ kind: "chunk", ref_id: 202 }]);
+    const second = await db.migrate();
+    expect(second.messageEmbeddingCleanupApplied).toBe(false);
+    expect(second.deletedMessageEmbeddings).toBe(0);
   });
 
   it("cleans only managed files and leaves just-bash workspaces untouched", async () => {
