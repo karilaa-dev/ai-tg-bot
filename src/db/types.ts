@@ -94,7 +94,7 @@ export interface MessageFilesTable {
 
 export interface EmbeddingsTable {
   id: number;
-  kind: "message" | "chunk";
+  kind: "chunk";
   ref_id: number;
   model: string | null;
   dim: number;

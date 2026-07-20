@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -57,35 +57,140 @@ describe("Pi retrieval tools backend", () => {
     ]));
   });
 
-  it("finds semantic vector hits without automatic context injection", async () => {
+  it("uses FTS for message-only search without invoking the embedder", async () => {
     const user = await repos.users.ensure({ tgId: 302, firstName: "Vector" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    const first = await repos.messages.insert({
+    const message = await repos.messages.insert({
       threadId: thread.id,
       role: "user",
-      content: { text: "unrelated lexical text" },
-      textPlain: "unrelated lexical text",
+      content: { text: "meaning probe available" },
+      textPlain: "meaning probe available",
     });
-    const semantic = await repos.messages.insert({
-      threadId: thread.id,
-      role: "assistant",
-      content: { text: "different wording" },
-      textPlain: "different wording",
-    });
-    await repos.embeddings.upsert("message", first.id, new Float32Array([1, 0]), "test-embed");
-    await repos.embeddings.upsert("message", semantic.id, new Float32Array([0, 1]), "test-embed");
+    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
 
     const hits = await hybridSearch({
       search: db.search,
       repos,
       threadIds: [thread.id],
+      fileIds: [],
       query: "meaning probe",
       k: 3,
-      embedder: { model: "test-embed", embed: async () => [new Float32Array([0, 1])] },
+      embedder: { model: "test-embed", embed },
       embeddingModel: "test-embed",
     });
 
-    expect(hits[0]).toMatchObject({ kind: "message", ref_id: semantic.id });
+    expect(hits[0]).toMatchObject({ kind: "message", ref_id: message.id });
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it("finds semantic file-chunk hits when current-model vectors exist", async () => {
+    const user = await repos.users.ensure({ tgId: 304, firstName: "ChunkVector" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "attached notes" },
+      textPlain: "attached notes",
+    });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      messageId: message.id,
+      type: "txt",
+      name: "notes.txt",
+      path: "/tmp/notes.txt",
+      size: 10,
+      isInline: false,
+    });
+    const first = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "unrelated lexical text" });
+    const semantic = await repos.files.insertChunk({ fileId: file.id, idx: 1, content: "different wording" });
+    await repos.embeddings.upsert("chunk", first.id, new Float32Array([1, 0]), "test-embed");
+    await repos.embeddings.upsert("chunk", semantic.id, new Float32Array([0, 1]), "test-embed");
+    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
+
+    const hits = await hybridSearch({
+      search: db.search,
+      repos,
+      threadIds: [thread.id],
+      fileIds: [file.id],
+      query: "meaning probe",
+      k: 3,
+      embedder: { model: "test-embed", embed },
+      embeddingModel: "test-embed",
+    });
+
+    expect(hits[0]).toMatchObject({ kind: "chunk", ref_id: semantic.id });
+    expect(embed).toHaveBeenCalledOnce();
+  });
+
+  it("skips query embedding when only old-model chunk vectors exist", async () => {
+    const user = await repos.users.ensure({ tgId: 305, firstName: "OldVector" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "old.txt",
+      path: "/tmp/old.txt",
+      size: 10,
+      isInline: false,
+    });
+    const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "orchid deployment detail" });
+    await repos.embeddings.upsert("chunk", chunk.id, new Float32Array([0, 1]), "old-embed");
+    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
+
+    const hits = await hybridSearch({
+      search: db.search,
+      repos,
+      threadIds: [thread.id],
+      fileIds: [file.id],
+      query: "orchid",
+      k: 3,
+      embedder: { model: "new-embed", embed },
+      embeddingModel: "new-embed",
+    });
+
+    expect(hits[0]).toMatchObject({ kind: "chunk", ref_id: chunk.id });
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it("returns lexical results when query embedding fails", async () => {
+    const user = await repos.users.ensure({ tgId: 306, firstName: "Fallback" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "orchid release checklist" },
+      textPlain: "orchid release checklist",
+    });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      messageId: message.id,
+      type: "txt",
+      name: "fallback.txt",
+      path: "/tmp/fallback.txt",
+      size: 10,
+      isInline: false,
+    });
+    const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "orchid deployment detail" });
+    await repos.embeddings.upsert("chunk", chunk.id, new Float32Array([0, 1]), "test-embed");
+
+    const hits = await hybridSearch({
+      search: db.search,
+      repos,
+      threadIds: [thread.id],
+      fileIds: [file.id],
+      query: "orchid",
+      k: 3,
+      embedder: { model: "test-embed", embed: async () => { throw new Error("provider unavailable"); } },
+      embeddingModel: "test-embed",
+    });
+
+    expect(hits).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "message", ref_id: message.id }),
+      expect.objectContaining({ kind: "chunk", ref_id: chunk.id }),
+    ]));
   });
 
   it("keeps message and file retrieval inside a fork boundary", async () => {

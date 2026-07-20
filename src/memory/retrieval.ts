@@ -1,7 +1,7 @@
 import type { Repos } from "../db/repos/index.js";
-import { cosine, type EmbeddingKind } from "../db/repos/embeddings.js";
+import { cosine } from "../db/repos/embeddings.js";
 import type { TextSearch } from "../db/search.js";
-import type { FileRow, ThreadRow } from "../db/types.js";
+import type { FileChunkRow, ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TextEmbedder } from "./embeddings.js";
 
@@ -18,23 +18,24 @@ export type RetrievalHit =
 
 export async function hybridSearch(input: {
   search: TextSearch;
-  repos?: Repos;
+  repos: Repos;
   threadIds: number[];
   messageIds?: number[];
-  fileIds?: number[];
+  fileIds: number[];
   query: string;
   k: number;
   embedder?: TextEmbedder;
   embeddingModel?: string;
   logger?: Logger;
+  signal?: AbortSignal;
 }): Promise<RetrievalHit[]> {
   input.logger?.debug("hybrid search starting", {
     threadIds: input.threadIds.length,
     messageScope: input.messageIds?.length ?? null,
-    fileScope: input.fileIds?.length ?? null,
+    fileScope: input.fileIds.length,
     queryChars: input.query.length,
     limit: input.k,
-    hasEmbedder: Boolean(input.embedder && input.repos),
+    hasEmbedder: Boolean(input.embedder),
   });
   const ranked = new Map<string, RetrievalHit>();
   const allowedMessages = input.messageIds ? new Set(input.messageIds) : undefined;
@@ -46,9 +47,12 @@ export async function hybridSearch(input: {
   };
 
   const scopedLimit = Math.max(input.k, SCOPED_LEXICAL_FETCH_LIMIT);
-  const [messages, chunks] = await Promise.all([
+  const [messages, chunks, chunkVectorCandidates] = await Promise.all([
     input.search.searchMessages(input.threadIds, input.query, allowedMessages ? scopedLimit : input.k),
-    input.fileIds?.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
+    input.fileIds.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
+    input.embedder
+      ? loadChunkVectorCandidates(input.repos, input.fileIds, input.embeddingModel ?? input.embedder.model)
+      : Promise.resolve([]),
   ]);
   input.logger?.debug("hybrid lexical search complete", {
     messages: messages.length,
@@ -60,24 +64,26 @@ export async function hybridSearch(input: {
     .forEach((hit, idx) => add("message", hit.id, hit.snippet, idx));
   chunks.forEach((hit, idx) => add("chunk", hit.id, hit.snippet, idx));
 
-  if (input.embedder && input.repos) {
+  if (input.embedder && chunkVectorCandidates.length) {
     input.logger?.debug("hybrid vector search starting", {
       model: input.embeddingModel ?? input.embedder.model ?? null,
+      chunks: chunkVectorCandidates.length,
     });
-    const [queryVector] = await input.embedder.embed([input.query]);
-    if (queryVector) {
-      await addEmbeddingHits({
-        repos: input.repos,
-        threadIds: input.threadIds,
-        messageIds: input.messageIds,
-        fileIds: input.fileIds,
-        queryVector,
-        embeddingModel: input.embeddingModel ?? input.embedder.model,
-        add,
-      });
-    } else {
-      input.logger?.warn("hybrid vector search skipped; embedder returned no query vector");
+    try {
+      const [queryVector] = await input.embedder.embed([input.query], input.signal);
+      if (queryVector) {
+        addChunkEmbeddingHits(chunkVectorCandidates, queryVector, add);
+      } else {
+        input.logger?.warn("hybrid vector search skipped; embedder returned no query vector");
+      }
+    } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      input.logger?.warn("hybrid vector search failed; returning lexical results", { err: String(err) });
     }
+  } else if (input.embedder) {
+    input.logger?.debug("hybrid vector search skipped; no current-model chunk vectors", {
+      model: input.embeddingModel ?? input.embedder.model ?? null,
+    });
   }
 
   const results = [...ranked.values()].sort((a, b) => b.score - a.score).slice(0, input.k);
@@ -108,54 +114,46 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
   return { threadIds, messageIds, fileIds };
 }
 
-async function addEmbeddingHits(input: {
-  repos: Repos;
-  threadIds: number[];
-  messageIds?: number[];
-  fileIds?: number[];
-  queryVector: Float32Array;
-  embeddingModel?: string;
-  add: (kind: RetrievalHit["kind"], refId: number, snippet: string, rank: number) => void;
-}): Promise<void> {
-  const [messageIds, fileRows] = await Promise.all([
-    input.messageIds ? Promise.resolve(input.messageIds) : input.repos.messages.idsForThreads(input.threadIds),
-    input.fileIds !== undefined ? Promise.resolve([] as FileRow[]) : input.repos.files.listForThreads(input.threadIds),
-  ]);
-  const fileIds = input.fileIds ?? fileRows.map((file) => file.id);
-  const chunkRows = fileIds.length ? await input.repos.files.chunksForFiles(fileIds) : [];
-  const candidates: Array<{
-    kind: EmbeddingKind;
-    hitKind: RetrievalHit["kind"];
-    refIds: number[];
-    snippetById: Map<number, string>;
-  }> = [
-    { kind: "message", hitKind: "message", refIds: messageIds, snippetById: await input.repos.messages.snippets(messageIds) },
-    {
-      kind: "chunk",
-      hitKind: "chunk",
-      refIds: chunkRows.map((row) => row.id),
-      snippetById: new Map(chunkRows.map((row) => [row.id, row.content.slice(0, 240)])),
-    },
-  ];
-  for (const candidate of candidates) {
-    const vectors = await cachedVectors(input.repos, candidate.kind, candidate.refIds, input.embeddingModel);
-    vectors
-      .map((row) => ({
-        refId: row.ref_id,
-        score: cosine(input.queryVector, row.decoded),
-        snippet: candidate.snippetById.get(row.ref_id) ?? "",
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, VECTOR_TOP_K)
-      .forEach((hit, idx) => {
-        if (hit.score > 0) input.add(candidate.hitKind, hit.refId, hit.snippet, idx);
-      });
-  }
+interface ChunkVectorCandidate {
+  row: FileChunkRow;
+  vector: Float32Array;
 }
 
-async function cachedVectors(
+async function loadChunkVectorCandidates(
   repos: Repos,
-  kind: EmbeddingKind,
+  fileIds: number[],
+  embeddingModel?: string,
+): Promise<ChunkVectorCandidate[]> {
+  if (!fileIds.length) return [];
+  const chunkRows = await repos.files.chunksForFiles(fileIds);
+  const rowsById = new Map(chunkRows.map((row) => [row.id, row]));
+  const vectors = await cachedChunkVectors(repos, chunkRows.map((row) => row.id), embeddingModel);
+  return vectors.flatMap((vector) => {
+    const row = rowsById.get(vector.ref_id);
+    return row ? [{ row, vector: vector.decoded }] : [];
+  });
+}
+
+function addChunkEmbeddingHits(
+  candidates: ChunkVectorCandidate[],
+  queryVector: Float32Array,
+  add: (kind: RetrievalHit["kind"], refId: number, snippet: string, rank: number) => void,
+): void {
+  candidates
+    .map((candidate) => ({
+      refId: candidate.row.id,
+      score: cosine(queryVector, candidate.vector),
+      snippet: candidate.row.content.slice(0, 240),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, VECTOR_TOP_K)
+    .forEach((hit, idx) => {
+      if (hit.score > 0) add("chunk", hit.refId, hit.snippet, idx);
+    });
+}
+
+async function cachedChunkVectors(
+  repos: Repos,
   refIds: number[],
   embeddingModel?: string,
 ): Promise<Array<{ ref_id: number; decoded: Float32Array }>> {
@@ -163,7 +161,7 @@ async function cachedVectors(
   const result: Array<{ ref_id: number; decoded: Float32Array }> = [];
   const missing: number[] = [];
   for (const refId of refIds) {
-    const key = vectorCacheKey(kind, refId, embeddingModel);
+    const key = vectorCacheKey(refId, embeddingModel);
     const cached = vectorCache.get(key);
     if (cached) {
       vectorCache.delete(key);
@@ -174,17 +172,17 @@ async function cachedVectors(
     }
   }
   if (missing.length) {
-    const loaded = await repos.embeddings.list(kind, missing, embeddingModel);
+    const loaded = await repos.embeddings.list("chunk", missing, embeddingModel);
     for (const row of loaded) {
-      rememberVector(kind, row.ref_id, row.decoded, embeddingModel);
+      rememberVector(row.ref_id, row.decoded, embeddingModel);
       result.push({ ref_id: row.ref_id, decoded: row.decoded });
     }
   }
   return result;
 }
 
-function rememberVector(kind: EmbeddingKind, refId: number, vector: Float32Array, embeddingModel?: string): void {
-  const key = vectorCacheKey(kind, refId, embeddingModel);
+function rememberVector(refId: number, vector: Float32Array, embeddingModel?: string): void {
+  const key = vectorCacheKey(refId, embeddingModel);
   if (vectorCache.has(key)) vectorCache.delete(key);
   vectorCache.set(key, vector);
   while (vectorCache.size > vectorCacheMax) {
@@ -194,8 +192,8 @@ function rememberVector(kind: EmbeddingKind, refId: number, vector: Float32Array
   }
 }
 
-function vectorCacheKey(kind: EmbeddingKind, refId: number, embeddingModel?: string): string {
-  return `${embeddingModel ?? "*"}:${kind}:${refId}`;
+function vectorCacheKey(refId: number, embeddingModel?: string): string {
+  return `${embeddingModel ?? "*"}:chunk:${refId}`;
 }
 
 export function clearRetrievalVectorCacheForTests(): void {

@@ -36,6 +36,7 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     expect(results.filter((result) => result.piCutoverApplied)).toHaveLength(1);
     expect(results.filter((result) => !result.piCutoverApplied)).toHaveLength(1);
     expect(results.filter((result) => result.inviteRemovalApplied)).toHaveLength(1);
+    expect(results.filter((result) => result.messageEmbeddingCleanupApplied)).toHaveLength(1);
     expect(first).toBeDefined();
     if (!first) throw new Error("No PostgreSQL cutover contender applied the migration.");
     expect(first.piCutoverApplied).toBe(true);
@@ -58,7 +59,28 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
       fileSourcesApplied: false,
       migratedFileSources: 0,
       inviteRemovalApplied: false,
+      messageEmbeddingCleanupApplied: false,
+      deletedMessageEmbeddings: 0,
     });
+  });
+
+  it("removes only message embeddings once under concurrent startup", async () => {
+    await db.db.execute(sql`delete from schema_migrations where name = 'remove_message_embeddings_v1'`);
+    await db.db.execute(sql.raw(`
+      insert into embeddings(kind, ref_id, model, dim, vector, created_at) values
+        ('message', 101, 'test-embed', 1, decode('00000000', 'hex'), 1),
+        ('chunk', 202, 'test-embed', 1, decode('00000000', 'hex'), 1)
+    `));
+    const contender = createDatabase(loadTestConfig({ DB_URL: schemaUrl }));
+
+    const results = await Promise.all([db.migrate(), contender.migrate()]);
+    await contender.destroy();
+
+    expect(results.filter((result) => result.messageEmbeddingCleanupApplied)).toHaveLength(1);
+    expect(results.reduce((sum, result) => sum + result.deletedMessageEmbeddings, 0)).toBe(1);
+    expect(await db.db.query<{ kind: string; ref_id: number }>(
+      sql.raw("select kind, ref_id from embeddings order by kind, ref_id"),
+    )).toEqual([{ kind: "chunk", ref_id: 202 }]);
   });
 
   async function count(table: string): Promise<number> {

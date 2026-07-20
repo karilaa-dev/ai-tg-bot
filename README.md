@@ -9,7 +9,7 @@ Telegram controls who can reach the bot; there is no application-level allowlist
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`. The database stores the session path/id and maps Telegram messages to Pi entry ids.
 - Pi's built-in automatic compaction is used unchanged. `/compact` calls Pi directly and `/fork` creates a Pi branch at the mapped message entry.
 - Built-in host filesystem tools are disabled. Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
-- Retrieval remains hybrid FTS/BM25 plus vectors, but nothing is automatically injected into prompts. Pi chooses when to call the retrieval tools.
+- Retrieval is explicit: prior messages use full-text search, while chunked large documents use full-text plus vector search. Nothing is automatically injected into prompts; Pi chooses when to call the retrieval tools.
 - The persistent just-bash workspace is isolated per chat thread. Every thread/fork-authorized file appears at `/attachments/<file_id>` and through `CHAT_FILE_<file_id>`. Directory listing and metadata operations do not download content; opening one entry restores only that file. `input_file_ids` remains an optional eager preload/validation list of up to five IDs. The per-call attachment mount is copy-on-write, so sandbox edits cannot alter canonical snapshots.
 
 ### Provider routing
@@ -93,7 +93,7 @@ See [.env.example](./.env.example) for file, Docling, bash, draft, onboarding, a
 
 ## Migration warning
 
-The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
+The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. The idempotent `remove_message_embeddings_v1` migration deletes obsolete message vectors while preserving messages, full-text indexes, file chunks, and chunk vectors. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
 
 SQLite is the default. PostgreSQL is selected when `DB_URL` begins with `postgres://` or `postgresql://`.
 

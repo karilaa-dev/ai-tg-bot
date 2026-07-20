@@ -12,7 +12,7 @@ Pi 0.80.6 is the sole agent backbone. Telegram threads own persistent Pi `AgentS
 
 ## Tools and retrieval
 
-Pi host filesystem tools are disabled. Project-scoped Pi tools expose just-bash, Telegram file creation, Tavily search/extract, explicit conversation/file retrieval, and image generation. Message/file-chunk embeddings plus FTS remain available only behind retrieval tools. There is no rolling summary store, summary embedding, context builder, token estimator, or automatic RAG injection.
+Pi host filesystem tools are disabled. Project-scoped Pi tools expose just-bash, Telegram file creation, Tavily search/extract, explicit conversation/file retrieval, and image generation. Prior messages use FTS-only retrieval; chunked large documents add vector retrieval behind the explicit search tools. Query embeddings are skipped unless current-model chunk vectors exist. There is no rolling summary store, summary embedding, context builder, token estimator, or automatic RAG injection.
 
 ## Images
 
@@ -27,6 +27,6 @@ Pi JSONL is conversation-authoritative. Database messages retain Telegram/search
 - Provider routing/circuit behavior, including missing Codex, quota fallback, non-fallback errors, aborts, and partial output.
 - Session persistence/reopen, context sizing, compaction, entry mapping, branching, cancellation, and tool continuation.
 - Telegram-backed image references, Codex/OpenRouter parity, fallback, delivery/reuse, and no persisted bytes.
-- Message/chunk vector and lexical retrieval with fork scoping and no summary/auto-RAG path.
+- FTS-only message retrieval plus hybrid file-chunk retrieval with fork scoping and no summary/auto-RAG path.
 - SQLite cutover idempotency, optional PostgreSQL cutover integration, and preservation/cleanup guarantees.
 - Typecheck, unit/integration suite, build, and optional live provider/Telegram smoke checks.

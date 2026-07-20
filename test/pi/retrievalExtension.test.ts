@@ -29,12 +29,23 @@ describe("Pi retrieval embedding extension", () => {
 
   it("times out stalled attempts and includes the final retryable response body", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("quota depleted", { status: 429 })));
+    const cancelledBodies = [vi.fn(), vi.fn()];
+    let responseIndex = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (responseIndex < cancelledBodies.length) {
+        const cancel = cancelledBodies[responseIndex];
+        responseIndex += 1;
+        return new Response(new ReadableStream({ cancel }), { status: 429 });
+      }
+      return new Response("quota depleted", { status: 429 });
+    }));
     const quota = embedForRetrieval(["one"], loadTestConfig());
     const quotaRejection = expect(quota).rejects.toThrow("HTTP 429: quota depleted");
     await vi.runAllTimersAsync();
     await quotaRejection;
     expect(fetch).toHaveBeenCalledTimes(3);
+    expect(cancelledBodies[0]).toHaveBeenCalledOnce();
+    expect(cancelledBodies[1]).toHaveBeenCalledOnce();
 
     vi.stubGlobal("fetch", vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
@@ -44,5 +55,37 @@ describe("Pi retrieval embedding extension", () => {
     await vi.runAllTimersAsync();
     await stalledRejection;
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts an in-flight embedding request without retrying", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    })));
+
+    const request = embedForRetrieval(["cancel me"], loadTestConfig(), undefined, controller.signal);
+    controller.abort(new DOMException("cancelled", "AbortError"));
+
+    await expect(request).rejects.toThrow("cancelled");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("aborts stalled response-body consumption without retrying", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = new ReadableStream({
+        start(streamController) {
+          init?.signal?.addEventListener("abort", () => streamController.error(init.signal?.reason), { once: true });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }));
+
+    const request = embedForRetrieval(["cancel body"], loadTestConfig(), undefined, controller.signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.abort(new DOMException("body cancelled", "AbortError"));
+
+    await expect(request).rejects.toThrow("body cancelled");
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });

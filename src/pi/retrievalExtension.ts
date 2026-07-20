@@ -9,6 +9,7 @@ export async function embedForRetrieval(
   texts: string[],
   config: AppConfig,
   logger?: Logger,
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
   const vectors: Float32Array[] = [];
   logger?.debug("embedding request starting", {
@@ -18,23 +19,23 @@ export async function embedForRetrieval(
   });
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const input = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const response = await retryFetch("https://openrouter.ai/api/v1/embeddings", {
+    const { response, body } = await retryFetch("https://openrouter.ai/api/v1/embeddings", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ model: config.OPENROUTER_EMBEDDING_MODEL, input }),
+      signal,
     }, 3, logger, "OpenRouter embeddings");
     if (!response.ok) {
-      const body = await response.clone().text().catch(() => "");
       logger?.warn("OpenRouter embeddings non-ok response", {
         status: response.status,
         body,
       });
       throw new Error(`OpenRouter embeddings failed with HTTP ${response.status}.`);
     }
-    const json = await response.json() as { data?: Array<{ embedding: number[] }> };
+    const json = JSON.parse(body) as { data?: Array<{ embedding: number[] }> };
     const rows = json.data ?? [];
     if (rows.length !== input.length) {
       throw new Error(`OpenRouter embeddings returned ${rows.length} vectors for ${input.length} inputs.`);
@@ -55,7 +56,7 @@ async function retryFetch(
   attempts: number,
   logger?: Logger,
   label = "HTTP request",
-): Promise<Response> {
+): Promise<{ response: Response; body: string }> {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (init.signal?.aborted) throw init.signal.reason ?? new DOMException("Embedding request aborted", "AbortError");
@@ -67,7 +68,12 @@ async function retryFetch(
     }, EMBEDDING_REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(url, { ...init, signal: controller.signal });
-      if (response.status !== 429 && response.status < 500) return response;
+      if (response.status !== 429 && response.status < 500) {
+        return { response, body: await response.text() };
+      }
+      if (attempt < attempts - 1) {
+        await response.body?.cancel().catch(() => undefined);
+      }
       const body = attempt === attempts - 1 ? await response.text().catch(() => "") : "";
       lastError = new Error(`${label} failed with HTTP ${response.status}${body ? `: ${body}` : ""}`);
       if (attempt < attempts - 1) {

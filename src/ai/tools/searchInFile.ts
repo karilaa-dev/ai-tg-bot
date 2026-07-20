@@ -13,7 +13,7 @@ export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbe
       query: z.string(),
       limit: z.number().max(20).default(8),
     }),
-    execute: async ({ file_id, query, limit }) => {
+    execute: async ({ file_id, query, limit }, signal) => {
       input.logger?.debug("tool search_in_file starting", {
         threadId: input.thread.id,
         fileId: file_id,
@@ -36,6 +36,7 @@ export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbe
         embedder,
         embeddingModel: embedder.model,
         logger: input.logger,
+        signal,
       });
       const chunks = await input.repos.files.chunks(file_id);
       const indexById = new Map(chunks.map((chunk) => [chunk.id, chunk.idx]));

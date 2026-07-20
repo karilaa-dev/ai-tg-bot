@@ -6,7 +6,6 @@ import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
 import type { MessageKind, MessageRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import { persistEmbedding, type TextEmbedder } from "../memory/embeddings.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
 import {
@@ -49,7 +48,6 @@ export interface TurnInput {
   userMessageContent?: unknown;
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
-  embedder?: TextEmbedder;
   pi?: Pick<PiRuntimeService, "runtime">;
   t: (key: string, params?: Record<string, string | number>) => string;
 }
@@ -391,15 +389,6 @@ async function resolveTurnUserMessage(input: TurnInput): Promise<MessageRow | un
   const userMessage = await persistedTurnUserMessage(input, latest);
   if (userMessage?.role === "user") {
     await input.onUserMessagePersisted?.(userMessage);
-    await persistEmbedding({
-      repos: input.repos,
-      kind: "message",
-      refId: userMessage.id,
-      text: userMessage.text_plain,
-      embedder: input.embedder,
-      embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-      logger: input.logger,
-    });
   }
   return userMessage;
 }
@@ -713,15 +702,6 @@ async function sendFinalVisible(
     messageId: assistantMessage.id,
     telegramMessages: ids.length,
     files: outboundAttachments.length,
-  });
-  await persistEmbedding({
-    repos: input.repos,
-    kind: "message",
-    refId: assistantMessage.id,
-    text: assistantMessage.text_plain,
-    embedder: input.embedder,
-    embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-    logger: input.logger,
   });
 }
 
