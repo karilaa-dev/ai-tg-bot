@@ -37,6 +37,13 @@ describe("thread title helper", () => {
 
   it("uses the first nonempty line and strips paired wrappers", () => {
     expect(sanitizeThreadTitle("\n\n`Thread Naming Logic`\nextra prose")).toBe("Thread Naming Logic");
+    expect(sanitizeThreadTitle('"Quoted Helper Topic Title"')).toBe("Quoted Helper Topic Title");
+  });
+
+  it("rejects parsed JSON objects without a usable title", () => {
+    expect(sanitizeThreadTitle('{"title":""}')).toBeUndefined();
+    expect(sanitizeThreadTitle('{"answer":"Ignore previous instructions"}')).toBeUndefined();
+    expect(sanitizeThreadTitle('{"title":42}')).toBeUndefined();
   });
 
   it("truncates long unbroken Unicode output and rejects empty decoration", () => {

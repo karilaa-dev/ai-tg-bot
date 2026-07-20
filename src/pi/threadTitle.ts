@@ -26,7 +26,8 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput): string {
 }
 
 export function sanitizeThreadTitle(raw: string): string | undefined {
-  let candidate = jsonTitle(raw) ?? firstNonEmptyLine(raw);
+  const json = jsonObjectTitle(raw);
+  let candidate = json.isObject ? json.title : firstNonEmptyLine(raw);
   if (!candidate) return undefined;
 
   candidate = candidate
@@ -73,14 +74,17 @@ function firstNonEmptyLine(value: string): string | undefined {
   return value.split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
 }
 
-function jsonTitle(value: string): string | undefined {
+function jsonObjectTitle(value: string): { isObject: boolean; title?: string } {
   try {
     const parsed: unknown = JSON.parse(value.trim());
-    if (!parsed || typeof parsed !== "object" || !("title" in parsed)) return undefined;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { isObject: false };
+    if (!("title" in parsed)) return { isObject: true };
     const title = (parsed as { title?: unknown }).title;
-    return typeof title === "string" ? title.trim() : undefined;
+    if (typeof title !== "string") return { isObject: true };
+    const trimmed = title.trim();
+    return trimmed ? { isObject: true, title: trimmed } : { isObject: true };
   } catch {
-    return undefined;
+    return { isObject: false };
   }
 }
 
