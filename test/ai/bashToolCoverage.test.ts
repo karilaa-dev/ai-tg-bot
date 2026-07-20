@@ -237,6 +237,26 @@ describe("just-bash coverage through the bot bash tool", () => {
     expect(Buffer.from(files["bundle/nested/item.txt"]!).toString()).toBe("nested-file");
   }, 60_000);
 
+  it("keeps recursive junk-path ZIP archives flat without directory collisions", async () => {
+    const bash = await createBashTool({ timeoutMs: 30_000, maxOutputChars: 100_000 });
+    const result = await bash.execute({
+      script: [
+        "mkdir -p left/shared right/shared",
+        "printf left-file > left/shared/left.txt",
+        "printf right-file > right/shared/right.txt",
+        "zip -jrq flat.zip left right",
+        "base64 flat.zip",
+      ].join("; "),
+    });
+
+    expect(result).toMatchObject({ exit_code: 0, timed_out: false, stderr: "" });
+    const archive = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
+    const files = unzipSync(archive);
+    expect(Object.keys(files).sort()).toEqual(["left.txt", "right.txt"]);
+    expect(Buffer.from(files["left.txt"]!).toString()).toBe("left-file");
+    expect(Buffer.from(files["right.txt"]!).toString()).toBe("right-file");
+  }, 60_000);
+
   it("covers shell features and tool input options used by agents", async () => {
     const bash = await createBashTool({ timeoutMs: 30_000, maxOutputChars: 50_000 });
     const argsResult = await bash.execute({ script: "printf '%s|%s\\n'", args: ["arg-one", "arg two"] });

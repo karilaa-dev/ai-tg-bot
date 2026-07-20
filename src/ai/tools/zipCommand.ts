@@ -57,7 +57,7 @@ export const zipCommand = defineCommand("zip", async (args, ctx) => {
     if (directoryPath === archivePath) return;
 
     const names = (await ctx.fs.readdir(directoryPath)).sort();
-    if (entryName) addEntry(`${stripTrailingSlashes(entryName)}/`, directoryPath, new Uint8Array(), {
+    if (entryName && !options.junkPaths) addEntry(`${stripTrailingSlashes(entryName)}/`, directoryPath, new Uint8Array(), {
       level: 0,
       mtime: (await ctx.fs.stat(directoryPath)).mtime,
     });
