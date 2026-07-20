@@ -8,6 +8,7 @@ import {
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+import { unzipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runTurn, sendFinal } from "../../src/ai/run.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -125,6 +126,115 @@ describe("runTurn with Pi", () => {
     expect(richMessages).toHaveLength(1);
     expect(JSON.stringify(richMessages[0])).toContain("Pi runtime is not configured");
   });
+
+  it("lets Pi create and deliver a ZIP archive through bash and create_file", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-zip-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7006, firstName: "ZipRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi ZIP run" });
+    let providerCalls = 0;
+    const stream = ((model: Model<Api>) => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "zip-bash-call",
+          name: "bash",
+          arguments: {
+            script: "mkdir -p /zip-smoke/nested; printf alpha > /zip-smoke/alpha.txt; printf beta > /zip-smoke/nested/beta.txt; zip -rq /zip-smoke.zip /zip-smoke",
+            cwd: "/",
+            stdin: "",
+            args: [],
+            raw_script: false,
+            input_file_ids: [],
+          },
+        });
+      }
+      if (providerCalls === 2) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "zip-create-file-call",
+          name: "create_file",
+          arguments: { path: "/zip-smoke.zip", name: "zip-smoke.zip", delivery: "document" },
+        });
+      }
+      return textStream(model, "ZIP_TOOL_SMOKE_OK");
+    }) as PiProviderStreamOverrides["openRouter"];
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    let documentCalls = 0;
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9040,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "ZipRunner" },
+        }),
+        sendRichMessageDraft: async () => true,
+      },
+      sendDocument: async () => {
+        documentCalls += 1;
+        return {
+          message_id: 9041,
+          document: { file_id: "BQAC-zip-smoke", file_unique_id: "unique-zip-smoke" },
+        };
+      },
+    } as unknown as import("grammy").Api;
+
+    await runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "Create two files, archive them as ZIP with bash, and send the archive.",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key) => key,
+    });
+
+    expect(providerCalls).toBe(3);
+    const runtime = await manager.runtime(thread, user);
+    const toolResults = runtime.session.messages
+      .filter((message) => message.role === "toolResult")
+      .map((message) => message.content);
+    expect(runtime.bridge.attachments, JSON.stringify(toolResults)).toHaveLength(1);
+    expect(documentCalls).toBe(1);
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ name: "zip-smoke.zip", type: "other" });
+    const archive = await fs.readFile(files[0]!.path!);
+    const zipped = unzipSync(archive);
+    expect(Object.keys(zipped).sort()).toEqual([
+      "zip-smoke/",
+      "zip-smoke/alpha.txt",
+      "zip-smoke/nested/",
+      "zip-smoke/nested/beta.txt",
+    ]);
+    expect(Buffer.from(zipped["zip-smoke/alpha.txt"]!).toString()).toBe("alpha");
+    expect(Buffer.from(zipped["zip-smoke/nested/beta.txt"]!).toString()).toBe("beta");
+    await expect(repos.files.listSources(files[0]!.id)).resolves.toMatchObject([{
+      transport: "telegram",
+      remote_key: "unique-zip-smoke",
+    }]);
+    const messages = await repos.messages.listThread(thread.id);
+    expect(messages.at(-1)).toMatchObject({ role: "assistant", text_plain: "ZIP_TOOL_SMOKE_OK" });
+  }, 20_000);
 
   it("preserves an image MIME type when Telegram receives it as a document", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-document-image-"));
