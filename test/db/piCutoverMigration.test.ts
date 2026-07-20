@@ -18,7 +18,7 @@ describe("Pi cutover migration", () => {
     tempDir = undefined;
   });
 
-  it("preserves users and invites while deleting legacy SQLite conversation state", async () => {
+  it("preserves user settings while deleting legacy conversation and invite state", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-cutover-"));
     db = createDatabase(loadTestConfig({ DB_URL: `sqlite:${path.join(tempDir, "legacy.db")}` }));
     await installLegacySchema(db);
@@ -26,9 +26,14 @@ describe("Pi cutover migration", () => {
     const first = await db.migrate();
     expect(first.piCutoverApplied).toBe(true);
     expect(first.fileSourcesApplied).toBe(true);
+    expect(first.inviteRemovalApplied).toBe(true);
     expect(first.deletedRows).toMatchObject({ threads: 1, messages: 1, files: 1, file_chunks: 1, embeddings: 1, summaries: 1 });
     expect(await count(db, "users")).toBe(1);
-    expect(await count(db, "invites")).toBe(1);
+    expect(await tableExists(db, "invites")).toBe(false);
+    expect(await columns(db, "users")).not.toContain("invited_with");
+    expect((await db.db.query<{ lang: string; tz_offset_min: number; stream_mode: number }>(
+      sql.raw("select lang, tz_offset_min, stream_mode from users where tg_id = 42"),
+    ))[0]).toEqual({ lang: "en", tz_offset_min: 120, stream_mode: 0 });
     expect(await count(db, "threads")).toBe(0);
     expect(await count(db, "messages")).toBe(0);
     expect(await count(db, "files")).toBe(0);
@@ -52,9 +57,23 @@ describe("Pi cutover migration", () => {
       deletedRows: {},
       fileSourcesApplied: false,
       migratedFileSources: 0,
+      inviteRemovalApplied: false,
     });
     expect(await count(db, "users")).toBe(1);
-    expect(await count(db, "invites")).toBe(1);
+    expect(await tableExists(db, "invites")).toBe(false);
+  });
+
+  it("creates a fresh schema without invite access artifacts or admin configuration", async () => {
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
+    expect(config).not.toHaveProperty("TELEGRAM_ADMIN_ID");
+    db = createDatabase(config);
+
+    const result = await db.migrate();
+
+    expect(result.inviteRemovalApplied).toBe(true);
+    expect(await tableExists(db, "invites")).toBe(false);
+    expect(await columns(db, "users")).not.toContain("invited_with");
+    expect((await db.migrate()).inviteRemovalApplied).toBe(false);
   });
 
   it("cleans only managed files and leaves just-bash workspaces untouched", async () => {
@@ -83,6 +102,7 @@ describe("Pi cutover migration", () => {
       piCutoverApplied: false,
       fileSourcesApplied: true,
       migratedFileSources: 3,
+      inviteRemovalApplied: true,
     });
     expect(await count(db, "threads")).toBe(1);
     expect(await count(db, "messages")).toBe(1);
@@ -100,6 +120,8 @@ describe("Pi cutover migration", () => {
     expect(JSON.parse(sources[1]!.locator_json)).toMatchObject({ file_id: "telegram-file-b" });
     expect(JSON.parse(sources[2]!.locator_json)).toMatchObject({ file_id: "telegram-file-c" });
     expect(await tableExists(db, "file_telegram_refs")).toBe(false);
+    expect(await tableExists(db, "invites")).toBe(false);
+    expect(await columns(db, "users")).not.toContain("invited_with");
     expect(await columns(db, "files")).not.toContain("telegram_file_id");
     expect((await db.migrate()).fileSourcesApplied).toBe(false);
   });
@@ -139,7 +161,7 @@ async function installLegacySchema(database: AppDatabase): Promise<void> {
     `create table embeddings (id integer primary key autoincrement, kind text not null, ref_id integer not null, dim integer not null, vector blob not null, created_at integer not null)`,
     `create table summaries (id integer primary key autoincrement, thread_id integer not null, level integer not null, from_message_id integer, to_message_id integer, content text not null, created_at integer not null)`,
     `create virtual table summaries_fts using fts5(text, summary_id unindexed, thread_id unindexed)`,
-    `insert into users values (42, 'Legacy', 'legacy', 'en', null, 1, null, 1)`,
+    `insert into users values (42, 'Legacy', 'legacy', 'en', 120, 0, 'KEEP-ME', 1)`,
     `insert into invites values ('KEEP-ME', 2, 1, null, 0, 42, 1)`,
     `insert into threads values (1, 42, null, null, null, 'Legacy thread', 'old summary', 1, 0, 1)`,
     `insert into messages values (1, 1, 'user', 'text', '{}', 'legacy message', null, 100, 10, 1)`,

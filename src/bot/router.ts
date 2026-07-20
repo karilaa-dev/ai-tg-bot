@@ -30,9 +30,8 @@ import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.
 import { handleUserText } from "./turns.js";
 import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } from "./batching.js";
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
-import { authAndThread, isStopCommand, privateOnly } from "./auth.js";
+import { initializeUserAndThread, isStopCommand, privateOnly } from "./auth.js";
 import { sendWelcome, timezoneConversation } from "./onboarding.js";
-import { registerInviteHandlers } from "./invites.js";
 import { FileByteCache } from "../files/cache.js";
 import { FileResolver } from "../files/resolver.js";
 import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
@@ -109,7 +108,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.use(sequentialize<BotContext>(threadSequentializationKey));
   bot.use(privateOnly);
-  bot.use(authAndThread);
+  bot.use(initializeUserAndThread);
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
   bot.use(async (ctx, next) => {
@@ -232,7 +231,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     }));
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
   });
-  registerInviteHandlers(bot);
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
     ctx.services.logger.debug("document message received", ctxLogMeta(ctx, {

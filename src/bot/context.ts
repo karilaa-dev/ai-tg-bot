@@ -41,7 +41,6 @@ export interface PendingTextBurst {
 }
 
 export interface RouterState {
-  awaitingCode: Set<number>;
   busyThreads: Set<number>;
   activeFileJobs: Map<string, ActiveFileJob>;
   pendingMediaGroups: Map<string, PendingMediaGroup>;
@@ -50,7 +49,6 @@ export interface RouterState {
 
 export function createRouterState(): RouterState {
   return {
-    awaitingCode: new Set<number>(),
     busyThreads: new Set<number>(),
     activeFileJobs: new Map<string, ActiveFileJob>(),
     pendingMediaGroups: new Map<string, PendingMediaGroup>(),

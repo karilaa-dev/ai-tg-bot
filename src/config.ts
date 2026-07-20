@@ -9,7 +9,6 @@ export const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", 
 
 const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
-  TELEGRAM_ADMIN_ID: z.coerce.number().int(),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
@@ -49,7 +48,6 @@ export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     ...ConfigSchema.parse({
       BOT_TOKEN: "TEST:TOKEN",
-      TELEGRAM_ADMIN_ID: "1000",
       OPENROUTER_API_KEY: "test-openrouter",
       TAVILY_API_KEY: "test-tavily",
     }),

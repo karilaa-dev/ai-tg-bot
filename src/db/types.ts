@@ -15,17 +15,6 @@ export interface UsersTable {
   lang: Locale;
   tz_offset_min: number | null;
   stream_mode: number;
-  invited_with: string | null;
-  created_at: number;
-}
-
-export interface InvitesTable {
-  code: string;
-  max_uses: number;
-  used_count: number;
-  expires_at: number | null;
-  revoked: number;
-  created_by: number;
   created_at: number;
 }
 
@@ -114,7 +103,6 @@ export interface EmbeddingsTable {
 }
 
 export type UserRow = UsersTable;
-export type InviteRow = InvitesTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;

@@ -14,14 +14,13 @@ export class UsersRepo {
     firstName?: string;
     username?: string;
     lang?: Locale;
-    invitedWith?: string | null;
   }): Promise<UserRow> {
     const now = Date.now();
     return insertReturning<UserRow>(
       this.db,
       sql`
-        insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, invited_with, created_at)
-        values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${input.invitedWith ?? null}, ${now})
+        insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, created_at)
+        values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${now})
         on conflict (tg_id) do update set
           first_name = excluded.first_name,
           username = excluded.username

@@ -19,43 +19,8 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.dispose();
   });
 
-  it("blocks unknown users until they redeem an invite", async () => {
-    const res = await env.bot.sendCommand(env.user, env.chat, "/start");
-    expect(res.text).toContain("invite code");
-  });
-
-  it("leaves non-private chats after a localized notice", async () => {
-    const group = env.bot.createChat({ id: -100, type: "supergroup", title: "Group" });
-    const res = await env.bot.sendCommand(env.user, group, "/start");
-
-    expect(res.text).toContain("private chats");
-    expect(res.getLastApiCall("leaveChat")).toBeDefined();
-  });
-
-  it("creates and redeems an invite, then shows the onboarding timezone prompt", async () => {
-    const adminChat = env.bot.createChat({ id: env.admin.id, type: "private", first_name: "Admin" });
-    const panel = await env.bot.sendCommand(env.admin, adminChat, "/invite");
-    expect(panel.text).toContain("Invite settings");
-    expect(panel.text).toContain("\n\nUses:");
-    expect(panel.text).not.toContain("\\n");
-    expect(panel.getInlineButtonByData("inv:create:1:30d")).toBeDefined();
-    const panelMessage = panel.messages.at(-1);
-    expect(panelMessage).toBeDefined();
-
-    const created = await env.bot.clickButton(env.admin, adminChat, "inv:create:1:30d", panelMessage!);
-    expect(created.editedText ?? created.text).toContain("Invite created");
-    const editCall = created.getLastApiCall("editMessageText");
-    expect(editCall?.payload).toMatchObject({
-      parse_mode: "HTML",
-    });
-    expect(JSON.stringify(editCall?.payload)).not.toContain("\\\\n");
-    expect(JSON.stringify(editCall?.payload)).toContain("\\n\\nCode:");
-    expect(JSON.stringify(editCall?.payload)).toContain("Open invite");
-    const invite = (await env.repos.invites.list())[0];
-    expect(invite).toMatchObject({ max_uses: 1, used_count: 0, revoked: 0 });
-    expect(invite?.expires_at).toBeGreaterThan(Date.now() + 29 * 24 * 60 * 60 * 1000);
-
-    const onboarded = await env.bot.sendCommand(env.user, env.chat, `/start ${invite!.code}`);
+  it("onboards a brand-new private-chat user without an invite", async () => {
+    const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start");
     const richWelcome = JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload);
     expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
     expect(richWelcome).toContain("## What I can help with");
@@ -72,43 +37,32 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(surface).not.toContain("Choose a language");
     expect(onboarded.getInlineButtonByData("tz:onboarding:set")).toBeDefined();
     expect(onboarded.getInlineButtonByData("tz:onboarding:later")).toBeDefined();
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({
+      tg_id: env.user.id,
+      first_name: "Alice",
+      lang: "en",
+    });
   });
 
-  it("updates invite settings inline before creating", async () => {
-    const adminChat = env.bot.createChat({ id: env.admin.id, type: "private", first_name: "Admin" });
-    const panel = await env.bot.sendCommand(env.admin, adminChat, "/invite");
-    const panelMessage = panel.messages.at(-1);
-    expect(panelMessage).toBeDefined();
+  it("leaves non-private chats after a localized notice", async () => {
+    const group = env.bot.createChat({ id: -100, type: "supergroup", title: "Group" });
+    const res = await env.bot.sendCommand(env.user, group, "/start");
 
-    const fiveUses = await env.bot.clickButton(env.admin, adminChat, "inv:set:5:30d", panelMessage!);
-    const fiveUsesText = normalizeFluent(fiveUses.editedText ?? fiveUses.text ?? "");
-    expect(fiveUsesText).toContain("Uses: 5");
-    expect(fiveUsesText).not.toContain("\\n");
-    const fiveUsesMessage = fiveUses.editedMessages.at(-1) ?? panelMessage;
-    const never = await env.bot.clickButton(env.admin, adminChat, "inv:set:5:never", fiveUsesMessage);
-    expect(normalizeFluent(never.editedText ?? never.text ?? "")).toContain("Expires: ♾️ never");
-    const neverMessage = never.editedMessages.at(-1) ?? fiveUsesMessage;
-    const created = await env.bot.clickButton(env.admin, adminChat, "inv:create:5:never", neverMessage);
-
-    expect(created.editedText ?? created.text).toContain("Invite created");
-    const invite = (await env.repos.invites.list())[0];
-    expect(invite).toMatchObject({ max_uses: 5, expires_at: null });
+    expect(res.text).toContain("private chats");
+    expect(res.getLastApiCall("leaveChat")).toBeDefined();
+    expect(await env.repos.users.get(env.user.id)).toBeUndefined();
   });
 
-  it("reports expired, exhausted, and revoked invite codes", async () => {
-    await env.repos.invites.insert({ code: "EXPIRED", maxUses: 1, expiresAt: Date.now() - 1000, createdBy: env.admin.id });
-    await env.repos.invites.insert({ code: "USEDUP", maxUses: 1, expiresAt: null, createdBy: env.admin.id });
-    await env.repos.invites.consume("USEDUP");
-    await env.repos.invites.insert({ code: "REVOKED", maxUses: 1, expiresAt: null, createdBy: env.admin.id });
-    await env.repos.invites.revoke("REVOKED");
+  it("treats a legacy /start payload as ordinary onboarding", async () => {
+    const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start LEGACY-CODE");
 
-    expect((await env.bot.sendCommand(env.user, env.chat, "/start EXPIRED")).text).toContain("expired");
-    expect((await env.bot.sendMessage(env.user, env.chat, "USEDUP")).text).toContain("already been used");
-    expect((await env.bot.sendMessage(env.user, env.chat, "REVOKED")).text).toContain("revoked");
+    expect(JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload)).toContain("Welcome to your AI assistant");
+    expect(onboarded.texts.join("\n")).toContain("Set your timezone");
+    expect(await env.repos.users.get(env.user.id)).toBeDefined();
   });
 
   it("persists language and stream settings", async () => {
-    await onboard("LANGCODE");
+    await startBot();
     const picker = await env.bot.sendCommand(env.user, env.chat, "/lang");
     const lang = await env.bot.clickButton(env.user, env.chat, "lang:ru", picker.messages.at(-1)!);
     expect(lang.text ?? lang.editedText).toContain("русский");
@@ -123,7 +77,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("collects timezone through a conversation", async () => {
-    await onboard("TZCODE");
+    await startBot();
     const prompt = await env.bot.sendCommand(env.user, env.chat, "/timezone");
     expect(prompt.text).toContain("What time");
 
@@ -138,7 +92,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("lets users postpone timezone setup from onboarding", async () => {
-    const onboarded = await onboard("TZLATER");
+    const onboarded = await startBot();
     const later = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:later", onboarded.messages.at(-1)!);
 
     expect(later.text).toContain("/timezone");
@@ -147,7 +101,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("starts the default timezone flow from the onboarding button", async () => {
-    const onboarded = await onboard("TZSET");
+    const onboarded = await startBot();
     const prompt = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:set", onboarded.messages.at(-1)!);
     expect(prompt.text).toContain("What time");
 
@@ -159,9 +113,9 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("offers Moscow timezone directly for Russian-language users", async () => {
-    const ruUser = env.bot.createUser({ id: env.config.TELEGRAM_ADMIN_ID + 2, first_name: "Alina", language_code: "ru" });
+    const ruUser = env.bot.createUser({ id: env.user.id + 1, first_name: "Alina", language_code: "ru" });
     const ruChat = env.bot.createChat({ id: ruUser.id, type: "private", first_name: "Alina" }) as typeof env.chat;
-    const onboarded = await onboard("TZMOSCOW", ruUser, ruChat);
+    const onboarded = await startBot(ruUser, ruChat);
 
     expect(onboarded.getInlineButtonByData("tz:onboarding:moscow")).toBeDefined();
     const done = await env.bot.clickButton(ruUser, ruChat, "tz:onboarding:moscow", onboarded.messages.at(-1)!);
@@ -173,7 +127,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("does not show onboarding timezone prompt when timezone is already set", async () => {
-    await onboard("TZEXISTS");
+    await startBot();
     await env.repos.users.setTimezone(env.user.id, -420);
 
     const restarted = await env.bot.sendCommand(env.user, env.chat, "/start");
@@ -183,8 +137,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(restarted.getInlineButtonByData("tz:onboarding:set")).toBeUndefined();
   });
 
-  it("runs user text through the turn runner and sends rich messages", async () => {
-    await onboard("CHATCODE");
+  it("runs a brand-new user's text through the turn runner", async () => {
     const res = await env.bot.sendMessage(env.user, env.chat, "Hello bot");
     expectRichCall(res, "Echo: Hello bot");
     const rows = await env.repos.messages.listThread((await env.repos.threads.activeForUserTopic(env.user.id, null)).id);
@@ -192,7 +145,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("coalesces Telegram-split large text into one user turn", async () => {
-    await onboard("SPLITTEXT");
+    await startBot();
     const firstChunk = "a".repeat(4096);
     const secondChunk = "b".repeat(4096);
     const tail = "\nlast split chunk";
@@ -218,7 +171,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("does not coalesce quick short text messages", async () => {
-    await onboard("SHORTTEXTS");
+    await startBot();
 
     await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createTextMessage(env.user, env.chat, "first quick text"),
@@ -238,7 +191,7 @@ describe("Telegram bot with grammy-emulate", () => {
   it("keeps split text bursts scoped to Telegram topics", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
-    await onboard("SPLITTOPICS");
+    await startBot();
     const firstChunk = "t".repeat(4096);
     const otherTopicText = "other topic text";
 
@@ -263,7 +216,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("warns when /fork is used before private topics are enabled", async () => {
-    await onboard("FORKOFF");
+    await startBot();
     const res = await env.bot.sendCommand(env.user, env.chat, "/fork");
     expect(res.text).toContain("Topics are not enabled");
   });
@@ -271,7 +224,7 @@ describe("Telegram bot with grammy-emulate", () => {
   it("creates a fork topic and child thread when private topics are enabled", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
-    await onboard("FORKON");
+    await startBot();
     const parent = await env.repos.threads.activeForUserTopic(env.user.id, null);
     await env.bot.sendMessage(env.user, env.chat, "context before fork");
 
@@ -290,7 +243,7 @@ describe("Telegram bot with grammy-emulate", () => {
   it("treats a Telegram-created topic as a clean thread", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
-    await onboard("TOPICCLEAN");
+    await startBot();
     const general = await env.repos.threads.activeForUserTopic(env.user.id, null);
     await env.bot.sendMessage(env.user, env.chat, "general-only detail");
 
@@ -311,7 +264,7 @@ describe("Telegram bot with grammy-emulate", () => {
   it("ignores Telegram topic service messages before command or text in that topic", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
-    await onboard("TOPICSERVICE");
+    await startBot();
     const update = env.bot.server.updateFactory.createForumTopicCreated(
       env.user,
       env.chat,
@@ -333,7 +286,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("retries command replies without a stale private topic id", async () => {
-    await onboard("TOPICRETRY");
+    await startBot();
     const sendMessagePayloads: Array<Record<string, unknown>> = [];
     env.bot.api.config.use(async (prev, method, payload, signal) => {
       if (method === "sendMessage") {
@@ -355,7 +308,6 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("ingests accepted text documents and passes an inline file block to the turn runner", async () => {
-    await onboard("FILECODE");
     const res = await env.bot.sendDocument(
       env.user,
       env.chat,
@@ -391,7 +343,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
       },
     });
-    await onboard("REUSECODE");
+    await startBot();
 
     const firstDoc = env.bot.server.fileState.storeDocument("reuse.txt", "text/plain", {
       content: Buffer.from("shared cached file content"),
@@ -434,7 +386,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
       },
     });
-    await onboard("HASHREUSE");
+    await startBot();
 
     const bytes = Buffer.from("hash fallback content");
     const firstDoc = env.bot.server.fileState.storeDocument("hash-a.txt", "text/plain", { content: bytes });
@@ -472,7 +424,7 @@ describe("Telegram bot with grammy-emulate", () => {
       headers: { "Content-Type": "application/json" },
     }));
     vi.stubGlobal("fetch", fetchMock);
-    await onboard("HASHDOCX");
+    await startBot();
 
     const bytes = Buffer.from("same fake docx bytes");
     const firstDoc = env.bot.server.fileState.storeDocument(
@@ -517,7 +469,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
       },
     });
-    await onboard("HASHMISS");
+    await startBot();
 
     const bytes = Buffer.from("# Heading\n" + "restored cached path content ".repeat(40));
     const firstDoc = env.bot.server.fileState.storeDocument("restore-a.txt", "text/plain", { content: bytes });
@@ -557,10 +509,10 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
       },
     });
-    await onboard("REUSEA");
+    await startBot();
     const other = env.bot.createUser({ id: env.user.id + 300, first_name: "Bob", language_code: "en" });
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" }) as typeof env.chat;
-    await onboard("REUSEB", other, otherChat);
+    await startBot(other, otherChat);
 
     const firstDoc = env.bot.server.fileState.storeDocument("global.txt", "text/plain", {
       content: Buffer.from("global cached document"),
@@ -591,7 +543,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("refuses legacy .doc files before download", async () => {
-    await onboard("DOCCODE");
+    await startBot();
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "legacy.doc",
       mimeType: "application/msword",
@@ -604,7 +556,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("replies to unsupported media instead of silently ignoring it", async () => {
-    await onboard("AUDIOCODE");
+    await startBot();
     const res = await env.bot.sendAudio(env.user, env.chat, { duration: 3, title: "voice memo" });
 
     expect(res.text).toContain("not supported");
@@ -613,7 +565,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("answers photos as image context without sending a processing response", async () => {
-    await onboard("IMAGECODE");
+    await startBot();
     const res = await env.bot.sendPhoto(
       env.user,
       env.chat,
@@ -649,7 +601,7 @@ describe("Telegram bot with grammy-emulate", () => {
         },
       },
     });
-    await onboard("VISIONCODE");
+    await startBot();
     const res = await env.bot.sendPhoto(env.user, env.chat, {
       width: 640,
       height: 480,
@@ -665,10 +617,10 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("does not expose one user's image caption when another user reuses the cached image", async () => {
-    await onboard("IMGREUSEA");
+    await startBot();
     const other = env.bot.createUser({ id: env.user.id + 400, first_name: "Bob", language_code: "en" });
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" }) as typeof env.chat;
-    await onboard("IMGREUSEB", other, otherChat);
+    await startBot(other, otherChat);
 
     const firstPhotos = env.bot.server.fileState.storePhoto(640, 480, {
       content: Buffer.from([1, 2, 3, 4]),
@@ -707,7 +659,7 @@ describe("Telegram bot with grammy-emulate", () => {
   it("chunks large text files into searchable file chunks", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ config: { FILE_INLINE_TOKENS: 1 } });
-    await onboard("CHUNKCODE");
+    await startBot();
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "big.txt",
       mimeType: "text/plain",
@@ -726,7 +678,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("shows editable file-processing status for accepted text files", async () => {
-    await onboard("FILESTATUS");
+    await startBot();
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "status.txt",
       mimeType: "text/plain",
@@ -755,7 +707,7 @@ describe("Telegram bot with grammy-emulate", () => {
       status: 200,
       headers: { "Content-Type": "application/json" },
     })));
-    await onboard("DOCXSTATUS");
+    await startBot();
 
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "report.docx",
@@ -781,10 +733,10 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.from("slow file content") };
       },
     });
-    await onboard("CONCURRENT1");
+    await startBot();
     const other = env.bot.createUser({ id: env.user.id + 200, first_name: "Bob", language_code: "en" });
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" }) as typeof env.chat;
-    await onboard("CONCURRENT2", other, otherChat);
+    await startBot(other, otherChat);
 
     const filePromise = env.bot.sendDocument(env.user, env.chat, {
       fileName: "slow.txt",
@@ -812,7 +764,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.from("topic slow file content") };
       },
     });
-    await onboard("TOPICCONCURRENT");
+    await startBot();
 
     const topicDocument = env.bot.server.fileState.storeDocument("topic-slow.txt", "text/plain", {
       content: Buffer.from("unused"),
@@ -839,7 +791,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.from("should not be stored") };
       },
     });
-    await onboard("STOPFILE");
+    await startBot();
 
     const filePromise = env.bot.sendDocument(env.user, env.chat, {
       fileName: "cancel-me.txt",
@@ -875,7 +827,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.from("cancelled restore must not complete") };
       },
     });
-    await onboard("STOPCACHEDFILE");
+    await startBot();
 
     const document = env.bot.server.fileState.storeDocument("cached-cancel.txt", "text/plain", {
       content: Buffer.from("durable cached document content"),
@@ -916,7 +868,7 @@ describe("Telegram bot with grammy-emulate", () => {
         return { bytes: Buffer.from("different topic file content") };
       },
     });
-    await onboard("STOPOTHERTOPIC");
+    await startBot();
 
     const topicDocument = env.bot.server.fileState.storeDocument("keep-going.txt", "text/plain", {
       content: Buffer.from("unused"),
@@ -940,7 +892,7 @@ describe("Telegram bot with grammy-emulate", () => {
   }, 10_000);
 
   it("processes Telegram media groups as one combined turn", async () => {
-    await onboard("ALBUMCODE");
+    await startBot();
     const document = env.bot.server.fileState.storeDocument("album.txt", "text/plain", {
       content: Buffer.from("album document content"),
     });
@@ -972,9 +924,8 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain("album caption");
   });
 
-  async function onboard(code: string, user = env.user, chat = env.chat): Promise<BotResponse> {
-    await env.repos.invites.insert({ code, maxUses: 5, expiresAt: null, createdBy: env.config.TELEGRAM_ADMIN_ID });
-    return env.bot.sendCommand(user, chat, `/start ${code}`);
+  async function startBot(user = env.user, chat = env.chat): Promise<BotResponse> {
+    return env.bot.sendCommand(user, chat, "/start");
   }
 });
 

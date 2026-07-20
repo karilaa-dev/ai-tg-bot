@@ -20,7 +20,7 @@ The project-owned `generate_image` Pi extension supports one image, generate/edi
 
 ## Persistence and migration
 
-Pi JSONL is conversation-authoritative. Database messages retain Telegram/search/attachment metadata and Pi entry mappings. The idempotent `pi_cutover_v2` migration preserves users, invites, and just-bash workspaces while deleting the legacy conversation graph, summary schema, embeddings, search rows, and managed files.
+Pi JSONL is conversation-authoritative. Database messages retain Telegram/search/attachment metadata and Pi entry mappings. The idempotent `pi_cutover_v2` migration preserves users and just-bash workspaces while deleting the legacy conversation graph, summary schema, embeddings, search rows, and managed files. The `remove_invites_v1` migration removes the obsolete application-level access schema; Telegram is the access-control boundary.
 
 ## Acceptance checks
 

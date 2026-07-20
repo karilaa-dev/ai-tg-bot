@@ -12,7 +12,6 @@ const dbPath = path.resolve("data", `external-samples-${Date.now()}.sqlite`);
 const config = loadConfig({
   ...process.env,
   BOT_TOKEN: process.env.BOT_TOKEN || "TEST:TOKEN",
-  TELEGRAM_ADMIN_ID: process.env.TELEGRAM_ADMIN_ID || "1000",
   DB_URL: `sqlite:${dbPath}`,
   LOG_LEVEL: process.env.LOG_LEVEL || "warn",
 });

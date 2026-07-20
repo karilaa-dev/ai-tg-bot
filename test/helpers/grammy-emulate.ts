@@ -19,7 +19,6 @@ export interface GrammyEmulator {
   config: AppConfig;
   db: AppDatabase;
   repos: Repos;
-  admin: User;
   user: User;
   chat: Chat.PrivateChat;
   dispose(): Promise<void>;
@@ -105,8 +104,7 @@ export async function createGrammyEmulator(options: {
       return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
     }),
   });
-  const admin = bot.createUser({ id: config.TELEGRAM_ADMIN_ID, first_name: "Admin" });
-  const user = bot.createUser({ id: config.TELEGRAM_ADMIN_ID + 1, first_name: "Alice", language_code: "en" });
+  const user = bot.createUser({ id: 1001, first_name: "Alice", language_code: "en" });
   const chat = bot.createChat({ id: user.id, type: "private", first_name: "Alice" }) as Chat.PrivateChat;
   if (options.privateTopics) {
     bot.setBotAdmin(chat, { can_manage_topics: true });
@@ -126,7 +124,6 @@ export async function createGrammyEmulator(options: {
     config,
     db,
     repos,
-    admin,
     user,
     chat,
     dispose: async () => {

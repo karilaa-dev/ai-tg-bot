@@ -10,41 +10,6 @@ start-welcome =
 lang-pick = 🌐 Choose a language. Auto-picked: { $lang }.
 lang-auto-note = 🌐 Language was selected from your Telegram profile.
 lang-set = ✅ Language set to English.
-invite-ask = 🎟️ Send your invite code to continue.
-invite-invalid-unknown = ❓ Invite code was not found.
-invite-invalid-expired = ⏳ Invite code has expired.
-invite-invalid-exhausted = 🚫 Invite code has already been used.
-invite-invalid-revoked = 🗑️ Invite code was revoked.
-invite-created =
-    🎟️ <b>Invite created</b>
-
-    Code: <code>{ $code }</code>
-    Uses: <b>{ $uses }</b>
-    Expires: <b>{ $expires }</b>
-
-    { $link }
-invite-created-toast = 🎟️ Invite created
-invite-draft =
-    🎟️ Invite settings
-
-    Uses: { $uses }
-    Expires: { $expires }
-
-    Adjust with the buttons, then create the invite.
-invite-btn-uses = 🔢 Uses { $uses }
-invite-btn-exp-7d = 📅 7 days
-invite-btn-exp-30d = 📅 30 days
-invite-btn-exp-never = ♾️ Never expires
-invite-btn-create = ✅ Create invite
-invite-btn-open = 🔗 Open invite
-invite-btn-revoke = 🗑️ Revoke { $code }
-invite-exp-never = ♾️ never
-invite-status-active = ✅ active
-invite-status-expired = ⏳ expired
-invite-status-revoked = 🗑️ revoked
-invite-revoked-toast = 🗑️ Invite revoked
-invite-revoked = 🗑️ Invite revoked.
-invites-empty = 📭 No invites yet.
 tz-ask =
     🕒 *Set timezone*
 

@@ -7,6 +7,7 @@ export interface MigrationResult {
   deletedRows: Record<string, number>;
   fileSourcesApplied: boolean;
   migratedFileSources: number;
+  inviteRemovalApplied: boolean;
 }
 
 export async function up(db: SqlExecutor, dialect: DialectName): Promise<MigrationResult> {
@@ -17,7 +18,8 @@ export async function up(db: SqlExecutor, dialect: DialectName): Promise<Migrati
     else await postgres(tx);
     const cutover = await piCutover(tx, dialect);
     const fileSources = await migrateFileSourcesLocked(tx, dialect);
-    return { ...cutover, ...fileSources };
+    const inviteRemoval = await removeInvitesLocked(tx, dialect);
+    return { ...cutover, ...fileSources, ...inviteRemoval };
   });
 }
 
@@ -30,7 +32,6 @@ async function sqlite(db: SqlExecutor): Promise<void> {
       lang text not null default 'en',
       tz_offset_min integer,
       stream_mode integer not null default 1,
-      invited_with text,
       created_at integer not null
     )
   `);
@@ -48,7 +49,6 @@ async function postgres(db: SqlExecutor): Promise<void> {
       lang text not null default 'en',
       tz_offset_min integer,
       stream_mode integer not null default 1,
-      invited_with text,
       created_at bigint not null
     )
   `);
@@ -82,17 +82,6 @@ async function commonTables(
   intType: string,
   blobType: string,
 ): Promise<void> {
-  await db.execute(sql.raw(`
-    create table if not exists invites (
-      code text primary key,
-      max_uses integer not null,
-      used_count integer not null default 0,
-      expires_at ${intType},
-      revoked integer not null default 0,
-      created_by ${intType} not null,
-      created_at ${intType} not null
-    )
-  `));
   await db.execute(sql.raw(`
     create table if not exists threads (
       id ${idType},
@@ -335,6 +324,21 @@ async function migrateFileSourcesLocked(
   const after = await safeCount(tx, dialect, "file_sources");
   await tx.execute(sql`insert into schema_migrations(name, applied_at) values ('chat_file_sources_v1', ${Date.now()})`);
   return { fileSourcesApplied: true, migratedFileSources: Math.max(0, after - before) };
+}
+
+async function removeInvitesLocked(
+  tx: SqlExecutor,
+  dialect: DialectName,
+): Promise<Pick<MigrationResult, "inviteRemovalApplied">> {
+  const applied = await tx.query<{ name: string }>(sql`
+    select name from schema_migrations where name = 'remove_invites_v1' limit 1
+  `);
+  if (applied.length) return { inviteRemovalApplied: false };
+
+  await tx.execute(sql.raw("drop table if exists invites"));
+  await dropColumnIfExists(tx, dialect, "users", "invited_with");
+  await tx.execute(sql`insert into schema_migrations(name, applied_at) values ('remove_invites_v1', ${Date.now()})`);
+  return { inviteRemovalApplied: true };
 }
 
 async function insertMigratedTelegramSource(
