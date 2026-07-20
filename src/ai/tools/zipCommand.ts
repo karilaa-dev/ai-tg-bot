@@ -1,5 +1,5 @@
 import path from "node:path";
-import { zipSync, type ZipOptions, type Zippable } from "fflate";
+import { zip, type AsyncZipOptions, type AsyncZippable, type ZipOptions } from "fflate";
 import { defineCommand, type CommandContext, type ExecResult } from "just-bash";
 
 const MAX_ZIP_ENTRIES = 10_000;
@@ -22,7 +22,7 @@ export const zipCommand = defineCommand("zip", async (args, ctx) => {
   const options = parsed;
 
   const archivePath = ctx.fs.resolvePath(ctx.cwd, options.archive);
-  const entries: Zippable = Object.create(null) as Zippable;
+  const entries: AsyncZippable = Object.create(null) as AsyncZippable;
   const entrySources = new Map<string, string>();
   let entryCount = 0;
   let inputBytes = 0;
@@ -45,7 +45,7 @@ export const zipCommand = defineCommand("zip", async (args, ctx) => {
     }
 
     if (entryCount === 0) throw new Error("nothing to do");
-    const archive = zipSync(entries, { level: options.level });
+    const archive = await createZipArchive(entries, { level: options.level }, ctx.signal);
     await ctx.fs.writeFile(archivePath, archive);
     return success(options.quiet ? "" : `  adding: ${entryCount} entr${entryCount === 1 ? "y" : "ies"}\n`);
   } catch (error) {
@@ -167,6 +167,42 @@ function stripTrailingSlashes(value: string): string {
 
 function assertNotAborted(ctx: CommandContext): void {
   if (ctx.signal?.aborted) throw ctx.signal.reason ?? new DOMException("Tool execution aborted", "AbortError");
+}
+
+function createZipArchive(
+  entries: AsyncZippable,
+  options: AsyncZipOptions,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("Tool execution aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let terminate: (() => void) | undefined;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      terminate?.();
+      cleanup();
+      reject(signal?.reason ?? new DOMException("Tool execution aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      terminate = zip(entries, options, (error, archive) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve(archive);
+      });
+    } catch (error) {
+      settled = true;
+      cleanup();
+      reject(error);
+      return;
+    }
+    if (signal?.aborted) onAbort();
+  });
 }
 
 function success(stdout: string): ExecResult {
