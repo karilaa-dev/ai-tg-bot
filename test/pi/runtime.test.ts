@@ -495,6 +495,105 @@ describe("PiRuntimeManager", () => {
     await manager.dispose();
   }, 20_000);
 
+  it("loads durable extracted document context when a historical source is unavailable", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-reload-durable-file-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9133, firstName: "ReloadDocument", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload document" });
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      kind: "file",
+      content: { text: "an older document" },
+      textPlain: "an older document",
+    });
+    const document = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      messageId: message.id,
+      type: "txt",
+      contentSha256: "durable-document-hash",
+      mimeType: "text/plain",
+      name: "older.txt",
+      path: null,
+      size: 24,
+      contentMd: "durable historical document text",
+      summary: "durable historical document text",
+      isInline: true,
+    });
+    const indexedDocument = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      messageId: message.id,
+      type: "txt",
+      contentSha256: "indexed-document-hash",
+      mimeType: "text/plain",
+      name: "indexed.txt",
+      path: null,
+      size: 200,
+      summary: "indexed historical document summary",
+      isInline: false,
+    });
+    await repos.files.insertChunk({
+      fileId: indexedDocument.id,
+      idx: 0,
+      content: "indexed historical chunk sentinel",
+    });
+    await repos.files.attachToMessage(message.id, document.id);
+    await repos.files.attachToMessage(message.id, indexedDocument.id);
+    let providerCalls = 0;
+    let liveText = "";
+    const stream = ((model: Model<Api>, context: Context) => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "load-old-document",
+          name: "load_message",
+          arguments: { message_id: message.id, file_ids: [document.id, indexedDocument.id] },
+        });
+      }
+      liveText = context.messages.flatMap((entry) => entry.role === "toolResult"
+        ? entry.content.filter((part) => part.type === "text").map((part) => part.text)
+        : []).join("\n");
+      return successStream(model, "Older document loaded");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const runtime = await manager.runtime(thread, user);
+    let remoteLoads = 0;
+    runtime.bridge.beginTurn({
+      api: {} as never,
+      chatId: user.tg_id,
+      resolveFile: async () => {
+        remoteLoads += 1;
+        throw new Error("Telegram file id expired");
+      },
+    });
+
+    await runtime.session.prompt("Load that old document", { expandPromptTemplates: false, source: "extension" });
+
+    expect(providerCalls).toBe(2);
+    expect(remoteLoads).toBe(2);
+    expect(liveText).toContain("durable historical document text");
+    expect(liveText).toContain(`Attachment #${indexedDocument.id} indexed.txt is indexed`);
+    expect(liveText).toContain("indexed historical document summary");
+    const toolResult = runtime.session.messages.find((entry) => entry.role === "toolResult");
+    expect(toolResult?.role === "toolResult" && toolResult.content[0]?.type === "text"
+      ? toolResult.content[0].text
+      : "").toContain(`"durable_file_ids":[${document.id},${indexedDocument.id}]`);
+    await manager.dispose();
+  }, 20_000);
+
   it("terminates after successful image generation without a follow-up provider call", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-terminal-image-"));
     const config = loadTestConfig({

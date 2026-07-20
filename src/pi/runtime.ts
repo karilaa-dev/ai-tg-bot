@@ -280,6 +280,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
+  private readonly durableContextFileIds = new Set<number>();
 
   constructor(input: {
     config: AppConfig;
@@ -310,6 +311,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.pendingCreatedFiles = [];
     this.turnFileCache.clear();
     this.contextFileIds.clear();
+    this.durableContextFileIds.clear();
     for (const fileId of input.currentFileIds ?? []) this.contextFileIds.add(fileId);
   }
 
@@ -324,6 +326,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       embedder: this.embedder,
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
+      selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),
       createdFiles: this.attachments,
       pendingCreatedFiles: this.pendingCreatedFiles,
     };
@@ -353,8 +356,19 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     for (const fileId of fileIds) this.contextFileIds.add(fileId);
   }
 
+  selectDurableContextFiles(fileIds: number[]): void {
+    for (const fileId of fileIds) {
+      this.contextFileIds.add(fileId);
+      this.durableContextFileIds.add(fileId);
+    }
+  }
+
   selectedContextFileIds(): ReadonlySet<number> {
     return this.contextFileIds;
+  }
+
+  selectedDurableContextFileIds(): ReadonlySet<number> {
+    return this.durableContextFileIds;
   }
 }
 
@@ -385,6 +399,14 @@ function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
             if (!file) continue;
             if (file.is_inline && file.content_md && containsInlineAttachment(textParts, file.id)) {
               injectedIds.add(file.id);
+              continue;
+            }
+            if (file.type !== "image"
+              && file.type !== "other"
+              && file.extraction_status === "ready"
+              && bridge.selectedDurableContextFileIds().has(file.id)) {
+              injectedIds.add(file.id);
+              additions.push(durableDocumentContext(file));
               continue;
             }
             try {

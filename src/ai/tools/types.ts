@@ -18,6 +18,7 @@ export interface ToolBuildInput {
   embedder?: TextEmbedder;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   selectContextFiles?: (fileIds: number[]) => void;
+  selectDurableContextFiles?: (fileIds: number[]) => void;
   createdFiles?: CreatedFileAttachment[];
   pendingCreatedFiles?: PendingCreatedFile[];
 }
@@ -90,4 +91,5 @@ export type LoadMessageResult =
       files: LoadMessageFileEntry[];
       images: LoadMessageImageEntry[];
       materialized_file_ids: number[];
+      durable_file_ids: number[];
     };
