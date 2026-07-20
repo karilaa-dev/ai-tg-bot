@@ -29,12 +29,23 @@ describe("Pi retrieval embedding extension", () => {
 
   it("times out stalled attempts and includes the final retryable response body", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("quota depleted", { status: 429 })));
+    const cancelledBodies = [vi.fn(), vi.fn()];
+    let responseIndex = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (responseIndex < cancelledBodies.length) {
+        const cancel = cancelledBodies[responseIndex];
+        responseIndex += 1;
+        return new Response(new ReadableStream({ cancel }), { status: 429 });
+      }
+      return new Response("quota depleted", { status: 429 });
+    }));
     const quota = embedForRetrieval(["one"], loadTestConfig());
     const quotaRejection = expect(quota).rejects.toThrow("HTTP 429: quota depleted");
     await vi.runAllTimersAsync();
     await quotaRejection;
     expect(fetch).toHaveBeenCalledTimes(3);
+    expect(cancelledBodies[0]).toHaveBeenCalledOnce();
+    expect(cancelledBodies[1]).toHaveBeenCalledOnce();
 
     vi.stubGlobal("fetch", vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });

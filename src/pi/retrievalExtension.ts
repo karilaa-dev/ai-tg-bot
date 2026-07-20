@@ -71,6 +71,9 @@ async function retryFetch(
       if (response.status !== 429 && response.status < 500) {
         return { response, body: await response.text() };
       }
+      if (attempt < attempts - 1) {
+        await response.body?.cancel().catch(() => undefined);
+      }
       const body = attempt === attempts - 1 ? await response.text().catch(() => "") : "";
       lastError = new Error(`${label} failed with HTTP ${response.status}${body ? `: ${body}` : ""}`);
       if (attempt < attempts - 1) {
