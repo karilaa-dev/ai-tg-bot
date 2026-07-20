@@ -47,7 +47,12 @@ describe.skipIf(!postgresUrl)("Pi cutover migration on PostgreSQL", () => {
     expect(await columnExists("threads", "pi_session_file")).toBe(true);
     expect(await columnExists("threads", "meta_summary")).toBe(false);
     expect(await columnNullable("files", "path")).toBe(true);
-    expect(await db.migrate()).toEqual({ piCutoverApplied: false, deletedRows: {} });
+    expect(await db.migrate()).toEqual({
+      piCutoverApplied: false,
+      deletedRows: {},
+      fileSourcesApplied: false,
+      migratedFileSources: 0,
+    });
   });
 
   async function count(table: string): Promise<number> {

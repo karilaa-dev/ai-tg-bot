@@ -8,15 +8,17 @@ import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { CreatedFileAttachment } from "../ai/tools/types.js";
+import { chatFileMarker } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
+import { persistManagedFile } from "../files/storage.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
 const MAX_REFERENCES = 5;
 
-export interface TelegramImageBridge {
+export interface ChatImageBridge {
   config: AppConfig;
   repos: Repos;
   user: UserRow;
@@ -44,16 +46,16 @@ type GeneratedImage = {
   model: string;
 };
 
-export function createGenerateImagePiTool(bridge: TelegramImageBridge): ToolDefinition {
+export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefinition {
   return {
     name: "generate_image",
     label: "Generate image",
     description:
-      "Generate or edit exactly one image. References are current-thread Telegram image file ids. After success, give one concise past-tense final sentence and do not call more tools.",
-    promptSnippet: "Generate or edit one Telegram-delivered raster image.",
+      "Generate or edit exactly one image. References are current-thread chat image file ids. After success, give one concise past-tense final sentence and do not call more tools.",
+    promptSnippet: "Generate or edit one chat-delivered raster image.",
     promptGuidelines: [
       "Use generate_image for image generation or editing requests.",
-      "Pass the user's image wording faithfully and use reference_file_ids for referenced Telegram images.",
+      "Pass the user's image wording faithfully and use reference_file_ids for referenced chat images.",
       "After generate_image succeeds, do not call another tool and do not claim the image is still being generated.",
     ],
     parameters: Type.Object({
@@ -109,24 +111,38 @@ export function createGenerateImagePiTool(bridge: TelegramImageBridge): ToolDefi
         path: null,
         size: generated.bytes.length,
         contentSha256: createHash("sha256").update(generated.bytes).digest("hex"),
+        mimeType: generated.mimeType,
         summary: generated.revisedPrompt ?? prompt,
         isInline: false,
       });
+      let persistedPath: string | undefined;
+      try {
+        persistedPath = await persistManagedFile(bridge.config, bridge.repos.files, file.id, generated.bytes);
+      } catch (error) {
+        bridge.logger?.warn("generated image snapshot persistence failed; Telegram recovery will be recorded after delivery", {
+          fileId: file.id,
+          name,
+          error: String(error),
+        });
+      }
       bridge.attachments.push({
         fileId: file.id,
         type: "image",
         name,
+        mimeType: generated.mimeType,
+        path: persistedPath,
         data: generated.bytes,
         size: generated.bytes.length,
         caption: params.caption?.trim() || null,
         inline: false,
-        card: `[Generated image #${file.id}: ${generated.revisedPrompt ?? prompt}]`,
+        card: `${chatFileMarker(file.id)} [Generated image #${file.id}: ${generated.revisedPrompt ?? prompt}]`,
         delivery: "photo",
         origin: "generated_image",
       });
       const result = {
         generated_image: true,
         file_id: file.id,
+        marker: chatFileMarker(file.id),
         name,
         provider: generated.provider,
         model: generated.model,
@@ -138,13 +154,14 @@ export function createGenerateImagePiTool(bridge: TelegramImageBridge): ToolDefi
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
         details: result,
+        terminate: true,
       };
     },
   } as ToolDefinition;
 }
 
 async function loadReferences(
-  bridge: TelegramImageBridge,
+  bridge: ChatImageBridge,
   referenceIds: number[],
   signal?: AbortSignal,
 ): Promise<ImageContent[]> {
@@ -165,7 +182,7 @@ async function loadReferences(
 }
 
 async function generateWithFallback(
-  bridge: TelegramImageBridge,
+  bridge: ChatImageBridge,
   request: {
     prompt: string;
     mode: "auto" | "generate" | "edit";
@@ -202,7 +219,7 @@ async function generateWithFallback(
 }
 
 async function requestCodexImage(
-  bridge: TelegramImageBridge,
+  bridge: ChatImageBridge,
   request: {
     prompt: string;
     mode: "auto" | "generate" | "edit";
@@ -260,7 +277,7 @@ async function requestCodexImage(
 }
 
 async function requestOpenRouterImage(
-  bridge: TelegramImageBridge,
+  bridge: ChatImageBridge,
   request: {
     prompt: string;
     outputFormat: "png" | "jpeg" | "webp";
@@ -313,6 +330,48 @@ async function parseCodexImageSse(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let latestPartial: { data: string; mimeType: string; revisedPrompt?: string } | undefined;
+  let imageCompleted = false;
+  const consume = (chunk: string): { data: string; mimeType: string; revisedPrompt?: string } | undefined => {
+    const data = chunk.split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("\n");
+    if (!data || data === "[DONE]") return undefined;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+    const item = imageItem(event.item) ?? imageItem(event) ?? responseImageItem(event.response);
+    if (item?.status === "completed" || event.type === "response.image_generation_call.completed") {
+      imageCompleted = true;
+    }
+    const raw = typeof item?.result === "string" ? item.result : typeof item?.b64_json === "string" ? item.b64_json : undefined;
+    if (raw && (item?.status === undefined || item.status === "completed")) {
+      return {
+        ...dataUrlParts(raw, fallbackMimeType),
+        revisedPrompt: typeof item?.revised_prompt === "string" ? item.revised_prompt : undefined,
+      };
+    }
+    if ((event.type === "image_generation.completed" || event.type === "image_edit.completed")
+      && typeof event.b64_json === "string") {
+      return dataUrlParts(event.b64_json, mimeFromEvent(event, fallbackMimeType));
+    }
+    if (event.type === "response.image_generation_call.partial_image" && typeof event.partial_image_b64 === "string") {
+      latestPartial = dataUrlParts(event.partial_image_b64, mimeFromEvent(event, fallbackMimeType));
+    }
+    if (event.type === "response.failed" || event.type === "error") {
+      const nested = event.error && typeof event.error === "object" ? event.error as Record<string, unknown> : undefined;
+      throw new Error(typeof event.message === "string"
+        ? event.message
+        : typeof nested?.message === "string"
+          ? nested.message
+          : "Codex image request failed.");
+    }
+    return undefined;
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -320,39 +379,37 @@ async function parseCodexImageSse(
     const chunks = buffer.split(/\r?\n\r?\n/);
     buffer = chunks.pop() ?? "";
     for (const chunk of chunks) {
-      const data = chunk.split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-      if (!data || data === "[DONE]") continue;
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(data) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      const item = imageItem(event.item) ?? imageItem(event);
-      const raw = typeof item?.result === "string" ? item.result : typeof item?.b64_json === "string" ? item.b64_json : undefined;
-      if (raw && (item?.status === undefined || item.status === "completed")) {
-        const parts = dataUrlParts(raw, fallbackMimeType);
+      const parsed = consume(chunk);
+      if (parsed) {
         await reader.cancel().catch(() => undefined);
-        return {
-          ...parts,
-          revisedPrompt: typeof item?.revised_prompt === "string" ? item.revised_prompt : undefined,
-        };
-      }
-      if (event.type === "response.failed" || event.type === "error") {
-        throw new Error(typeof event.message === "string" ? event.message : "Codex image request failed.");
+        return parsed;
       }
     }
   }
-  throw new Error("Codex returned no completed image_generation result.");
+  const final = consume(buffer);
+  if (final) return final;
+  // The hosted Codex endpoint can omit the base64 result from output_item.done
+  // after streaming a usable final partial image. Keep only the newest partial
+  // in memory and return it once the stream has completed.
+  if (imageCompleted && latestPartial) return latestPartial;
+  throw new Error("Codex image network stream ended before a completed image_generation result.");
 }
 
 function imageItem(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && (value as Record<string, unknown>).type === "image_generation_call"
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function responseImageItem(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const output = (value as Record<string, unknown>).output;
+  return Array.isArray(output) ? output.map(imageItem).find(Boolean) : undefined;
+}
+
+function mimeFromEvent(event: Record<string, unknown>, fallbackMimeType: string): string {
+  const format = event.output_format;
+  return format === "jpeg" || format === "png" || format === "webp" ? mimeFor(format) : fallbackMimeType;
 }
 
 function dataUrl(image: ImageContent): string {

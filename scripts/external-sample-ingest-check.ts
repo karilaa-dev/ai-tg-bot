@@ -102,7 +102,6 @@ async function ingestSample(
     repo: repos.files,
     userId,
     threadId,
-    telegramFileId: `external-${sample.name}`,
     bytes,
     name: sample.name,
     mime: sample.mime,

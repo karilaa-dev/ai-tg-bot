@@ -30,6 +30,9 @@ try {
     const deletedFiles = await clearManagedFiles();
     logger.info("Pi cutover cleanup complete", { deletedRows: migration.deletedRows, deletedFiles, preserved: config.BASH_WORKSPACE_ROOT });
   }
+  if (migration.fileSourcesApplied) {
+    logger.info("chat file source migration complete", { migratedSources: migration.migratedFileSources });
+  }
   logger.debug("checking docling health", { url: config.DOCLING_URL });
   try {
     await checkDocling(config);

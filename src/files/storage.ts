@@ -1,8 +1,80 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { nanoid } from "nanoid";
+import type { AppConfig } from "../config.js";
+import type { FilesRepo } from "../db/repos/files.js";
+import { MAX_FILE_BYTES } from "./limits.js";
 
 export const FILES_DIR = "data/files";
+export const CHAT_FILES_DIR = ".chat-files";
+
+export class ManagedFileStore {
+  readonly root: string;
+  private readonly legacyRoot = path.resolve(FILES_DIR);
+
+  constructor(config: Pick<AppConfig, "BASH_WORKSPACE_ROOT">) {
+    this.root = path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR);
+  }
+
+  pathFor(fileId: number): string {
+    assertFileId(fileId);
+    return path.join(this.root, String(fileId), "content");
+  }
+
+  async write(fileId: number, input: Buffer | Uint8Array): Promise<string> {
+    assertFileId(fileId);
+    const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+    if (bytes.length > MAX_FILE_BYTES) throw new Error(`File #${fileId} exceeds the file size limit.`);
+    await ensurePrivateDirectory(this.root);
+    const directory = path.join(this.root, String(fileId));
+    await ensurePrivateDirectory(directory);
+    const finalPath = this.pathFor(fileId);
+    const partialPath = path.join(directory, `.content.part-${process.pid}-${randomUUID()}`);
+    try {
+      await fs.writeFile(partialPath, bytes, { flag: "wx", mode: 0o600 });
+      await fs.rename(partialPath, finalPath);
+      await fs.chmod(finalPath, 0o600);
+      return finalPath;
+    } finally {
+      await fs.unlink(partialPath).catch(() => undefined);
+    }
+  }
+
+  async readManaged(fileId: number): Promise<{ path: string; bytes: Buffer } | undefined> {
+    const filePath = this.pathFor(fileId);
+    const bytes = await readSafeRegularFile(filePath, MAX_FILE_BYTES);
+    if (!bytes) return undefined;
+    await fs.chmod(filePath, 0o600);
+    return { path: filePath, bytes };
+  }
+
+  async readKnownPath(fileId: number, filePath: string): Promise<{ path: string; bytes: Buffer; managed: boolean } | undefined> {
+    const resolved = path.resolve(filePath);
+    const managedPath = this.pathFor(fileId);
+    const managed = resolved === managedPath;
+    if (!managed && !isPathInside(this.legacyRoot, resolved)) return undefined;
+    const bytes = await readSafeRegularFile(resolved, MAX_FILE_BYTES);
+    if (!bytes) return undefined;
+    if (managed) await fs.chmod(resolved, 0o600);
+    return { path: resolved, bytes, managed };
+  }
+
+  async remove(fileId: number): Promise<void> {
+    assertFileId(fileId);
+    await fs.rm(path.dirname(this.pathFor(fileId)), { recursive: true, force: true });
+  }
+}
+
+export async function persistManagedFile(
+  config: Pick<AppConfig, "BASH_WORKSPACE_ROOT">,
+  files: FilesRepo,
+  fileId: number,
+  bytes: Buffer | Uint8Array,
+): Promise<string> {
+  const filePath = await new ManagedFileStore(config).write(fileId, bytes);
+  await files.setPath(fileId, filePath);
+  return filePath;
+}
 
 export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise<number> {
   const outDir = path.resolve(root);
@@ -12,17 +84,30 @@ export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise
   return count;
 }
 
-export async function storeFileBytes(bytes: Buffer | Uint8Array, ext: string): Promise<string> {
-  const outDir = path.resolve(FILES_DIR);
-  await fs.mkdir(outDir, { recursive: true });
-  const dest = path.join(outDir, `${nanoid()}${ext}`);
-  try {
-    await fs.writeFile(dest, bytes);
-  } catch (err) {
-    await fs.unlink(dest).catch(() => undefined);
-    throw err;
+async function ensurePrivateDirectory(directory: string): Promise<void> {
+  const existing = await fs.lstat(directory).catch(() => undefined);
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
+    throw new Error(`Managed file store path is not a safe directory: ${directory}`);
   }
-  return dest;
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fs.chmod(directory, 0o700);
+}
+
+async function readSafeRegularFile(filePath: string, maxBytes: number): Promise<Buffer | undefined> {
+  const stat = await fs.lstat(filePath).catch(() => undefined);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) return undefined;
+  const bytes = await fs.readFile(filePath).catch(() => undefined);
+  if (!bytes || bytes.length > maxBytes) return undefined;
+  return bytes;
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function assertFileId(fileId: number): void {
+  if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error(`Invalid chat file id: ${fileId}`);
 }
 
 async function countFiles(root: string): Promise<number> {

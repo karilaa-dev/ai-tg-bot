@@ -14,6 +14,17 @@ import {
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 describe("Pi automatic provider", () => {
+  it("uses Codex exclusively while its OAuth and provider are available", async () => {
+    const harness = providerHarness({ codexConfigured: true });
+    const mainEvents = await harness.run("main");
+    const helperEvents = await harness.run("helper");
+
+    expect(harness.calls).toEqual(["codex", "codex"]);
+    expect(textDeltas(mainEvents)).toBe("codex answer");
+    expect(textDeltas(helperEvents)).toBe("codex answer");
+    expect(harness.router.circuit.state().open).toBe(false);
+  });
+
   it("uses OpenRouter only when Codex OAuth is not configured", async () => {
     const harness = providerHarness({ codexConfigured: false });
     const events = await harness.run();
@@ -106,10 +117,11 @@ function providerHarness(input: {
   return {
     calls,
     router,
-    run: async () => {
+    run: async (kind: "main" | "helper" = "main") => {
       if (!registered) throw new Error("provider was not registered");
       const events: AssistantMessageEvent[] = [];
-      for await (const event of registered.streamSimple(router.mainModel, { systemPrompt: "", messages: [] })) events.push(event);
+      const model = kind === "helper" ? router.helperModel : router.mainModel;
+      for await (const event of registered.streamSimple(model, { systemPrompt: "", messages: [] })) events.push(event);
       return events;
     },
   };

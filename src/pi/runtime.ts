@@ -22,9 +22,13 @@ import type { CreatedFileAttachment, PendingCreatedFile, ToolBuildInput } from "
 import type { TextEmbedder } from "../memory/embeddings.js";
 import type { Logger } from "../logger.js";
 import { detectImageMediaType, imageMediaTypeFromName } from "../files/mediaType.js";
-import { createGenerateImagePiTool, type TelegramImageBridge } from "./imageExtension.js";
+import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtension.js";
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
+import type { ResolvedChatFile } from "../files/source.js";
+import { chatFileIdsFromText } from "../files/contextMarker.js";
+import { threadChainScope } from "../memory/retrieval.js";
+import { refreshExtractedFileBytes } from "../files/ingest.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -32,7 +36,8 @@ export interface PiTurnTransport {
   api: Api;
   chatId: number;
   messageThreadId?: number;
-  redownloadFile(file: FileRow, signal?: AbortSignal): Promise<Buffer>;
+  resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile>;
+  currentFileIds?: number[];
 }
 
 export interface PiThreadRuntime {
@@ -103,7 +108,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       cwd: process.cwd(),
       agentDir: this.agentDir,
       settingsManager,
-      extensionFactories: [createTelegramImageContextExtension(bridge)],
+      extensionFactories: [createChatFileContextExtension(bridge)],
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -260,7 +265,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 }
 
-export class ThreadBridge implements PiToolBridge, TelegramImageBridge {
+export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   user: UserRow;
   thread: ThreadRow;
   readonly config: AppConfig;
@@ -273,8 +278,9 @@ export class ThreadBridge implements PiToolBridge, TelegramImageBridge {
   attachments: CreatedFileAttachment[] = [];
   pendingCreatedFiles: PendingCreatedFile[] = [];
   private transport?: PiTurnTransport;
-  private readonly stagedImageIds = new Set<number>();
-  private readonly turnImageCache = new Map<number, ImageContent>();
+  private readonly turnFileCache = new Map<number, ResolvedChatFile>();
+  private readonly contextFileIds = new Set<number>();
+  private readonly durableContextFileIds = new Set<number>();
 
   constructor(input: {
     config: AppConfig;
@@ -303,8 +309,10 @@ export class ThreadBridge implements PiToolBridge, TelegramImageBridge {
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
-    this.stagedImageIds.clear();
-    this.turnImageCache.clear();
+    this.turnFileCache.clear();
+    this.contextFileIds.clear();
+    this.durableContextFileIds.clear();
+    for (const fileId of input.currentFileIds ?? []) this.contextFileIds.add(fileId);
   }
 
   buildInput(): ToolBuildInput {
@@ -316,70 +324,191 @@ export class ThreadBridge implements PiToolBridge, TelegramImageBridge {
       thread: this.thread,
       logger: this.logger,
       embedder: this.embedder,
-      redownloadFile: async (file) => (await this.resolveImage(file)).bytes,
+      resolveFile: (file, signal) => this.resolveFile(file, signal),
+      selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
+      selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),
       createdFiles: this.attachments,
       pendingCreatedFiles: this.pendingCreatedFiles,
     };
   }
 
-  stageImages(fileIds: number[]): void {
-    for (const fileId of fileIds) this.stagedImageIds.add(fileId);
-  }
-
-  async takeStagedImages(): Promise<ImageContent[]> {
-    const ids = [...this.stagedImageIds];
-    const missingIds = ids.filter((id) => !this.turnImageCache.has(id));
-    const files = await this.repos.files.listByIds(missingIds);
-    const byId = new Map(files.map((file) => [file.id, file]));
-    for (const id of missingIds) {
-      const file = byId.get(id);
-      if (!file || file.type !== "image") continue;
-      const resolved = await this.resolveImage(file);
-      this.turnImageCache.set(id, { type: "image", data: resolved.bytes.toString("base64"), mimeType: resolved.mimeType });
-    }
-    return ids.flatMap((id) => {
-      const image = this.turnImageCache.get(id);
-      return image ? [image] : [];
-    });
+  async resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile> {
+    const cached = this.turnFileCache.get(file.id);
+    if (cached) return cached;
+    if (!this.transport) throw new Error(`File #${file.id} has no active chat transport resolver.`);
+    const loaded = await this.transport.resolveFile(file, signal);
+    const resolved: ResolvedChatFile = {
+      ...loaded,
+      mimeType: file.type === "image"
+        ? detectImageMediaType(loaded.bytes) ?? loaded.mimeType ?? imageMediaTypeFromName(file.name) ?? "image/jpeg"
+        : loaded.mimeType,
+    };
+    this.turnFileCache.set(file.id, resolved);
+    return resolved;
   }
 
   async resolveImage(file: FileRow, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType: string }> {
-    let bytes: Buffer;
-    if (file.telegram_file_id && this.transport) {
-      bytes = await this.transport.redownloadFile(file, signal);
-    } else if (file.telegram_file_id) {
-      throw new Error(`Image #${file.id} has no active Telegram transport for redownload.`);
-    } else if (file.path) {
-      bytes = await fs.readFile(file.path);
-    } else {
-      throw new Error(`Image #${file.id} has no Telegram file_id.`);
+    const resolved = await this.resolveFile(file, signal);
+    return { bytes: resolved.bytes, mimeType: resolved.mimeType ?? "image/jpeg" };
+  }
+
+  selectContextFiles(fileIds: number[]): void {
+    for (const fileId of fileIds) this.contextFileIds.add(fileId);
+  }
+
+  selectDurableContextFiles(fileIds: number[]): void {
+    for (const fileId of fileIds) {
+      this.contextFileIds.add(fileId);
+      this.durableContextFileIds.add(fileId);
     }
-    const mimeType = detectImageMediaType(bytes) ?? imageMediaTypeFromName(file.name) ?? "image/jpeg";
-    return { bytes, mimeType };
+  }
+
+  selectedContextFileIds(): ReadonlySet<number> {
+    return this.contextFileIds;
+  }
+
+  selectedDurableContextFileIds(): ReadonlySet<number> {
+    return this.durableContextFileIds;
   }
 }
 
-function createTelegramImageContextExtension(bridge: ThreadBridge): InlineExtension {
+function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
   return {
-    name: "telegram-image-context",
+    name: "chat-file-context",
     factory: (pi) => {
       pi.on("context", async (event) => {
-        const images = await bridge.takeStagedImages();
-        if (!images.length) return;
         const messages = event.messages.map((message) => cloneMessage(message));
+        const scope = await threadChainScope(bridge.repos, bridge.thread);
+        const allowedIds = new Set(scope.fileIds);
+        let changed = false;
+        const injectedIds = new Set<number>();
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
-          if (message?.role !== "user") continue;
-          const textParts: TextContent[] = typeof message.content === "string"
-            ? [{ type: "text", text: message.content }]
-            : message.content.filter((part): part is TextContent => part.type === "text");
-          messages[index] = { ...message, content: [...textParts, ...images] };
-          return { messages };
+          if (!message || (message.role !== "user" && message.role !== "toolResult")) continue;
+          const textParts = messageTextParts(message);
+          const fileIds = [...new Set(textParts.flatMap((part) => chatFileIdsFromText(part.text)))]
+            .filter((id) => allowedIds.has(id)
+              && bridge.selectedContextFileIds().has(id)
+              && !injectedIds.has(id));
+          if (!fileIds.length) continue;
+          const rows = await bridge.repos.files.listByIds(fileIds);
+          const byId = new Map(rows.map((file) => [file.id, file]));
+          const additions: Array<TextContent | ImageContent> = [];
+          for (const fileId of fileIds) {
+            let file = byId.get(fileId);
+            if (!file) continue;
+            if (file.is_inline && file.content_md && containsInlineAttachment(textParts, file.id)) {
+              injectedIds.add(file.id);
+              continue;
+            }
+            if (file.type !== "image"
+              && file.type !== "other"
+              && file.extraction_status === "ready"
+              && bridge.selectedDurableContextFileIds().has(file.id)) {
+              injectedIds.add(file.id);
+              additions.push(durableDocumentContext(file));
+              continue;
+            }
+            try {
+              injectedIds.add(fileId);
+              const resolved = await bridge.resolveFile(file);
+              const contentChanged = Boolean(resolved.contentSha256
+                && file.content_sha256 !== resolved.contentSha256);
+              const needsExtractionRetry = file.type !== "image" && file.extraction_status !== "ready";
+              if (contentChanged || needsExtractionRetry) {
+                bridge.logger.warn(contentChanged ? "chat file content hash changed" : "chat file extraction retrying", {
+                  fileId: file.id,
+                  threadId: bridge.thread.id,
+                  extractionStatus: file.extraction_status,
+                });
+                try {
+                  file = await refreshExtractedFileBytes({
+                    config: bridge.config,
+                    repo: bridge.repos.files,
+                    file,
+                    bytes: resolved.bytes,
+                    mime: resolved.mimeType,
+                    embeddings: bridge.repos.embeddings,
+                    embedder: bridge.embedder,
+                    logger: bridge.logger,
+                  });
+                } catch (error) {
+                  bridge.logger.warn("chat file extracted content refresh failed", {
+                    fileId: file.id,
+                    threadId: bridge.thread.id,
+                    error: String(error),
+                  });
+                  additions.push({
+                    type: "text",
+                    text: `\n\n[Attachment #${file.id} could not be refreshed from its chat source.]`,
+                  });
+                  continue;
+                }
+              }
+              if (file.type === "image") {
+                additions.push({
+                  type: "image",
+                  data: resolved.bytes.toString("base64"),
+                  mimeType: resolved.mimeType ?? "image/jpeg",
+                });
+              } else {
+                additions.push(durableDocumentContext(file));
+              }
+            } catch (error) {
+              bridge.logger.warn("chat file context materialization failed", {
+                fileId: file.id,
+                threadId: bridge.thread.id,
+                error: String(error),
+              });
+              additions.push(file.type !== "image" && file.extraction_status === "ready"
+                ? durableDocumentContext(file)
+                : { type: "text", text: `\n\n[Attachment #${file.id} is currently unavailable from its chat source.]` });
+            }
+          }
+          if (!additions.length) continue;
+          messages[index] = appendMessageContent(message, additions);
+          changed = true;
         }
-        throw new Error("Telegram image context could not find a user message for transient injection.");
+        return changed ? { messages } : undefined;
       });
     },
   };
+}
+
+function durableDocumentContext(file: FileRow): TextContent {
+  if (file.is_inline && file.content_md) {
+    return { type: "text", text: `\n\n<attachment id="${file.id}" name="${file.name}">\n${file.content_md}\n</attachment>` };
+  }
+  return {
+    type: "text",
+    text: `\n\n[Attachment #${file.id} ${file.name} is indexed. ${file.summary ?? ""} Use search_in_file or read_file_section for its full extracted content.]`,
+  };
+}
+
+function containsInlineAttachment(parts: TextContent[], fileId: number): boolean {
+  return parts.some((part) => part.text.includes(`<attachment id="${fileId}"`));
+}
+
+function messageTextParts(message: AgentMessage): TextContent[] {
+  if (message.role === "user") {
+    return typeof message.content === "string"
+      ? [{ type: "text", text: message.content }]
+      : message.content.filter((part): part is TextContent => part.type === "text");
+  }
+  if (message.role === "toolResult") return message.content.filter((part): part is TextContent => part.type === "text");
+  return [];
+}
+
+function appendMessageContent(
+  message: AgentMessage,
+  additions: Array<TextContent | ImageContent>,
+): AgentMessage {
+  if (message.role === "user") {
+    const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+    return { ...message, content: [...content, ...additions] };
+  }
+  if (message.role === "toolResult") return { ...message, content: [...message.content, ...additions] };
+  return message;
 }
 
 function cloneMessage(message: AgentMessage): AgentMessage {
@@ -389,6 +518,7 @@ function cloneMessage(message: AgentMessage): AgentMessage {
       content: typeof message.content === "string" ? message.content : [...message.content],
     };
   }
+  if (message.role === "toolResult") return { ...message, content: [...message.content] };
   return { ...message };
 }
 

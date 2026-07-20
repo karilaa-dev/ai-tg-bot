@@ -1,5 +1,6 @@
-import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
@@ -367,7 +368,7 @@ describe("Telegram bot with grammy-emulate", () => {
     );
 
     expectRichCall(res, "Please read this");
-    expectRichCall(res, "```txt name=notes.txt");
+    expectRichCall(res, "[[chat-file:");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
@@ -398,7 +399,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const [first] = await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, firstDoc),
     ]);
-    expectRichCall(first!, "shared cached file content");
+    expectRichCall(first!, "[[chat-file:");
 
     const secondDoc = env.bot.server.fileState.storeDocument("reuse-again.txt", "text/plain", {
       content: Buffer.from("this should not be downloaded"),
@@ -411,13 +412,14 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(downloads).toBe(1);
     expect(expectResponseSurface(second!)).toContain("Reused cached file <code>reuse-again.txt</code>.");
     expect(expectResponseSurface(second!)).not.toContain("Extracting <code>reuse-again.txt</code>");
-    expectRichCall(second!, "shared cached file content");
+    expectRichCall(second!, "reuse-again.txt");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const rows = await env.repos.messages.listThread(thread.id);
     const userMessages = rows.filter((row) => row.role === "user" && row.kind === "file");
     expect(userMessages).toHaveLength(2);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
+    expect(files[0]?.content_md).toBe("shared cached file content");
     await expect(env.repos.files.listForMessage(userMessages[1]!.id)).resolves.toMatchObject([{ id: files[0]!.id }]);
   });
 
@@ -439,7 +441,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const [first] = await env.bot.processUpdatesConcurrently([
       env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, firstDoc),
     ]);
-    expectRichCall(first!, "hash fallback content");
+    expectRichCall(first!, "[[chat-file:");
 
     const secondDoc = env.bot.server.fileState.storeDocument("hash-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -451,10 +453,11 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(expectResponseSurface(second!)).toContain("Downloading <code>hash-b.txt</code>");
     expect(expectResponseSurface(second!)).toContain("Reused cached file <code>hash-b.txt</code>.");
     expect(expectResponseSurface(second!)).not.toContain("Extracting <code>hash-b.txt</code>");
-    expectRichCall(second!, "hash fallback content");
+    expectRichCall(second!, "hash-b.txt");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
+    expect(files[0]?.content_md).toBe("hash fallback content");
   });
 
   it("does not extract a repeated docx when the content hash already exists", async () => {
@@ -502,7 +505,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(chunks.length).toBeGreaterThan(0);
   });
 
-  it("restores a missing cached path on a hash hit without duplicating chunks", async () => {
+  it("reuses the durable index while keeping one persistent original snapshot", async () => {
     await env.dispose();
     let downloads = 0;
     env = await createGrammyEmulator({
@@ -525,7 +528,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const chunksBefore = await env.repos.files.chunks(file!.id);
     expect(chunksBefore.length).toBeGreaterThan(0);
-    await fs.rm(file!.path!, { force: true });
+    expect(file!.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(file!.id), "content"));
 
     const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -535,9 +538,10 @@ describe("Telegram bot with grammy-emulate", () => {
 
     expect(downloads).toBe(2);
     expect(expectResponseSurface(second!)).toContain("Reused cached file <code>restore-b.txt</code>.");
-    await expect(fs.readFile(file!.path!)).resolves.toEqual(bytes);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
+    expect(files[0]!.path).toBe(file!.path);
+    expect(await env.repos.files.listSources(file!.id)).toHaveLength(2);
     const chunksAfter = await env.repos.files.chunks(file!.id);
     expect(chunksAfter.map((chunk) => chunk.id)).toEqual(chunksBefore.map((chunk) => chunk.id));
   });
@@ -624,7 +628,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
     expect(files[0]?.summary).toBe("Telegram image");
-    expect(files[0]?.path).toBeNull();
+    expect(files[0]?.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
     const rows = await env.repos.messages.listThread(thread.id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     const userMessage = rows.find((row) => row.role === "user");
@@ -657,7 +661,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
     expect(file?.summary).toBe("a sketched system diagram");
-    expect(file?.path).toBeNull();
+    expect(file?.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(file?.id), "content"));
   });
 
   it("does not expose one user's image caption when another user reuses the cached image", async () => {
@@ -854,6 +858,52 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
   }, 10_000);
 
+  it("cancels a cached-file restoration without dispatching another user turn", async () => {
+    await env.dispose();
+    const restoreStarted = deferred<void>();
+    let downloads = 0;
+    env = await createGrammyEmulator({
+      downloadFile: async ({ fileId, signal }) => {
+        downloads += 1;
+        if (downloads === 1) {
+          const content = env.bot.server.fileState.getFileContent(fileId);
+          if (!content) throw new Error(`test file content not found: ${fileId}`);
+          return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
+        }
+        restoreStarted.resolve();
+        await waitForAbort(signal);
+        return { bytes: Buffer.from("cancelled restore must not complete") };
+      },
+    });
+    await onboard("STOPCACHEDFILE");
+
+    const document = env.bot.server.fileState.storeDocument("cached-cancel.txt", "text/plain", {
+      content: Buffer.from("durable cached document content"),
+    });
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
+    ]);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    const messagesBefore = await env.repos.messages.listThread(thread.id);
+    expect(file?.path).toBeTruthy();
+    await fs.rm(file!.path!, { force: true });
+    await fs.rm(env.config.FILE_CACHE_DIR, { recursive: true, force: true });
+    await fs.mkdir(env.config.FILE_CACHE_DIR, { recursive: true, mode: 0o700 });
+
+    const restorePromise = env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
+    ]);
+    await restoreStarted.promise;
+
+    const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+    expect(expectResponseSurface(stop)).toContain("Stopping file processing");
+    const [restoreResponse] = await restorePromise;
+    expect(expectResponseSurface(restoreResponse!)).toContain("File processing cancelled");
+    expect(downloads).toBe(2);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(messagesBefore.length);
+  }, 10_000);
+
   it("does not cancel another topic's file processing with /stop", async () => {
     await env.dispose();
     const started = deferred<void>();
@@ -882,9 +932,11 @@ describe("Telegram bot with grammy-emulate", () => {
     release.resolve();
     const [fileRes] = await filePromise;
     expect(fileRes).toBeDefined();
-    expectRichCall(fileRes!, "different topic file content");
+    expectRichCall(fileRes!, "[[chat-file:");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, 51);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(1);
+    const files = await env.repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    expect(files[0]?.content_md).toBe("different topic file content");
   }, 10_000);
 
   it("processes Telegram media groups as one combined turn", async () => {
@@ -910,11 +962,12 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     expect(rows[0]).toMatchObject({ kind: "file" });
     expect(rows[0]?.text_plain).toContain("album caption");
-    expect(rows[0]?.text_plain).toContain("album document content");
+    expect(rows[0]?.text_plain).toContain("[[chat-file:");
     expect(rows[0]?.text_plain).toContain("[image #");
 
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(2);
+    expect(files.find((file) => file.type === "txt")?.content_md).toContain("album document content");
     expect(new Set(files.map((file) => file.message_id))).toEqual(new Set([rows[0]?.id]));
     expect(rows[1]?.text_plain).toContain("album caption");
   });

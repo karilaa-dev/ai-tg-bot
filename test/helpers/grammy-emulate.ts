@@ -1,5 +1,8 @@
 import { TestBot } from "@bonkers-agency/grammy-test";
 import type { Chat, User } from "grammy/types";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -31,7 +34,17 @@ export async function createGrammyEmulator(options: {
   downloadFile?: TelegramFileDownloader;
   embedder?: TextEmbedder;
 } = {}): Promise<GrammyEmulator> {
-  const config = loadTestConfig(options.config);
+  const ownsCacheDir = !options.config?.FILE_CACHE_DIR;
+  const cacheDir = options.config?.FILE_CACHE_DIR
+    ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-files-"));
+  const ownsBashRoot = !options.config?.BASH_WORKSPACE_ROOT;
+  const bashRoot = options.config?.BASH_WORKSPACE_ROOT
+    ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-bash-"));
+  const config = loadTestConfig({
+    ...options.config,
+    FILE_CACHE_DIR: cacheDir,
+    BASH_WORKSPACE_ROOT: bashRoot,
+  });
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
   await db.migrate();
@@ -119,6 +132,8 @@ export async function createGrammyEmulator(options: {
     dispose: async () => {
       bot.dispose();
       await db.destroy();
+      if (ownsCacheDir) await fs.rm(cacheDir, { recursive: true, force: true });
+      if (ownsBashRoot) await fs.rm(bashRoot, { recursive: true, force: true });
     },
   };
 }

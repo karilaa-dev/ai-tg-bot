@@ -1,4 +1,6 @@
 import "dotenv/config";
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
 
 export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
@@ -27,6 +29,8 @@ const ConfigSchema = z.object({
   DOCLING_URL: z.string().url().default("http://localhost:5001"),
   DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
+  FILE_CACHE_DIR: z.string().min(1).default(path.join(os.tmpdir(), "ai-tg-bot-files")),
+  FILE_CACHE_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
   BASH_WORKSPACE_ROOT: z.string().min(1).default("./data/bash"),
   BASH_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BASH_MAX_OUTPUT_CHARS: z.coerce.number().int().positive().default(12_000),

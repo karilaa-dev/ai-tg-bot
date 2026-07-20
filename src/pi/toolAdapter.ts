@@ -18,7 +18,6 @@ const LEGACY_TOOL_NAMES = [
 
 export interface PiToolBridge {
   buildInput(): ToolBuildInput;
-  stageImages(fileIds: number[]): void;
 }
 
 export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
@@ -39,7 +38,6 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
         const parsed = await liveDefinition.inputSchema.safeParseAsync(rawInput);
         if (!parsed.success) throw new Error(`Invalid ${name} input: ${parsed.error.message}`);
         const output = await abortableToolExecution(liveDefinition.execute(parsed.data, signal), signal);
-        if (name === "load_message") bridge.stageImages(imageIdsFromLoadMessage(output));
         return {
           content: [{ type: "text", text: safeJson(output) }],
           details: output,
@@ -59,29 +57,18 @@ async function abortableToolExecution<T>(promise: Promise<T>, signal?: AbortSign
   });
 }
 
-function imageIdsFromLoadMessage(output: unknown): number[] {
-  if (!output || typeof output !== "object") return [];
-  const images = (output as { images?: unknown }).images;
-  if (!Array.isArray(images)) return [];
-  return images.flatMap((image) => {
-    if (!image || typeof image !== "object") return [];
-    const fileId = (image as { file_id?: unknown }).file_id;
-    return typeof fileId === "number" && Number.isInteger(fileId) ? [fileId] : [];
-  });
-}
-
 function toolLabel(name: string): string {
   return name.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ");
 }
 
 function toolSnippet(name: string): string {
   switch (name) {
-    case "bash": return "Run commands inside the persistent just-bash workspace.";
-    case "search_thread": return "Search prior Telegram conversation messages semantically and lexically.";
-    case "load_message": return "Load one prior Telegram message and stage any referenced image transiently.";
+    case "bash": return "Run commands inside the persistent just-bash workspace; scoped chat files are lazy paths under /attachments/<file_id>.";
+    case "search_thread": return "Search prior chat messages semantically and lexically.";
+    case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";
     case "read_file_section": return "Read exact indexed sections from an uploaded file.";
-    case "create_file": return "Create a file for delivery to Telegram.";
+    case "create_file": return "Create a file for delivery through the active chat.";
     case "web_search": return "Search the web through Tavily.";
     case "web_extract": return "Extract content from web pages through Tavily.";
     default: return name;

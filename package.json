@@ -11,7 +11,8 @@
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
-    "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts"
+    "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
+    "live:telegram-restore": "tsx scripts/live-telegram-restore.ts"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -31,7 +32,6 @@
     "drizzle-orm": "^1.0.0-beta.22",
     "grammy": "^1.43.0",
     "just-bash": "^3.0.1",
-    "nanoid": "^5.1.11",
     "pg": "^8.21.0",
     "unpdf": "^1.6.2",
     "zod": "^4.4.3"

@@ -6,9 +6,10 @@ import {
   type Api,
   type AssistantMessage,
   type Model,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
-import { runTurn } from "../../src/ai/run.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runTurn, sendFinal } from "../../src/ai/run.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -22,6 +23,7 @@ describe("runTurn with Pi", () => {
   let tempDir: string | undefined;
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await manager?.dispose();
     await db?.destroy();
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
@@ -70,7 +72,7 @@ describe("runTurn with Pi", () => {
       thread,
       text: "hello persistent Pi",
       pi: manager,
-      redownloadFile: async () => Buffer.from("unused"),
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
       t: (key, params) => params ? `${key}:${JSON.stringify(params)}` : key,
     });
 
@@ -120,6 +122,219 @@ describe("runTurn with Pi", () => {
     expect(richMessages).toHaveLength(1);
     expect(JSON.stringify(richMessages[0])).toContain("Pi runtime is not configured");
   });
+
+  it("preserves an image MIME type when Telegram receives it as a document", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-document-image-"));
+    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7004, firstName: "DocumentImage", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Document image" });
+    const bytes = Buffer.from("png-original-bytes");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "image",
+      mimeType: "image/png",
+      name: "original.png",
+      path: null,
+      size: bytes.length,
+      isInline: false,
+    });
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9020,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "DocumentImage" },
+        }),
+      },
+      sendDocument: async () => ({
+        message_id: 9021,
+        document: { file_id: "BQAC-original-png", file_unique_id: "unique-original-png" },
+      }),
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here is the original image.", 0, [{
+      fileId: file.id,
+      type: "image",
+      name: file.name,
+      mimeType: "image/png",
+      data: bytes,
+      size: bytes.length,
+      inline: false,
+      card: "original image",
+      delivery: "document",
+      origin: "created_file",
+    }]);
+
+    const [source] = await repos.files.listSources(file.id);
+    expect(source).toMatchObject({ mime_type: "image/png", remote_key: "unique-original-png" });
+    expect(JSON.parse(source!.locator_json)).toMatchObject({ file_id: "BQAC-original-png" });
+  });
+
+  it("removes an undelivered attachment that has no durable path or transport source", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7005, firstName: "FailedDelivery", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Failed delivery" });
+    const bytes = Buffer.from("turn-local-only");
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "other",
+      name: "undelivered.bin",
+      path: null,
+      size: bytes.length,
+      isInline: false,
+    });
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9030,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "FailedDelivery" },
+        }),
+      },
+      sendDocument: async () => { throw new Error("Telegram delivery failed"); },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "The attachment could not be delivered.", 0, [{
+      fileId: file.id,
+      type: "other",
+      name: file.name,
+      data: bytes,
+      size: bytes.length,
+      inline: false,
+      card: "undelivered attachment",
+      delivery: "document",
+      origin: "created_file",
+    }]);
+
+    await expect(repos.files.get(file.id)).resolves.toBeUndefined();
+  });
+
+  it("sends a terminal generated image before final text and stores its Telegram file id once", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-image-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7003, firstName: "ImageRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi image run" });
+    let providerCalls = 0;
+    const stream = ((model: Model<Api>) => {
+      providerCalls += 1;
+      return providerCalls === 1
+        ? toolStream(model, {
+            type: "toolCall",
+            id: "generate-call",
+            name: "generate_image",
+            arguments: { prompt: "a red square", output_format: "png" },
+          })
+        : textStream(model, "unexpected follow-up");
+    }) as PiProviderStreamOverrides["openRouter"];
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      data: [{ b64_json: Buffer.from("generated-image-bytes").toString("base64"), media_type: "image/png" }],
+    })));
+    const events: string[] = [];
+    let photoCalls = 0;
+    const api = {
+      raw: {
+        sendRichMessage: async () => {
+          events.push("final-text");
+          return { message_id: 9010, date: 1, chat: { id: user.tg_id, type: "private", first_name: "ImageRunner" } };
+        },
+        sendRichMessageDraft: async () => {
+          events.push("draft");
+          return true;
+        },
+      },
+      sendPhoto: async () => {
+        photoCalls += 1;
+        events.push("photo");
+        return {
+          message_id: 9011,
+          photo: [{ file_id: "AgAC-sent-image", file_unique_id: "unique-sent-image", width: 10, height: 10, file_size: 21 }],
+        };
+      },
+    } as unknown as import("grammy").Api;
+
+    await runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "generate a red square",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key) => key === "image-generated-done" || key === "image-generated-ready"
+        ? "Done — the image is ready."
+        : key,
+    });
+
+    expect(providerCalls).toBe(1);
+    expect(photoCalls).toBe(1);
+    expect(events.indexOf("photo")).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf("photo")).toBeLessThan(events.indexOf("final-text"));
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({
+      type: "image",
+    });
+    expect(files[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
+    const sources = await repos.files.listSources(files[0]!.id);
+    expect(sources).toMatchObject([{
+      transport: "telegram",
+      connection_key: "default",
+      remote_key: "unique-sent-image",
+    }]);
+    expect(JSON.parse(sources[0]!.locator_json)).toMatchObject({ file_id: "AgAC-sent-image" });
+    const messages = await repos.messages.listThread(thread.id);
+    expect(messages.at(-1)).toMatchObject({ role: "assistant", text_plain: "Done — the image is ready." });
+  }, 20_000);
 });
 
 function textStream(model: Model<Api>, text: string) {
@@ -130,6 +345,23 @@ function textStream(model: Model<Api>, text: string) {
   stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: assistant(model, text) });
   stream.push({ type: "text_end", contentIndex: 0, content: text, partial: assistant(model, text) });
   stream.push({ type: "done", reason: "stop", message: assistant(model, text) });
+  return stream;
+}
+
+function toolStream(model: Model<Api>, toolCall: ToolCall) {
+  const stream = createAssistantMessageEventStream();
+  const start = assistant(model, "");
+  const message: AssistantMessage = { ...start, content: [toolCall], stopReason: "toolUse" };
+  stream.push({ type: "start", partial: start });
+  stream.push({ type: "toolcall_start", contentIndex: 0, partial: { ...start, content: [{ ...toolCall, arguments: {} }] } });
+  stream.push({
+    type: "toolcall_delta",
+    contentIndex: 0,
+    delta: JSON.stringify(toolCall.arguments),
+    partial: { ...start, content: [{ ...toolCall, arguments: {} }] },
+  });
+  stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+  stream.push({ type: "done", reason: "toolUse", message });
   return stream;
 }
 
@@ -150,5 +382,17 @@ function assistant(model: Model<Api>, text: string): AssistantMessage {
     },
     stopReason: "stop",
     timestamp: Date.now(),
+  };
+}
+
+function resolvedFile(bytes: Buffer, fileId: number) {
+  return {
+    path: "",
+    bytes,
+    mimeType: null,
+    size: bytes.length,
+    contentSha256: "test-hash",
+    expiresAt: Number.POSITIVE_INFINITY,
+    source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
   };
 }

@@ -32,8 +32,11 @@ describe("Codex fallback classification", () => {
   it("falls back only for provider/auth/network failures", () => {
     expect(retryableCodexError({ status: 429 })).toBe(true);
     expect(retryableCodexError({ status: 503 })).toBe(true);
+    expect(retryableCodexError({ status: 504 })).toBe(true);
     expect(retryableCodexError({ message: "OAuth refresh token failed" })).toBe(true);
     expect(retryableCodexError({ message: "network socket ECONNRESET" })).toBe(true);
+    expect(retryableCodexError({ status: 409 })).toBe(false);
+    expect(retryableCodexError({ status: 501 })).toBe(false);
     expect(retryableCodexError({ message: "context window maximum tokens exceeded" })).toBe(false);
     expect(retryableCodexError({ message: "content policy refusal" })).toBe(false);
     expect(retryableCodexError({ status: 500, message: "content policy refusal" })).toBe(false);

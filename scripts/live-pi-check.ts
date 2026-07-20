@@ -4,6 +4,7 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
+import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/authMigration.js";
 
 const baseConfig = loadConfig();
 const config = { ...baseConfig, DB_URL: "sqlite::memory:" };
@@ -16,13 +17,18 @@ try {
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9_999_001, firstName: "Pi smoke", lang: "en" });
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi smoke" });
+  await migrateLegacyCodexAuth({
+    agentDir: config.PI_CODING_AGENT_DIR,
+    logger,
+    legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
+  });
   pi = new PiRuntimeManager({ config, db, repos, logger });
   if (process.env.PI_SMOKE_FORCE_OPENROUTER === "1") pi.providerRouter.circuit.recordFailure();
   const runtime = await pi.runtime(thread, user);
   runtime.bridge.beginTurn({
     api: {} as never,
     chatId: user.tg_id,
-    redownloadFile: async () => {
+    resolveFile: async () => {
       throw new Error("The smoke check did not supply an image.");
     },
   });
@@ -40,9 +46,14 @@ try {
   if (!process.env.PI_SMOKE_PROMPT?.trim() && text !== "PI_SMOKE_OK") {
     throw new Error(`Unexpected smoke-check response: ${text}`);
   }
+  const requiredProvider = process.env.PI_SMOKE_REQUIRE_PROVIDER?.trim();
+  if (requiredProvider && assistant.provider !== requiredProvider) {
+    throw new Error(`Expected provider ${requiredProvider}, received ${assistant.provider}. Codex configured: ${pi.providerRouter.codexConfigured()}`);
+  }
   process.stdout.write(`${JSON.stringify({
     ok: true,
     forcedOpenRouter: process.env.PI_SMOKE_FORCE_OPENROUTER === "1",
+    codexConfigured: pi.providerRouter.codexConfigured(),
     provider: assistant.provider,
     model: assistant.model,
     sessionFile: runtime.session.sessionFile,

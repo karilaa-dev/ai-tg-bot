@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { FileRow } from "../db/types.js";
 import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { sha256Hex } from "../files/hash.js";
@@ -12,6 +10,8 @@ import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import { handleUserText } from "./turns.js";
 import { enqueueMediaGroup } from "./batching.js";
+import { telegramFileSource } from "../files/telegramSource.js";
+import { ManagedFileStore, persistManagedFile } from "../files/storage.js";
 
 interface TelegramFileInput {
   fileId: string;
@@ -115,9 +115,8 @@ async function ingestTelegramFile(
   if (!ctx.user || !ctx.thread || !ctx.chat) return undefined;
   const { signal, status, logLabel } = opts;
   const withType = logLabel === "file";
-  const cached = input.fileUniqueId
-    ? await ctx.services.repos.files.findByTelegramFileUniqueId(input.fileUniqueId)
-    : undefined;
+  const source = telegramFileSource({ fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime });
+  const cached = await ctx.services.repos.files.findBySource(source);
   if (cached) {
     ctx.services.logger.debug(withType ? "telegram file cache hit by unique id" : "image cache hit by unique id", ctxLogMeta(ctx, {
       fileId: cached.id,
@@ -125,7 +124,7 @@ async function ingestTelegramFile(
       ...(withType ? { type: cached.type } : {}),
     }));
   }
-  const reused = cached?.type === input.type
+  const reused = cached?.type === input.type && cached.extraction_status === "ready"
     ? await prepareCachedTelegramFile(ctx, input, cached, signal, status)
     : undefined;
   if (reused === "too-big") return "too-big";
@@ -136,12 +135,7 @@ async function ingestTelegramFile(
     name: input.name,
     ...(withType ? { type: input.type } : {}),
   }));
-  const downloaded = await ctx.services.downloadFile({
-    api: ctx.api,
-    config: ctx.services.config,
-    fileId: input.fileId,
-    signal,
-  });
+  const downloaded = await ctx.services.fileResolver.resolveSource(source, signal);
   throwIfAborted(signal);
   const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
   ctx.services.logger.debug(withType ? "telegram file download complete" : "telegram image download complete", ctxLogMeta(ctx, {
@@ -181,22 +175,27 @@ async function ingestTelegramFile(
       userId: ctx.user.tg_id,
       threadId: ctx.thread.id,
       type: "image",
-      telegramFileId: input.fileId,
-      telegramFileUniqueId: input.fileUniqueId ?? null,
       contentSha256,
+      mimeType,
       name: input.name,
       path: null,
       size: bytes.length,
       summary,
       isInline: true,
     });
-    await ctx.services.repos.files.rememberTelegramFileRef(file.id, {
-      fileUniqueId: input.fileUniqueId ?? null,
-      telegramFileId: input.fileId,
-    });
+    try {
+      await persistManagedFile(ctx.services.config, ctx.services.repos.files, file.id, bytes);
+    } catch (error) {
+      ctx.services.logger.warn("inbound image snapshot persistence failed; Telegram recovery remains available", ctxLogMeta(ctx, {
+        fileId: file.id,
+        name: input.name,
+        error: String(error),
+      }));
+    }
+    const canonical = await claimTelegramSource(ctx, file, { ...source, mimeType });
     return {
       outcome: "ingested",
-      prepared: { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type: "image" },
+      prepared: await preparedTelegramFile(ctx, input, canonical),
     };
   }
   const ingested = await ingestFileBytes({
@@ -207,8 +206,6 @@ async function ingestTelegramFile(
     bytes,
     name: input.name,
     mime: input.mime,
-    telegramFileId: input.fileId,
-    telegramFileUniqueId: input.fileUniqueId ?? null,
     contentSha256,
     embeddings: opts.withEmbeddings ? ctx.services.repos.embeddings : undefined,
     embedder: opts.withEmbeddings ? ctx.services.embedder : undefined,
@@ -217,11 +214,13 @@ async function ingestTelegramFile(
     onStage: status ? (stage) => status.updateIngestStage(stage) : undefined,
   });
   throwIfAborted(signal);
-  await ctx.services.repos.files.rememberTelegramFileRef(ingested.fileId, {
-    fileUniqueId: input.fileUniqueId ?? null,
-    telegramFileId: input.fileId,
-  });
-  return { outcome: "ingested", prepared: ingested };
+  const stored = await ctx.services.repos.files.get(ingested.fileId);
+  if (!stored) throw new Error(`Ingested file #${ingested.fileId} disappeared before source registration.`);
+  const canonical = await claimTelegramSource(ctx, stored, source);
+  return {
+    outcome: "ingested",
+    prepared: canonical.id === ingested.fileId ? ingested : await preparedTelegramFile(ctx, input, canonical),
+  };
 }
 
 export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Promise<void> {
@@ -352,58 +351,84 @@ async function prepareCachedTelegramFile(
   status?: FileProcessingStatus,
   restoreBytes?: Buffer,
 ): Promise<PreparedTelegramFile | "too-big" | undefined> {
-  if (cached.type !== "image" && (!cached.path || !(await fileExists(cached.path)))) {
-    ctx.services.logger.warn("cached file missing on disk; restoring", ctxLogMeta(ctx, {
-      fileId: cached.id,
-      path: cached.path,
+  throwIfAborted(signal);
+  const claimed = await ctx.services.repos.files.rememberSource(cached.id, telegramFileSource({
+    fileId: input.fileId,
+    fileUniqueId: input.fileUniqueId,
+    mimeType: input.mime,
+  }));
+  const canonical = await ctx.services.repos.files.get(claimed.file_id);
+  if (!canonical) throw new Error(`Canonical file #${claimed.file_id} is missing.`);
+  assertCompatibleTelegramFile(canonical, input);
+  try {
+    if (restoreBytes && canonical.id === cached.id) {
+      await persistManagedFile(ctx.services.config, ctx.services.repos.files, canonical.id, restoreBytes);
+    } else {
+      await ctx.services.fileResolver.resolveFile(canonical, signal);
+    }
+  } catch (error) {
+    if (isAbortError(error) || signal?.aborted) throw error;
+    ctx.services.logger.warn("reused inbound file snapshot restoration failed; source locator was retained", ctxLogMeta(ctx, {
+      fileId: canonical.id,
       name: input.name,
-    }));
-    let bytes = restoreBytes;
-    if (!bytes) {
-      await status?.updateKey("file-processing-downloading");
-      const downloaded = await ctx.services.downloadFile({
-        api: ctx.api,
-        config: ctx.services.config,
-        fileId: input.fileId,
-        signal,
-      });
-      bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
-    }
-    throwIfAborted(signal);
-    if ((input.size ?? bytes.length) > MAX_FILE_BYTES) {
-      ctx.services.logger.warn("restored cached file rejected; too large", ctxLogMeta(ctx, {
-        fileId: cached.id,
-        bytes: bytes.length,
-      }));
-      if (status) await status.updateText(ctx.t("file-too-big"));
-      else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
-      return "too-big";
-    }
-    if (!cached.path) throw new Error(`Cached file #${cached.id} has no storage path.`);
-    await fs.mkdir(path.dirname(cached.path), { recursive: true });
-    await fs.writeFile(cached.path, bytes);
-    ctx.services.logger.info("cached file restored on disk", ctxLogMeta(ctx, {
-      fileId: cached.id,
-      bytes: bytes.length,
+      error: String(error),
     }));
   }
-  throwIfAborted(signal);
-  await ctx.services.repos.files.rememberTelegramFileRef(cached.id, {
-    fileUniqueId: input.fileUniqueId ?? null,
-    telegramFileId: input.fileId,
-  });
-  const chunks = cached.is_inline ? [] : await ctx.services.repos.files.chunks(cached.id);
+  const prepared = await preparedTelegramFile(ctx, input, canonical);
   ctx.services.logger.debug("prepared cached telegram file", ctxLogMeta(ctx, {
-    fileId: cached.id,
-    inline: Boolean(cached.is_inline),
-    chunks: chunks.length,
+    fileId: canonical.id,
+    inline: prepared.inline,
   }));
+  return prepared;
+}
+
+async function claimTelegramSource(
+  ctx: BotContext,
+  candidate: FileRow,
+  source: ReturnType<typeof telegramFileSource>,
+): Promise<FileRow> {
+  const claimed = await ctx.services.repos.files.rememberSource(candidate.id, source);
+  const canonical = await ctx.services.repos.files.get(claimed.file_id);
+  if (!canonical) throw new Error(`Canonical file #${claimed.file_id} is missing.`);
+  if (canonical.id === candidate.id) return canonical;
+  if (canonical.type !== candidate.type || canonical.extraction_status !== "ready") {
+    throw new Error(`Telegram source already belongs to incompatible file #${canonical.id}.`);
+  }
+  const removedChunkIds = await ctx.services.repos.files.deleteFile(candidate.id);
+  if (removedChunkIds.length) await ctx.services.repos.embeddings.deleteRefs("chunk", removedChunkIds);
+  await new ManagedFileStore(ctx.services.config).remove(candidate.id).catch((error) => {
+    ctx.services.logger.warn("duplicate chat file snapshot cleanup failed", ctxLogMeta(ctx, {
+      fileId: candidate.id,
+      canonicalFileId: canonical.id,
+      error: String(error),
+    }));
+  });
+  ctx.services.logger.info("reused canonical Telegram source owner", ctxLogMeta(ctx, {
+    duplicateFileId: candidate.id,
+    canonicalFileId: canonical.id,
+  }));
+  return canonical;
+}
+
+async function preparedTelegramFile(
+  ctx: BotContext,
+  input: TelegramFileInput,
+  file: FileRow,
+): Promise<PreparedTelegramFile> {
+  assertCompatibleTelegramFile(file, input);
+  const chunks = file.is_inline ? [] : await ctx.services.repos.files.chunks(file.id);
   return {
-    fileId: cached.id,
-    card: cardForFile(cached, chunks, input.name),
-    inline: Boolean(cached.is_inline),
+    fileId: file.id,
+    card: cardForFile(file, chunks, input.name),
+    inline: Boolean(file.is_inline),
     type: input.type,
   };
+}
+
+function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): void {
+  if (file.type !== input.type || file.extraction_status !== "ready") {
+    throw new Error(`Telegram source resolves to incompatible file #${file.id}.`);
+  }
 }
 
 async function handlePreparedTelegramFile(
@@ -446,13 +471,4 @@ async function handlePreparedTelegramFile(
       });
     },
   });
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
 }
