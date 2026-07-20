@@ -7,6 +7,7 @@ Telegram controls who can reach the bot; there is no application-level allowlist
 ## Runtime model
 
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`. The database stores the session path/id and maps Telegram messages to Pi entry ids.
+- Newly observed implicit Telegram topics receive one concise helper-model title from their opening user/assistant exchange. Explicit topic names, forks, General, and every thread that predates the title-state migration are preserved; helper or Telegram rename failures never fail the chat turn.
 - Pi's built-in automatic compaction is used unchanged. `/compact` calls Pi directly and `/fork` creates a Pi branch at the mapped message entry.
 - Built-in host filesystem tools are disabled. Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
 - Retrieval is explicit: prior messages use full-text search, while chunked large documents use full-text plus vector search. Nothing is automatically injected into prompts; Pi chooses when to call the retrieval tools.
@@ -84,16 +85,17 @@ OPENROUTER_EMBEDDING_MODEL=perplexity/pplx-embed-v1-0.6b
 MODEL_CONTEXT_TOKENS=128000
 PI_THINKING_LEVEL=medium
 PI_TURN_TIMEOUT_MS=900000
+THREAD_TITLE_TIMEOUT_MS=30000
 IMAGE_TIMEOUT_MS=300000
 FILE_CACHE_DIR=/tmp/ai-tg-bot-files
 FILE_CACHE_TTL_MS=3600000
 ```
 
-See [.env.example](./.env.example) for file, Docling, bash, draft, onboarding, and logging settings.
+`THREAD_TITLE_TIMEOUT_MS` applies only to the isolated, tool-free helper call used to name a new implicit topic. Each eligible topic normally adds one helper-model inference; failed generations can retry on up to three turns, while Telegram-only synchronization retries do not call the model again. See [.env.example](./.env.example) for file, Docling, bash, draft, onboarding, and logging settings.
 
 ## Migration warning
 
-The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. The idempotent `remove_message_embeddings_v1` migration deletes obsolete message vectors while preserving messages, full-text indexes, file chunks, and chunk vectors. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
+The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. The idempotent `remove_message_embeddings_v1` migration deletes obsolete message vectors while preserving messages, full-text indexes, file chunks, and chunk vectors. Thread-title state columns are non-destructive and classify all existing rows as explicit, so no existing topic is automatically renamed. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
 
 SQLite is the default. PostgreSQL is selected when `DB_URL` begins with `postgres://` or `postgresql://`.
 

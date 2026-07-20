@@ -9,6 +9,7 @@ Pi 0.80.6 is the sole agent backbone. Telegram threads own persistent Pi `AgentS
 - Fallback/always-on without Codex: Pi `openai-completions` through OpenRouter.
 - Shared circuit: main, helper, and image calls.
 - Fallback is allowed only before visible output and only for retryable provider/auth/network failures.
+- Newly observed implicit Telegram topics are titled once in a background, tool-free helper session from the bounded opening exchange; explicit, forked, General, and pre-migration titles remain authoritative.
 
 ## Tools and retrieval
 
@@ -20,7 +21,7 @@ The project-owned `generate_image` Pi extension supports one image, generate/edi
 
 ## Persistence and migration
 
-Pi JSONL is conversation-authoritative. Database messages retain Telegram/search/attachment metadata and Pi entry mappings. The idempotent `pi_cutover_v2` migration preserves users and just-bash workspaces while deleting the legacy conversation graph, summary schema, embeddings, search rows, and managed files. The `remove_invites_v1` migration removes the obsolete application-level access schema; Telegram is the access-control boundary.
+Pi JSONL is conversation-authoritative. Database messages retain Telegram/search/attachment metadata and Pi entry mappings. Thread rows also retain title source, attempt count, and Telegram synchronization state; existing rows migrate as explicit to prevent backfill. The idempotent `pi_cutover_v2` migration preserves users and just-bash workspaces while deleting the legacy conversation graph, summary schema, embeddings, search rows, and managed files. The `remove_invites_v1` migration removes the obsolete application-level access schema; Telegram is the access-control boundary.
 
 ## Acceptance checks
 

@@ -55,6 +55,11 @@ export async function handleUserText(
       pi: ctx.services.pi,
       t: ctx.t,
     });
+    ctx.services.threadTitles.schedule({
+      api: ctx.api,
+      chatId: ctx.chat.id,
+      threadId: ctx.thread.id,
+    });
   } finally {
     busyThreads.delete(ctx.thread.id);
     ctx.services.logger.info("turn dispatch finished", ctxLogMeta(ctx, {

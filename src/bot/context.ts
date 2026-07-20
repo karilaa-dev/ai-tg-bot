@@ -11,6 +11,7 @@ import type { TextEmbedder } from "../memory/embeddings.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
 import type { FileResolver } from "../files/resolver.js";
+import type { ThreadTitleCoordinator } from "./threadTitles.js";
 
 export interface ActiveFileJob {
   controller: AbortController;
@@ -65,6 +66,7 @@ export interface BotServices {
   fileResolver: FileResolver;
   embedder?: TextEmbedder;
   pi: PiRuntimeService;
+  threadTitles: ThreadTitleCoordinator;
   routerState: RouterState;
 }
 

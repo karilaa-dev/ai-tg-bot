@@ -48,6 +48,7 @@ describe("bot router file adapters", () => {
       compact: async () => 0,
       fork: async () => undefined,
       captionImage: async () => "not used",
+      generateThreadTitle: async () => "not used",
       abort: async () => false,
       dispose: async () => undefined,
     };
