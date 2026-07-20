@@ -58,4 +58,23 @@ describe("Pi retrieval embedding extension", () => {
     await expect(request).rejects.toThrow("cancelled");
     expect(fetch).toHaveBeenCalledOnce();
   });
+
+  it("aborts stalled response-body consumption without retrying", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = new ReadableStream({
+        start(streamController) {
+          init?.signal?.addEventListener("abort", () => streamController.error(init.signal?.reason), { once: true });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }));
+
+    const request = embedForRetrieval(["cancel body"], loadTestConfig(), undefined, controller.signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.abort(new DOMException("body cancelled", "AbortError"));
+
+    await expect(request).rejects.toThrow("body cancelled");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
 });
