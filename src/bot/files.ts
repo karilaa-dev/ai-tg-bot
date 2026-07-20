@@ -367,6 +367,7 @@ async function prepareCachedTelegramFile(
       await ctx.services.fileResolver.resolveFile(canonical, signal);
     }
   } catch (error) {
+    if (isAbortError(error) || signal?.aborted) throw error;
     ctx.services.logger.warn("reused inbound file snapshot restoration failed; source locator was retained", ctxLogMeta(ctx, {
       fileId: canonical.id,
       name: input.name,

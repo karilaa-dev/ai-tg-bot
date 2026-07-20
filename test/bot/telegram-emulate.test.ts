@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
@@ -855,6 +856,52 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
+  }, 10_000);
+
+  it("cancels a cached-file restoration without dispatching another user turn", async () => {
+    await env.dispose();
+    const restoreStarted = deferred<void>();
+    let downloads = 0;
+    env = await createGrammyEmulator({
+      downloadFile: async ({ fileId, signal }) => {
+        downloads += 1;
+        if (downloads === 1) {
+          const content = env.bot.server.fileState.getFileContent(fileId);
+          if (!content) throw new Error(`test file content not found: ${fileId}`);
+          return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
+        }
+        restoreStarted.resolve();
+        await waitForAbort(signal);
+        return { bytes: Buffer.from("cancelled restore must not complete") };
+      },
+    });
+    await onboard("STOPCACHEDFILE");
+
+    const document = env.bot.server.fileState.storeDocument("cached-cancel.txt", "text/plain", {
+      content: Buffer.from("durable cached document content"),
+    });
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
+    ]);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    const messagesBefore = await env.repos.messages.listThread(thread.id);
+    expect(file?.path).toBeTruthy();
+    await fs.rm(file!.path!, { force: true });
+    await fs.rm(env.config.FILE_CACHE_DIR, { recursive: true, force: true });
+    await fs.mkdir(env.config.FILE_CACHE_DIR, { recursive: true, mode: 0o700 });
+
+    const restorePromise = env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
+    ]);
+    await restoreStarted.promise;
+
+    const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+    expect(expectResponseSurface(stop)).toContain("Stopping file processing");
+    const [restoreResponse] = await restorePromise;
+    expect(expectResponseSurface(restoreResponse!)).toContain("File processing cancelled");
+    expect(downloads).toBe(2);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(messagesBefore.length);
   }, 10_000);
 
   it("does not cancel another topic's file processing with /stop", async () => {
