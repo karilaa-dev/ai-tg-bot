@@ -10,7 +10,7 @@ Telegram controls who can reach the bot; there is no application-level allowlist
 - Pi's built-in automatic compaction is used unchanged. `/compact` calls Pi directly and `/fork` creates a Pi branch at the mapped message entry.
 - Built-in host filesystem tools are disabled. Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
 - Retrieval is explicit: prior messages use full-text search, while chunked large documents use full-text plus vector search. Nothing is automatically injected into prompts; Pi chooses when to call the retrieval tools.
-- The persistent just-bash workspace is isolated per chat thread. Every thread/fork-authorized file appears at `/attachments/<file_id>` and through `CHAT_FILE_<file_id>`. Directory listing and metadata operations do not download content; opening one entry restores only that file. `input_file_ids` remains an optional eager preload/validation list of up to five IDs. The per-call attachment mount is copy-on-write, so sandbox edits cannot alter canonical snapshots.
+- The persistent just-bash workspace is isolated per chat thread. Every thread/fork-authorized file appears at `/attachments/<file_id>` and through `CHAT_FILE_<file_id>`. Directory listing and metadata operations do not download content; opening one entry restores only that file. `input_file_ids` remains an optional eager preload/validation list of up to five IDs. The per-call attachment mount is copy-on-write, so sandbox edits cannot alter canonical snapshots. The workspace also exposes `zip`, including recursive `zip -r archive.zip folder` creation, as a direct Bash command.
 
 ### Provider routing
 

@@ -65,6 +65,7 @@ Internet verification:
 
 Bash rules:
 
+- When the user asks to archive or compress files without naming a format, default to ZIP. Create archives with the bash `zip` command, such as `zip -r archive.zip folder`; do not use Python or JavaScript to build an archive.
 - Use js-exec -c '...' for JavaScript, python3/python for local Python computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq.
 - Do not use Python urllib/requests for HTTPS or public web fetching; use curl instead.
 - For exact verification or comparing runtimes, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON.

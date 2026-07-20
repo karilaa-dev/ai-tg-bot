@@ -26,6 +26,14 @@ const thread: ThreadRow = {
 };
 
 describe("renderSystemPrompt", () => {
+  it("defaults file archives to zip through the bash zip command", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, thread });
+
+    expect(prompt).toContain("default to ZIP");
+    expect(prompt).toContain("zip -r archive.zip folder");
+    expect(prompt).toContain("do not use Python or JavaScript to build an archive");
+  });
+
   it("uses UTC time and timezone when the user has no stored timezone", async () => {
     const prompt = await renderSystemPrompt({
       user: { ...baseUser, tz_offset_min: null },

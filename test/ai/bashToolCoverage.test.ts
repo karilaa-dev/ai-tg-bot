@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { unzipSync } from "fflate";
 import { getCommandNames, getJavaScriptCommandNames, getNetworkCommandNames, getPythonCommandNames } from "just-bash";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
@@ -208,6 +209,32 @@ describe("just-bash coverage through the bot bash tool", () => {
       expect(result.exit_code).not.toBe(0);
     });
     expect(privateFetchCalls).toBe(0);
+  }, 60_000);
+
+  it("creates a recursive ZIP archive with the bash zip command", async () => {
+    const bash = await createBashTool({ timeoutMs: 30_000, maxOutputChars: 100_000 });
+    const result = await bash.execute({
+      script: [
+        "mkdir -p bundle/nested bundle/empty",
+        "printf root-file > bundle/root.txt",
+        "printf nested-file > bundle/nested/item.txt",
+        "zip -rq archive.zip bundle",
+        "base64 archive.zip",
+      ].join("; "),
+    });
+
+    expect(result).toMatchObject({ exit_code: 0, timed_out: false, stderr: "" });
+    const archive = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
+    const files = unzipSync(archive);
+    expect(Object.keys(files).sort()).toEqual([
+      "bundle/",
+      "bundle/empty/",
+      "bundle/nested/",
+      "bundle/nested/item.txt",
+      "bundle/root.txt",
+    ]);
+    expect(Buffer.from(files["bundle/root.txt"]!).toString()).toBe("root-file");
+    expect(Buffer.from(files["bundle/nested/item.txt"]!).toString()).toBe("nested-file");
   }, 60_000);
 
   it("covers shell features and tool input options used by agents", async () => {

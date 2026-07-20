@@ -8,6 +8,7 @@ import { threadChainScope } from "../../memory/retrieval.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd, truncateBashOutput } from "./helpers.js";
 import { MAX_BASH_RESPONSE_BYTES, defineBotTool, type ToolBuildInput } from "./types.js";
+import { zipCommand } from "./zipCommand.js";
 
 const MAX_BASH_INPUT_FILES = 5;
 
@@ -21,7 +22,7 @@ type MountedInputFile = {
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per chat thread. Every authorized chat file is visible at /attachments/<file_id> and through CHAT_FILE_<file_id>; listing or statting entries does not fetch bytes, and reading one path restores only that file. input_file_ids optionally validates and eagerly loads up to five files before the script. Attachment edits are copy-on-write for this call and never change the canonical snapshot. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
+      "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per chat thread. Every authorized chat file is visible at /attachments/<file_id> and through CHAT_FILE_<file_id>; listing or statting entries does not fetch bytes, and reading one path restores only that file. input_file_ids optionally validates and eagerly loads up to five files before the script. Attachment edits are copy-on-write for this call and never change the canonical snapshot. Use zip (for example, zip -r archive.zip folder) to create ZIP archives without Python or JavaScript. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -115,6 +116,7 @@ async function runBashTool(
     env,
     python: true,
     javascript: true,
+    customCommands: [zipCommand],
     network: {
       dangerouslyAllowFullInternetAccess: true,
       denyPrivateRanges: true,
