@@ -238,18 +238,24 @@ async function copyNewFileAtomically(source: string, target: string): Promise<vo
     await fs.rename(partial, target);
   } catch (error) {
     failure = error;
-    throw error;
-  } finally {
-    try {
-      await fs.unlink(partial);
-    } catch (error) {
-      if (!isNotFound(error)) {
-        if (failure !== undefined) {
-          throw new AggregateError([failure, error], `migration copy and cleanup both failed: ${target}`);
-        }
-        throw error;
-      }
+  }
+
+  const cleanupError = await cleanupMigrationPartial(partial);
+  if (failure !== undefined) {
+    if (cleanupError !== undefined) {
+      throw new AggregateError([failure, cleanupError], `migration copy and cleanup both failed: ${target}`);
     }
+    throw failure;
+  }
+  if (cleanupError !== undefined) throw cleanupError;
+}
+
+async function cleanupMigrationPartial(filePath: string): Promise<unknown> {
+  try {
+    await fs.unlink(filePath);
+    return undefined;
+  } catch (error) {
+    return isNotFound(error) ? undefined : error;
   }
 }
 

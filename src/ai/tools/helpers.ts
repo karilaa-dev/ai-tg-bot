@@ -130,6 +130,7 @@ async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string
   const botDirectory = path.join(botOutboxRoot(input.config), outboxId);
   const botPath = path.join(botDirectory, "content");
   await fs.mkdir(botDirectory, { recursive: true, mode: 0o700 });
+  let bytes: Buffer | undefined;
   let failure: unknown;
   try {
     await input.commandRuntime.exportFile({
@@ -139,20 +140,32 @@ async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string
       maxBytes: MAX_FILE_BYTES,
       signal,
     });
-    return await readExportedFile(botPath, virtualPath);
+    bytes = await readExportedFile(botPath, virtualPath);
   } catch (error) {
     failure = error;
-    throw error;
-  } finally {
-    try {
-      await fs.rm(botDirectory, { recursive: true, force: true });
-    } catch (cleanupError) {
-      if (failure !== undefined) {
-        throw new AggregateError([failure, cleanupError], "file export and outbox cleanup both failed");
-      }
-      throw cleanupError;
-    }
   }
+
+  let cleanupError: unknown;
+  try {
+    await fs.rm(botDirectory, { recursive: true, force: true });
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (failure !== undefined) {
+    if (cleanupError !== undefined) {
+      throw new AggregateError([failure, cleanupError], "file export and outbox cleanup both failed");
+    }
+    throw failure;
+  }
+  if (cleanupError !== undefined) {
+    input.logger?.warn("file export outbox cleanup failed", {
+      threadId: input.thread.id,
+      virtualPath,
+      error: String(cleanupError),
+    });
+  }
+  if (bytes === undefined) throw new Error("file export completed without bytes");
+  return bytes;
 }
 
 async function readExportedFile(filePath: string, virtualPath: string): Promise<Buffer> {

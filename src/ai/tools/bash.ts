@@ -134,7 +134,6 @@ async function runBashTool(
     });
     toolResult = {
       ...toolResult,
-      exit_code: null,
       error: [toolResult.error, `attachment cleanup failed: ${cleanupError}`].filter(Boolean).join("; "),
     };
   }

@@ -258,9 +258,15 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("removes the per-command stdin file after execution", async () => {
+  it("uses configured names for stdin ownership and numeric ids for execution", async () => {
     const client = new FakeClient();
-    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+    const config = loadTestConfig({
+      OPEN_SANDBOX_USER: "runner",
+      OPEN_SANDBOX_GROUP: "runners",
+      OPEN_SANDBOX_UID: 2200,
+      OPEN_SANDBOX_GID: 2201,
+    });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
     await manager.execute({ ...command(44), stdin: "input data" });
 
@@ -269,9 +275,10 @@ describe("UserOpenSandboxRuntimeManager", () => {
     expect(connection.writeEntries[0]).toMatchObject({
       data: "input data",
       mode: 600,
-      owner: "agent",
-      group: "agent",
+      owner: "runner",
+      group: "runners",
     });
+    expect(connection.runOptions[0]).toMatchObject({ uid: 2200, gid: 2201 });
     expect(connection.writeEntries[0]!.path).toMatch(/^\/tmp\/ai-tg-bot-stdin-/);
     expect(connection.deleteCalls).toEqual([[connection.writeEntries[0]!.path]]);
     await manager.dispose();
@@ -427,6 +434,7 @@ class FakeConnection implements OpenSandboxConnection {
   readonly interruptCalls: string[] = [];
   readonly writeEntries: WriteEntry[] = [];
   readonly deleteCalls: string[][] = [];
+  readonly runOptions: RunCommandOpts[] = [];
   lastExecutionId?: string;
   active = 0;
   maxActive = 0;
@@ -442,7 +450,8 @@ class FakeConnection implements OpenSandboxConnection {
     return this.client.getInfo(this.id);
   }
 
-  async run(_command: string, _options: RunCommandOpts, handlers: ExecutionHandlers) {
+  async run(_command: string, options: RunCommandOpts, handlers: ExecutionHandlers) {
+    this.runOptions.push(options);
     this.active += 1;
     this.maxActive = Math.max(this.maxActive, this.active);
     this.client.started();

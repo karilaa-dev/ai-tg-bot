@@ -48,34 +48,38 @@ export async function copySandboxFileToOutbox(input: {
     if (total > input.maxBytes) throw new Error("file is larger than the allowed limit");
   } catch (error) {
     failure = error;
-    throw error;
-  } finally {
-    const cleanupErrors: unknown[] = [];
-    if (destinationHandle) {
-      try {
-        await destinationHandle.close();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
+  }
+
+  const cleanupErrors: unknown[] = [];
+  if (destinationHandle) {
+    try {
+      await destinationHandle.close();
+    } catch (error) {
+      cleanupErrors.push(error);
     }
-    if (sourceHandle) {
-      try {
-        await sourceHandle.close();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
+  }
+  if (sourceHandle) {
+    try {
+      await sourceHandle.close();
+    } catch (error) {
+      cleanupErrors.push(error);
     }
-    if (failure !== undefined && destinationCreated) {
-      try {
-        await fs.unlink(input.destinationPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") cleanupErrors.push(error);
-      }
+  }
+  if (failure !== undefined && destinationCreated) {
+    try {
+      await fs.unlink(input.destinationPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") cleanupErrors.push(error);
     }
+  }
+  if (failure !== undefined) {
     if (cleanupErrors.length) {
-      if (failure !== undefined) throw new AggregateError([failure, ...cleanupErrors], "sandbox file export and cleanup failed");
-      throw new AggregateError(cleanupErrors, "sandbox file export cleanup failed");
+      throw new AggregateError([failure, ...cleanupErrors], "sandbox file export and cleanup failed");
     }
+    throw failure;
+  }
+  if (cleanupErrors.length) {
+    throw new AggregateError(cleanupErrors, "sandbox file export cleanup failed");
   }
 }
 

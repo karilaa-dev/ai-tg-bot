@@ -70,9 +70,10 @@ Start the OpenSandbox server first. On Linux with Docker:
 ```bash
 cp .env.example .env
 # Edit API keys and set BOT_SHARED_HOST_PATH to a real absolute host path.
-mkdir -p /mnt/user/ai-tg-bot-shared/users
+. ./.env
+mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
 
-docker network create ai-tg-bot-opensandbox 2>/dev/null || true
+docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
 docker compose -f docker-compose.opensandbox.yml up -d
 ```
 
@@ -127,12 +128,14 @@ OPEN_SANDBOX_DEPLOYMENT_ID=ai-tg-bot
 OPEN_SANDBOX_IMAGE=ghcr.io/karilaa-dev/ai-agent-box:sha-<commit>
 OPEN_SANDBOX_CPU=2
 OPEN_SANDBOX_MEMORY=512Mi
+OPEN_SANDBOX_USER=agent
+OPEN_SANDBOX_GROUP=agent
 OPEN_SANDBOX_UID=1000
 OPEN_SANDBOX_GID=1000
 OPEN_SANDBOX_IDLE_PAUSE_MS=600000
 ```
 
-The image reference, resources, UID/GID, shared root, and layout markers form the provisioning fingerprint. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
+The image reference, resources, username/group, UID/GID, shared root, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
 
 The published Ubuntu 24.04 runner image includes Bash, Python, Node.js, `curl`, `zip`, `unzip`, Git, SQLite, build tools, and common diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` tag in production rather than relying on `latest`.
 
@@ -164,7 +167,9 @@ Create the shared directory and private network, then start the trusted lifecycl
 
 ```bash
 cp .env.example .env
-mkdir -p "$BOT_SHARED_HOST_PATH/users"
+# Edit API keys and BOT_SHARED_HOST_PATH.
+. ./.env
+mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
 docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
 
 docker compose -f docker-compose.opensandbox.yml up -d
@@ -205,7 +210,7 @@ Setup:
    - Agent Shared Data: `/mnt/user/ai-tg-bot-shared` -> `/data`
    - OpenSandbox Shared Host Root: `/mnt/user/ai-tg-bot-shared`
    - OpenSandbox Domain: `opensandbox-server:8080`
-   - UID/GID values aligned at `1000:1000`
+   - Runner username/group set to `agent:agent` and UID/GID values aligned at `1000:1000`
 7. Leave Docling URL empty unless a separately operated service is available.
 
 If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.

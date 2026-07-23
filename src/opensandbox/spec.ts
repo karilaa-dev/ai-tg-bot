@@ -36,6 +36,8 @@ export function openSandboxProvisioningFingerprint(config: AppConfig): string {
     image: config.OPEN_SANDBOX_IMAGE,
     cpu: config.OPEN_SANDBOX_CPU,
     memory: config.OPEN_SANDBOX_MEMORY,
+    user: config.OPEN_SANDBOX_USER,
+    group: config.OPEN_SANDBOX_GROUP,
     uid: config.OPEN_SANDBOX_UID,
     gid: config.OPEN_SANDBOX_GID,
     sharedHostRoot: path.resolve(config.OPEN_SANDBOX_SHARED_HOST_ROOT),

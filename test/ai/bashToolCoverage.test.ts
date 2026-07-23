@@ -123,6 +123,70 @@ describe("OpenSandbox bash tool contract", () => {
     await expect(fs.readdir(attachmentRoot)).resolves.toEqual([]);
   });
 
+  it("preserves the command exit code when attachment cleanup fails", async () => {
+    const bytes = Buffer.from("attachment bytes");
+    const runtime = new FakeRuntime();
+    const config = testConfig();
+    const user = await repos.users.ensure({ tgId: SANDBOX_USER_ID, firstName: "OpenSandbox", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "input.txt",
+      path: null,
+      size: bytes.length,
+      summary: "input",
+      isInline: true,
+    });
+    const resolveFile = vi.fn(async () => ({
+      path: "",
+      bytes,
+      size: bytes.length,
+      mimeType: "text/plain",
+      contentSha256: "hash",
+      expiresAt: Number.POSITIVE_INFINITY,
+      source: { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: {} },
+    }));
+    const logger = {
+      level: "debug" as const,
+      isLevelEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const realRm = fs.rm.bind(fs);
+    const remove = vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (String(target).includes(`${path.sep}attachments${path.sep}`)) {
+        throw new Error("cleanup unavailable");
+      }
+      return realRm(target, options);
+    });
+    try {
+      const bash = buildToolRegistry({
+        config,
+        db,
+        repos,
+        user,
+        thread,
+        commandRuntime: runtime,
+        resolveFile,
+        logger,
+      }).bash;
+
+      const result = await bash.execute({ script: "true", input_file_ids: [file.id] });
+
+      expect(result).toMatchObject({
+        exit_code: 0,
+        error: expect.stringContaining("attachment cleanup failed: Error: cleanup unavailable"),
+      });
+      expect(logger.warn).toHaveBeenCalledWith("sandbox attachment cleanup failed", expect.any(Object));
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
   it("rejects attachments from another thread before starting OpenSandbox", async () => {
     const runtime = new FakeRuntime();
     const { bash, user } = await createBash(runtime);

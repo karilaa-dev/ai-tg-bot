@@ -7,7 +7,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import type { CreatedFileAttachment, ToolBuildInput } from "../../src/ai/tools/types.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { botThreadWorkspace } from "../../src/sandbox/paths.js";
+import { botOutboxRoot, botThreadWorkspace } from "../../src/sandbox/paths.js";
 import type { SandboxCommandRequest, SandboxCommandResult, SandboxFileExportRequest, CommandRuntime } from "../../src/sandbox/types.js";
 
 describe("Pi safe tool adapters", () => {
@@ -63,6 +63,63 @@ describe("Pi safe tool adapters", () => {
     expect(createdFiles[0]).toMatchObject({ delivery: "photo", caption: "Pi-created image" });
     expect(createdFiles[0]?.path).toBe(path.join(config.MANAGED_FILE_ROOT, String(createdFiles[0]?.fileId), "content"));
     await expect(fs.readFile(createdFiles[0]!.path!)).resolves.toEqual(Buffer.from("image-bytes"));
+  });
+
+  it("keeps a created file when best-effort outbox cleanup fails", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-cleanup-"));
+    const config = testConfig(tempDir);
+    db = createDatabase(config);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9904, firstName: "Cleanup", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Cleanup" });
+    const runtime = new FakeRuntime(undefined, async (request) => {
+      await fs.writeFile(request.hostDestination, "created bytes");
+    });
+    const createdFiles: CreatedFileAttachment[] = [];
+    const logger = {
+      level: "debug" as const,
+      isLevelEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const outboxRoot = botOutboxRoot(config);
+    const realRm = fs.rm.bind(fs);
+    const remove = vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (path.dirname(String(target)) === outboxRoot) throw new Error("outbox cleanup unavailable");
+      return realRm(target, options);
+    });
+    try {
+      const createFile = createPiToolAdapters({
+        buildInput: () => ({
+          config,
+          db: db!,
+          repos,
+          user,
+          thread,
+          createdFiles,
+          commandRuntime: runtime,
+          logger,
+        }),
+      }).find((tool) => tool.name === "create_file")!;
+
+      const result = await createFile.execute("file-cleanup", {
+        path: "/created.txt",
+        delivery: "document",
+      }, undefined, undefined, {} as never);
+
+      expect(result.details).toMatchObject({ name: "created.txt" });
+      expect(createdFiles).toHaveLength(1);
+      expect(logger.warn).toHaveBeenCalledWith("file export outbox cleanup failed", expect.objectContaining({
+        threadId: thread.id,
+        virtualPath: "/created.txt",
+        error: "Error: outbox cleanup unavailable",
+      }));
+    } finally {
+      remove.mockRestore();
+    }
   });
 
   it("stages only requested scoped attachments for the live adapter call", async () => {

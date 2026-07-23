@@ -57,6 +57,7 @@ export APP_UID APP_GID AGENT_SHARED_ROOT APP_DATA_ROOT
 valid_id "${APP_UID}" || { log "ERROR: APP_UID must be a non-negative numeric UID."; exit 1; }
 valid_id "${APP_GID}" || { log "ERROR: APP_GID must be a non-negative numeric GID."; exit 1; }
 [ "${APP_UID}" != "0" ] || { log "ERROR: APP_UID must not be 0."; exit 1; }
+[ "${APP_GID}" != "0" ] || { log "ERROR: APP_GID must not be 0."; exit 1; }
 
 if [ "$#" -eq 0 ]; then
     set -- node dist/src/main.js

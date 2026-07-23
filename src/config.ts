@@ -8,7 +8,7 @@ export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b
 export const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const MAX_LINUX_ID = 4_294_967_294;
-const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.string().trim().url().optional());
+const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.url().optional());
 const BooleanEnvSchema = z.preprocess((value) => {
   if (typeof value !== "string") return value;
   if (value === "true" || value === "1") return true;
@@ -58,6 +58,8 @@ const ConfigSchema = z.object({
   OPEN_SANDBOX_IMAGE: z.string().min(1).default("ghcr.io/karilaa-dev/ai-agent-box:latest"),
   OPEN_SANDBOX_CPU: z.string().regex(/^\d+(?:\.\d+)?$/).default("2"),
   OPEN_SANDBOX_MEMORY: z.string().regex(/^\d+(?:\.\d+)?(?:Ki|Mi|Gi|Ti)$/).default("512Mi"),
+  OPEN_SANDBOX_USER: z.string().trim().min(1).default("agent"),
+  OPEN_SANDBOX_GROUP: z.string().trim().min(1).default("agent"),
   OPEN_SANDBOX_UID: z.coerce.number().int().min(0).max(MAX_LINUX_ID).default(1000),
   OPEN_SANDBOX_GID: z.coerce.number().int().min(0).max(MAX_LINUX_ID).default(1000),
   OPEN_SANDBOX_IDLE_PAUSE_MS: z.coerce.number().int().positive().default(600_000),
@@ -72,7 +74,9 @@ const ConfigSchema = z.object({
 }).superRefine(validateStorageIsolation);
 
 function normalizeOptionalUrl(value: unknown): unknown {
-  return typeof value === "string" && value.trim() === "" ? undefined : value;
+  if (typeof value !== "string") return value;
+  const normalized = value.trim();
+  return normalized === "" ? undefined : normalized;
 }
 
 function validateStorageIsolation(

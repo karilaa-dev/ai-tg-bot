@@ -156,8 +156,8 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       path: stdinPath,
       data: request.stdin,
       mode: 600,
-      owner: "agent",
-      group: "agent",
+      owner: this.input.config.OPEN_SANDBOX_USER,
+      group: this.input.config.OPEN_SANDBOX_GROUP,
     }]));
 
     const stdout: OutputCapture = { text: "", truncated: false };

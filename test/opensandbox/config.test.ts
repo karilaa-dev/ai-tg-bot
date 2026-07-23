@@ -19,6 +19,8 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_SHARED_HOST_ROOT: "/srv/ai-tg-bot",
       OPEN_SANDBOX_CPU: "1.5",
       OPEN_SANDBOX_MEMORY: "1Gi",
+      OPEN_SANDBOX_USER: "runner",
+      OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: "2000",
       OPEN_SANDBOX_GID: "2001",
     });
@@ -30,9 +32,22 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_SHARED_HOST_ROOT: "/srv/ai-tg-bot",
       OPEN_SANDBOX_CPU: "1.5",
       OPEN_SANDBOX_MEMORY: "1Gi",
+      OPEN_SANDBOX_USER: "runner",
+      OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: 2000,
       OPEN_SANDBOX_GID: 2001,
     });
+  });
+
+  it("defaults runner names and normalizes optional URLs", () => {
+    expect(loadConfig({ ...required, DOCLING_URL: "   " })).toMatchObject({
+      OPEN_SANDBOX_USER: "agent",
+      OPEN_SANDBOX_GROUP: "agent",
+      DOCLING_URL: undefined,
+    });
+    expect(loadConfig({ ...required, DOCLING_URL: "  https://docling.example.test/api  " }).DOCLING_URL)
+      .toBe("https://docling.example.test/api");
+    expect(() => loadConfig({ ...required, DOCLING_URL: "not a url" })).toThrow();
   });
 
   it("requires an absolute non-root server-visible shared path", () => {

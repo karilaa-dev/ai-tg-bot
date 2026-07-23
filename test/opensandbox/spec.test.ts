@@ -33,13 +33,27 @@ describe("OpenSandbox provisioning spec", () => {
     });
   });
 
-  it("changes the fingerprint when provisioning changes", () => {
+  it("changes the fingerprint when provisioning or runner identity changes", () => {
     const base = loadTestConfig({ OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared" });
-    expect(openSandboxProvisioningFingerprint(base)).not.toBe(
-      openSandboxProvisioningFingerprint(loadTestConfig({
+    const changed = [
+      loadTestConfig({
         OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
         OPEN_SANDBOX_IMAGE: "ubuntu:24.04",
-      })),
-    );
+      }),
+      loadTestConfig({
+        OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
+        OPEN_SANDBOX_USER: "runner",
+      }),
+      loadTestConfig({
+        OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
+        OPEN_SANDBOX_GROUP: "runners",
+      }),
+    ];
+
+    for (const config of changed) {
+      expect(openSandboxProvisioningFingerprint(base)).not.toBe(
+        openSandboxProvisioningFingerprint(config),
+      );
+    }
   });
 });
