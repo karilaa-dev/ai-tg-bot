@@ -1,17 +1,18 @@
 import type { FileRow } from "../db/types.js";
-import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
-import { sha256Hex } from "../files/hash.js";
-import { detectImageMediaType } from "../files/mediaType.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
+import { isDoclingConversionError } from "../files/docling.js";
+import { sha256Hex } from "../files/hash.js";
+import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
+import { detectImageMediaType } from "../files/mediaType.js";
+import { ManagedFileStore, persistManagedFile } from "../files/storage.js";
+import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
+import { enqueueMediaGroup } from "./batching.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import { handleUserText } from "./turns.js";
-import { enqueueMediaGroup } from "./batching.js";
-import { telegramFileSource } from "../files/telegramSource.js";
-import { ManagedFileStore, persistManagedFile } from "../files/storage.js";
 
 interface TelegramFileInput {
   fileId: string;
@@ -290,7 +291,9 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       return;
     }
     ctx.services.logger.warn("file ingestion failed", { err: String(err), name: input.name });
-    const key = input.type === "pdf" || input.type === "docx" ? "docling-down" : "error-generic";
+    const key = isDoclingConversionError(err)
+      ? err.kind === "unavailable" ? "docling-unavailable" : "docling-conversion-failed"
+      : "error-generic";
     await status.updateText(ctx.t(key));
   } finally {
     clearJob();

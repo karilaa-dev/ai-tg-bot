@@ -8,23 +8,34 @@ services:
       NODE_ENV: production
       DB_URL: sqlite:/app/data/bot.db
       BASH_WORKSPACE_ROOT: /app/data/bash
+      AGENT_SHARED_ROOT: /data
+      MANAGED_FILE_ROOT: /data/.chat-files
+      BOXLITE_HOME: /var/lib/boxlite
+      BOXLITE_GUEST_USER: ${BOXLITE_GUEST_USER:-agent}
+      APP_UID: ${APP_UID:-1000}
+      APP_GID: ${APP_GID:-1000}
       PI_CODING_AGENT_DIR: /app/data/pi
-      DOCLING_URL: http://docling:5001
     volumes:
       - bot-data:/app/data
+      - boxlite-home:/var/lib/boxlite
+      - type: bind
+        source: ${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the mounted BoxLite share}
+        target: /data
+        bind:
+          create_host_path: false
       # Compatibility name: upgrades reuse the former Codex volume for Pi state.
       - codex-home:/app/data/pi
-    depends_on:
-      docling:
-        condition: service_started
-    restart: unless-stopped
-
-  docling:
-    image: quay.io/docling-project/docling-serve
-    ports:
-      - "5001:5001"
+    devices:
+      - /dev/kvm:/dev/kvm
+    cgroup: private
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - writable-cgroups=true
+    stop_grace_period: 60s
     restart: unless-stopped
 
 volumes:
   bot-data:
+  boxlite-home:
   codex-home:

@@ -1,10 +1,10 @@
-name: Publish container
+name: Publish AI agent box
 
 on:
   push:
     branches:
       - main
-    paths-ignore:
+    paths:
       - 'docker/ai-agent-box/**'
       - '.github/workflows/publish-ai-agent-box.yml'
   workflow_dispatch:
@@ -13,39 +13,56 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-container-${{ github.ref }}
+  group: publish-ai-agent-box-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: karilaa-dev/ai-tg-bot
+  IMAGE_NAME: karilaa-dev/ai-agent-box
 
 jobs:
   verify:
-    name: Typecheck and test
+    name: Build and smoke test
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build smoke-test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
-          node-version: 22
-          cache: npm
+          context: ./docker/ai-agent-box
+          load: true
+          tags: ai-agent-box:smoke
+          cache-from: type=gha,scope=ai-agent-box
+          cache-to: type=gha,mode=max,scope=ai-agent-box
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Smoke test default process
+        run: |
+          container_id="$(docker run --detach ai-agent-box:smoke)"
+          trap 'docker rm --force "${container_id}" >/dev/null' EXIT
+          sleep 1
+          test "$(docker inspect --format '{{.State.Running}}' "${container_id}")" = true
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Smoke test tool contract
+        run: docker run --rm ai-agent-box:smoke /usr/local/bin/tool-contract.sh
 
-      - name: Test
-        run: npm test
+      - name: Smoke test agent UID and GID
+        run: |
+          docker run --rm ai-agent-box:smoke bash -lc '
+            set -e
+            test "$(id -u)" = 1000
+            test "$(id -g)" = 1000
+            test "$(id -un)" = agent
+          '
 
   publish:
     name: Build and publish
     needs: verify
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -79,10 +96,10 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
-          context: .
+          context: ./docker/ai-agent-box
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ai-agent-box
+          cache-to: type=gha,mode=max,scope=ai-agent-box

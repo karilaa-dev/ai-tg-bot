@@ -41,6 +41,7 @@ export async function createGrammyEmulator(options: {
   const bashRoot = options.config?.BASH_WORKSPACE_ROOT
     ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-bash-"));
   const config = loadTestConfig({
+    DOCLING_URL: "http://docling.test",
     ...options.config,
     FILE_CACHE_DIR: cacheDir,
     BASH_WORKSPACE_ROOT: bashRoot,

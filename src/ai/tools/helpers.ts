@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
+import { botOutboxRoot, guestCreatedFilePath } from "../../boxlite/paths.js";
 import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
@@ -53,24 +55,10 @@ export async function getScopedFile(input: ToolBuildInput, fileId: number): Prom
 export async function prepareCreatedFile(
   input: ToolBuildInput,
   file: { virtualPath: string; name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference },
+  signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
-  const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
-  await fs.mkdir(root, { recursive: true });
-  const rootReal = await fs.realpath(root);
   const virtualPath = normalizeBashCwd(file.virtualPath);
-  const hostPath = path.resolve(root, `.${virtualPath}`);
-  const realPath = await fs.realpath(hostPath).catch(() => {
-    throw new Error(`file not found: ${virtualPath}`);
-  });
-  if (!isPathInside(rootReal, realPath)) {
-    throw new Error("file path escapes the thread workspace");
-  }
-  const stat = await fs.stat(realPath);
-  if (!stat.isFile()) throw new Error("path is not a regular file");
-  if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-
-  const bytes = await fs.readFile(realPath);
-  if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+  const bytes = await exportCreatedFileBytes(input, virtualPath, signal);
   const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
   assertAllowedOutboundFile(displayName, file.mime, bytes);
 
@@ -134,6 +122,54 @@ export async function prepareCreatedFile(
     delivery,
     origin: "created_file",
   };
+}
+
+async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string, signal?: AbortSignal): Promise<Buffer> {
+  if (!input.commandRuntime) throw new Error("BoxLite command runtime is unavailable.");
+  const outboxId = randomUUID();
+  const botDirectory = path.join(botOutboxRoot(input.config), outboxId);
+  const botPath = path.join(botDirectory, "content");
+  await fs.mkdir(botDirectory, { recursive: true, mode: 0o700 });
+  let failure: unknown;
+  try {
+    await input.commandRuntime.exportFile({
+      userId: input.user.tg_id,
+      guestPath: guestCreatedFilePath(input.thread.id, virtualPath),
+      hostDestination: botPath,
+      maxBytes: MAX_FILE_BYTES,
+      signal,
+    });
+    return await readExportedFile(botPath, virtualPath);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await fs.rm(botDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (failure !== undefined) {
+        throw new AggregateError([failure, cleanupError], "file export and outbox cleanup both failed");
+      }
+      throw cleanupError;
+    }
+  }
+}
+
+async function readExportedFile(filePath: string, virtualPath: string): Promise<Buffer> {
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      throw new Error(`file not found: ${virtualPath}`);
+    }
+    throw new Error(`cannot inspect exported file ${virtualPath}: ${String(error)}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("path is not a regular file");
+  if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+  const bytes = await fs.readFile(filePath);
+  if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+  return bytes;
 }
 
 function createdFileDeliveryFor(
@@ -268,11 +304,6 @@ function normalizeCreatedFileName(value: string): string {
   return base;
 }
 
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 export function normalizeBashCwd(value: string): string {
   const normalized = path.posix.normalize(value);
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
@@ -292,21 +323,18 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
   const combined = [stringField(result, "error"), stringField(result, "stderr"), stringField(result, "stdout")]
     .filter(Boolean)
     .join("\n");
-  if (timedOut) return "The bash script timed out; retry with a smaller bounded command.";
-  if (/\bnode\b/.test(script) || /this sandbox uses js-exec instead of node|node is .*stub/i.test(combined)) {
-    return "Use js-exec -c '...' for JavaScript in just-bash; node is only a help stub.";
+  if (timedOut) return "The BoxLite command timed out; retry with a smaller bounded command.";
+  if (/BoxLite is (?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
+    return "The BoxLite command runtime is unavailable. Continue with non-VM tools when possible, or report that local command execution is unavailable.";
   }
-  if (/\$\(|<\(/.test(script) || /command substitution|process substitution|syntax error near unexpected token|bad substitution/i.test(combined)) {
-    return "Avoid just-bash command/process substitution. Write js-exec, python3, and curl outputs to temp files, then compare/read those files.";
+  if (/out of memory|oom|killed|exit code 137/i.test(combined)) {
+    return "The 512 MiB VM may have run out of memory. Retry with a smaller input or a less memory-intensive command.";
   }
-  if (/pipefail/i.test(script) || /pipefail/i.test(combined)) {
-    return "Retry with a simpler just-bash script without set -o pipefail; emit compact JSON with the values and checks.";
+  if (/permission denied|read-only file system/i.test(combined) && /apt|sudo|npm.*-g|pip.*system/i.test(`${script}\n${combined}`)) {
+    return "The configured VM user cannot modify that system location. Install packages into user-writable locations or use an image with the required system tools preinstalled.";
   }
-  if (/\bcurl\b/.test(script) || /networkaccessdenied|private\/loopback|localhost|curl:|failed to fetch|could not resolve|response.*too large/i.test(combined)) {
-    return "Use curl for public internet URLs and raw APIs; localhost/private ranges are blocked. Use web_search for discovery and web_extract for readable pages.";
-  }
-  if (/security violation|dynamic import/i.test(combined)) {
-    return "Retry with simpler just-bash syntax; some defense-in-depth paths reject dynamic imports.";
+  if (/\bcurl\b/.test(script) || /private|loopback|metadata|could not resolve|failed to connect/i.test(combined)) {
+    return "Use curl for internet URLs and raw APIs. Network reachability depends on the deployment firewall; do not assume private, local, or metadata destinations are blocked.";
   }
   return undefined;
 }

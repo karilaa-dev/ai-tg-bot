@@ -3,7 +3,28 @@ import { relayAbort, throwIfAborted } from "./cancel.js";
 
 const DOCLING_HEALTHCHECK_TIMEOUT_MS = 5_000;
 
+export type DoclingConversionErrorKind = "unavailable" | "conversion";
+
+export class DoclingConversionError extends Error {
+  constructor(
+    readonly kind: DoclingConversionErrorKind,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "DoclingConversionError";
+  }
+}
+
+export function isDoclingConversionError(error: unknown): error is DoclingConversionError {
+  return error instanceof DoclingConversionError;
+}
+
 export async function checkDocling(config: Pick<AppConfig, "DOCLING_URL">): Promise<void> {
+  if (!config.DOCLING_URL) {
+    throw new Error("Docling is disabled because DOCLING_URL is not configured.");
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOCLING_HEALTHCHECK_TIMEOUT_MS);
   const endpoint = doclingEndpoint(config.DOCLING_URL, "/docs");
@@ -23,12 +44,24 @@ export async function convertWithDocling(input: {
   bytes: Buffer;
   signal?: AbortSignal;
 }): Promise<string> {
+  const baseUrl = input.config.DOCLING_URL;
+  if (!baseUrl) {
+    throw new DoclingConversionError(
+      "unavailable",
+      "Docling conversion is disabled because DOCLING_URL is not configured.",
+    );
+  }
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), input.config.DOCLING_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, input.config.DOCLING_TIMEOUT_MS);
   const cleanupAbortRelay = relayAbort(input.signal, () => controller.abort());
+  const endpoint = doclingEndpoint(baseUrl, "/v1/convert/source");
   try {
     throwIfAborted(input.signal);
-    const endpoint = doclingEndpoint(input.config.DOCLING_URL, "/v1/convert/source");
     let res: Response;
     try {
       res = await fetch(endpoint, {
@@ -42,13 +75,56 @@ export async function convertWithDocling(input: {
       });
     } catch (err) {
       throwIfAborted(input.signal);
-      throw new Error(`Docling request failed at ${endpoint}: ${errorDetail(err)}`, { cause: err });
+      if (timedOut) {
+        throw new DoclingConversionError(
+          "unavailable",
+          `Docling conversion timed out after ${input.config.DOCLING_TIMEOUT_MS}ms at ${endpoint}.`,
+          { cause: err },
+        );
+      }
+      throw new DoclingConversionError(
+        "unavailable",
+        `Docling request failed at ${endpoint}: ${errorDetail(err)}`,
+        { cause: err },
+      );
     }
-    if (!res.ok) throw new Error(`docling HTTP ${res.status}`);
+    if (!res.ok) {
+      const kind = res.status === 429 || res.status >= 500 ? "unavailable" : "conversion";
+      throw new DoclingConversionError(
+        kind,
+        `Docling request failed with HTTP ${res.status} at ${endpoint}.`,
+      );
+    }
     throwIfAborted(input.signal);
-    const json = await res.json() as Record<string, unknown>;
+
+    let json: Record<string, unknown>;
+    try {
+      json = await res.json() as Record<string, unknown>;
+    } catch (err) {
+      throwIfAborted(input.signal);
+      if (timedOut) {
+        throw new DoclingConversionError(
+          "unavailable",
+          `Docling conversion timed out after ${input.config.DOCLING_TIMEOUT_MS}ms while reading the response.`,
+          { cause: err },
+        );
+      }
+      throw new DoclingConversionError(
+        "conversion",
+        "Docling returned an invalid JSON response.",
+        { cause: err },
+      );
+    }
     throwIfAborted(input.signal);
-    return findMarkdown(json) ?? "";
+
+    const markdown = findMarkdown(json);
+    if (markdown === undefined) {
+      throw new DoclingConversionError(
+        "conversion",
+        "Docling returned no converted Markdown content.",
+      );
+    }
+    return markdown;
   } finally {
     clearTimeout(timer);
     cleanupAbortRelay();
@@ -74,7 +150,7 @@ function findMarkdown(value: unknown): string | undefined {
   if (obj.document) return findMarkdown(obj.document);
   for (const child of Object.values(obj)) {
     const found = findMarkdown(child);
-    if (found) return found;
+    if (found !== undefined) return found;
   }
   return undefined;
 }

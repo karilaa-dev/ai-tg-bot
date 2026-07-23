@@ -26,6 +26,7 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtensio
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
+import type { CommandRuntime } from "../boxlite/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
@@ -74,6 +75,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     repos: Repos;
     logger: Logger;
     embedder?: TextEmbedder;
+    commandRuntime?: CommandRuntime;
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
@@ -301,6 +303,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   readonly repos: Repos;
   readonly logger: Logger;
   readonly embedder?: TextEmbedder;
+  readonly commandRuntime?: CommandRuntime;
   readonly modelRegistry: ModelRegistry;
   readonly providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[] = [];
@@ -316,6 +319,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     repos: Repos;
     logger: Logger;
     embedder?: TextEmbedder;
+    commandRuntime?: CommandRuntime;
     user: UserRow;
     thread: ThreadRow;
     modelRegistry: ModelRegistry;
@@ -329,6 +333,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.repos = input.repos;
     this.logger = input.logger;
     this.embedder = input.embedder;
+    this.commandRuntime = input.commandRuntime;
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
   }
@@ -352,6 +357,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       thread: this.thread,
       logger: this.logger,
       embedder: this.embedder,
+      commandRuntime: this.commandRuntime,
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),

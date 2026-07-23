@@ -63,7 +63,7 @@ function toolLabel(name: string): string {
 
 function toolSnippet(name: string): string {
   switch (name) {
-    case "bash": return "Run commands inside the persistent just-bash workspace; scoped chat files are lazy paths under /attachments/<file_id>.";
+    case "bash": return "Run real Bash in the user's persistent BoxLite VM; pass exact attachment ids in input_file_ids, use the thread workspace by default, and use /data/shared across threads.";
     case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
     case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";

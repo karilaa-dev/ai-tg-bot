@@ -8,15 +8,17 @@ import {
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import { unzipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runTurn, sendFinal } from "../../src/ai/run.js";
-import { loadTestConfig } from "../../src/config.js";
+import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import { botThreadWorkspace } from "../../src/boxlite/paths.js";
+import type { BoxCommandRequest, BoxCommandResult, BoxFileExportRequest, CommandRuntime } from "../../src/boxlite/types.js";
 
 describe("runTurn with Pi", () => {
   let db: AppDatabase | undefined;
@@ -148,7 +150,7 @@ describe("runTurn with Pi", () => {
           id: "zip-bash-call",
           name: "bash",
           arguments: {
-            script: "mkdir -p /zip-smoke/nested; printf alpha > /zip-smoke/alpha.txt; printf beta > /zip-smoke/nested/beta.txt; zip -rq /zip-smoke.zip /zip-smoke",
+            script: "mkdir -p zip-smoke/nested; printf alpha > zip-smoke/alpha.txt; printf beta > zip-smoke/nested/beta.txt; zip -rq zip-smoke.zip zip-smoke",
             cwd: "/",
             stdin: "",
             args: [],
@@ -167,11 +169,27 @@ describe("runTurn with Pi", () => {
       }
       return textStream(model, "ZIP_TOOL_SMOKE_OK");
     }) as PiProviderStreamOverrides["openRouter"];
+    const workspace = botThreadWorkspace(config, user.tg_id, thread.id);
+    const commandRuntime = new TestCommandRuntime(async () => {
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.writeFile(path.join(workspace, "zip-smoke.zip"), zipSync({
+        "zip-smoke/": new Uint8Array(),
+        "zip-smoke/alpha.txt": Buffer.from("alpha"),
+        "zip-smoke/nested/": new Uint8Array(),
+        "zip-smoke/nested/beta.txt": Buffer.from("beta"),
+      }));
+      return successfulCommand();
+    }, async (request) => {
+      const destination = request.hostDestination;
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.copyFile(path.join(workspace, "zip-smoke.zip"), destination);
+    });
     manager = new PiRuntimeManager({
       config,
       db,
       repos,
       logger,
+      commandRuntime,
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     let documentCalls = 0;
@@ -507,5 +525,39 @@ function resolvedFile(bytes: Buffer, fileId: number) {
     contentSha256: "test-hash",
     expiresAt: Number.POSITIVE_INFINITY,
     source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
+  };
+}
+
+class TestCommandRuntime implements CommandRuntime {
+  readonly requests: BoxCommandRequest[] = [];
+
+  constructor(
+    private readonly handler: (request: BoxCommandRequest) => Promise<BoxCommandResult>,
+    private readonly exporter: (request: BoxFileExportRequest) => Promise<void> = async () => {
+      throw new Error("export not configured");
+    },
+  ) {}
+
+  async execute(request: BoxCommandRequest): Promise<BoxCommandResult> {
+    this.requests.push(request);
+    return this.handler(request);
+  }
+
+  exportFile(request: BoxFileExportRequest): Promise<void> {
+    return this.exporter(request);
+  }
+
+  async reconcile(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+function successfulCommand(): BoxCommandResult {
+  return {
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
   };
 }

@@ -278,7 +278,7 @@ function generateImageSubject(record: Record<string, unknown> | undefined): stri
 function bashSubject(record: Record<string, unknown> | undefined): string | undefined {
   const script = stringField(record, "script")?.replace(/\s+/g, " ").trim();
   if (!script) return undefined;
-  const tools = ["js-exec", "python3", "python", "curl"].filter((name) => new RegExp(`\\b${name}\\b`).test(script));
+  const tools = ["node", "python3", "python", "curl"].filter((name) => new RegExp(`\\b${name}\\b`).test(script));
   const uniqueTools = tools.filter((name, index) => name !== "python" || !tools.includes("python3") || tools.indexOf(name) === index);
   const prefix = uniqueTools.length > 1 ? `${uniqueTools.join(" + ")}: ` : "";
   return truncateSubject(`${prefix}${script}`, 64);

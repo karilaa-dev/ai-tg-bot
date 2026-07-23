@@ -10,14 +10,20 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
+    "migrate:boxlite-data": "node dist/scripts/migrate-boxlite-data.js",
+    "migrate:boxlite-data:dev": "tsx scripts/migrate-boxlite-data.ts",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
-    "live:telegram-restore": "tsx scripts/live-telegram-restore.ts"
+    "live:telegram-restore": "tsx scripts/live-telegram-restore.ts",
+    "live:boxlite-check": "tsx scripts/live-boxlite-check.ts",
+    "live:boxlite-python-check": "tsx scripts/live-boxlite-python-check.ts",
+    "live:boxlite-workspace-check": "tsx scripts/live-boxlite-workspace-check.ts"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
+    "@boxlite-ai/boxlite": "0.9.7",
     "@earendil-works/pi-agent-core": "0.80.6",
     "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",
@@ -31,7 +37,6 @@
     "drizzle-orm": "^1.0.0-beta.22",
     "fflate": "^0.8.3",
     "grammy": "^1.43.0",
-    "just-bash": "^3.0.1",
     "pg": "^8.21.0",
     "unpdf": "^1.6.2",
     "zod": "^4.4.3"

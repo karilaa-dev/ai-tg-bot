@@ -8,26 +8,33 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/karilaa-dev/ai-tg-bot/issues</Support>
   <Project>https://github.com/karilaa-dev/ai-tg-bot</Project>
-  <Overview>Pi-powered personal Telegram agent with persistent sessions, Codex OAuth, OpenRouter fallback, retrieval, files, images, web tools, and per-thread just-bash workspaces.</Overview>
+  <Overview>Single-container Pi-powered Telegram agent with SQLite, persistent sessions, retrieval, files, images, web tools, and lazy embedded per-user BoxLite VMs.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/ai-tg-bot.xml</TemplateURL>
   <ReadMe>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/README.md</ReadMe>
   <Icon>https://telegram.org/img/t_logo.png</Icon>
-  <ExtraParams>--user=99:100</ExtraParams>
-  <Requires>A Telegram bot token, OpenRouter API key, Tavily API key, and a reachable Docling server. Codex OAuth is optional.</Requires>
+  <ExtraParams>--device=/dev/kvm:/dev/kvm --cgroupns=private --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt writable-cgroups=true --stop-timeout=60</ExtraParams>
+  <Requires>Telegram, OpenRouter, and Tavily API keys; /dev/kvm; cgroup v2 mounted with nsdelegate; and Docker support for private writable cgroups. Codex OAuth and an external Docling server are optional. The template runs one non-privileged container.</Requires>
 
-  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database, Pi sessions and OAuth credentials, and managed bot state. A legacy Codex auth file under /app/data/codex is converted for Pi once and retained as a backup." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="Managed Files" Target="/app/data/files" Default="/mnt/user/ai-tg-bot" Mode="rw" Description="Extracted Telegram document data. The Pi cutover migration clears this directory once; image bytes are never stored here." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database, Pi sessions/OAuth credentials, and the legacy bash tree retained for migration and rollback." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="BoxLite Shared Data" Target="/data" Default="/mnt/user/boxlite" Mode="rw" Description="Persistent user workspaces and canonical managed chat files. The entrypoint aligns this tree with APP_UID:APP_GID; keep the default 1000:1000 when using the published agent image." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="BoxLite Runtime State" Target="/var/lib/boxlite" Default="/mnt/user/appdata/ai-tg-bot/boxlite" Mode="rw" Description="Dedicated embedded BoxLite runtime home. Do not share this path with another bot replica, live check, or BoxLite daemon." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token used to receive updates and call Telegram APIs." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter key used for inference fallback, fallback image generation, and retrieval embeddings." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily key used by web search and page extraction tools." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Docling URL" Target="DOCLING_URL" Default="http://docling:5001" Description="Base URL of a reachable Docling server." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="BoxLite Image" Target="BOXLITE_AGENT_IMAGE" Default="ghcr.io/karilaa-dev/ai-agent-box:latest" Description="Agent VM image. Pin a sha-* tag in production." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="BoxLite Guest User" Target="BOXLITE_GUEST_USER" Default="agent" Description="Linux username, numeric UID, or UID:GID used for VM startup and every command. Named users must exist in the image; use root or 0 for images such as python:slim." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used for Node and persistent data. Keep 1000 with the published agent image so guest and host workspace ownership match." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used for Node and persistent data." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Docling URL" Target="DOCLING_URL" Default="" Description="Optional external Docling server for DOCX, scanned PDFs, and PDFs without usable native text. Leave empty for the default one-container deployment." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="Database URL" Target="DB_URL" Default="sqlite:/app/data/bot.db" Description="SQLite or PostgreSQL database URL." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Pi Agent Directory" Target="PI_CODING_AGENT_DIR" Default="/app/data/pi" Description="Persistent Pi configuration, OAuth credentials, and Telegram-thread JSONL sessions." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Bash Workspace Root" Target="BASH_WORKSPACE_ROOT" Default="/app/data/bash" Description="Root for persistent per-thread just-bash workspaces. Kept outside managed files so migration cleanup preserves it." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Legacy Bash Root" Target="BASH_WORKSPACE_ROOT" Default="/app/data/bash" Description="Pre-BoxLite workspace and managed-file source retained during migration and rollback." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Agent Shared Root" Target="AGENT_SHARED_ROOT" Default="/data" Description="Bot-side path to the same shared filesystem used for BoxLite workspaces." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Managed File Root" Target="MANAGED_FILE_ROOT" Default="/data/.chat-files" Description="Canonical chat-file store, kept outside per-user VM mounts." Type="Variable" Display="advanced" Required="true" Mask="false"/>
 
   <Config Name="Codex Main Model" Target="CODEX_MODEL" Default="gpt-5.6-sol" Description="Pi openai-codex model for main turns when Codex OAuth is configured." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Codex Helper Model" Target="CODEX_HELPER_MODEL" Default="gpt-5.6-luna" Description="Pi openai-codex model for isolated helper work." Type="Variable" Display="advanced" Required="false" Mask="false"/>
@@ -43,7 +50,9 @@
 
   <Config Name="Docling Timeout" Target="DOCLING_TIMEOUT_MS" Default="300000" Description="Docling conversion timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="File Inline Tokens" Target="FILE_INLINE_TOKENS" Default="6000" Description="Maximum estimated file tokens to inline before chunking and indexing." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one just-bash execution." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one BoxLite bash execution." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="BoxLite Idle Stop" Target="BOXLITE_IDLE_STOP_MS" Default="600000" Description="Stop a user's VM after this many idle milliseconds; disk state is retained." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="BoxLite Provision Timeout" Target="BOXLITE_PROVISION_TIMEOUT_MS" Default="300000" Description="Bot-side upper bound in milliseconds for image acquisition and VM startup. BoxLite may report its own earlier native timeout." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Bash Max Output" Target="BASH_MAX_OUTPUT_CHARS" Default="12000" Description="Maximum characters returned for each bash stdout or stderr stream." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Draft Update Interval" Target="DRAFT_UPDATE_MS" Default="0" Description="Minimum milliseconds between Telegram draft/status edits." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Onboarding Timezone Delay" Target="ONBOARDING_TIMEZONE_DELAY_MS" Default="2000" Description="Delay before the onboarding timezone prompt." Type="Variable" Display="advanced" Required="false" Mask="false"/>
