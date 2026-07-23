@@ -155,7 +155,9 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     await this.control("write command stdin", connection.writeFiles([{
       path: stdinPath,
       data: request.stdin,
-      mode: 0o600,
+      mode: 600,
+      owner: "agent",
+      group: "agent",
     }]));
 
     const stdout: OutputCapture = { text: "", truncated: false };
@@ -175,8 +177,8 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       onInit: (init) => {
         active.executionId = init.id;
       },
-      onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
-      onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
+      onStdout: (message) => appendOutput(stdout, streamLine(message.text), request.maxOutputChars),
+      onStderr: (message) => appendOutput(stderr, streamLine(message.text), request.maxOutputChars),
     }, abortController.signal);
     const deadline = createDeadline(request.timeoutMs, request.signal);
 
@@ -304,7 +306,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       state.remoteState = undefined;
     }
 
-    await fs.mkdir(botUserRoot(this.input.config, userId), { recursive: true, mode: 0o700 });
+    await fs.mkdir(botUserRoot(this.input.config, userId), { recursive: true, mode: 0o770 });
     const connection = await this.control(
       "create sandbox",
       client.create(openSandboxCreateSpec(this.input.config, userId)),
@@ -381,12 +383,12 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 
   private scheduleIdlePause(userId: number, state: UserRuntimeState): void {
-    if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId) return;
+    if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId || state.remoteState === "Paused") return;
     this.clearIdleTimer(state);
     state.idleTimer = setTimeout(() => {
       state.idleTimer = undefined;
       const pause = state.tail.then(async () => {
-        if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId) return;
+        if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId || state.remoteState === "Paused") return;
         const client = await this.ensureClient();
         const id = state.sandboxId;
         try {
@@ -485,6 +487,10 @@ function guestPathToHostPath(userRoot: string, guestPath: string): string {
   const relation = path.relative(root, candidate);
   if (relation === ".." || relation.startsWith(`..${path.sep}`)) throw new Error("created file path escapes the user root");
   return candidate;
+}
+
+function streamLine(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
 }
 
 function appendOutput(capture: OutputCapture, chunk: string, maxChars: number): void {

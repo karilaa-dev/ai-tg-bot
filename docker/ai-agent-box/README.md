@@ -4,7 +4,7 @@
 
 ## Runtime contract
 
-The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. This matches the bot's default `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`. A different numeric identity still needs suitable home/tool directories and filesystem permissions. The per-user host directory mounted by OpenSandbox at `/data` must be writable by the configured identity. The image includes:
+The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. The container defaults to root because OpenSandbox's injected `execd` process needs to switch command identities; the bot runs every agent command as `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`. A different numeric identity still needs suitable home/tool directories and filesystem permissions. The per-user host directory mounted by OpenSandbox at `/data` must be writable by the configured identity. The image includes:
 
 - Python 3 with pip and venv
 - Node.js 22 with npm
@@ -18,7 +18,7 @@ The image intentionally does not include credentials, a Docker client or socket,
 Run the installed contract check with:
 
 ```sh
-docker run --rm ghcr.io/karilaa-dev/ai-agent-box:latest \
+docker run --rm --user 1000:1000 ghcr.io/karilaa-dev/ai-agent-box:latest \
   /usr/local/bin/tool-contract.sh
 ```
 
@@ -29,6 +29,7 @@ Pull and open an interactive shell with the current directory mounted as the wor
 ```sh
 docker pull ghcr.io/karilaa-dev/ai-agent-box:latest
 docker run --rm -it \
+  --user 1000:1000 \
   -v "$PWD:/workspace" \
   ghcr.io/karilaa-dev/ai-agent-box:latest bash
 ```
@@ -54,7 +55,7 @@ From the repository root:
 
 ```sh
 docker build -t ai-agent-box:local docker/ai-agent-box
-docker run --rm ai-agent-box:local /usr/local/bin/tool-contract.sh
+docker run --rm --user 1000:1000 ai-agent-box:local /usr/local/bin/tool-contract.sh
 ```
 
 The directory-local `.dockerignore` limits the build context to the Dockerfile and tool contract script.

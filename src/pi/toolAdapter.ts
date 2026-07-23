@@ -63,7 +63,7 @@ function toolLabel(name: string): string {
 
 function toolSnippet(name: string): string {
   switch (name) {
-    case "bash": return "Run real Bash in the user's persistent OpenSandbox environment; omit cwd to use the thread workspace, never pass the bot host cwd, pass exact attachment ids in input_file_ids, and use /data/shared across threads.";
+    case "bash": return "Run real Bash in the user's persistent OpenSandbox environment. Omit cwd and use relative paths: logical / is the current thread workspace, not filesystem root. Never pass the bot host cwd or probe /home/agent or /workspace; use /data/shared only across threads and pass exact attachment ids in input_file_ids.";
     case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
     case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";

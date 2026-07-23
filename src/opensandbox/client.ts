@@ -124,7 +124,6 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       entrypoint: ["tail", "-f", "/dev/null"],
       resource: { cpu: spec.cpu, memory: spec.memory },
       timeoutSeconds: null,
-      secureAccess: true,
       networkPolicy: { defaultAction: "allow" },
       volumes: [{
         name: "user-data",

@@ -243,7 +243,7 @@ async function validatePersistenceAndToolUse(input: {
     .filter((result) => result.name === "bash" && numberField(result.details, "exit_code") === 0)
     .map((result) => result.id));
   const zipCommandObserved = bashCalls.some((call) => successfulBashIds.has(call.id)
-    && /(^|[;&|\n]\s*)zip(?:\s|$)/m.test(stringField(call.arguments, "script") ?? ""));
+    && /(?:^|[;\n]|&&|\|\||\||&)\s*zip(?:\s|$)/m.test(stringField(call.arguments, "script") ?? ""));
   const unzipVerificationObserved = bashCalls.some((call) => {
     if (!successfulBashIds.has(call.id)) return false;
     const script = stringField(call.arguments, "script") ?? "";

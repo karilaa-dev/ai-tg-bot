@@ -57,11 +57,16 @@ RUN existing_user="$(getent passwd 1000 | cut -d: -f1 || true)" \
     && if [[ -n "${existing_group}" ]]; then groupdel "${existing_group}"; fi \
     && groupadd --gid 1000 agent \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash agent \
-    && install -d -o agent -g agent /workspace /home/agent/.local/bin /home/agent/.cache/pip /home/agent/.npm
+    && install -d -o agent -g agent \
+        /workspace \
+        /home/agent/.local \
+        /home/agent/.local/bin \
+        /home/agent/.cache \
+        /home/agent/.cache/pip \
+        /home/agent/.npm
 
 COPY --chmod=0755 tool-contract.sh /usr/local/bin/tool-contract.sh
 
-USER agent
 WORKDIR /workspace
 
 ENV HOME=/home/agent \

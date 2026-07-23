@@ -153,16 +153,34 @@ describe("UserOpenSandboxRuntimeManager", () => {
   it("pauses on idle and resumes the same sandbox", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
-    const manager = new UserOpenSandboxRuntimeManager({
-      config: loadTestConfig({ OPEN_SANDBOX_IDLE_PAUSE_MS: 1000 }),
-      client,
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "opensandbox-idle-"));
+    const config = loadTestConfig({
+      OPEN_SANDBOX_IDLE_PAUSE_MS: 1000,
+      AGENT_SHARED_ROOT: root,
+      OPEN_SANDBOX_SHARED_HOST_ROOT: root,
+      MANAGED_FILE_ROOT: path.join(root, ".chat-files"),
     });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
     await manager.execute(command(30));
     const sandboxId = client.connections[0]!.id;
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(client.pauseCalls).toEqual([sandboxId]);
+
+    const sourcePath = path.join(config.AGENT_SHARED_ROOT, "users", "30", "paused-export.txt");
+    const destinationPath = path.join(config.MANAGED_FILE_ROOT, "paused-export.txt");
+    await fs.writeFile(sourcePath, "exported");
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await manager.exportFile({
+      userId: 30,
+      guestPath: "/data/paused-export.txt",
+      hostDestination: destinationPath,
+      maxBytes: 100,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.pauseCalls).toEqual([sandboxId]);
+
     await manager.execute(command(30));
     expect(client.resumeCalls).toEqual([sandboxId]);
     expect(client.createCalls).toBe(1);
@@ -232,7 +250,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
 
     await expect(manager.execute({ ...command(43), maxOutputChars: 5 })).resolves.toMatchObject({
-      stdout: "12345",
+      stdout: "123\n4",
       stderr: "abcde",
       stdoutTruncated: true,
       stderrTruncated: true,
@@ -248,7 +266,12 @@ describe("UserOpenSandboxRuntimeManager", () => {
 
     const connection = client.connections[0]!;
     expect(connection.writeEntries).toHaveLength(1);
-    expect(connection.writeEntries[0]).toMatchObject({ data: "input data", mode: 0o600 });
+    expect(connection.writeEntries[0]).toMatchObject({
+      data: "input data",
+      mode: 600,
+      owner: "agent",
+      group: "agent",
+    });
     expect(connection.writeEntries[0]!.path).toMatch(/^\/tmp\/ai-tg-bot-stdin-/);
     expect(connection.deleteCalls).toEqual([[connection.writeEntries[0]!.path]]);
     await manager.dispose();
