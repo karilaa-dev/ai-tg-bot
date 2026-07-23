@@ -7,8 +7,8 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import type { CreatedFileAttachment, ToolBuildInput } from "../../src/ai/tools/types.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { botThreadWorkspace } from "../../src/boxlite/paths.js";
-import type { BoxCommandRequest, BoxCommandResult, BoxFileExportRequest, CommandRuntime } from "../../src/boxlite/types.js";
+import { botThreadWorkspace } from "../../src/sandbox/paths.js";
+import type { SandboxCommandRequest, SandboxCommandResult, SandboxFileExportRequest, CommandRuntime } from "../../src/sandbox/types.js";
 
 describe("Pi safe tool adapters", () => {
   let db: AppDatabase | undefined;
@@ -19,7 +19,7 @@ describe("Pi safe tool adapters", () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("persists and delivers a BoxLite-created image from the managed chat-file store", async () => {
+  it("persists and delivers a OpenSandbox-created image from the managed chat-file store", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-adapter-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
@@ -114,7 +114,7 @@ describe("Pi safe tool adapters", () => {
     expect(resolveFile).toHaveBeenCalledTimes(1);
   });
 
-  it("does not contact BoxLite while tool adapters are constructed", async () => {
+  it("does not contact OpenSandbox while tool adapters are constructed", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-lazy-box-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
@@ -129,26 +129,30 @@ describe("Pi safe tool adapters", () => {
     });
 
     expect(tools.map((tool) => tool.name)).toContain("bash");
+    expect((tools.find((tool) => tool.name === "bash")!.parameters as { required?: string[] }).required)
+      .toEqual(["script"]);
+    expect((tools.find((tool) => tool.name === "web_search")!.parameters as { required?: string[] }).required)
+      .toEqual(["query"]);
     expect(runtime.requests).toHaveLength(0);
   });
 });
 
 class FakeRuntime implements CommandRuntime {
-  readonly requests: BoxCommandRequest[] = [];
+  readonly requests: SandboxCommandRequest[] = [];
 
   constructor(
-    private readonly handler: (request: BoxCommandRequest) => Promise<BoxCommandResult> = async () => successfulCommand(),
-    private readonly exporter: (request: BoxFileExportRequest) => Promise<void> = async () => {
+    private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult> = async () => successfulCommand(),
+    private readonly exporter: (request: SandboxFileExportRequest) => Promise<void> = async () => {
       throw new Error("export not configured");
     },
   ) {}
 
-  async execute(request: BoxCommandRequest): Promise<BoxCommandResult> {
+  async execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
     this.requests.push(request);
     return this.handler(request);
   }
 
-  exportFile(request: BoxFileExportRequest): Promise<void> {
+  exportFile(request: SandboxFileExportRequest): Promise<void> {
     return this.exporter(request);
   }
 
@@ -156,7 +160,7 @@ class FakeRuntime implements CommandRuntime {
   async dispose(): Promise<void> {}
 }
 
-function successfulCommand(stdout = ""): BoxCommandResult {
+function successfulCommand(stdout = ""): SandboxCommandResult {
   return {
     stdout,
     stderr: "",

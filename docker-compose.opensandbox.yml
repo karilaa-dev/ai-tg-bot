@@ -1,0 +1,26 @@
+services:
+  opensandbox-server:
+    image: docker.io/opensandbox/server:v0.2.2
+    container_name: opensandbox-server
+    environment:
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
+      OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?set OPEN_SANDBOX_API_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - opensandbox-state:/var/lib/opensandbox
+      - ${OPEN_SANDBOX_CONFIG_FILE:-./docker/opensandbox/config.example.toml}:/etc/opensandbox/config.toml:ro
+      - type: bind
+        source: ${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}
+        target: ${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}
+        bind:
+          create_host_path: false
+    networks:
+      - opensandbox
+    restart: unless-stopped
+
+volumes:
+  opensandbox-state:
+
+networks:
+  opensandbox:
+    name: ${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}

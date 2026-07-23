@@ -6,7 +6,7 @@ import type { FileRow, StoredFileType, ThreadRow, UserRow } from "../../db/types
 import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
 import type { ResolvedChatFile } from "../../files/source.js";
-import type { CommandRuntime } from "../../boxlite/types.js";
+import type { CommandRuntime } from "../../sandbox/types.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 
 export interface ToolBuildInput {

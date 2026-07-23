@@ -26,7 +26,7 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtensio
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
-import type { CommandRuntime } from "../boxlite/types.js";
+import type { CommandRuntime } from "../sandbox/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";

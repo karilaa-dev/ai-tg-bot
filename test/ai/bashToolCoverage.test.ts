@@ -6,17 +6,17 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { buildToolRegistry } from "../../src/ai/tools/index.js";
-import type { BoxCommandRequest, BoxCommandResult, CommandRuntime } from "../../src/boxlite/types.js";
+import type { SandboxCommandRequest, SandboxCommandResult, CommandRuntime } from "../../src/sandbox/types.js";
 
-const BOX_USER_ID = 71;
+const SANDBOX_USER_ID = 71;
 
-describe("BoxLite bash tool contract", () => {
+describe("OpenSandbox bash tool contract", () => {
   let db: AppDatabase;
   let repos: Repos;
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-boxlite-bash-"));
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-opensandbox-bash-"));
     const config = loadTestConfig();
     db = createDatabase(config);
     await db.migrate();
@@ -28,7 +28,7 @@ describe("BoxLite bash tool contract", () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("maps the stable bash tool contract to a per-thread BoxLite command", async () => {
+  it("maps the stable bash tool contract to a per-thread OpenSandbox command", async () => {
     const runtime = new FakeRuntime();
     const { bash, thread } = await createBash(runtime);
     const result = await bash.execute({
@@ -57,12 +57,25 @@ describe("BoxLite bash tool contract", () => {
     });
   });
 
+  it("maps a leaked bot host cwd back to the thread workspace", async () => {
+    const runtime = new FakeRuntime();
+    const { bash, thread } = await createBash(runtime);
+
+    const result = await bash.execute({
+      script: "pwd",
+      cwd: process.cwd(),
+    });
+
+    expect(result).toMatchObject({ exit_code: 0, cwd: "/" });
+    expect(runtime.requests[0]?.workingDir).toBe(`/data/threads/${thread.id}/workspace`);
+  });
+
   it("stages only requested scoped attachments and removes copies after execution", async () => {
     const bytes = Buffer.from("attachment bytes");
     const runtime = new FakeRuntime(async (request) => {
       const guestPath = stagedGuestPath(request);
       const relative = path.posix.relative("/data", guestPath);
-      const hostPath = path.join(tempDir, "agent", "users", String(BOX_USER_ID), relative);
+      const hostPath = path.join(tempDir, "agent", "users", String(SANDBOX_USER_ID), relative);
       await expect(fs.readFile(hostPath)).resolves.toEqual(bytes);
       return successfulCommand("staged\n");
     });
@@ -102,7 +115,7 @@ describe("BoxLite bash tool contract", () => {
       tempDir,
       "agent",
       "users",
-      String(BOX_USER_ID),
+      String(SANDBOX_USER_ID),
       "threads",
       String(thread.id),
       "attachments",
@@ -110,7 +123,7 @@ describe("BoxLite bash tool contract", () => {
     await expect(fs.readdir(attachmentRoot)).resolves.toEqual([]);
   });
 
-  it("rejects attachments from another thread before starting BoxLite", async () => {
+  it("rejects attachments from another thread before starting OpenSandbox", async () => {
     const runtime = new FakeRuntime();
     const { bash, user } = await createBash(runtime);
     const other = await repos.threads.create({ userId: user.tg_id, topicId: 2, title: "Other" });
@@ -131,7 +144,7 @@ describe("BoxLite bash tool contract", () => {
 
   it("returns embedded runtime initialization errors to the model", async () => {
     const runtime = new FakeRuntime(async () => {
-      throw new Error("BoxLite cannot access /dev/kvm");
+      throw new Error("OpenSandbox server is unavailable");
     });
     const config = loadTestConfig({
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
@@ -146,13 +159,13 @@ describe("BoxLite bash tool contract", () => {
 
     expect(result).toMatchObject({
       exit_code: null,
-      error: "Error: BoxLite cannot access /dev/kvm",
+      error: "Error: OpenSandbox server is unavailable",
     });
   });
 
   async function createBash(runtime: CommandRuntime) {
     const config = testConfig();
-    const user = await repos.users.ensure({ tgId: BOX_USER_ID, firstName: "BoxLite", lang: "en" });
+    const user = await repos.users.ensure({ tgId: SANDBOX_USER_ID, firstName: "OpenSandbox", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const bash = buildToolRegistry({ config, db, repos, user, thread, commandRuntime: runtime }).bash;
     return { bash, user, thread };
@@ -168,14 +181,14 @@ describe("BoxLite bash tool contract", () => {
 });
 
 class FakeRuntime implements CommandRuntime {
-  readonly requests: BoxCommandRequest[] = [];
+  readonly requests: SandboxCommandRequest[] = [];
 
   constructor(
-    private readonly handler: (request: BoxCommandRequest) => Promise<BoxCommandResult> = async () =>
+    private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult> = async () =>
       successfulCommand("ok\n"),
   ) {}
 
-  async execute(request: BoxCommandRequest): Promise<BoxCommandResult> {
+  async execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
     this.requests.push(request);
     return this.handler(request);
   }
@@ -188,13 +201,13 @@ class FakeRuntime implements CommandRuntime {
   async dispose(): Promise<void> {}
 }
 
-function stagedGuestPath(request: BoxCommandRequest): string {
+function stagedGuestPath(request: SandboxCommandRequest): string {
   const guestPath = Object.entries(request.env).find(([key]) => key.startsWith("CHAT_FILE_"))?.[1];
   if (!guestPath) throw new Error("expected a staged chat file path");
   return guestPath;
 }
 
-function successfulCommand(stdout: string): BoxCommandResult {
+function successfulCommand(stdout: string): SandboxCommandResult {
   return {
     stdout,
     stderr: "",

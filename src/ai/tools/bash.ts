@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import { z } from "zod";
-import { stageChatFiles, type StagedInputFile } from "../../boxlite/attachments.js";
-import { formatBoxliteError } from "../../boxlite/client.js";
-import { promoteLegacyThreadWorkspace } from "../../boxlite/migrateData.js";
-import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../boxlite/paths.js";
+import { stageChatFiles, type StagedInputFile } from "../../sandbox/attachments.js";
+import { formatSandboxError } from "../../opensandbox/client.js";
+import { promoteLegacyThreadWorkspace } from "../../sandbox/migrateData.js";
+import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
@@ -33,7 +33,7 @@ type BashToolResult = {
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Run a real Bash script in this user's persistent BoxLite VM. The default directory is this thread's workspace; use relative paths for thread files because absolute paths are real guest paths. /data/shared is shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage immutable copies for this call at the returned paths and through CHAT_FILE_<id>. The VM starts lazily only when this tool runs and stops after its idle timeout; files, installed packages, and the VM disk persist across restarts. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
+      "Run a real Bash script in this user's persistent OpenSandbox environment. Omit cwd to use this thread's workspace; never pass the bot host path shown by the coding-agent runtime. Use relative paths for thread files because absolute paths are real guest paths. /data/shared is shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available in the configured runner image. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage immutable copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily and pauses after its idle timeout; /data and the container state persist until the sandbox is replaced. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -76,7 +76,8 @@ async function runBashTool(
   signal?: AbortSignal,
 ): Promise<BashToolResult> {
   const { config, thread, user } = input;
-  const logicalCwd = normalizeBashCwd(command.cwd);
+  const requestedCwd = normalizeBashCwd(command.cwd);
+  const logicalCwd = requestedCwd === normalizeBashCwd(process.cwd()) ? "/" : requestedCwd;
   const workingDir = guestCwd(thread.id, logicalCwd);
   await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
   await Promise.all([
@@ -86,7 +87,7 @@ async function runBashTool(
   const stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
   let toolResult: BashToolResult;
   try {
-    if (!input.commandRuntime) throw new Error("BoxLite command runtime is unavailable.");
+    if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
     const result = await input.commandRuntime.execute({
       userId: user.tg_id,
       command: "bash",
@@ -119,15 +120,15 @@ async function runBashTool(
       stderr_truncated: false,
       cwd: logicalCwd,
       input_files: stagedFiles.files,
-      error: formatBoxliteError(error),
+      error: formatSandboxError(error),
     };
   }
 
   try {
     await stagedFiles.cleanup();
   } catch (error) {
-    const cleanupError = formatBoxliteError(error);
-    input.logger?.warn("BoxLite attachment cleanup failed", {
+    const cleanupError = formatSandboxError(error);
+    input.logger?.warn("sandbox attachment cleanup failed", {
       threadId: thread.id,
       error: cleanupError,
     });

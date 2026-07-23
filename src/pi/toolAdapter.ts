@@ -30,7 +30,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
       label: toolLabel(name),
       description: definition.description,
       promptSnippet: toolSnippet(name),
-      parameters: z.toJSONSchema(definition.inputSchema) as TSchema,
+      parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
       executionMode: name === "bash" || name === "create_file" ? "sequential" : undefined,
       async execute(_toolCallId, rawInput, signal) {
         const liveDefinition = buildToolRegistry(bridge.buildInput())[name];
@@ -63,7 +63,7 @@ function toolLabel(name: string): string {
 
 function toolSnippet(name: string): string {
   switch (name) {
-    case "bash": return "Run real Bash in the user's persistent BoxLite VM; pass exact attachment ids in input_file_ids, use the thread workspace by default, and use /data/shared across threads.";
+    case "bash": return "Run real Bash in the user's persistent OpenSandbox environment; omit cwd to use the thread workspace, never pass the bot host cwd, pass exact attachment ids in input_file_ids, and use /data/shared across threads.";
     case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
     case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";

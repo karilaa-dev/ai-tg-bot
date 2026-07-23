@@ -1,0 +1,34 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[store]
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.21"
+
+[docker]
+network_mode = "bridge"
+no_new_privileges = true
+pids_limit = 4096
+drop_capabilities = [
+  "AUDIT_WRITE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_RAW",
+  "SYS_ADMIN",
+  "SYS_MODULE",
+  "SYS_PTRACE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+]
+
+[storage]
+# This must match BOT_SHARED_HOST_PATH exactly. Only user subtrees are allowed.
+allowed_host_paths = ["/mnt/user/ai-tg-bot-shared/users"]
+
+[ingress]
+mode = "direct"

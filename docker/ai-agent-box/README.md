@@ -4,7 +4,7 @@
 
 ## Runtime contract
 
-The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. This matches the bot's default `BOXLITE_GUEST_USER=agent`. A different username must exist in the selected image; numeric UID or `UID:GID` values are passed directly but still need suitable home/tool directories and filesystem permissions. The shared BoxLite volume must be writable by the configured guest identity. The image includes:
+The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. This matches the bot's default `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`. A different numeric identity still needs suitable home/tool directories and filesystem permissions. The per-user host directory mounted by OpenSandbox at `/data` must be writable by the configured identity. The image includes:
 
 - Python 3 with pip and venv
 - Node.js 22 with npm
@@ -13,7 +13,7 @@ The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`
 - jq, ripgrep (`rg`), fd, file, tree, and less
 - SQLite, procps, iproute2, and DNS utilities
 
-The image intentionally does not include credentials, a Docker client or socket, an SSH server, or bot application files. Supply required data and credentials at runtime using appropriately scoped mounts or environment injection. User-level Python installs (`pip install --user`) and npm global installs use writable paths under `/home/agent/.local`, which persist on the BoxLite disk.
+The image intentionally does not include credentials, a Docker client or socket, an SSH server, or bot application files. Supply required data and credentials at runtime using appropriately scoped mounts or environment injection. The bot mounts only one user's host subtree at `/data`. User-level Python and npm installs persist only if their target is under that mounted tree; the container's other writable layers depend on OpenSandbox lifecycle retention and should not be treated as durable backup storage.
 
 Run the installed contract check with:
 

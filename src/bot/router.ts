@@ -37,7 +37,7 @@ import { FileResolver } from "../files/resolver.js";
 import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
 import { ManagedFileStore } from "../files/storage.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
-import type { CommandRuntime } from "../boxlite/types.js";
+import type { CommandRuntime } from "../sandbox/types.js";
 
 interface InstallOptions {
   config: AppConfig;

@@ -18,7 +18,7 @@ import { createLogger } from "../../src/logger.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
-import type { BoxCommandRequest, BoxCommandResult, CommandRuntime } from "../../src/boxlite/types.js";
+import type { SandboxCommandRequest, SandboxCommandResult, CommandRuntime } from "../../src/sandbox/types.js";
 
 describe("PiRuntimeManager", () => {
   let db: AppDatabase | undefined;
@@ -912,7 +912,7 @@ function resolvedFile(bytes: Buffer, mimeType: string | null, fileId: number) {
 class StubCommandRuntime implements CommandRuntime {
   constructor(private readonly stdout: string) {}
 
-  async execute(_request: BoxCommandRequest): Promise<BoxCommandResult> {
+  async execute(_request: SandboxCommandRequest): Promise<SandboxCommandResult> {
     return {
       stdout: this.stdout,
       stderr: "",

@@ -17,8 +17,8 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
-import { botThreadWorkspace } from "../../src/boxlite/paths.js";
-import type { BoxCommandRequest, BoxCommandResult, BoxFileExportRequest, CommandRuntime } from "../../src/boxlite/types.js";
+import { botThreadWorkspace } from "../../src/sandbox/paths.js";
+import type { SandboxCommandRequest, SandboxCommandResult, SandboxFileExportRequest, CommandRuntime } from "../../src/sandbox/types.js";
 
 describe("runTurn with Pi", () => {
   let db: AppDatabase | undefined;
@@ -529,21 +529,21 @@ function resolvedFile(bytes: Buffer, fileId: number) {
 }
 
 class TestCommandRuntime implements CommandRuntime {
-  readonly requests: BoxCommandRequest[] = [];
+  readonly requests: SandboxCommandRequest[] = [];
 
   constructor(
-    private readonly handler: (request: BoxCommandRequest) => Promise<BoxCommandResult>,
-    private readonly exporter: (request: BoxFileExportRequest) => Promise<void> = async () => {
+    private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult>,
+    private readonly exporter: (request: SandboxFileExportRequest) => Promise<void> = async () => {
       throw new Error("export not configured");
     },
   ) {}
 
-  async execute(request: BoxCommandRequest): Promise<BoxCommandResult> {
+  async execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
     this.requests.push(request);
     return this.handler(request);
   }
 
-  exportFile(request: BoxFileExportRequest): Promise<void> {
+  exportFile(request: SandboxFileExportRequest): Promise<void> {
     return this.exporter(request);
   }
 
@@ -551,7 +551,7 @@ class TestCommandRuntime implements CommandRuntime {
   async dispose(): Promise<void> {}
 }
 
-function successfulCommand(): BoxCommandResult {
+function successfulCommand(): SandboxCommandResult {
   return {
     stdout: "",
     stderr: "",

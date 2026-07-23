@@ -5,17 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
-import { migrateBoxliteData, promoteLegacyThreadWorkspace } from "../../src/boxlite/migrateData.js";
-import { botThreadWorkspace } from "../../src/boxlite/paths.js";
+import { migrateSandboxData, promoteLegacyThreadWorkspace } from "../../src/sandbox/migrateData.js";
+import { botThreadWorkspace } from "../../src/sandbox/paths.js";
 
-describe("BoxLite data migration", () => {
+describe("sandbox data migration", () => {
   let root: string;
   let config: AppConfig;
   let db: AppDatabase;
   let repos: Repos;
 
   beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-boxlite-migrate-"));
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-sandbox-migrate-"));
     config = loadTestConfig({
       DB_URL: `sqlite:${path.join(root, "bot.db")}`,
       BASH_WORKSPACE_ROOT: path.join(root, "legacy-bash"),
@@ -54,11 +54,11 @@ describe("BoxLite data migration", () => {
     await fs.mkdir(path.dirname(legacyManaged), { recursive: true });
     await fs.writeFile(legacyManaged, "managed file");
 
-    const dryRun = await migrateBoxliteData({ config, db, apply: false });
+    const dryRun = await migrateSandboxData({ config, db, apply: false });
     expect(dryRun).toMatchObject({ dryRun: true, workspaces: 1, workspaceFilesCopied: 1, managedFilesCopied: 1 });
     await expect(fs.access(botThreadWorkspace(config, user.tg_id, thread.id))).rejects.toThrow();
 
-    const applied = await migrateBoxliteData({ config, db, apply: true });
+    const applied = await migrateSandboxData({ config, db, apply: true });
     expect(applied.conflicts).toBe(0);
     const migratedNote = path.join(botThreadWorkspace(config, user.tg_id, thread.id), "nested", "note.txt");
     await expect(fs.readFile(migratedNote, "utf8")).resolves.toBe("legacy workspace");
@@ -67,7 +67,7 @@ describe("BoxLite data migration", () => {
     expect(stored?.path).toBe(path.join(config.MANAGED_FILE_ROOT, String(file.id), "content"));
     await expect(fs.readFile(stored!.path!, "utf8")).resolves.toBe("managed file");
 
-    const repeated = await migrateBoxliteData({ config, db, apply: true });
+    const repeated = await migrateSandboxData({ config, db, apply: true });
     expect(repeated).toMatchObject({ conflicts: 0, workspaceFilesCopied: 0, managedFilesCopied: 0 });
     expect(repeated.identicalFiles).toBeGreaterThan(0);
   });
@@ -80,7 +80,7 @@ describe("BoxLite data migration", () => {
     await fs.writeFile(path.join(root, "outside.txt"), "outside");
     await fs.symlink(path.join(root, "outside.txt"), path.join(legacyWorkspace, "link.txt"));
 
-    const result = await migrateBoxliteData({ config, db, apply: true });
+    const result = await migrateSandboxData({ config, db, apply: true });
     expect(result.unsafeEntries).toBe(1);
     await expect(fs.access(path.join(botThreadWorkspace(config, user.tg_id, thread.id), "link.txt"))).rejects.toThrow();
   });
@@ -99,7 +99,7 @@ describe("BoxLite data migration", () => {
       isInline: true,
     });
 
-    const result = await migrateBoxliteData({ config, db, apply: false });
+    const result = await migrateSandboxData({ config, db, apply: false });
 
     expect(result.conflicts).toBe(1);
   });
@@ -112,12 +112,12 @@ describe("BoxLite data migration", () => {
     await fs.mkdir(legacyWorkspace, { recursive: true });
     await fs.writeFile(path.join(legacyWorkspace, "note.txt"), "legacy");
     await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
-    await fs.writeFile(path.join(target, "note.txt"), "updated in BoxLite");
+    await fs.writeFile(path.join(target, "note.txt"), "updated in sandbox");
 
     vi.resetModules();
-    const reloaded = await import("../../src/boxlite/migrateData.js");
+    const reloaded = await import("../../src/sandbox/migrateData.js");
     await reloaded.promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
 
-    await expect(fs.readFile(path.join(target, "note.txt"), "utf8")).resolves.toBe("updated in BoxLite");
+    await expect(fs.readFile(path.join(target, "note.txt"), "utf8")).resolves.toBe("updated in sandbox");
   });
 });

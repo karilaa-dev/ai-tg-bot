@@ -9,9 +9,9 @@ import {
   guestCreatedFilePath,
   guestCwd,
   guestThreadWorkspace,
-} from "../../src/boxlite/paths.js";
+} from "../../src/sandbox/paths.js";
 
-describe("BoxLite shared paths", () => {
+describe("sandbox shared paths", () => {
   const userId = 42;
   const threadId = 7;
   const config = loadTestConfig({ AGENT_SHARED_ROOT: "/data" });

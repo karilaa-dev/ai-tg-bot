@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
-import { botOutboxRoot, guestCreatedFilePath } from "../../boxlite/paths.js";
+import { botOutboxRoot, guestCreatedFilePath } from "../../sandbox/paths.js";
 import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
@@ -125,7 +125,7 @@ export async function prepareCreatedFile(
 }
 
 async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string, signal?: AbortSignal): Promise<Buffer> {
-  if (!input.commandRuntime) throw new Error("BoxLite command runtime is unavailable.");
+  if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
   const outboxId = randomUUID();
   const botDirectory = path.join(botOutboxRoot(input.config), outboxId);
   const botPath = path.join(botDirectory, "content");
@@ -323,15 +323,15 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
   const combined = [stringField(result, "error"), stringField(result, "stderr"), stringField(result, "stdout")]
     .filter(Boolean)
     .join("\n");
-  if (timedOut) return "The BoxLite command timed out; retry with a smaller bounded command.";
-  if (/BoxLite is (?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
-    return "The BoxLite command runtime is unavailable. Continue with non-VM tools when possible, or report that local command execution is unavailable.";
+  if (timedOut) return "The OpenSandbox command timed out; retry with a smaller bounded command.";
+  if (/OpenSandbox.*(?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
+    return "The OpenSandbox command runtime is unavailable. Continue with online-only tools when possible, or report that sandbox command execution is unavailable.";
   }
   if (/out of memory|oom|killed|exit code 137/i.test(combined)) {
-    return "The 512 MiB VM may have run out of memory. Retry with a smaller input or a less memory-intensive command.";
+    return "The configured sandbox may have run out of memory. Retry with a smaller input or a less memory-intensive command.";
   }
   if (/permission denied|read-only file system/i.test(combined) && /apt|sudo|npm.*-g|pip.*system/i.test(`${script}\n${combined}`)) {
-    return "The configured VM user cannot modify that system location. Install packages into user-writable locations or use an image with the required system tools preinstalled.";
+    return "The configured sandbox user cannot modify that system location. Install packages into user-writable locations or use an image with the required system tools preinstalled.";
   }
   if (/\bcurl\b/.test(script) || /private|loopback|metadata|could not resolve|failed to connect/i.test(combined)) {
     return "Use curl for internet URLs and raw APIs. Network reachability depends on the deployment firewall; do not assume private, local, or metadata destinations are blocked.";

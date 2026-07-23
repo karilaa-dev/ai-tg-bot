@@ -10,20 +10,21 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate-cli.ts",
+    "migrate:sandbox-data": "node dist/scripts/migrate-sandbox-data.js",
+    "migrate:sandbox-data:dev": "tsx scripts/migrate-sandbox-data.ts",
     "migrate:boxlite-data": "node dist/scripts/migrate-boxlite-data.js",
     "migrate:boxlite-data:dev": "tsx scripts/migrate-boxlite-data.ts",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
     "live:telegram-restore": "tsx scripts/live-telegram-restore.ts",
-    "live:boxlite-check": "tsx scripts/live-boxlite-check.ts",
-    "live:boxlite-python-check": "tsx scripts/live-boxlite-python-check.ts",
-    "live:boxlite-workspace-check": "tsx scripts/live-boxlite-workspace-check.ts"
+    "live:opensandbox-check": "node --import tsx scripts/live-opensandbox-check.ts",
+    "live:opensandbox-turn-check": "node --import tsx scripts/live-opensandbox-turn-check.ts"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@boxlite-ai/boxlite": "0.9.7",
+    "@alibaba-group/opensandbox": "0.1.10",
     "@earendil-works/pi-agent-core": "0.80.6",
     "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",

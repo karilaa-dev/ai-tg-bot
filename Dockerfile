@@ -12,19 +12,15 @@ COPY locales ./locales
 
 RUN npm run build
 RUN npm prune --omit=dev
-RUN node -e "import('@boxlite-ai/boxlite').then(({ JsBoxlite }) => { if (typeof JsBoxlite !== 'function') process.exit(1); })"
 
 FROM node:22.19.0-bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot" \
-      org.opencontainers.image.description="Pi-powered Telegram agent with Codex OAuth and OpenRouter fallback"
+      org.opencontainers.image.description="Pi-powered Telegram agent with OpenSandbox command execution"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        e2fsprogs \
-        libcap2 \
-        libgcc-s1 \
         tini \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
@@ -36,8 +32,12 @@ ENV NODE_ENV=production \
     BASH_WORKSPACE_ROOT=/app/data/bash \
     AGENT_SHARED_ROOT=/data \
     MANAGED_FILE_ROOT=/data/.chat-files \
-    BOXLITE_HOME=/var/lib/boxlite \
-    BOXLITE_GUEST_USER=agent \
+    OPEN_SANDBOX_DOMAIN=opensandbox-server:8080 \
+    OPEN_SANDBOX_PROTOCOL=http \
+    OPEN_SANDBOX_USE_SERVER_PROXY=true \
+    OPEN_SANDBOX_IMAGE=ghcr.io/karilaa-dev/ai-agent-box:latest \
+    OPEN_SANDBOX_UID=1000 \
+    OPEN_SANDBOX_GID=1000 \
     APP_UID=1000 \
     APP_GID=1000 \
     PI_CODING_AGENT_DIR=/app/data/pi
@@ -50,10 +50,10 @@ COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
 COPY docker/entrypoint.sh /usr/local/bin/ai-tg-bot-entrypoint
 
 RUN chmod 0755 /usr/local/bin/ai-tg-bot-entrypoint \
-    && mkdir -p /app/data/pi /app/data/bash /app/data/files /data /var/lib/boxlite \
-    && chown -R 1000:1000 /app /data /var/lib/boxlite
+    && mkdir -p /app/data/pi /app/data/bash /data \
+    && chown -R 1000:1000 /app /data
 
-VOLUME ["/app/data", "/data", "/var/lib/boxlite"]
+VOLUME ["/app/data", "/data"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ai-tg-bot-entrypoint"]
 CMD ["node", "dist/src/main.js"]

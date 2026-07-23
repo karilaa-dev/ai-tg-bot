@@ -11,7 +11,7 @@ import { MAX_FILE_BYTES } from "../files/limits.js";
 import { ManagedFileStore } from "../files/storage.js";
 import { botThreadWorkspace } from "./paths.js";
 
-export interface BoxliteDataMigrationResult {
+export interface SandboxDataMigrationResult {
   dryRun: boolean;
   workspaces: number;
   workspaceFilesCopied: number;
@@ -35,13 +35,13 @@ type PromotionMarker = {
   threadId: number;
 };
 
-export async function migrateBoxliteData(input: {
+export async function migrateSandboxData(input: {
   config: AppConfig;
   db: AppDatabase;
   apply: boolean;
   logger?: Logger;
-}): Promise<BoxliteDataMigrationResult> {
-  const result: BoxliteDataMigrationResult = {
+}): Promise<SandboxDataMigrationResult> {
+  const result: SandboxDataMigrationResult = {
     dryRun: !input.apply,
     workspaces: 0,
     workspaceFilesCopied: 0,
@@ -123,7 +123,7 @@ export async function migrateBoxliteData(input: {
     result.managedPathsUpdated += 1;
   }
 
-  input.logger?.info("BoxLite data migration complete", result);
+  input.logger?.info("sandbox data migration complete", result);
   return result;
 }
 
@@ -223,7 +223,7 @@ async function copyTreeWithoutLinks(
 async function copyNewFileAtomically(source: string, target: string): Promise<void> {
   const partial = path.join(
     path.dirname(target),
-    `.${path.basename(target)}.boxlite-part-${process.pid}-${randomUUID()}`,
+    `.${path.basename(target)}.sandbox-part-${process.pid}-${randomUUID()}`,
   );
   let failure: unknown;
   try {

@@ -1,8 +1,8 @@
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { createBoxClientProvider } from "./boxlite/client.js";
-import { UserBoxRuntimeManager } from "./boxlite/userRuntimeManager.js";
+import { createOpenSandboxClientProvider } from "./opensandbox/client.js";
+import { UserOpenSandboxRuntimeManager } from "./opensandbox/userRuntimeManager.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
@@ -17,7 +17,7 @@ const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let boxRuntime: UserBoxRuntimeManager | undefined;
+let sandboxRuntime: UserOpenSandboxRuntimeManager | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
@@ -55,12 +55,12 @@ try {
     logger,
     legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
   });
-  boxRuntime = new UserBoxRuntimeManager({
+  sandboxRuntime = new UserOpenSandboxRuntimeManager({
     config,
-    clientProvider: createBoxClientProvider(config),
+    clientProvider: createOpenSandboxClientProvider(config),
     logger,
   });
-  pi = new PiRuntimeManager({ config, db, repos, logger, embedder, commandRuntime: boxRuntime });
+  pi = new PiRuntimeManager({ config, db, repos, logger, embedder, commandRuntime: sandboxRuntime });
   const bot = createBot({
     config,
     db,
@@ -89,9 +89,9 @@ try {
   process.exitCode = 1;
 } finally {
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
-  await boxRuntime?.dispose().catch((err) => {
+  await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;
-    logger.warn("BoxLite runtime disposal failed", { err: String(err) });
+    logger.warn("OpenSandbox runtime disposal failed", { err: String(err) });
   });
   logger.debug("destroying database connection");
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
