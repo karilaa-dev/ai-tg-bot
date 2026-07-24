@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import { z } from "zod";
-import { stageChatFiles, type StagedAttachments, type StagedInputFile } from "../../sandbox/attachments.js";
+import {
+  stageChatFiles,
+  type ChatFileStagingInput,
+  type StagedAttachments,
+  type StagedInputFile,
+} from "../../sandbox/attachments.js";
 import { formatSandboxError } from "../../opensandbox/client.js";
 import { promoteLegacyThreadWorkspace } from "../../sandbox/migrateData.js";
 import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
@@ -75,7 +80,8 @@ async function runBashTool(
   command: BashCommand,
   signal?: AbortSignal,
 ): Promise<BashToolResult> {
-  const { config, thread, user } = input;
+  const { commandRuntime, config, logger, repos, resolveFile, thread, user } = input;
+  const stagingInput: ChatFileStagingInput = { config, repos, resolveFile, thread, user };
   const requestedCwd = normalizeBashCwd(command.cwd);
   const logicalCwd = requestedCwd === normalizeBashCwd(process.cwd()) ? "/" : requestedCwd;
   const workingDir = guestCwd(thread.id, logicalCwd);
@@ -87,8 +93,8 @@ async function runBashTool(
   let cleanupError: string | undefined;
   let toolResult: BashToolResult;
   try {
-    if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
-    const result = await input.commandRuntime.execute({
+    if (!commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
+    const result = await commandRuntime.execute({
       userId: user.tg_id,
       command: "bash",
       args: ["-c", command.script, "bash", ...command.args],
@@ -105,7 +111,7 @@ async function runBashTool(
           fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
           fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
         ]);
-        stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
+        stagedFiles = await stageChatFiles(stagingInput, command.inputFileIds, signal);
         return { env: stagedFiles.env };
       },
       async afterExecute() {
@@ -113,7 +119,7 @@ async function runBashTool(
           await stagedFiles.cleanup();
         } catch (error) {
           cleanupError = formatSandboxError(error);
-          input.logger?.warn("sandbox attachment cleanup failed", {
+          logger?.warn("sandbox attachment cleanup failed", {
             threadId: thread.id,
             error: cleanupError,
           });

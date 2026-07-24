@@ -19,8 +19,13 @@ export interface StagedAttachments {
   cleanup(): Promise<void>;
 }
 
+export type ChatFileStagingInput = Pick<
+  ToolBuildInput,
+  "config" | "repos" | "user" | "thread" | "resolveFile"
+>;
+
 export async function stageChatFiles(
-  input: ToolBuildInput,
+  input: ChatFileStagingInput,
   requestedIds: number[],
   signal?: AbortSignal,
 ): Promise<StagedAttachments> {
@@ -40,23 +45,28 @@ export async function stageChatFiles(
     if (!file) throw new Error(`Input file #${id} is not available in this thread.`);
     return file;
   });
-  if (!input.resolveFile) throw new Error("Chat attachment byte access is unavailable.");
+  const resolveFile = input.resolveFile;
+  if (!resolveFile) throw new Error("Chat attachment byte access is unavailable.");
   const callId = randomUUID();
   const hostRoot = path.join(botAttachmentRoot(input.config, input.user.tg_id, input.thread.id), callId);
   const guestRoot = path.posix.join(guestAttachmentRoot(input.thread.id), callId);
   await fs.mkdir(hostRoot, { recursive: true, mode: 0o700 });
   const files: StagedInputFile[] = [];
   try {
-    for (const file of requestedFiles) {
+    const resolvedFiles = await Promise.all(requestedFiles.map(async (file) => {
       throwIfAborted(signal);
-      const resolved = await input.resolveFile(file, signal);
+      const resolved = await resolveFile(file, signal);
+      throwIfAborted(signal);
       if (resolved.bytes.length > MAX_FILE_BYTES) {
         throw new Error(`Input file #${file.id} exceeds the file size limit.`);
       }
+      return { file, bytes: resolved.bytes };
+    }));
+    for (const { file, bytes } of resolvedFiles) {
       const hostPath = path.join(hostRoot, String(file.id));
-      await fs.writeFile(hostPath, resolved.bytes, { flag: "wx", mode: 0o400 });
+      await fs.writeFile(hostPath, bytes, { flag: "wx", mode: 0o400 });
       const guestPath = path.posix.join(guestRoot, String(file.id));
-      files.push({ file_id: file.id, path: guestPath, name: file.name, size: resolved.bytes.length });
+      files.push({ file_id: file.id, path: guestPath, name: file.name, size: bytes.length });
     }
   } catch (error) {
     try {

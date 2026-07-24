@@ -28,8 +28,12 @@ export interface SandboxFileExportRequest {
   signal?: AbortSignal;
 }
 
+export type SandboxCommandPreparation = Partial<
+  Omit<SandboxCommandRequest, "userId" | "signal">
+>;
+
 export interface SandboxCommandLifecycle {
-  beforeExecute?(): Promise<{ env?: Record<string, string> } | void>;
+  beforeExecute?(): Promise<SandboxCommandPreparation | void>;
   afterExecute?(): Promise<void>;
 }
 

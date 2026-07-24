@@ -4,6 +4,10 @@ import path from "node:path";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { copySandboxFileToOutbox } from "../sandbox/exportSnapshot.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../sandbox/lifecycle.js";
 import { botUserRoot } from "../sandbox/paths.js";
 import type {
   CommandRuntime,
@@ -55,17 +59,30 @@ type UserOpenSandboxRuntimeManagerInput = {
 type OutputCapture = { text: string; truncated: boolean };
 type DeadlineOutcome = { kind: "timeout" } | { kind: "aborted"; reason: unknown };
 
-const STABLE_STATES = new Set(["Running", "Paused", "Terminated", "Failed", "Deleted", "Error"]);
-const ADOPTABLE_STATES = new Set([
-  "Pending",
-  "Running",
-  "Pausing",
-  "Paused",
-  "Resuming",
-  "Stopping",
-  "Creating",
-]);
-const NON_KILLABLE_STATES = new Set(["Stopping", "Terminated", "Deleted"]);
+type SandboxStatePolicy = {
+  stable: boolean;
+  adoptable: boolean;
+  killable: boolean;
+};
+
+const DEFAULT_STATE_POLICY: SandboxStatePolicy = {
+  stable: false,
+  adoptable: false,
+  killable: true,
+};
+const SANDBOX_STATE_POLICIES: Record<string, SandboxStatePolicy> = {
+  Pending: { stable: false, adoptable: true, killable: true },
+  Running: { stable: true, adoptable: true, killable: true },
+  Pausing: { stable: false, adoptable: true, killable: true },
+  Paused: { stable: true, adoptable: true, killable: true },
+  Resuming: { stable: false, adoptable: true, killable: true },
+  Stopping: { stable: false, adoptable: true, killable: false },
+  Terminated: { stable: true, adoptable: false, killable: false },
+  Failed: { stable: true, adoptable: false, killable: true },
+  Creating: { stable: false, adoptable: true, killable: true },
+  Deleted: { stable: true, adoptable: false, killable: false },
+  Error: { stable: true, adoptable: false, killable: true },
+};
 const OUTPUT_SENTINEL = 0x1e;
 
 export class UserOpenSandboxRuntimeManager implements CommandRuntime {
@@ -134,7 +151,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     for (const info of infos) {
       const userId = Number(info.metadata[METADATA_USER_ID]);
       if (!Number.isSafeInteger(userId) || userId <= 0) {
-        if (!NON_KILLABLE_STATES.has(info.state)) {
+        if (sandboxStatePolicy(info.state).killable) {
           await this.control("remove malformed managed sandbox", client.kill(info.id));
         }
         continue;
@@ -146,7 +163,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
 
     for (const [userId, group] of grouped) {
       const current = group
-        .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && ADOPTABLE_STATES.has(info.state))
+        .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && sandboxStatePolicy(info.state).adoptable)
         .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
       const adopted = current[0];
       if (adopted) {
@@ -156,7 +173,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         this.scheduleIdlePause(userId, state);
       }
       for (const info of group) {
-        if (info.id === adopted?.id || NON_KILLABLE_STATES.has(info.state)) continue;
+        if (info.id === adopted?.id || !sandboxStatePolicy(info.state).killable) continue;
         await this.control("remove obsolete managed sandbox", client.kill(info.id));
       }
     }
@@ -167,39 +184,13 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    let result: SandboxCommandResult | undefined;
-    let operationFailed = false;
-    let operationError: unknown;
-    try {
-      const prepared = await lifecycle?.beforeExecute?.();
+    return runSandboxCommandLifecycle(lifecycle, async (preparation) => {
       throwIfAborted(request.signal);
-      result = await this.executeLocked(state, {
-        ...request,
-        env: { ...request.env, ...prepared?.env },
-      });
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-    }
-
-    let cleanupFailed = false;
-    let cleanupError: unknown;
-    try {
-      await lifecycle?.afterExecute?.();
-    } catch (error) {
-      cleanupFailed = true;
-      cleanupError = error;
-    }
-
-    if (operationFailed && cleanupFailed) {
-      throw new AggregateError(
-        [operationError, cleanupError],
-        "OpenSandbox command and lifecycle cleanup both failed",
+      return this.executeLocked(
+        state,
+        applySandboxCommandPreparation(request, preparation),
       );
-    }
-    if (operationFailed) throw operationError;
-    if (cleanupFailed) throw cleanupError;
-    return result!;
+    });
   }
 
   private async executeLocked(
@@ -452,7 +443,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       client.list(managedUserSandboxMetadata(this.input.config, userId)),
     );
     for (const duplicate of matches) {
-      if (duplicate.id !== connection.id && !NON_KILLABLE_STATES.has(duplicate.state)) {
+      if (duplicate.id !== connection.id && sandboxStatePolicy(duplicate.state).killable) {
         await this.control("remove duplicate sandbox", client.kill(duplicate.id));
       }
     }
@@ -483,12 +474,12 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       client.list(managedUserSandboxMetadata(this.input.config, userId)),
     );
     const current = infos
-      .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && ADOPTABLE_STATES.has(info.state))
+      .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && sandboxStatePolicy(info.state).adoptable)
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
     const adopted = current[0];
 
     for (const info of infos) {
-      if (info.id === adopted?.id || NON_KILLABLE_STATES.has(info.state)) continue;
+      if (info.id === adopted?.id || !sandboxStatePolicy(info.state).killable) continue;
       await this.control("remove obsolete user sandbox", client.kill(info.id));
     }
 
@@ -500,7 +491,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     const started = Date.now();
     while (true) {
       const info = await this.control("inspect sandbox", client.getInfo(sandboxId));
-      if (STABLE_STATES.has(info.state)) return info;
+      if (sandboxStatePolicy(info.state).stable) return info;
       if (Date.now() - started >= this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS) {
         throw new Error(`sandbox ${sandboxId} remained in ${info.state} past the ready timeout`);
       }
@@ -714,6 +705,10 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sandboxStatePolicy(state: string): SandboxStatePolicy {
+  return SANDBOX_STATE_POLICIES[state] ?? DEFAULT_STATE_POLICY;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

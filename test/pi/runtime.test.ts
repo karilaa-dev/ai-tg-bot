@@ -18,6 +18,7 @@ import { createLogger } from "../../src/logger.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
+import { runSandboxCommandLifecycle } from "../../src/sandbox/lifecycle.js";
 import type {
   CommandRuntime,
   SandboxCommandLifecycle,
@@ -921,19 +922,14 @@ class StubCommandRuntime implements CommandRuntime {
     _request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    try {
-      await lifecycle?.beforeExecute?.();
-      return {
-        stdout: this.stdout,
-        stderr: "",
-        exitCode: 0,
-        timedOut: false,
-        stdoutTruncated: false,
-        stderrTruncated: false,
-      };
-    } finally {
-      await lifecycle?.afterExecute?.();
-    }
+    return runSandboxCommandLifecycle(lifecycle, async () => ({
+      stdout: this.stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }));
   }
 
   async exportFile(): Promise<void> {

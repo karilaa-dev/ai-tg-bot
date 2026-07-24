@@ -7,6 +7,10 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import type { CreatedFileAttachment, ToolBuildInput } from "../../src/ai/tools/types.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../../src/sandbox/lifecycle.js";
 import { botOutboxRoot, botThreadWorkspace } from "../../src/sandbox/paths.js";
 import type {
   CommandRuntime,
@@ -214,17 +218,11 @@ class FakeRuntime implements CommandRuntime {
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    try {
-      const prepared = await lifecycle?.beforeExecute?.();
-      const preparedRequest = {
-        ...request,
-        env: { ...request.env, ...prepared?.env },
-      };
+    return runSandboxCommandLifecycle(lifecycle, (preparation) => {
+      const preparedRequest = applySandboxCommandPreparation(request, preparation);
       this.requests.push(preparedRequest);
-      return await this.handler(preparedRequest);
-    } finally {
-      await lifecycle?.afterExecute?.();
-    }
+      return this.handler(preparedRequest);
+    });
   }
 
   exportFile(request: SandboxFileExportRequest): Promise<void> {

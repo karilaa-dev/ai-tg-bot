@@ -17,6 +17,10 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../../src/sandbox/lifecycle.js";
 import { botThreadWorkspace } from "../../src/sandbox/paths.js";
 import type {
   CommandRuntime,
@@ -548,37 +552,11 @@ class TestCommandRuntime implements CommandRuntime {
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    let result: SandboxCommandResult | undefined;
-    let operationFailed = false;
-    let operationError: unknown;
-    try {
-      const prepared = await lifecycle?.beforeExecute?.();
-      const preparedRequest = {
-        ...request,
-        env: { ...request.env, ...prepared?.env },
-      };
+    return runSandboxCommandLifecycle(lifecycle, (preparation) => {
+      const preparedRequest = applySandboxCommandPreparation(request, preparation);
       this.requests.push(preparedRequest);
-      result = await this.handler(preparedRequest);
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-    }
-
-    let cleanupFailed = false;
-    let cleanupError: unknown;
-    try {
-      await lifecycle?.afterExecute?.();
-    } catch (error) {
-      cleanupFailed = true;
-      cleanupError = error;
-    }
-
-    if (operationFailed && cleanupFailed) {
-      throw new AggregateError([operationError, cleanupError], "test command and lifecycle cleanup both failed");
-    }
-    if (operationFailed) throw operationError;
-    if (cleanupFailed) throw cleanupError;
-    return result!;
+      return this.handler(preparedRequest);
+    });
   }
 
   exportFile(request: SandboxFileExportRequest): Promise<void> {

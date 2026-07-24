@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
+import { deferred } from "../helpers/async.js";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import { sendFinal, type TurnInput } from "../../src/ai/run.js";
 import type { ThreadRow } from "../../src/db/types.js";
@@ -1097,20 +1098,6 @@ describe("Telegram bot with grammy-emulate", () => {
     return env.bot.sendCommand(user, chat, "/start");
   }
 });
-
-function deferred<T>(): { promise: Promise<T>; resolve(value?: T | PromiseLike<T>): void; reject(reason?: unknown): void } {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return {
-    promise,
-    resolve: (value?: T | PromiseLike<T>) => resolve(value as T),
-    reject,
-  };
-}
 
 function piWithTitleGenerator(generateThreadTitle: PiRuntimeService["generateThreadTitle"]): PiRuntimeService {
   return {

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ExecutionHandlers, RunCommandOpts, WriteEntry } from "@alibaba-group/opensandbox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../helpers/async.js";
 import { loadTestConfig } from "../../src/config.js";
 import type {
   OpenSandboxClient,
@@ -773,14 +774,6 @@ function info(
   createdAt = new Date(),
 ): OpenSandboxInfo {
   return { id, state, metadata, createdAt };
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
 }
 
 function command(userId: number): SandboxCommandRequest {

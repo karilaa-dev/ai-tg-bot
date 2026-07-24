@@ -2,8 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../helpers/async.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../../src/sandbox/lifecycle.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { buildToolRegistry } from "../../src/ai/tools/index.js";
 import type {
@@ -341,17 +346,10 @@ class QueueingFakeRuntime implements CommandRuntime {
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
     const previous = this.tails.get(request.userId) ?? Promise.resolve();
-    const run = previous.then(async () => {
-      try {
-        const prepared = await lifecycle?.beforeExecute?.();
-        return await this.handler({
-          ...request,
-          env: { ...request.env, ...prepared?.env },
-        });
-      } finally {
-        await lifecycle?.afterExecute?.();
-      }
-    });
+    const run = previous.then(() => runSandboxCommandLifecycle(
+      lifecycle,
+      (preparation) => this.handler(applySandboxCommandPreparation(request, preparation)),
+    ));
     this.tails.set(request.userId, run.then(() => undefined, () => undefined));
     return run;
   }
@@ -375,17 +373,11 @@ class FakeRuntime implements CommandRuntime {
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    try {
-      const prepared = await lifecycle?.beforeExecute?.();
-      const preparedRequest = {
-        ...request,
-        env: { ...request.env, ...prepared?.env },
-      };
+    return runSandboxCommandLifecycle(lifecycle, (preparation) => {
+      const preparedRequest = applySandboxCommandPreparation(request, preparation);
       this.requests.push(preparedRequest);
-      return await this.handler(preparedRequest);
-    } finally {
-      await lifecycle?.afterExecute?.();
-    }
+      return this.handler(preparedRequest);
+    });
   }
 
   async exportFile(): Promise<void> {
@@ -400,14 +392,6 @@ function stagedGuestPath(request: SandboxCommandRequest): string {
   const guestPath = Object.entries(request.env).find(([key]) => key.startsWith("CHAT_FILE_"))?.[1];
   if (!guestPath) throw new Error("expected a staged chat file path");
   return guestPath;
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
 }
 
 function successfulCommand(stdout: string): SandboxCommandResult {
