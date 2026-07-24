@@ -77,8 +77,8 @@ export class ManagedFileStore {
     let failure: unknown;
     try {
       await fs.writeFile(partialPath, bytes, { flag: "wx", mode: 0o600 });
-      if (mode === "no-clobber") await assertPathAbsent(finalPath);
-      await fs.rename(partialPath, finalPath);
+      if (mode === "no-clobber") await fs.link(partialPath, finalPath);
+      else await fs.rename(partialPath, finalPath);
       await fs.chmod(finalPath, 0o600);
       return finalPath;
     } catch (error) {
@@ -107,18 +107,6 @@ export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise
   await fs.rm(outDir, { recursive: true, force: true });
   await fs.mkdir(outDir, { recursive: true });
   return count;
-}
-
-async function assertPathAbsent(filePath: string): Promise<void> {
-  try {
-    await fs.lstat(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
-    throw error;
-  }
-  const error = new Error(`Managed file already exists: ${filePath}`) as NodeJS.ErrnoException;
-  error.code = "EEXIST";
-  throw error;
 }
 
 async function cleanupPartialFile(filePath: string, primaryError?: unknown): Promise<void> {

@@ -3,6 +3,7 @@ import {
   Sandbox,
   SandboxManager,
   type ExecutionHandlers,
+  type NetworkPolicy,
   type RunCommandOpts,
   type SandboxInfo,
   type WriteEntry,
@@ -10,6 +11,26 @@ import {
 import type { AppConfig } from "../config.js";
 
 export type OpenSandboxState = string;
+
+export const PUBLIC_INTERNET_NETWORK_POLICY: NetworkPolicy = {
+  defaultAction: "allow",
+  egress: [
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+  ].map((target) => ({ action: "deny", target })),
+};
 
 export interface OpenSandboxInfo {
   id: string;
@@ -124,7 +145,7 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       entrypoint: ["tail", "-f", "/dev/null"],
       resource: { cpu: spec.cpu, memory: spec.memory },
       timeoutSeconds: null,
-      networkPolicy: { defaultAction: "allow" },
+      networkPolicy: PUBLIC_INTERNET_NETWORK_POLICY,
       volumes: [{
         name: "user-data",
         host: { path: spec.hostPath },

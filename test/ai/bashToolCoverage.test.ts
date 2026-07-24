@@ -201,8 +201,11 @@ describe("OpenSandbox bash tool contract", () => {
       summary: "other",
       isInline: true,
     });
-    await expect(bash.execute({ script: "true", input_file_ids: [file.id] }))
-      .rejects.toThrow("not available in this thread");
+    await expect(bash.execute({ script: "true", input_file_ids: [file.id] })).resolves.toMatchObject({
+      exit_code: null,
+      input_files: [],
+      error: expect.stringContaining("not available in this thread"),
+    });
     expect(runtime.requests).toHaveLength(0);
   });
 

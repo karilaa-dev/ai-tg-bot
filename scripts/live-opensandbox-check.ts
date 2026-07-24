@@ -64,6 +64,7 @@ let failure: Error | undefined;
 const knownSandboxIds = new Set<string>();
 let sandboxId: string | undefined;
 let publicHttps: { verified: boolean; detail?: string } = { verified: false };
+let privateEgressBlocked: { verified: boolean; detail?: string } = { verified: false };
 
 try {
   await fs.mkdir(hostWorkspace, { recursive: true, mode: 0o700 });
@@ -103,11 +104,16 @@ try {
   const httpsResult = await execute(manager, {
     script: "curl -fsS --max-time 15 https://example.com/ >/dev/null",
   });
-  if (httpsResult.exitCode === 0) {
-    publicHttps = { verified: true };
-  } else {
-    publicHttps = { verified: false, detail: resultDetail(httpsResult) };
+  assertSuccess(httpsResult, "public HTTPS egress");
+  publicHttps = { verified: true };
+
+  const privateResult = await execute(manager, {
+    script: "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://169.254.169.254/latest/meta-data/",
+  });
+  if (privateResult.exitCode === 0) {
+    throw new Error("private/link-local egress unexpectedly reached the cloud metadata address");
   }
+  privateEgressBlocked = { verified: true, detail: resultDetail(privateResult) };
 
   const timed = await execute(manager, {
     script: "printf 'timeout-started\\n'; sleep 30",
@@ -167,9 +173,11 @@ try {
     sandboxId,
     image: config.OPEN_SANDBOX_IMAGE,
     publicHttps,
+    privateEgressBlocked,
     checks: [
       "real command execution",
       "stdin, environment, and cwd",
+      "public HTTPS and blocked link-local metadata egress",
       "bidirectional workspace and shared host visibility",
       "timeout interruption and reuse",
       "safe export and out-of-root rejection",

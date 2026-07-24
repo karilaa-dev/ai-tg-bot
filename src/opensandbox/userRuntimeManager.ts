@@ -155,6 +155,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     await this.control("write command stdin", connection.writeFiles([{
       path: stdinPath,
       data: request.stdin,
+      // OpenSandbox encodes octal permission digits as a number; 0o600 would be sent as 384.
       mode: 600,
       owner: this.input.config.OPEN_SANDBOX_USER,
       group: this.input.config.OPEN_SANDBOX_GROUP,

@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { z } from "zod";
-import { stageChatFiles, type StagedInputFile } from "../../sandbox/attachments.js";
+import { stageChatFiles, type StagedAttachments, type StagedInputFile } from "../../sandbox/attachments.js";
 import { formatSandboxError } from "../../opensandbox/client.js";
 import { promoteLegacyThreadWorkspace } from "../../sandbox/migrateData.js";
 import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
@@ -79,14 +79,19 @@ async function runBashTool(
   const requestedCwd = normalizeBashCwd(command.cwd);
   const logicalCwd = requestedCwd === normalizeBashCwd(process.cwd()) ? "/" : requestedCwd;
   const workingDir = guestCwd(thread.id, logicalCwd);
-  await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
-  await Promise.all([
-    fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
-    fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
-  ]);
-  const stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
+  let stagedFiles: StagedAttachments = {
+    files: [],
+    env: {},
+    async cleanup() {},
+  };
   let toolResult: BashToolResult;
   try {
+    await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
+    await Promise.all([
+      fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
+      fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
+    ]);
+    stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
     if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
     const result = await input.commandRuntime.execute({
       userId: user.tg_id,

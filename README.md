@@ -74,7 +74,10 @@ cp .env.example .env
 mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
 
 docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
-docker compose -f docker-compose.opensandbox.yml up -d
+docker compose \
+  -f docker-compose.opensandbox.yml \
+  -f docker-compose.opensandbox.dev.yml \
+  up -d
 ```
 
 The checked-in example server configuration permits host binds only below:
@@ -84,6 +87,8 @@ The checked-in example server configuration permits host binds only below:
 ```
 
 If `BOT_SHARED_HOST_PATH` differs, copy `docker/opensandbox/config.example.toml`, change `allowed_host_paths` to `<your-root>/users`, and set `OPEN_SANDBOX_CONFIG_FILE` to that copy. Do not allow the entire filesystem or the shared root's `.chat-files` and `.outbox` directories.
+
+The development override publishes the authenticated lifecycle API only on `127.0.0.1:8080`, allowing the host-run bot configuration below to use `localhost:8080`. Do not include this override in the normal two-container deployment.
 
 Run the bot from source:
 
@@ -138,6 +143,10 @@ OPEN_SANDBOX_IDLE_PAUSE_MS=600000
 The image reference, resources, username/group, UID/GID, shared root, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
 
 The published Ubuntu 24.04 runner image includes Bash, Python, Node.js, `curl`, `zip`, `unzip`, Git, SQLite, build tools, and common diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` tag in production rather than relying on `latest`.
+
+The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. The bot supplies ordered deny rules for routed non-public IPv4 ranges and otherwise allows public internet traffic. IPv6 is disabled by the egress sidecar by default. Keep a host/network firewall as defense in depth and test the policy against the actual LAN, Docker networks, metadata endpoints, and DNS setup before production exposure.
+
+For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
 
 ## Data migration and rollback
 
@@ -204,7 +213,7 @@ Setup:
 
 2. Create `/mnt/user/ai-tg-bot-shared/users` and ensure UID/GID `1000:1000` can write it.
 3. Copy `docker/opensandbox/config.example.toml` to `/mnt/user/appdata/opensandbox/config.toml`.
-4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users`.
+4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users` and retain the pinned `dns+nft` egress image.
 5. Install and start `opensandbox-server` on `ai-tg-bot-opensandbox`. Set a long random API key.
 6. Install `ai-tg-bot` on the same network, use the identical API key, and keep:
    - Agent Shared Data: `/mnt/user/ai-tg-bot-shared` -> `/data`
@@ -225,7 +234,7 @@ OpenSandbox's default Docker runtime isolates workloads with Linux containers; i
 - Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
 - Mount only `<shared-root>/users/<userId>` into each runner. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets must stay outside runner mounts.
 - Do not inject Telegram, OpenRouter, Tavily, Codex, or OpenSandbox credentials into runner commands.
-- Public internet access does not prove that localhost, RFC1918/LAN, link-local, cloud metadata, IPv6-local destinations, literal private IPs, or DNS rebinding are blocked. Enforce public-only egress in the host/network firewall if required and test it separately.
+- The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark IPv4 ranges before allowing unmatched public traffic. IPv6 is disabled by the sidecar by default. The sidecar permits the sandbox's own loopback interface, so do not expose sensitive services there. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
 - No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.
 
 ## Telegram commands

@@ -10,6 +10,19 @@ path = "/var/lib/opensandbox/opensandbox.db"
 type = "docker"
 execd_image = "opensandbox/execd:v1.0.21"
 
+[egress]
+image = "opensandbox/egress:v1.1.4"
+mode = "dns+nft"
+
+# Optional stronger isolation for hosts with Kata installed and registered in Docker.
+# Kata remains compatible with the egress network policy used by ai-tg-bot.
+# [secure_runtime]
+# type = "kata"
+# docker_runtime = "kata"
+#
+# gVisor can be configured with type = "gvisor" and docker_runtime = "runsc",
+# but OpenSandbox v0.2.2 cannot combine gVisor with networkPolicy enforcement.
+
 [docker]
 network_mode = "bridge"
 no_new_privileges = true

@@ -42,7 +42,7 @@ export function openSandboxProvisioningFingerprint(config: AppConfig): string {
     gid: config.OPEN_SANDBOX_GID,
     sharedHostRoot: path.resolve(config.OPEN_SANDBOX_SHARED_HOST_ROOT),
     guestMount: "/data",
-    network: "allow-v1",
+    network: "public-internet-v1",
     security: "opensandbox-secure-access-v1",
   };
   return createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 12);

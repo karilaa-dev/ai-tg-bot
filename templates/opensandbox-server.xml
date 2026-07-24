@@ -14,7 +14,7 @@
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/opensandbox-server.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/alibaba/OpenSandbox/main/docs/assets/logo.svg</Icon>
   <ExtraParams>--stop-timeout=60</ExtraParams>
-  <Requires>Create the custom Docker network ai-tg-bot-opensandbox first. Copy docker/opensandbox/config.example.toml to the Config File host path, set allowed_host_paths to the Shared Host Folder users subtree, and use the same API key in ai-tg-bot. Docker-socket access gives this service root-equivalent authority over the Unraid host.</Requires>
+  <Requires>Create the custom Docker network ai-tg-bot-opensandbox first. Copy docker/opensandbox/config.example.toml to the Config File host path, retain the pinned dns+nft egress image, set allowed_host_paths to the Shared Host Folder users subtree, and use the same API key in ai-tg-bot. Docker-socket access gives this service root-equivalent authority over the Unraid host.</Requires>
 
   <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Required by the OpenSandbox Docker runtime. Never mount this into ai-tg-bot or a runner container." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="OpenSandbox State" Target="/var/lib/opensandbox" Default="/mnt/user/appdata/opensandbox" Mode="rw" Description="Persistent SQLite lifecycle state." Type="Path" Display="always" Required="true" Mask="false"/>

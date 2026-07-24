@@ -45,12 +45,13 @@ describe("sandbox data migration", () => {
       threadId: thread.id,
       type: "txt",
       name: "saved.txt",
-      path: path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", "1", "content"),
+      path: null,
       size: 12,
       summary: "saved",
       isInline: true,
     });
     const legacyManaged = path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(file.id), "content");
+    await repos.files.setPath(file.id, legacyManaged);
     await fs.mkdir(path.dirname(legacyManaged), { recursive: true });
     await fs.writeFile(legacyManaged, "managed file");
 

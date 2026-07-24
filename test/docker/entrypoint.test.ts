@@ -20,7 +20,7 @@ beforeEach(async () => {
     AI_TG_BOT_ENTRYPOINT_TEST: "1",
     AI_TG_BOT_TEST_SKIP_PRIVILEGE_DROP: "1",
     APP_UID: String(currentUid === 0 ? 1000 : currentUid),
-    APP_GID: String(currentUid === 0 ? 1000 : currentGid),
+    APP_GID: String(currentGid === 0 ? 1000 : currentGid),
     APP_DATA_ROOT: path.join(tempDir, "app-data"),
     AGENT_SHARED_ROOT: path.join(tempDir, "shared"),
   };
