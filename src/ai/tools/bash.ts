@@ -1,28 +1,44 @@
-import path from "node:path";
 import fs from "node:fs/promises";
-import { Bash, MountableFs, ReadWriteFs } from "just-bash";
 import { z } from "zod";
-import { MAX_FILE_BYTES } from "../../files/limits.js";
-import { LazyAttachmentFs } from "../../files/lazyAttachmentFs.js";
-import { threadChainScope } from "../../memory/retrieval.js";
+import {
+  stageChatFiles,
+  type ChatFileStagingInput,
+  type StagedAttachments,
+  type StagedInputFile,
+} from "../../sandbox/attachments.js";
+import { formatSandboxError } from "../../opensandbox/client.js";
+import { promoteLegacyThreadWorkspace } from "../../sandbox/migrateData.js";
+import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
 import { asRecord } from "../../util/records.js";
-import { bashModelHint, normalizeBashCwd, truncateBashOutput } from "./helpers.js";
-import { MAX_BASH_RESPONSE_BYTES, defineBotTool, type ToolBuildInput } from "./types.js";
-import { zipCommand } from "./zipCommand.js";
+import { bashModelHint, normalizeBashCwd } from "./helpers.js";
+import { defineBotTool, type ToolBuildInput } from "./types.js";
 
 const MAX_BASH_INPUT_FILES = 5;
 
-type MountedInputFile = {
-  file_id: number;
-  path: string;
-  name: string;
-  size: number;
+type BashCommand = {
+  script: string;
+  cwd: string;
+  stdin: string;
+  args: string[];
+  inputFileIds: number[];
+};
+
+type BashToolResult = {
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+  cwd: string;
+  input_files: StagedInputFile[];
+  error?: string;
 };
 
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Run a bash script in this thread's persistent just-bash virtual workspace. The filesystem is isolated per chat thread. Every authorized chat file is visible at /attachments/<file_id> and through CHAT_FILE_<file_id>; listing or statting entries does not fetch bytes, and reading one path restores only that file. input_file_ids optionally validates and eagerly loads up to five files before the script. Attachment edits are copy-on-write for this call and never change the canonical snapshot. Use zip (for example, zip -r archive.zip folder) to create ZIP archives without Python or JavaScript. Use js-exec -c '...' for JavaScript, python3/python for local computation, and curl -fsSL for public raw URLs/APIs, optionally piped to jq. Do not use Python urllib/requests for web fetching; use curl for HTTPS/network data. If the user asks to search the internet/web/online or verify against online sources, include curl here or use web_search/web_extract before claiming online verification. For exact numeric verification, runtime comparisons, or constant-digit checks, prefer one simple bash call that computes all values, fetches any raw reference data, checks equality/lengths/counts, and emits compact JSON. Avoid command substitution $() and process substitution <(...); write js-exec/python3/curl outputs to temp files and compare/read those files. If part of a multi-step check fails, retry only the failed part and preserve already-successful values. Avoid node and unsupported shell setup such as set -o pipefail; node is only a help stub. Localhost/private network ranges are blocked.",
+      "Run a real Bash script in this user's persistent OpenSandbox environment. Omit cwd and use relative paths for normal work. Logical cwd / means this thread's workspace, not the Linux filesystem root; this mapping is expected and does not need investigation. Inside commands the physical workspace may appear under /data/threads/<thread-id>/workspace. Never pass the bot host path or probe /home/agent or /workspace to locate files. Use /data/shared only for files intentionally shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available in the configured runner image. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage immutable copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily and pauses after its idle timeout; /data and the container state persist until the sandbox is replaced. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -31,7 +47,7 @@ export function createBashTool(input: ToolBuildInput) {
       raw_script: z.boolean().default(false),
       input_file_ids: z.array(z.number().int().positive()).max(MAX_BASH_INPUT_FILES).default([]),
     }),
-    execute: async ({ script, cwd = "/", stdin = "", args = [], raw_script = false, input_file_ids = [] }, signal) => {
+    execute: async ({ script, cwd = "/", stdin = "", args = [], input_file_ids = [] }, signal) => {
       input.logger?.info("tool bash starting", {
         threadId: input.thread.id,
         scriptChars: script.length,
@@ -39,14 +55,7 @@ export function createBashTool(input: ToolBuildInput) {
         args: args.length,
         inputFileIds: input_file_ids,
       });
-      const result = await runBashTool(input, {
-        script,
-        cwd,
-        stdin,
-        args,
-        rawScript: raw_script,
-        inputFileIds: input_file_ids,
-      }, signal);
+      const result = await runBashTool(input, { script, cwd, stdin, args, inputFileIds: input_file_ids }, signal);
       input.logger?.info("tool bash complete", {
         threadId: input.thread.id,
         exitCode: result.exit_code,
@@ -68,150 +77,85 @@ export function createBashTool(input: ToolBuildInput) {
 
 async function runBashTool(
   input: ToolBuildInput,
-  command: {
-    script: string;
-    cwd: string;
-    stdin: string;
-    args: string[];
-    rawScript: boolean;
-    inputFileIds: number[];
-  },
-  externalSignal?: AbortSignal,
-): Promise<{
-  stdout: string;
-  stderr: string;
-  exit_code: number | null;
-  timed_out: boolean;
-  stdout_truncated: boolean;
-  stderr_truncated: boolean;
-  cwd: string;
-  input_files: MountedInputFile[];
-  error?: string;
-}> {
-  const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
-  await fs.mkdir(root, { recursive: true });
-  const cwd = normalizeBashCwd(command.cwd);
-  const controller = new AbortController();
-  let timedOut = false;
-  const startedAt = Date.now();
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, input.config.BASH_TIMEOUT_MS);
-  const signal = externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal;
-  let mounted: Awaited<ReturnType<typeof mountChatFiles>>;
-  try {
-    mounted = await mountChatFiles(input, root, command.inputFileIds, signal);
-  } catch (error) {
-    clearTimeout(timeout);
-    throw error;
-  }
-  const env = {
-    TZ: "UTC",
-    ...Object.fromEntries(mounted.availableFiles.map((file) => [`CHAT_FILE_${file.file_id}`, file.path])),
+  command: BashCommand,
+  signal?: AbortSignal,
+): Promise<BashToolResult> {
+  const { commandRuntime, config, logger, repos, resolveFile, thread, user } = input;
+  const stagingInput: ChatFileStagingInput = { config, repos, resolveFile, thread, user };
+  const requestedCwd = normalizeBashCwd(command.cwd);
+  const logicalCwd = requestedCwd === normalizeBashCwd(process.cwd()) ? "/" : requestedCwd;
+  const workingDir = guestCwd(thread.id, logicalCwd);
+  let stagedFiles: StagedAttachments = {
+    files: [],
+    env: {},
+    async cleanup() {},
   };
-  const bash = new Bash({
-    fs: mounted.fs,
-    cwd: "/",
-    env,
-    python: true,
-    javascript: true,
-    customCommands: [zipCommand],
-    network: {
-      dangerouslyAllowFullInternetAccess: true,
-      denyPrivateRanges: true,
-      timeoutMs: input.config.BASH_TIMEOUT_MS,
-      maxResponseSize: MAX_BASH_RESPONSE_BYTES,
-    },
-    defenseInDepth: true,
-  });
+  let cleanupError: string | undefined;
+  let toolResult: BashToolResult;
   try {
-    const result = await bash.exec(command.script, {
-      args: command.args,
-      cwd,
-      env,
-      replaceEnv: true,
-      rawScript: command.rawScript,
-      signal,
+    if (!commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
+    const result = await commandRuntime.execute({
+      userId: user.tg_id,
+      command: "bash",
+      args: ["-c", command.script, "bash", ...command.args],
+      env: { TZ: "UTC" },
       stdin: command.stdin,
+      workingDir,
+      timeoutMs: config.BASH_TIMEOUT_MS,
+      maxOutputChars: config.BASH_MAX_OUTPUT_CHARS,
+      signal,
+    }, {
+      async beforeExecute() {
+        await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
+        await Promise.all([
+          fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
+          fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
+        ]);
+        stagedFiles = await stageChatFiles(stagingInput, command.inputFileIds, signal);
+        return { env: stagedFiles.env };
+      },
+      async afterExecute() {
+        try {
+          await stagedFiles.cleanup();
+        } catch (error) {
+          cleanupError = formatSandboxError(error);
+          logger?.warn("sandbox attachment cleanup failed", {
+            threadId: thread.id,
+            error: cleanupError,
+          });
+        }
+      },
     });
-    const stdout = truncateBashOutput(result.stdout, input.config.BASH_MAX_OUTPUT_CHARS);
-    const stderr = truncateBashOutput(result.stderr, input.config.BASH_MAX_OUTPUT_CHARS);
-    const elapsedTimedOut = result.exitCode === 124 && Date.now() - startedAt >= input.config.BASH_TIMEOUT_MS;
-    const didTimeOut = timedOut || elapsedTimedOut;
-    return {
-      stdout: stdout.text,
-      stderr: stderr.text,
-      exit_code: didTimeOut ? null : result.exitCode,
-      timed_out: didTimeOut,
-      stdout_truncated: stdout.truncated,
-      stderr_truncated: stderr.truncated,
-      cwd,
-      input_files: mounted.files,
-      ...(didTimeOut ? { error: `timed out after ${input.config.BASH_TIMEOUT_MS}ms` } : {}),
+    toolResult = {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exit_code: result.exitCode,
+      timed_out: result.timedOut,
+      stdout_truncated: result.stdoutTruncated,
+      stderr_truncated: result.stderrTruncated,
+      cwd: logicalCwd,
+      input_files: stagedFiles.files,
+      ...(result.error ? { error: result.error } : {}),
     };
-  } catch (err) {
-    return {
+  } catch (error) {
+    toolResult = {
       stdout: "",
       stderr: "",
       exit_code: null,
-      timed_out: timedOut,
+      timed_out: false,
       stdout_truncated: false,
       stderr_truncated: false,
-      cwd,
-      input_files: mounted.files,
-      error: timedOut ? `timed out after ${input.config.BASH_TIMEOUT_MS}ms` : String(err),
+      cwd: logicalCwd,
+      input_files: stagedFiles.files,
+      error: formatSandboxError(error),
     };
-  } finally {
-    clearTimeout(timeout);
   }
-}
 
-async function mountChatFiles(
-  input: ToolBuildInput,
-  root: string,
-  requestedIds: number[],
-  signal?: AbortSignal,
-): Promise<{ fs: MountableFs; files: MountedInputFile[]; availableFiles: MountedInputFile[] }> {
-  const ids = [...new Set(requestedIds)];
-  const scope = await threadChainScope(input.repos, input.thread);
-  const rows = await input.repos.files.listByIds(scope.fileIds);
-  const byId = new Map(rows.map((file) => [file.id, file]));
-  const memory = new LazyAttachmentFs(rows.map((file) => ({
-    id: file.id,
-    size: file.size,
-    createdAt: file.created_at,
-    load: async (loadSignal?: AbortSignal) => {
-      if (!input.resolveFile) throw new Error("Chat attachment byte access is unavailable.");
-      const bytes = (await input.resolveFile!(file, loadSignal)).bytes;
-      if (bytes.length > MAX_FILE_BYTES) throw new Error(`Input file #${file.id} exceeds the file size limit.`);
-      return bytes;
-    },
-  })), signal);
-  const availableFiles = rows.map((file) => ({
-    file_id: file.id,
-    path: `/attachments/${file.id}`,
-    name: file.name,
-    size: file.size,
-  }));
-  const files: MountedInputFile[] = [];
-  if (ids.length) {
-    if (!input.resolveFile) throw new Error("Chat attachment byte access is unavailable.");
-    for (const id of ids) {
-      if (signal?.aborted) throw signal.reason ?? new DOMException("Tool execution aborted", "AbortError");
-      const file = byId.get(id);
-      if (!file) throw new Error(`Input file #${id} is not available in this thread.`);
-      const virtualPath = `/attachments/${id}`;
-      const bytes = await memory.readFileBuffer(`/${id}`);
-      files.push({ file_id: id, path: virtualPath, name: file.name, size: bytes.length });
-    }
+  if (cleanupError) {
+    toolResult = {
+      ...toolResult,
+      error: [toolResult.error, `attachment cleanup failed: ${cleanupError}`].filter(Boolean).join("; "),
+    };
   }
-  return {
-    fs: new MountableFs({
-      base: new ReadWriteFs({ root, allowSymlinks: false }),
-      mounts: [{ mountPoint: "/attachments", filesystem: memory }],
-    }),
-    files,
-    availableFiles,
-  };
+  return toolResult;
 }

@@ -8,12 +8,20 @@ import { MAX_FILE_BYTES } from "./limits.js";
 export const FILES_DIR = "data/files";
 export const CHAT_FILES_DIR = ".chat-files";
 
+type ManagedFileConfig = Pick<AppConfig, "BASH_WORKSPACE_ROOT"> & Partial<Pick<AppConfig, "MANAGED_FILE_ROOT">>;
+
 export class ManagedFileStore {
   readonly root: string;
-  private readonly legacyRoot = path.resolve(FILES_DIR);
+  private readonly legacyRoots: string[];
 
-  constructor(config: Pick<AppConfig, "BASH_WORKSPACE_ROOT">) {
-    this.root = path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR);
+  constructor(config: ManagedFileConfig) {
+    this.root = config.MANAGED_FILE_ROOT
+      ? path.resolve(config.MANAGED_FILE_ROOT)
+      : path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR);
+    this.legacyRoots = [
+      path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR),
+      path.resolve(FILES_DIR),
+    ];
   }
 
   pathFor(fileId: number): string {
@@ -21,23 +29,12 @@ export class ManagedFileStore {
     return path.join(this.root, String(fileId), "content");
   }
 
-  async write(fileId: number, input: Buffer | Uint8Array): Promise<string> {
-    assertFileId(fileId);
-    const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
-    if (bytes.length > MAX_FILE_BYTES) throw new Error(`File #${fileId} exceeds the file size limit.`);
-    await ensurePrivateDirectory(this.root);
-    const directory = path.join(this.root, String(fileId));
-    await ensurePrivateDirectory(directory);
-    const finalPath = this.pathFor(fileId);
-    const partialPath = path.join(directory, `.content.part-${process.pid}-${randomUUID()}`);
-    try {
-      await fs.writeFile(partialPath, bytes, { flag: "wx", mode: 0o600 });
-      await fs.rename(partialPath, finalPath);
-      await fs.chmod(finalPath, 0o600);
-      return finalPath;
-    } finally {
-      await fs.unlink(partialPath).catch(() => undefined);
-    }
+  write(fileId: number, input: Buffer | Uint8Array): Promise<string> {
+    return this.writeBytes(fileId, input, "overwrite");
+  }
+
+  writeNew(fileId: number, input: Buffer | Uint8Array): Promise<string> {
+    return this.writeBytes(fileId, input, "no-clobber");
   }
 
   async readManaged(fileId: number): Promise<{ path: string; bytes: Buffer } | undefined> {
@@ -52,7 +49,7 @@ export class ManagedFileStore {
     const resolved = path.resolve(filePath);
     const managedPath = this.pathFor(fileId);
     const managed = resolved === managedPath;
-    if (!managed && !isPathInside(this.legacyRoot, resolved)) return undefined;
+    if (!managed && !this.legacyRoots.some((root) => isPathInside(root, resolved))) return undefined;
     const bytes = await readSafeRegularFile(resolved, MAX_FILE_BYTES);
     if (!bytes) return undefined;
     if (managed) await fs.chmod(resolved, 0o600);
@@ -63,10 +60,38 @@ export class ManagedFileStore {
     assertFileId(fileId);
     await fs.rm(path.dirname(this.pathFor(fileId)), { recursive: true, force: true });
   }
+
+  private async writeBytes(
+    fileId: number,
+    input: Buffer | Uint8Array,
+    mode: "overwrite" | "no-clobber",
+  ): Promise<string> {
+    assertFileId(fileId);
+    const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+    if (bytes.length > MAX_FILE_BYTES) throw new Error(`File #${fileId} exceeds the file size limit.`);
+    await ensurePrivateDirectory(this.root);
+    const directory = path.join(this.root, String(fileId));
+    await ensurePrivateDirectory(directory);
+    const finalPath = this.pathFor(fileId);
+    const partialPath = path.join(directory, `.content.part-${process.pid}-${randomUUID()}`);
+    let failure: unknown;
+    try {
+      await fs.writeFile(partialPath, bytes, { flag: "wx", mode: 0o600 });
+      if (mode === "no-clobber") await fs.link(partialPath, finalPath);
+      else await fs.rename(partialPath, finalPath);
+      await fs.chmod(finalPath, 0o600);
+      return finalPath;
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      await cleanupPartialFile(partialPath, failure);
+    }
+  }
 }
 
 export async function persistManagedFile(
-  config: Pick<AppConfig, "BASH_WORKSPACE_ROOT">,
+  config: ManagedFileConfig,
   files: FilesRepo,
   fileId: number,
   bytes: Buffer | Uint8Array,
@@ -82,6 +107,18 @@ export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise
   await fs.rm(outDir, { recursive: true, force: true });
   await fs.mkdir(outDir, { recursive: true });
   return count;
+}
+
+async function cleanupPartialFile(filePath: string, primaryError?: unknown): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    if (primaryError !== undefined) {
+      throw new AggregateError([primaryError, error], `Managed file operation and cleanup both failed: ${filePath}`);
+    }
+    throw error;
+  }
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {

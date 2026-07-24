@@ -7,10 +7,18 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import type { CreatedFileAttachment, ToolBuildInput } from "../../src/ai/tools/types.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { FileByteCache } from "../../src/files/cache.js";
-import { FileResolver } from "../../src/files/resolver.js";
-import { ManagedFileStore } from "../../src/files/storage.js";
-import type { ChatFileSourceAdapter } from "../../src/files/source.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../../src/sandbox/lifecycle.js";
+import { botOutboxRoot, botThreadWorkspace } from "../../src/sandbox/paths.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+  SandboxFileExportRequest,
+} from "../../src/sandbox/types.js";
 
 describe("Pi safe tool adapters", () => {
   let db: AppDatabase | undefined;
@@ -21,16 +29,34 @@ describe("Pi safe tool adapters", () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("persists and delivers a just-bash image from the managed chat-file store", async () => {
+  it("persists and delivers a OpenSandbox-created image from the managed chat-file store", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-adapter-"));
-    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    const config = testConfig(tempDir);
     db = createDatabase(config);
     await db.migrate();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9901, firstName: "Adapter", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Adapter" });
+    const workspace = botThreadWorkspace(config, user.tg_id, thread.id);
+    const runtime = new FakeRuntime(async () => {
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.writeFile(path.join(workspace, "picture.png"), "image-bytes");
+      return successfulCommand();
+    }, async (request) => {
+      const destination = request.hostDestination;
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.copyFile(path.join(workspace, "picture.png"), destination);
+    });
     const createdFiles: CreatedFileAttachment[] = [];
-    const buildInput = (): ToolBuildInput => ({ config, db: db!, repos, user, thread, createdFiles });
+    const buildInput = (): ToolBuildInput => ({
+      config,
+      db: db!,
+      repos,
+      user,
+      thread,
+      createdFiles,
+      commandRuntime: runtime,
+    });
     const tools = createPiToolAdapters({ buildInput });
     const bash = tools.find((tool) => tool.name === "bash")!;
     const createFile = tools.find((tool) => tool.name === "create_file")!;
@@ -45,195 +71,183 @@ describe("Pi safe tool adapters", () => {
     expect(result.details).toMatchObject({ type: "image", caption: "Pi-created image" });
     expect(createdFiles).toHaveLength(1);
     expect(createdFiles[0]).toMatchObject({ delivery: "photo", caption: "Pi-created image" });
-    expect(createdFiles[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(createdFiles[0]?.fileId), "content"));
-    expect(createdFiles[0]?.data).toBeUndefined();
+    expect(createdFiles[0]?.path).toBe(path.join(config.MANAGED_FILE_ROOT, String(createdFiles[0]?.fileId), "content"));
     await expect(fs.readFile(createdFiles[0]!.path!)).resolves.toEqual(Buffer.from("image-bytes"));
-    await expect(repos.files.get(createdFiles[0]!.fileId)).resolves.toMatchObject({ path: createdFiles[0]?.path, type: "image" });
   });
 
-  it("mounts scoped chat attachment snapshots for Python and JavaScript", async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-input-image-"));
-    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+  it("keeps a created file when best-effort outbox cleanup fails", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-cleanup-"));
+    const config = testConfig(tempDir);
     db = createDatabase(config);
     await db.migrate();
     const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 9902, firstName: "InputImage", lang: "en" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Input image" });
-    const image = await repos.files.insertFile({
+    const user = await repos.users.ensure({ tgId: 9904, firstName: "Cleanup", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Cleanup" });
+    const runtime = new FakeRuntime(undefined, async (request) => {
+      await fs.writeFile(request.hostDestination, "created bytes");
+    });
+    const createdFiles: CreatedFileAttachment[] = [];
+    const logger = {
+      level: "debug" as const,
+      isLevelEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const outboxRoot = botOutboxRoot(config);
+    const realRm = fs.rm.bind(fs);
+    const remove = vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (path.dirname(String(target)) === outboxRoot) throw new Error("outbox cleanup unavailable");
+      return realRm(target, options);
+    });
+    try {
+      const createFile = createPiToolAdapters({
+        buildInput: () => ({
+          config,
+          db: db!,
+          repos,
+          user,
+          thread,
+          createdFiles,
+          commandRuntime: runtime,
+          logger,
+        }),
+      }).find((tool) => tool.name === "create_file")!;
+
+      const result = await createFile.execute("file-cleanup", {
+        path: "/created.txt",
+        delivery: "document",
+      }, undefined, undefined, {} as never);
+
+      expect(result.details).toMatchObject({ name: "created.txt" });
+      expect(createdFiles).toHaveLength(1);
+      expect(logger.warn).toHaveBeenCalledWith("file export outbox cleanup failed", expect.objectContaining({
+        threadId: thread.id,
+        virtualPath: "/created.txt",
+        error: "Error: outbox cleanup unavailable",
+      }));
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
+  it("stages only requested scoped attachments for the live adapter call", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-input-"));
+    const config = testConfig(tempDir);
+    db = createDatabase(config);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9902, firstName: "Input", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Input" });
+    const bytes = Buffer.from("telegram attachment");
+    const file = await repos.files.insertFile({
       userId: user.tg_id,
       threadId: thread.id,
-      type: "image",
-      mimeType: "image/png",
-      name: "telegram.png",
+      type: "txt",
+      mimeType: "text/plain",
+      name: "telegram.txt",
       path: null,
-      size: 20,
-      summary: "a Telegram image",
+      size: bytes.length,
+      summary: "attachment",
       isInline: true,
     });
-    const bytes = Buffer.from([
-      255, 0, 0,
-      200, 10, 10,
-      0, 0, 255,
-    ]);
-    let downloads = 0;
-    const buildInput = (): ToolBuildInput => ({
-      config,
-      db: db!,
-      repos,
-      user,
-      thread,
-      resolveFile: async (file) => {
-        downloads += 1;
-        expect(file.id).toBe(image.id);
-        return resolvedFile(bytes, file.id);
-      },
+    const runtime = new FakeRuntime(async (request) => {
+      expect(request.env[`CHAT_FILE_${file.id}`]).toMatch(new RegExp(`/attachments/[^/]+/${file.id}$`));
+      return successfulCommand("read-ok\n");
     });
-    const bash = createPiToolAdapters({ buildInput })
-      .find((tool) => tool.name === "bash")!;
-    const virtualPath = `/attachments/${image.id}`;
+    const resolveFile = vi.fn(async () => ({
+      path: "",
+      bytes,
+      mimeType: "text/plain",
+      size: bytes.length,
+      contentSha256: "hash",
+      expiresAt: Number.POSITIVE_INFINITY,
+      source: { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: {} },
+    }));
+    const bash = createPiToolAdapters({
+      buildInput: () => ({ config, db: db!, repos, user, thread, commandRuntime: runtime, resolveFile }),
+    }).find((tool) => tool.name === "bash")!;
+
     const result = await bash.execute("bash-input", {
-      script: [
-        `python3 -c 'd=open("${virtualPath}", "rb").read(); print(sum(1 for i in range(0,len(d),3) if d[i] > d[i+1]*2 and d[i] > d[i+2]*2))'`,
-        `js-exec -m -c "import fs from 'fs'; const d=fs.readFileSync('${virtualPath}'); let n=0; for(let i=0;i<d.length;i+=3){const r=d.readUInt8(i),g=d.readUInt8(i+1),b=d.readUInt8(i+2); if(r>g*2&&r>b*2)n++} console.log(n)"`,
-        `printenv CHAT_FILE_${image.id}`,
-        "printf persistent > /kept.txt",
-      ].join("; "),
-      input_file_ids: [image.id],
+      script: `cat "$CHAT_FILE_${file.id}"`,
+      input_file_ids: [file.id],
     }, undefined, undefined, {} as never);
 
     expect(result.details).toMatchObject({
       exit_code: 0,
-      input_files: [{ file_id: image.id, path: virtualPath, name: "telegram.png", size: bytes.length }],
+      input_files: [{ file_id: file.id, name: "telegram.txt", size: bytes.length }],
     });
-    expect((result.details as { stdout: string }).stdout).toBe(`2\n2\n${virtualPath}\n`);
-    expect(downloads).toBe(1);
-    await expect(fs.readFile(path.join(config.BASH_WORKSPACE_ROOT, `thread-${thread.id}`, "kept.txt"), "utf8"))
-      .resolves.toBe("persistent");
-    await expect(fs.access(path.join(config.BASH_WORKSPACE_ROOT, `thread-${thread.id}`, "attachments")))
-      .rejects.toThrow();
-
-    const otherThread = await repos.threads.create({ userId: user.tg_id, topicId: 22, title: "Other" });
-    const otherImage = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: otherThread.id,
-      type: "image",
-      name: "other.png",
-      path: null,
-      size: 5,
-      summary: "out of scope",
-      isInline: true,
-    });
-    await expect(bash.execute("bash-cross-thread", {
-      script: "wc -c /attachments/input",
-      input_file_ids: [otherImage.id],
-    }, undefined, undefined, {} as never)).rejects.toThrow("not available in this thread");
+    expect(resolveFile).toHaveBeenCalledTimes(1);
   });
 
-  it("lists every scoped attachment without downloading and restores only the file that is read", async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-lazy-attachments-"));
-    const config = loadTestConfig({
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
-      FILE_CACHE_DIR: path.join(tempDir, "cache"),
-    });
+  it("does not contact OpenSandbox while tool adapters are constructed", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-lazy-box-"));
+    const config = testConfig(tempDir);
     db = createDatabase(config);
     await db.migrate();
     const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 9903, firstName: "LazyFiles", lang: "en" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Lazy files" });
-    const firstBytes = Buffer.from("first remote attachment");
-    const secondBytes = Buffer.from("second remote attachment");
-    const first = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      type: "txt",
-      mimeType: "text/plain",
-      name: "first.txt",
-      path: null,
-      size: firstBytes.length,
-      contentMd: firstBytes.toString(),
-      isInline: true,
+    const user = await repos.users.ensure({ tgId: 9903, firstName: "Lazy", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Lazy" });
+    const runtime = new FakeRuntime();
+
+    const tools = createPiToolAdapters({
+      buildInput: () => ({ config, db: db!, repos, user, thread, commandRuntime: runtime }),
     });
-    const second = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      type: "txt",
-      mimeType: "text/plain",
-      name: "second.txt",
-      path: null,
-      size: secondBytes.length,
-      contentMd: secondBytes.toString(),
-      isInline: true,
-    });
-    for (const file of [first, second]) {
-      await repos.files.rememberSource(file.id, {
-        transport: "matrix",
-        connectionKey: "main",
-        remoteKey: `mxc://example/${file.id}`,
-        locator: { url: `mxc://example/${file.id}` },
-        mimeType: "text/plain",
-      });
-    }
-    const payloads = new Map([
-      [`mxc://example/${first.id}`, firstBytes],
-      [`mxc://example/${second.id}`, secondBytes],
-    ]);
-    const fetch = vi.fn(async (source: Parameters<ChatFileSourceAdapter["fetch"]>[0]) => payloads.get(source.remoteKey)!);
-    const resolver = new FileResolver(
-      repos.files,
-      new FileByteCache(config),
-      new ManagedFileStore(config),
-    );
-    resolver.registry.register({ transport: "matrix", connectionKey: "main", fetch });
-    const bash = createPiToolAdapters({
-      buildInput: () => ({
-        config,
-        db: db!,
-        repos,
-        user,
-        thread,
-        resolveFile: (file, signal) => resolver.resolveFile(file, signal),
-      }),
-    }).find((tool) => tool.name === "bash")!;
 
-    const metadata = await bash.execute("metadata", {
-      script: `ls /attachments; find /attachments -maxdepth 1 -type f; stat /attachments/${first.id}`,
-    }, undefined, undefined, {} as never);
-    expect(metadata.details).toMatchObject({ exit_code: 0, input_files: [] });
-    expect(fetch).not.toHaveBeenCalled();
-
-    const firstRead = await bash.execute("first-read", {
-      script: `wc -c /attachments/${first.id}`,
-    }, undefined, undefined, {} as never);
-    expect(firstRead.details).toMatchObject({ exit_code: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    await expect(repos.files.get(first.id)).resolves.toMatchObject({
-      path: path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(first.id), "content"),
-    });
-    await expect(repos.files.get(second.id)).resolves.toMatchObject({ path: null });
-
-    await bash.execute("first-read-again", {
-      script: `sha256sum /attachments/${first.id}`,
-    }, undefined, undefined, {} as never);
-    expect(fetch).toHaveBeenCalledTimes(1);
-
-    const copyOnWrite = await bash.execute("copy-on-write", {
-      script: `printf changed > /attachments/${first.id}; cat /attachments/${first.id}`,
-    }, undefined, undefined, {} as never);
-    expect((copyOnWrite.details as { stdout: string }).stdout).toBe("changed");
-    expect(fetch).toHaveBeenCalledTimes(1);
-    await expect(fs.readFile(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(first.id), "content")))
-      .resolves.toEqual(firstBytes);
+    expect(tools.map((tool) => tool.name)).toContain("bash");
+    expect((tools.find((tool) => tool.name === "bash")!.parameters as { required?: string[] }).required)
+      .toEqual(["script"]);
+    expect((tools.find((tool) => tool.name === "web_search")!.parameters as { required?: string[] }).required)
+      .toEqual(["query"]);
+    expect(runtime.requests).toHaveLength(0);
   });
 });
 
-function resolvedFile(bytes: Buffer, fileId: number) {
+class FakeRuntime implements CommandRuntime {
+  readonly requests: SandboxCommandRequest[] = [];
+
+  constructor(
+    private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult> = async () => successfulCommand(),
+    private readonly exporter: (request: SandboxFileExportRequest) => Promise<void> = async () => {
+      throw new Error("export not configured");
+    },
+  ) {}
+
+  async execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    return runSandboxCommandLifecycle(lifecycle, (preparation) => {
+      const preparedRequest = applySandboxCommandPreparation(request, preparation);
+      this.requests.push(preparedRequest);
+      return this.handler(preparedRequest);
+    });
+  }
+
+  exportFile(request: SandboxFileExportRequest): Promise<void> {
+    return this.exporter(request);
+  }
+
+  async reconcile(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+function successfulCommand(stdout = ""): SandboxCommandResult {
   return {
-    path: "",
-    bytes,
-    mimeType: "image/png",
-    size: bytes.length,
-    contentSha256: "test-hash",
-    expiresAt: Number.POSITIVE_INFINITY,
-    source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
+    stdout,
+    stderr: "",
+    exitCode: 0,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
   };
+}
+
+function testConfig(root: string) {
+  return loadTestConfig({
+    AGENT_SHARED_ROOT: path.join(root, "agent"),
+    MANAGED_FILE_ROOT: path.join(root, "agent", ".chat-files"),
+    BASH_WORKSPACE_ROOT: path.join(root, "legacy-bash"),
+  });
 }

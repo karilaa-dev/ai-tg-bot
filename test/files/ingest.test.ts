@@ -230,6 +230,28 @@ describe("file ingestion", () => {
     expect(embedding.at(-1)).toMatchObject({ completed: chunks.length, total: chunks.length });
   });
 
+  it("keeps short native PDF text when Docling is disabled", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const config = testConfig({ FILE_INLINE_TOKENS: 1, DOCLING_URL: undefined });
+    const user = await repos.users.ensure({ tgId: 332, firstName: "ShortPdf", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+
+    const result = await ingestFileBytes({
+      config,
+      repo: repos.files,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "short-note.pdf",
+      mime: "application/pdf",
+      bytes: makePdf("Short native PDF note that should remain searchable."),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    const chunks = await repos.files.chunks(result.fileId);
+    expect(chunks.map((chunk) => chunk.content).join("\n")).toContain("Short native PDF note");
+  });
+
   it("extracts searchable text PDFs natively before falling back to docling", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("docling should not be called for native text PDFs");

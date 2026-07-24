@@ -1,68 +1,115 @@
 # ai-tg-bot
 
-A private Telegram agent built on persistent [Pi](https://github.com/earendil-works/pi) sessions. Pi owns inference, tool loops, conversation persistence, branching, cancellation, retries, and compaction. Codex OAuth is preferred; OpenRouter is the automatic fallback and the vector-embedding backend. Attachment storage is transport-neutral so another chat interface can supply remote locators without changing the Pi runtime.
+A private Telegram agent built on persistent [Pi](https://github.com/earendil-works/pi) sessions. Pi owns inference, tool loops, conversation persistence, branching, cancellation, retries, and compaction. Codex OAuth is preferred; OpenRouter is the automatic fallback and vector-embedding backend.
 
-Telegram controls who can reach the bot; there is no application-level allowlist. The bot accepts any sender delivered to its private chat and rejects group or supergroup use.
+Telegram controls who can reach the bot. The bot accepts private-chat senders delivered by Telegram and rejects groups and supergroups; there is no separate application allowlist.
 
-## Runtime model
+## Architecture
 
-- Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`. The database stores the session path/id and maps Telegram messages to Pi entry ids.
-- Newly observed implicit Telegram topics receive one concise helper-model title from their opening user/assistant exchange. Explicit topic names, forks, General, and every thread that predates the title-state migration are preserved; helper or Telegram rename failures never fail the chat turn.
-- Pi's built-in automatic compaction is used unchanged. `/compact` calls Pi directly and `/fork` creates a Pi branch at the mapped message entry.
-- Built-in host filesystem tools are disabled. Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
-- Retrieval is explicit: prior messages use full-text search, while chunked large documents use full-text plus vector search. Nothing is automatically injected into prompts; Pi chooses when to call the retrieval tools.
-- The persistent just-bash workspace is isolated per chat thread. Every thread/fork-authorized file appears at `/attachments/<file_id>` and through `CHAT_FILE_<file_id>`. Directory listing and metadata operations do not download content; opening one entry restores only that file. `input_file_ids` remains an optional eager preload/validation list of up to five IDs. The per-call attachment mount is copy-on-write, so sandbox edits cannot alter canonical snapshots. The workspace also exposes `zip`, including recursive `zip -r archive.zip folder` creation, as a direct Bash command.
+```text
+Telegram / Pi bot container (non-root)
+        |
+        | OpenSandbox HTTP API + API key
+        v
+OpenSandbox lifecycle server (trusted Docker-socket service)
+        |
+        | Docker API
+        v
+One persistent runner container per Telegram user
+        |
+        | host bind
+        v
+<shared-root>/users/<userId>  ->  /data
+```
 
-### Provider routing
+- Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`.
+- Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
+- OpenSandbox provides one persistent command environment per Telegram user. Commands are serialized for the same user while different users can execute concurrently.
+- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is shared across that user's threads.
+- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the user's environment. Healthy idle environments are paused, not destroyed, so files and the retained container state survive pause/resume and bot restarts.
+- Chat attachments are copied into an immutable per-call staging directory only when Pi passes their exact IDs. Canonical chat files live outside `users/` and are never mounted into a sandbox.
+- Online conversation, retrieval, web, image, and ingestion turns do not require OpenSandbox. If the service is unavailable, only sandbox-backed tools fail, and later calls retry initialization.
+
+## Provider routing
 
 The internal `telegram-auto/main` and `telegram-auto/helper` models route through Pi's existing providers:
 
 1. Use Pi's `openai-codex` OAuth credentials when configured.
-2. Use OpenRouter immediately when Codex is not configured.
-3. Before any output is emitted, fall back for quota/429, OAuth/auth refresh, network, timeout, and retryable 5xx failures.
-4. Do not fall back after partial output, or for context overflow, content policy, invalid request, or tool errors.
+2. Use OpenRouter when Codex is not configured.
+3. Before output begins, fall back for quota/429, OAuth refresh, network, timeout, and retryable 5xx failures.
+4. Do not fall back after partial output or for context overflow, policy, invalid-request, or tool errors.
 
-Main, helper, and image calls share one Codex circuit breaker. While open, requests use OpenRouter; only one half-open Codex probe is allowed at a time.
+Main, helper, and image calls share one Codex circuit breaker. While it is open, requests use OpenRouter and only one half-open Codex probe is allowed at a time.
 
-### Images
+## Files, images, and retrieval
 
-`generate_image` is the only image-generation tool. It creates or edits exactly one PNG, JPEG, or WebP with up to five current-thread chat image references.
-
-- The Codex path uses the hosted Responses `image_generation` tool with Pi's existing Codex credentials.
-- The fallback path uses OpenRouter's dedicated image endpoint.
-- Reference images are resolved from their recorded chat source into memory and sent as data URLs.
-- By design, generated originals are atomically saved under `BASH_WORKSPACE_ROOT/.chat-files/<file_id>/content`; they are not transient-only. A successful `generate_image` result terminates Pi's tool loop, and the photo is sent from the current turn's delivery outbox before final text/draft cleanup. After Telegram accepts the photo, its `file_id` and `file_unique_id` are retained as recovery sources. If the local original is manually deleted, a later Telegram photo restoration may be a recompressed JPEG.
-- Pi JSONL and tool results contain text metadata, never image base64.
-- Incoming images are captioned once by an isolated Pi helper session. A Pi context hook injects bytes only for attachments newly received in the current turn or exact IDs explicitly selected with `load_message(file_ids: [...])`. Historical markers remain text-only, including after compaction.
-
-The Codex request shape is adapted from the MIT-licensed [pi-better-openai](https://github.com/mattleong/pi-better-openai) implementation; that package is not installed.
-
-### Attachment sources and cache
-
-- The database stores logical file metadata plus one or more `file_sources` locators. Telegram locators contain `file_id`/`file_unique_id`; a future Matrix adapter can store an MXC URL and connection key in the same schema. Locators should reference a separately configured connection/auth profile and must not embed access tokens or other credentials.
-- Original inbound attachments, generated images, and `create_file` outputs are atomically stored under `BASH_WORKSPACE_ROOT/.chat-files/<file_id>/content` with private permissions. The database stores the canonical path, while Pi JSONL and database rows remain free of raw bytes/base64. Ordinary just-bash scripts and temporary files remain persistent workspace files but are not tracked as chat files.
-- `[[chat-file:<id>]]` markers are the durable Pi references. After compaction, `search_thread` plus metadata-only `load_message` discovers old files; selecting only the needed IDs rehydrates only those files for that turn.
-- Remote loads use opaque SHA-256 staging names in `FILE_CACHE_DIR`. Entries have a fixed one-hour lifetime by default and deduplicate concurrent requests. Successful restoration is copied into the persistent managed store and updates `files.path`; a persistence failure still serves the staged bytes for the current request.
-- Inline documents retain extracted text, while large documents remain searchable through `search_in_file` and `read_file_section` without downloading originals. Exact bash access or an explicit `load_message.file_ids` selection restores the requested raw file. If restored bytes no longer match the durable hash, derived content is rebuilt through the existing refresh path.
-- Telegram is the registered adapter today. Adding Matrix requires a `ChatFileSourceAdapter` for the Matrix connection and registration in the interface bootstrap; Pi, tools, cache, and retrieval do not need transport-specific changes.
+- `generate_image` creates or edits one PNG, JPEG, or WebP with up to five current-thread image references. Generated originals are saved under `MANAGED_FILE_ROOT/<file_id>/content` and delivered immediately.
+- Original inbound attachments and `create_file` outputs are also persisted under `MANAGED_FILE_ROOT`. Pi JSONL and database rows contain metadata, not raw bytes or base64.
+- `[[chat-file:<id>]]` markers are durable Pi references. `search_thread` and metadata-only `load_message` discover older files; selecting exact IDs restores only those files.
+- Large documents use full-text plus vector chunk search. Searchable PDFs have native extraction; DOCX, scanned PDFs, and PDFs without usable native text require an optional external Docling service.
+- Sandbox exports are copied through a private outbox using no-follow file opens, descriptor-path validation, regular-file and byte-limit checks, exclusive mode-`0600` destinations, and partial-output cleanup.
 
 ## Requirements
 
-- Node.js 22.19 or newer
-- A Telegram bot token
-- An OpenRouter API key (fallback, images, and embeddings)
-- A Tavily API key
-- Optional Codex OAuth login through Pi
-- Docling for DOCX and low-text PDF extraction
+- Node.js 22.19 or newer for source development.
+- Telegram bot token.
+- OpenRouter API key.
+- Tavily API key.
+- OpenSandbox API key shared with the lifecycle server.
+- A reachable OpenSandbox server using the pinned Docker server/execd releases.
+- One absolute host folder visible under the same path to the bot deployment, OpenSandbox server, host Docker daemon, and runner bind mounts.
+- Optional Codex OAuth login through Pi.
+- Optional external Docling server.
 
-## Setup
+The bot container itself does **not** need `/dev/kvm`, `/var/run/docker.sock`, privileged mode, writable/private cgroups, or unconfined security profiles.
+
+## Source setup
+
+Start the OpenSandbox server first. On Linux with Docker:
 
 ```bash
 cp .env.example .env
+# Edit API keys and set BOT_SHARED_HOST_PATH to a real absolute host path.
+. ./.env
+mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
+
+docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
+docker compose \
+  -f docker-compose.opensandbox.yml \
+  -f docker-compose.opensandbox.dev.yml \
+  up -d
+```
+
+The checked-in example server configuration permits host binds only below:
+
+```text
+/mnt/user/ai-tg-bot-shared/users
+```
+
+If `BOT_SHARED_HOST_PATH` differs, copy `docker/opensandbox/config.example.toml`, change `allowed_host_paths` to `<your-root>/users`, and set `OPEN_SANDBOX_CONFIG_FILE` to that copy. Do not allow the entire filesystem or the shared root's `.chat-files` and `.outbox` directories.
+
+The development override publishes the authenticated lifecycle API only on `127.0.0.1:8080`, allowing the host-run bot configuration below to use `localhost:8080`. Do not include this override in the normal two-container deployment.
+
+Run the bot from source:
+
+```bash
 npm install
 npm run migrate
 npm run dev
 ```
+
+For source execution, the bot-visible and server-visible shared roots can be the same absolute local directory:
+
+```dotenv
+AGENT_SHARED_ROOT=/absolute/path/to/ai-tg-bot-shared
+MANAGED_FILE_ROOT=/absolute/path/to/ai-tg-bot-shared/.chat-files
+OPEN_SANDBOX_SHARED_HOST_ROOT=/absolute/path/to/ai-tg-bot-shared
+OPEN_SANDBOX_DOMAIN=localhost:8080
+OPEN_SANDBOX_PROTOCOL=http
+OPEN_SANDBOX_API_KEY=<same-secret-as-server>
+```
+
+`MANAGED_FILE_ROOT` must remain outside `AGENT_SHARED_ROOT/users`.
 
 To configure Codex OAuth in the same Pi directory used by the bot:
 
@@ -70,55 +117,125 @@ To configure Codex OAuth in the same Pi directory used by the bot:
 PI_CODING_AGENT_DIR=./data/pi npx pi
 ```
 
-Enter `/login` in Pi and choose the OpenAI Codex provider. If no Codex credentials are present, the bot remains fully operational through OpenRouter.
+Enter `/login` and choose OpenAI Codex. Without Codex credentials, the bot operates through OpenRouter.
 
-Required `.env` values are `BOT_TOKEN`, `OPENROUTER_API_KEY`, and `TAVILY_API_KEY`. The Pi/model defaults are:
+## OpenSandbox configuration
+
+Important settings are documented in [`.env.example`](./.env.example):
 
 ```dotenv
-PI_CODING_AGENT_DIR=./data/pi
-CODEX_MODEL=gpt-5.6-sol
-CODEX_HELPER_MODEL=gpt-5.6-luna
-OPENROUTER_MAIN_MODEL=openai/gpt-5.6-sol
-OPENROUTER_HELPER_MODEL=openai/gpt-5.6-luna
-OPENROUTER_IMAGE_MODEL=openai/gpt-5.4-image-2
-OPENROUTER_EMBEDDING_MODEL=perplexity/pplx-embed-v1-0.6b
-MODEL_CONTEXT_TOKENS=128000
-PI_THINKING_LEVEL=medium
-PI_TURN_TIMEOUT_MS=900000
-THREAD_TITLE_TIMEOUT_MS=30000
-IMAGE_TIMEOUT_MS=300000
-FILE_CACHE_DIR=/tmp/ai-tg-bot-files
-FILE_CACHE_TTL_MS=3600000
+OPEN_SANDBOX_DOMAIN=opensandbox-server:8080
+OPEN_SANDBOX_PROTOCOL=http
+OPEN_SANDBOX_API_KEY=<long-random-secret>
+OPEN_SANDBOX_USE_SERVER_PROXY=true
+OPEN_SANDBOX_SHARED_HOST_ROOT=/mnt/user/ai-tg-bot-shared
+OPEN_SANDBOX_DEPLOYMENT_ID=ai-tg-bot
+OPEN_SANDBOX_IMAGE=ghcr.io/karilaa-dev/ai-agent-box:sha-<commit>
+OPEN_SANDBOX_CPU=2
+OPEN_SANDBOX_MEMORY=512Mi
+OPEN_SANDBOX_USER=agent
+OPEN_SANDBOX_GROUP=agent
+OPEN_SANDBOX_UID=1000
+OPEN_SANDBOX_GID=1000
+OPEN_SANDBOX_IDLE_PAUSE_MS=600000
 ```
 
-`THREAD_TITLE_TIMEOUT_MS` applies only to the isolated, tool-free helper call used to name a new implicit topic. Each eligible topic normally adds one helper-model inference; failed generations can retry on up to three turns, while Telegram-only synchronization retries do not call the model again. See [.env.example](./.env.example) for file, Docling, bash, draft, onboarding, and logging settings.
+The image reference, resources, username/group, UID/GID, shared root, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
 
-## Migration warning
+The published Ubuntu 24.04 runner image includes Bash, Python, Node.js, `curl`, `zip`, `unzip`, Git, SQLite, build tools, and common diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` tag in production rather than relying on `latest`.
 
-The first startup that applies `pi_cutover_v2` intentionally deletes all legacy conversations, messages, attachments, chunks, summaries, search entries, embeddings, and managed `data/files` contents. It preserves users, settings stored on users, and `data/bash` workspaces. The idempotent `remove_invites_v1` migration deletes the obsolete built-in access table and user attribution column. The later idempotent `chat_file_sources_v1` migration converts existing Telegram locator columns/rows into `file_sources`. The idempotent `remove_message_embeddings_v1` migration deletes obsolete message vectors while preserving messages, full-text indexes, file chunks, and chunk vectors. Thread-title state columns are non-destructive and classify all existing rows as explicit, so no existing topic is automatically renamed. Existing rows with `path = null` stay remote-only until one specific file is requested; legacy local files are copied into `.chat-files` lazily.
+The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. The bot supplies ordered deny rules for routed non-public IPv4 ranges and otherwise allows public internet traffic. IPv6 is disabled by the egress sidecar by default. Keep a host/network firewall as defense in depth and test the policy against the actual LAN, Docker networks, metadata endpoints, and DNS setup before production exposure.
 
-SQLite is the default. PostgreSQL is selected when `DB_URL` begins with `postgres://` or `postgresql://`.
+For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
 
-## Docker
+## Data migration and rollback
+
+The database migrations preserve users and the existing documented Pi/file migrations. Before sandbox cutover, back up the database, Pi directory, legacy workspace root, shared root, and old BoxLite state.
+
+Migrate legacy thread workspaces and managed originals with a dry run first:
 
 ```bash
-docker compose up --build
+npm run migrate:sandbox-data:dev
+npm run migrate:sandbox-data:dev -- --apply
 ```
 
-The `bot-data` volume contains SQLite, per-thread just-bash workspaces, and managed chat-file originals under `/app/data/bash/.chat-files`. No automatic persistent-file or workspace cleanup is applied. The compatibility-named `codex-home` volume is mounted at `/app/data/pi` and contains Pi sessions and OAuth state. On the first upgraded startup, a Codex CLI `auth.json` in that volume is backed up as `auth.codex-cli.json` and converted to Pi's credential schema. The same migration detects the former Unraid `/app/data/codex/auth.json` location. It is idempotent and never logs token values.
-
-To configure or replace Codex OAuth, stop the bot and run Pi interactively:
+For a built image:
 
 ```bash
-docker compose stop bot
-docker compose run --rm bot ./node_modules/.bin/pi --no-tools
+npm run migrate:sandbox-data
+npm run migrate:sandbox-data -- --apply
 ```
 
-Enter `/login`, then restart the service. PostgreSQL is available with:
+The temporary `migrate:boxlite-data` and `migrate:boxlite-data:dev` aliases invoke the same neutral migration for one compatibility release. The migration refuses symlinks, reports nonidentical conflicts instead of overwriting, updates managed-file paths only after successful writes, and leaves the old tree untouched for rollback.
+
+Do not delete the former BoxLite runtime data until representative workspaces, exports, pause/resume, bot restart/reconciliation, and backups have been verified. The new bot never opens the old BoxLite runtime home.
+
+## Docker Compose
+
+Create the shared directory and private network, then start the trusted lifecycle service and bot:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+cp .env.example .env
+# Edit API keys and BOT_SHARED_HOST_PATH.
+. ./.env
+mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
+docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
+
+docker compose -f docker-compose.opensandbox.yml up -d
+docker compose up --build -d
 ```
+
+- `docker-compose.opensandbox.yml` mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, and mounts the shared folder under the identical absolute host path.
+- `docker-compose.yml` mounts that folder at `/data` in the bot and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
+- Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
+- The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
+
+PostgreSQL remains available through the existing override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build -d
+```
+
+## Unraid deployment
+
+This deployment uses two templates:
+
+1. [`templates/opensandbox-server.xml`](./templates/opensandbox-server.xml) — trusted lifecycle service with Docker-socket access.
+2. [`templates/ai-tg-bot.xml`](./templates/ai-tg-bot.xml) — unprivileged Telegram bot.
+
+Setup:
+
+1. Create a custom Docker network:
+
+   ```bash
+   docker network create ai-tg-bot-opensandbox
+   ```
+
+2. Create `/mnt/user/ai-tg-bot-shared/users` and ensure UID/GID `1000:1000` can write it.
+3. Copy `docker/opensandbox/config.example.toml` to `/mnt/user/appdata/opensandbox/config.toml`.
+4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users` and retain the pinned `dns+nft` egress image.
+5. Install and start `opensandbox-server` on `ai-tg-bot-opensandbox`. Set a long random API key.
+6. Install `ai-tg-bot` on the same network, use the identical API key, and keep:
+   - Agent Shared Data: `/mnt/user/ai-tg-bot-shared` -> `/data`
+   - OpenSandbox Shared Host Root: `/mnt/user/ai-tg-bot-shared`
+   - OpenSandbox Domain: `opensandbox-server:8080`
+   - Runner username/group set to `agent:agent` and UID/GID values aligned at `1000:1000`
+7. Leave Docling URL empty unless a separately operated service is available.
+
+If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.
+
+Back up `/mnt/user/appdata/ai-tg-bot`, `/mnt/user/appdata/opensandbox`, and `/mnt/user/ai-tg-bot-shared`. Preserve the old BoxLite data separately during rollback validation.
+
+## Security boundary
+
+OpenSandbox's default Docker runtime isolates workloads with Linux containers; it is not the BoxLite microVM boundary. Treat untrusted commands accordingly.
+
+- The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
+- Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
+- Mount only `<shared-root>/users/<userId>` into each runner. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets must stay outside runner mounts.
+- Do not inject Telegram, OpenRouter, Tavily, Codex, or OpenSandbox credentials into runner commands.
+- The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark IPv4 ranges before allowing unmatched public traffic. IPv6 is disabled by the sidecar by default. The sidecar permits the sandbox's own loopback interface, so do not expose sensitive services there. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
+- No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.
 
 ## Telegram commands
 
@@ -132,17 +249,34 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
 
 ## Verification
 
+Automated checks:
+
 ```bash
 npm run typecheck
 npm test
 npm run build
 ```
 
-Live provider checks use the configured Pi auth and `.env` values:
+Provider checks use configured credentials:
 
 ```bash
 npm run live:pi-check
 npm run live:pi-fallback
 ```
 
-The second command forces the shared Codex circuit open so the smoke turn must use OpenRouter.
+With a real OpenSandbox server and shared host path configured:
+
+```bash
+npm run live:opensandbox-check
+npm run live:opensandbox-check   # repeat to exercise reconciliation
+```
+
+The runtime check covers real command execution, shared-path visibility, interruption/recovery, export, pause/resume, and manager recreation. It cleans up only its uniquely identified test resources.
+
+The end-to-end benchmark uses the real Pi tool loop and provider credentials while replacing Telegram transmission with a capture adapter:
+
+```bash
+npm run live:opensandbox-turn-check
+```
+
+It asks the agent to download exactly ten safe-for-work Hatsune Miku artworks from Wikimedia Commons, record source/creator/license/hash metadata, build and test a ZIP with the `zip` command, and deliver it through `create_file`. The harness independently verifies archive paths, count, image signatures, unique hashes, Wikimedia source metadata, approved licenses, size, persistence, and one captured document delivery.

@@ -37,6 +37,7 @@ import { FileResolver } from "../files/resolver.js";
 import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
 import { ManagedFileStore } from "../files/storage.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
+import type { CommandRuntime } from "../sandbox/types.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -48,6 +49,7 @@ interface InstallOptions {
   downloadFile?: TelegramFileDownloader;
   fileResolver?: FileResolver;
   embedder?: TextEmbedder;
+  commandRuntime?: CommandRuntime;
   pi?: PiRuntimeService;
 }
 
@@ -75,6 +77,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     repos,
     logger: options.logger,
     embedder: options.embedder,
+    commandRuntime: options.commandRuntime,
   });
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
   const fileResolver = options.fileResolver ?? new FileResolver(

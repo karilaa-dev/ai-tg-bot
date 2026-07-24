@@ -18,6 +18,13 @@ import { createLogger } from "../../src/logger.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
+import { runSandboxCommandLifecycle } from "../../src/sandbox/lifecycle.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+} from "../../src/sandbox/types.js";
 
 describe("PiRuntimeManager", () => {
   let db: AppDatabase | undefined;
@@ -34,6 +41,8 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
       BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
@@ -61,7 +70,14 @@ describe("PiRuntimeManager", () => {
           : []).length;
     });
 
-    const firstManager = new PiRuntimeManager({ config, db, repos, logger, providerStreams: streams });
+    const firstManager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime: new StubCommandRuntime("8\n"),
+      providerStreams: streams,
+    });
     const first = await firstManager.runtime(parent, user);
     expect(first.session.model?.contextWindow).toBe(config.MODEL_CONTEXT_TOKENS);
     expect(first.session.settingsManager.getCompactionSettings().enabled).toBe(true);
@@ -85,7 +101,7 @@ describe("PiRuntimeManager", () => {
     expect(providerImageCount).toBe(1);
     const bash = first.session.getToolDefinition("bash")!;
     const bashResult = await bash.execute("mounted-image", {
-      script: `wc -c /attachments/${image.id}`,
+      script: `wc -c "$CHAT_FILE_${image.id}"`,
       input_file_ids: [image.id],
     }, undefined, undefined, {} as never);
     expect(bashResult.details).toMatchObject({ exit_code: 0, input_files: [{ file_id: image.id }] });
@@ -209,6 +225,8 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
       BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
@@ -229,6 +247,7 @@ describe("PiRuntimeManager", () => {
       db,
       repos,
       logger,
+      commandRuntime: new StubCommandRuntime("pi-tool-ok\n"),
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     const runtime = await manager.runtime(thread, user);
@@ -670,6 +689,8 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
       BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
@@ -892,4 +913,29 @@ function resolvedFile(bytes: Buffer, mimeType: string | null, fileId: number) {
     expiresAt: Number.POSITIVE_INFINITY,
     source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
   };
+}
+
+class StubCommandRuntime implements CommandRuntime {
+  constructor(private readonly stdout: string) {}
+
+  async execute(
+    _request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    return runSandboxCommandLifecycle(lifecycle, async () => ({
+      stdout: this.stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }));
+  }
+
+  async exportFile(): Promise<void> {
+    throw new Error("export not configured");
+  }
+
+  async reconcile(): Promise<void> {}
+  async dispose(): Promise<void> {}
 }

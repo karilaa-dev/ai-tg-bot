@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GrammyError } from "grammy";
 import { DraftStreamer } from "../../src/telegram/draftStreamer.js";
+import { deferred } from "../helpers/async.js";
 
 describe("DraftStreamer", () => {
   afterEach(() => {
@@ -261,14 +262,6 @@ function floodWaitError(retryAfter: number): GrammyError {
     "sendRichMessageDraft",
     {},
   );
-}
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
 }
 
 async function flushPromises(): Promise<void> {

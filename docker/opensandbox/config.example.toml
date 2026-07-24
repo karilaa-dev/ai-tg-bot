@@ -1,0 +1,47 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[store]
+type = "sqlite"
+path = "/var/lib/opensandbox/opensandbox.db"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.21"
+
+[egress]
+image = "opensandbox/egress:v1.1.4"
+mode = "dns+nft"
+
+# Optional stronger isolation for hosts with Kata installed and registered in Docker.
+# Kata remains compatible with the egress network policy used by ai-tg-bot.
+# [secure_runtime]
+# type = "kata"
+# docker_runtime = "kata"
+#
+# gVisor can be configured with type = "gvisor" and docker_runtime = "runsc",
+# but OpenSandbox v0.2.2 cannot combine gVisor with networkPolicy enforcement.
+
+[docker]
+network_mode = "bridge"
+no_new_privileges = true
+pids_limit = 4096
+drop_capabilities = [
+  "AUDIT_WRITE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_RAW",
+  "SYS_ADMIN",
+  "SYS_MODULE",
+  "SYS_PTRACE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+]
+
+[storage]
+# This must match BOT_SHARED_HOST_PATH exactly. Only user subtrees are allowed.
+allowed_host_paths = ["/mnt/user/ai-tg-bot-shared/users"]
+
+[ingress]
+mode = "direct"

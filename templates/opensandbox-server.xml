@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>opensandbox-server</Name>
+  <Repository>docker.io/opensandbox/server:v0.2.2</Repository>
+  <Registry>https://hub.docker.com/r/opensandbox/server</Registry>
+  <Network>ai-tg-bot-opensandbox</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/alibaba/OpenSandbox/issues</Support>
+  <Project>https://github.com/alibaba/OpenSandbox</Project>
+  <Overview>Trusted OpenSandbox lifecycle service for ai-tg-bot. It owns Docker-socket access and creates persistent per-user runner containers; the bot itself remains unprivileged.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/opensandbox-server.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/alibaba/OpenSandbox/main/docs/assets/logo.svg</Icon>
+  <ExtraParams>--stop-timeout=60</ExtraParams>
+  <Requires>Create the custom Docker network ai-tg-bot-opensandbox first. Copy docker/opensandbox/config.example.toml to the Config File host path, retain the pinned dns+nft egress image, set allowed_host_paths to the Shared Host Folder users subtree, and use the same API key in ai-tg-bot. Docker-socket access gives this service root-equivalent authority over the Unraid host.</Requires>
+
+  <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Required by the OpenSandbox Docker runtime. Never mount this into ai-tg-bot or a runner container." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="OpenSandbox State" Target="/var/lib/opensandbox" Default="/mnt/user/appdata/opensandbox" Mode="rw" Description="Persistent SQLite lifecycle state." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Config File" Target="/etc/opensandbox/config.toml" Default="/mnt/user/appdata/opensandbox/config.toml" Mode="ro" Description="OpenSandbox TOML configuration. Seed it from docker/opensandbox/config.example.toml before starting." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Shared Host Folder" Target="/mnt/user/ai-tg-bot-shared" Default="/mnt/user/ai-tg-bot-shared" Mode="rw" Description="Must be the identical absolute host path used by ai-tg-bot. If you change it, also change this target, OPEN_SANDBOX_SHARED_HOST_ROOT, and allowed_host_paths." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="OpenSandbox API Key" Target="OPENSANDBOX_SERVER_API_KEY" Default="" Description="Long random secret. Set the identical value as OPEN_SANDBOX_API_KEY in ai-tg-bot." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Config Path" Target="SANDBOX_CONFIG_PATH" Default="/etc/opensandbox/config.toml" Description="Path to the mounted server configuration." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+</Container>
