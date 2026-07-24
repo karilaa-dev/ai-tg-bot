@@ -13,7 +13,7 @@ The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`
 - jq, ripgrep (`rg`), fd, file, tree, and less
 - SQLite, procps, iproute2, and DNS utilities
 
-The image intentionally does not include credentials, a Docker client or socket, an SSH server, or bot application files. Supply required data and credentials at runtime using appropriately scoped mounts or environment injection. The bot mounts only one user's host subtree at `/data`. User-level Python and npm installs persist only if their target is under that mounted tree; the container's other writable layers depend on OpenSandbox lifecycle retention and should not be treated as durable backup storage.
+The image intentionally does not include credentials, a Docker client or socket, an SSH server, or bot application files. Supply only user-scoped data at runtime through appropriately scoped mounts. Never expose Telegram, provider, OpenSandbox, bot, host, or other service credentials to commands running in the container, whether through mounts or environment variables. The bot mounts only one user's host subtree at `/data`. User-level Python and npm installs persist only if their target is under that mounted tree; the container's other writable layers depend on OpenSandbox lifecycle retention and should not be treated as durable backup storage.
 
 Run the installed contract check with:
 

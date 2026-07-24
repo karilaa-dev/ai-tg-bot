@@ -100,6 +100,13 @@ try {
   assertSuccess(exactOutput, "exact command output capture");
   assertEqual(exactOutput.stdout, "compact-json", "unterminated command stdout");
   assertEqual(exactOutput.stderr, "compact-error", "unterminated command stderr");
+  const rangedOutput = await execute(manager, {
+    script: "printf '\\n%.0s' {1..100}",
+    maxOutputChars: 5,
+  });
+  assertSuccess(rangedOutput, "byte-range output capture");
+  assertEqual(rangedOutput.stdout, "\n\n\n\n\n", "byte-range stdout");
+  if (!rangedOutput.stdoutTruncated) throw new Error("byte-range stdout was not marked truncated");
   const removedCwd = `${guestWorkspace}/removed-cwd`;
   await fs.mkdir(path.join(hostWorkspace, "removed-cwd"));
   const afterRemovedCwd = await execute(manager, {
@@ -272,6 +279,7 @@ function execute(
     env?: Record<string, string>;
     timeoutMs?: number;
     workingDir?: string;
+    maxOutputChars?: number;
   },
 ): Promise<SandboxCommandResult> {
   return runtime.execute({
@@ -282,7 +290,7 @@ function execute(
     stdin: input.stdin ?? "",
     workingDir: input.workingDir ?? guestWorkspace,
     timeoutMs: input.timeoutMs ?? COMMAND_TIMEOUT_MS,
-    maxOutputChars: 8_000,
+    maxOutputChars: input.maxOutputChars ?? 8_000,
   });
 }
 

@@ -307,6 +307,10 @@ describe("UserOpenSandboxRuntimeManager", () => {
       stderrTruncated: false,
     });
     expect(client.connections[0]?.readBytesCalls).toHaveLength(2);
+    expect(client.connections[0]?.readBytesCalls.map((call) => call.options)).toEqual([
+      { range: "bytes=0-4004" },
+      { range: "bytes=0-4004" },
+    ]);
     expect(client.connections[0]?.runOptions[1]?.workingDirectory).toBe("/tmp");
     await manager.dispose();
   });
@@ -516,7 +520,7 @@ class FakeConnection implements OpenSandboxConnection {
   readonly interruptCalls: string[] = [];
   readonly writeEntries: WriteEntry[] = [];
   readonly deleteCalls: string[][] = [];
-  readonly readBytesCalls: Array<{ path: string; options?: { offset?: number; limit?: number } }> = [];
+  readonly readBytesCalls: Array<{ path: string; options?: { range?: string; offset?: number; limit?: number } }> = [];
   readonly runOptions: RunCommandOpts[] = [];
   lastExecutionId?: string;
   active = 0;
@@ -577,13 +581,15 @@ class FakeConnection implements OpenSandboxConnection {
 
   async readBytes(
     filePath: string,
-    options?: { offset?: number; limit?: number },
+    options?: { range?: string; offset?: number; limit?: number },
   ): Promise<Uint8Array> {
     this.readBytesCalls.push({ path: filePath, options });
     const text = filePath.includes("-stdout-")
       ? this.options.stdout.join("")
       : this.options.stderr.join("");
     const bytes = new TextEncoder().encode(`${text}`);
+    const range = options?.range?.match(/^bytes=(\d+)-(\d+)$/);
+    if (range) return bytes.slice(Number(range[1]), Number(range[2]) + 1);
     const offset = options?.offset ?? 0;
     return bytes.slice(offset, options?.limit === undefined ? undefined : offset + options.limit);
   }

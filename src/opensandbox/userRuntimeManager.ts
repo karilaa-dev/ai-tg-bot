@@ -293,8 +293,8 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     byteLimit: number,
   ): Promise<[Uint8Array, Uint8Array]> {
     return this.control("read command output", Promise.all([
-      connection.readBytes(stdoutPath, { limit: byteLimit }),
-      connection.readBytes(stderrPath, { limit: byteLimit }),
+      connection.readBytes(stdoutPath, { range: `bytes=0-${byteLimit - 1}` }),
+      connection.readBytes(stderrPath, { range: `bytes=0-${byteLimit - 1}` }),
     ]));
   }
 
