@@ -142,7 +142,7 @@ OPEN_SANDBOX_IDLE_PAUSE_MS=600000
 
 The image reference, resources, username/group, UID/GID, shared root, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
 
-The published Ubuntu 24.04 runner image includes Bash, Python, Node.js, `curl`, `zip`, `unzip`, Git, SQLite, build tools, and common diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` tag in production rather than relying on `latest`.
+The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
 The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. The bot supplies ordered deny rules for routed non-public IPv4 ranges and otherwise allows public internet traffic. IPv6 is disabled by the egress sidecar by default. Keep a host/network firewall as defense in depth and test the policy against the actual LAN, Docker networks, metadata endpoints, and DNS setup before production exposure.
 

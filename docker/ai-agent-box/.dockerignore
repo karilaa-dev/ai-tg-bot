@@ -1,3 +1,4 @@
 *
 !Dockerfile
 !tool-contract.sh
+!tool-contract-dev.sh

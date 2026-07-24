@@ -1,76 +1,75 @@
-FROM ubuntu:24.04
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS base
 
 LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot" \
-      org.opencontainers.image.description="General-purpose Ubuntu tool box for isolated AI agent workloads"
+      org.opencontainers.image.description="Lightweight Alpine tool box for isolated AI agent workloads"
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
         bash \
-        build-essential \
         bzip2 \
         ca-certificates \
         coreutils \
         curl \
-        dnsutils \
-        fd-find \
+        fd \
         file \
         findutils \
         gawk \
+        gcompat \
         git \
-        gnupg \
         grep \
         gzip \
-        iproute2 \
         jq \
         less \
-        openssh-client \
-        procps \
+        nodejs \
+        npm \
+        openssh-client-default \
+        py3-pip \
         python3 \
-        python3-pip \
-        python3-venv \
         ripgrep \
         sed \
-        sqlite3 \
+        sqlite \
         tar \
         tree \
         unzip \
         wget \
-        xz-utils \
-        zip \
-    && install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
-    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
-    && rm -rf /var/lib/apt/lists/*
+        xz \
+        zip
 
-RUN existing_user="$(getent passwd 1000 | cut -d: -f1 || true)" \
-    && if [[ -n "${existing_user}" ]]; then userdel --remove "${existing_user}"; fi \
-    && existing_group="$(getent group 1000 | cut -d: -f1 || true)" \
-    && if [[ -n "${existing_group}" ]]; then groupdel "${existing_group}"; fi \
-    && groupadd --gid 1000 agent \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash agent \
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN addgroup -g 1000 agent \
+    && adduser -D -u 1000 -G agent -h /home/agent -s /bin/bash agent \
     && install -d -o agent -g agent \
         /workspace \
+        /data \
         /home/agent/.local \
         /home/agent/.local/bin \
         /home/agent/.cache \
         /home/agent/.cache/pip \
         /home/agent/.npm
 
-COPY --chmod=0755 tool-contract.sh /usr/local/bin/tool-contract.sh
+COPY --chmod=0755 tool-contract.sh /usr/local/libexec/runtime-tool-contract.sh
 
 WORKDIR /workspace
 
 ENV HOME=/home/agent \
     NPM_CONFIG_PREFIX=/home/agent/.local \
+    PYTHONUSERBASE=/home/agent/.local \
+    PIP_CACHE_DIR=/home/agent/.cache/pip \
     PATH=/home/agent/.local/bin:$PATH
 
-CMD ["sleep", "infinity"]
+CMD ["/usr/bin/sleep", "infinity"]
+
+FROM base AS dev
+
+RUN apk add --no-cache \
+        bind-tools \
+        build-base \
+        gnupg \
+        iproute2 \
+        procps-ng
+
+COPY --chmod=0755 tool-contract-dev.sh /usr/local/bin/tool-contract.sh
+
+FROM base AS runtime
+
+RUN ln -s /usr/local/libexec/runtime-tool-contract.sh /usr/local/bin/tool-contract.sh
