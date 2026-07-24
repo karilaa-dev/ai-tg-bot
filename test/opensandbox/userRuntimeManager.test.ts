@@ -99,6 +99,24 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("removes an obsolete user sandbox discovered after initial reconciliation", async () => {
+    const config = loadTestConfig();
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(5));
+    client.infos.set("late-obsolete", info("late-obsolete", "Running", {
+      ...userSandboxMetadata(config, 5),
+      [METADATA_FINGERPRINT]: "obsolete",
+    }));
+
+    await manager.execute(command(5));
+
+    expect(client.killCalls).toContain("late-obsolete");
+    expect(client.createCalls).toBe(1);
+    await manager.dispose();
+  });
+
   it("removes managed sandboxes with malformed user metadata", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
@@ -135,6 +153,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
     expect(client.createCalls).toBe(1);
+    expect(client.connectCalls).toEqual(["sandbox-1"]);
     expect(client.connections[0]?.maxActive).toBe(1);
     await manager.dispose();
   });
@@ -187,6 +206,36 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("resumes a sandbox paused outside the manager before reuse", async () => {
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await manager.execute(command(31));
+    const sandboxId = client.connections[0]!.id;
+    client.infos.set(sandboxId, { ...client.infos.get(sandboxId)!, state: "Paused" });
+
+    await manager.execute(command(31));
+
+    expect(client.resumeCalls).toEqual([sandboxId]);
+    expect(client.createCalls).toBe(1);
+    await manager.dispose();
+  });
+
+  it("replaces a sandbox deleted outside the manager before reuse", async () => {
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await manager.execute(command(32));
+    const sandboxId = client.connections[0]!.id;
+    client.infos.set(sandboxId, { ...client.infos.get(sandboxId)!, state: "Deleted" });
+
+    await manager.execute(command(32));
+
+    expect(client.createCalls).toBe(2);
+    expect(client.connections.at(-1)?.id).not.toBe(sandboxId);
+    await manager.dispose();
+  });
+
   it("interrupts a timed-out command and keeps the sandbox reusable", async () => {
     vi.useFakeTimers();
     const client = new FakeClient({ waitForInterrupt: true });
@@ -215,7 +264,9 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
     const connection = client.connections[0]!;
     expect(connection.interruptCalls).toEqual([connection.lastExecutionId]);
-    expect(connection.deleteCalls).toEqual([[connection.writeEntries[0]!.path]]);
+    expect(connection.deleteCalls).toHaveLength(1);
+    expect(connection.deleteCalls[0]).toHaveLength(3);
+    expect(connection.deleteCalls[0]).toContain(connection.writeEntries[0]!.path);
     await manager.dispose();
   });
 
@@ -242,6 +293,35 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("preserves exact stdout and stderr without inventing line endings", async () => {
+    const client = new FakeClient({
+      stdout: ["compact", "-json"],
+      stderr: ["warn", "!"],
+    });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute(command(43))).resolves.toMatchObject({
+      stdout: "compact-json",
+      stderr: "warn!",
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    });
+    expect(client.connections[0]?.readBytesCalls).toHaveLength(2);
+    expect(client.connections[0]?.runOptions[1]?.workingDirectory).toBe("/tmp");
+    await manager.dispose();
+  });
+
+  it("does not confuse a user output byte with the capture sentinel", async () => {
+    const client = new FakeClient({ stdout: ["user-output"] });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute(command(43))).resolves.toMatchObject({
+      stdout: "user-output",
+      stdoutTruncated: false,
+    });
+    await manager.dispose();
+  });
+
   it("bounds stdout and stderr independently and reports truncation", async () => {
     const client = new FakeClient({
       stdout: ["123", "456"],
@@ -250,7 +330,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
 
     await expect(manager.execute({ ...command(43), maxOutputChars: 5 })).resolves.toMatchObject({
-      stdout: "123\n4",
+      stdout: "12345",
       stderr: "abcde",
       stdoutTruncated: true,
       stderrTruncated: true,
@@ -280,7 +360,9 @@ describe("UserOpenSandboxRuntimeManager", () => {
     });
     expect(connection.runOptions[0]).toMatchObject({ uid: 2200, gid: 2201 });
     expect(connection.writeEntries[0]!.path).toMatch(/^\/tmp\/ai-tg-bot-stdin-/);
-    expect(connection.deleteCalls).toEqual([[connection.writeEntries[0]!.path]]);
+    expect(connection.deleteCalls).toHaveLength(1);
+    expect(connection.deleteCalls[0]).toHaveLength(3);
+    expect(connection.deleteCalls[0]).toContain(connection.writeEntries[0]!.path);
     await manager.dispose();
   });
 
@@ -434,6 +516,7 @@ class FakeConnection implements OpenSandboxConnection {
   readonly interruptCalls: string[] = [];
   readonly writeEntries: WriteEntry[] = [];
   readonly deleteCalls: string[][] = [];
+  readonly readBytesCalls: Array<{ path: string; options?: { offset?: number; limit?: number } }> = [];
   readonly runOptions: RunCommandOpts[] = [];
   lastExecutionId?: string;
   active = 0;
@@ -450,8 +533,11 @@ class FakeConnection implements OpenSandboxConnection {
     return this.client.getInfo(this.id);
   }
 
-  async run(_command: string, options: RunCommandOpts, handlers: ExecutionHandlers) {
+  async run(command: string, options: RunCommandOpts, handlers: ExecutionHandlers) {
     this.runOptions.push(options);
+    if (command.includes("printf '\\036'")) {
+      return { id: `seal-${this.id}-${Date.now()}`, exitCode: 0 };
+    }
     this.active += 1;
     this.maxActive = Math.max(this.maxActive, this.active);
     this.client.started();
@@ -487,6 +573,19 @@ class FakeConnection implements OpenSandboxConnection {
 
   async writeFiles(entries: WriteEntry[]): Promise<void> {
     this.writeEntries.push(...entries);
+  }
+
+  async readBytes(
+    filePath: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<Uint8Array> {
+    this.readBytesCalls.push({ path: filePath, options });
+    const text = filePath.includes("-stdout-")
+      ? this.options.stdout.join("")
+      : this.options.stderr.join("");
+    const bytes = new TextEncoder().encode(`${text}`);
+    const offset = options?.offset ?? 0;
+    return bytes.slice(offset, options?.limit === undefined ? undefined : offset + options.limit);
   }
 
   async deleteFiles(paths: string[]): Promise<void> {

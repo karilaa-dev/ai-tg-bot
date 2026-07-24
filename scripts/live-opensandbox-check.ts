@@ -94,12 +94,33 @@ try {
   });
   assertSuccess(execution, "command execution with stdin, environment, and cwd");
   assertEqual(execution.stdout, "execution-ok\n", "command stdout");
+  const exactOutput = await execute(manager, {
+    script: "printf %s compact-json; printf %s compact-error >&2",
+  });
+  assertSuccess(exactOutput, "exact command output capture");
+  assertEqual(exactOutput.stdout, "compact-json", "unterminated command stdout");
+  assertEqual(exactOutput.stderr, "compact-error", "unterminated command stderr");
+  const removedCwd = `${guestWorkspace}/removed-cwd`;
+  await fs.mkdir(path.join(hostWorkspace, "removed-cwd"));
+  const afterRemovedCwd = await execute(manager, {
+    script: "rm -rf -- \"$PWD\"; printf 'output-after-cwd-removal\\n'",
+    workingDir: removedCwd,
+  });
+  assertSuccess(afterRemovedCwd, "output capture after working directory removal");
+  assertEqual(afterRemovedCwd.stdout, "output-after-cwd-removal\n", "removed-cwd stdout");
   await assertFile(guestOutputPath, `${guestMarker}\n`, "guest-to-host workspace visibility");
   await assertFile(guestSharedPath, `${sharedGuestMarker}\n`, "guest-to-host shared visibility");
 
   const initial = await waitForSingleSandbox(adminClient, config, "Running");
   sandboxId = initial.id;
   knownSandboxIds.add(initial.id);
+
+  await adminClient.pause(sandboxId);
+  await waitForSandboxState(adminClient, sandboxId, "Paused", STATE_WAIT_MS);
+  const afterExternalPause = await execute(manager, { script: "printf 'resume-after-external-pause-ok\n'" });
+  assertSuccess(afterExternalPause, "resume after external pause");
+  assertEqual(afterExternalPause.stdout, "resume-after-external-pause-ok\n", "external-pause stdout");
+  await assertSameSingleSandbox(adminClient, config, sandboxId, "external pause/resume");
 
   const httpsResult = await execute(manager, {
     script: "curl -fsS --max-time 15 https://example.com/ >/dev/null",
@@ -175,8 +196,9 @@ try {
     publicHttps,
     privateEgressBlocked,
     checks: [
-      "real command execution",
+      "real command execution with exact stdout and stderr",
       "stdin, environment, and cwd",
+      "external pause detection and resume",
       "public HTTPS and blocked link-local metadata egress",
       "bidirectional workspace and shared host visibility",
       "timeout interruption and reuse",
@@ -249,6 +271,7 @@ function execute(
     stdin?: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    workingDir?: string;
   },
 ): Promise<SandboxCommandResult> {
   return runtime.execute({
@@ -257,7 +280,7 @@ function execute(
     args: ["-c", input.script, "opensandbox-live-check"],
     env: input.env ?? { TZ: "UTC" },
     stdin: input.stdin ?? "",
-    workingDir: guestWorkspace,
+    workingDir: input.workingDir ?? guestWorkspace,
     timeoutMs: input.timeoutMs ?? COMMAND_TIMEOUT_MS,
     maxOutputChars: 8_000,
   });

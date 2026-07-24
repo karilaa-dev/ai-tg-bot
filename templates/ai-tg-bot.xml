@@ -31,7 +31,7 @@
   <Config Name="OpenSandbox User" Target="OPEN_SANDBOX_USER" Default="agent" Description="Username used to own private stdin files inside the runner. It must exist in the image and resolve to OpenSandbox UID." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="OpenSandbox Group" Target="OPEN_SANDBOX_GROUP" Default="agent" Description="Group name used to own private stdin files inside the runner. It must exist in the image and resolve to OpenSandbox GID." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="OpenSandbox UID" Target="OPEN_SANDBOX_UID" Default="1000" Description="Numeric UID used for commands inside the sandbox." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox GID" Target="OPEN_SANDBOX_GID" Default="1000" Description="Numeric GID used for commands inside the sandbox." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="OpenSandbox GID" Target="OPEN_SANDBOX_GID" Default="1000" Description="Nonzero numeric GID used for commands inside the sandbox." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used by the bot. Keep aligned with the runner image and shared-folder ownership." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used by the bot." Type="Variable" Display="always" Required="true" Mask="false"/>
 

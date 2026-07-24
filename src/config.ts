@@ -61,7 +61,7 @@ const ConfigSchema = z.object({
   OPEN_SANDBOX_USER: z.string().trim().min(1).default("agent"),
   OPEN_SANDBOX_GROUP: z.string().trim().min(1).default("agent"),
   OPEN_SANDBOX_UID: z.coerce.number().int().min(0).max(MAX_LINUX_ID).default(1000),
-  OPEN_SANDBOX_GID: z.coerce.number().int().min(0).max(MAX_LINUX_ID).default(1000),
+  OPEN_SANDBOX_GID: z.coerce.number().int().min(1).max(MAX_LINUX_ID).default(1000),
   OPEN_SANDBOX_IDLE_PAUSE_MS: z.coerce.number().int().positive().default(600_000),
   OPEN_SANDBOX_READY_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   OPEN_SANDBOX_CONTROL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),

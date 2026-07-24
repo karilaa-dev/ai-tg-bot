@@ -20,11 +20,11 @@ import type {
 import { formatSandboxError } from "./client.js";
 import {
   managedSandboxMetadata,
+  managedUserSandboxMetadata,
   METADATA_FINGERPRINT,
   METADATA_USER_ID,
   openSandboxCreateSpec,
   openSandboxProvisioningFingerprint,
-  userSandboxMetadata,
 } from "./spec.js";
 
 type ActiveExecution = {
@@ -56,6 +56,7 @@ type DeadlineOutcome = { kind: "timeout" } | { kind: "aborted"; reason: unknown 
 
 const STABLE_STATES = new Set(["Running", "Paused", "Deleted", "Error"]);
 const ADOPTABLE_STATES = new Set(["Running", "Paused", "Creating", "Pausing", "Resuming"]);
+const OUTPUT_SENTINEL = 0x1e;
 
 export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   private readonly states = new Map<number, UserRuntimeState>();
@@ -151,7 +152,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   ): Promise<SandboxCommandResult> {
     const connection = await this.acquireConnection(state, request.userId);
     throwIfAborted(request.signal);
-    const stdinPath = `/tmp/ai-tg-bot-stdin-${randomUUID()}`;
+    const commandId = randomUUID();
+    const stdinPath = `/tmp/ai-tg-bot-stdin-${commandId}`;
+    const stdoutPath = `/tmp/ai-tg-bot-stdout-${commandId}`;
+    const stderrPath = `/tmp/ai-tg-bot-stderr-${commandId}`;
     await this.control("write command stdin", connection.writeFiles([{
       path: stdinPath,
       data: request.stdin,
@@ -166,7 +170,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     const abortController = new AbortController();
     const active: ActiveExecution = { connection, abortController };
     state.active = active;
-    const command = `${shellJoin([request.command, ...request.args])} < ${quoteShellToken(stdinPath)}`;
+    const command = [
+      "umask 077",
+      `${shellJoin([request.command, ...request.args])} < ${quoteShellToken(stdinPath)} > ${quoteShellToken(stdoutPath)} 2> ${quoteShellToken(stderrPath)}`,
+    ].join("; ");
     const completion = connection.run(command, {
       workingDirectory: request.workingDir,
       timeoutSeconds: Math.max(1, Math.ceil(request.timeoutMs / 1000)),
@@ -178,8 +185,11 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       onInit: (init) => {
         active.executionId = init.id;
       },
-      onStdout: (message) => appendOutput(stdout, streamLine(message.text), request.maxOutputChars),
-      onStderr: (message) => appendOutput(stderr, streamLine(message.text), request.maxOutputChars),
+      // Execd's SSE events are line-oriented and do not preserve whether a chunk ended
+      // with a newline. Keep them only as best-effort partial output; completed output
+      // is read verbatim from the redirected files below.
+      onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
+      onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
     }, abortController.signal);
     const deadline = createDeadline(request.timeoutMs, request.signal);
 
@@ -189,6 +199,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         deadline.promise,
       ]);
       if (outcome.kind === "completed") {
+        await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
         return {
           stdout: stdout.text,
           stderr: stderr.text,
@@ -212,6 +223,16 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         state.sandboxId = connection.id;
       }
       if (outcome.kind === "aborted") throw outcome.reason;
+      if (termination.confirmed) {
+        try {
+          await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
+        } catch (error) {
+          this.input.logger?.warn("OpenSandbox interrupted output capture failed", {
+            userId: request.userId,
+            error: formatSandboxError(error),
+          });
+        }
+      }
       return {
         stdout: stdout.text,
         stderr: stderr.text,
@@ -236,13 +257,67 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       if (state.active === active) state.active = undefined;
       abortController.abort();
       try {
-        await this.control("remove command stdin", connection.deleteFiles([stdinPath]));
+        await this.control("remove command files", connection.deleteFiles([
+          stdinPath,
+          stdoutPath,
+          stderrPath,
+        ]));
       } catch (error) {
-        this.input.logger?.warn("OpenSandbox stdin cleanup failed", {
+        this.input.logger?.warn("OpenSandbox command file cleanup failed", {
           userId: request.userId,
           error: formatSandboxError(error),
         });
       }
+    }
+  }
+
+  private async readCommandOutput(
+    connection: OpenSandboxConnection,
+    stdoutPath: string,
+    stderrPath: string,
+    request: SandboxCommandRequest,
+    stdout: OutputCapture,
+    stderr: OutputCapture,
+  ): Promise<void> {
+    const byteLimit = Math.min(Number.MAX_SAFE_INTEGER, request.maxOutputChars * 4 + 5);
+    await this.sealCommandOutput(connection, [stdoutPath, stderrPath], request);
+    const bytes = await this.readCommandOutputBytes(connection, stdoutPath, stderrPath, byteLimit);
+    replaceOutputBytes(stdout, bytes[0], byteLimit, request.maxOutputChars);
+    replaceOutputBytes(stderr, bytes[1], byteLimit, request.maxOutputChars);
+  }
+
+  private readCommandOutputBytes(
+    connection: OpenSandboxConnection,
+    stdoutPath: string,
+    stderrPath: string,
+    byteLimit: number,
+  ): Promise<[Uint8Array, Uint8Array]> {
+    return this.control("read command output", Promise.all([
+      connection.readBytes(stdoutPath, { limit: byteLimit }),
+      connection.readBytes(stderrPath, { limit: byteLimit }),
+    ]));
+  }
+
+  private async sealCommandOutput(
+    connection: OpenSandboxConnection,
+    paths: string[],
+    request: SandboxCommandRequest,
+  ): Promise<void> {
+    const result = await this.control("seal command output", connection.run(
+      paths.map((outputPath) => `printf '\\036' >> ${quoteShellToken(outputPath)}`).join("; "),
+      {
+        workingDirectory: "/tmp",
+        timeoutSeconds: Math.max(1, Math.ceil(this.input.config.OPEN_SANDBOX_CONTROL_TIMEOUT_MS / 1000)),
+        uid: this.input.config.OPEN_SANDBOX_UID,
+        gid: this.input.config.OPEN_SANDBOX_GID,
+        envs: request.env,
+      },
+      { skipAccumulation: true },
+    ));
+    if ((result.exitCode ?? null) !== 0 || result.error) {
+      throw new Error(`failed to seal command output: ${result.error
+        ? `${result.error.name}: ${result.error.value}`
+        : `exit code ${String(result.exitCode)}`}`);
     }
   }
 
@@ -280,7 +355,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   private async acquireConnection(state: UserRuntimeState, userId: number): Promise<OpenSandboxConnection> {
     const client = await this.ensureClient();
     await this.recoverQuarantine(state, client);
-    if (state.connection) return state.connection;
+    await this.refreshUserSandbox(state, client, userId);
 
     if (state.sandboxId) {
       const info = await this.waitForStableState(client, state.sandboxId);
@@ -318,12 +393,49 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     state.connection = connection;
     const matches = await this.control(
       "reconcile created sandbox",
-      client.list(userSandboxMetadata(this.input.config, userId, this.fingerprint)),
+      client.list(managedUserSandboxMetadata(this.input.config, userId)),
     );
     for (const duplicate of matches) {
       if (duplicate.id !== connection.id) await this.control("remove duplicate sandbox", client.kill(duplicate.id));
     }
     return connection;
+  }
+
+  private async refreshUserSandbox(
+    state: UserRuntimeState,
+    client: OpenSandboxClient,
+    userId: number,
+  ): Promise<void> {
+    const cached = state.connection;
+    state.connection = undefined;
+    if (cached) {
+      try {
+        await this.control("close cached sandbox connection", cached.close());
+      } catch (error) {
+        this.input.logger?.warn("failed to close cached OpenSandbox connection", {
+          userId,
+          sandboxId: cached.id,
+          error: formatSandboxError(error),
+        });
+      }
+    }
+
+    const infos = await this.control(
+      "refresh user sandbox",
+      client.list(managedUserSandboxMetadata(this.input.config, userId)),
+    );
+    const current = infos
+      .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && ADOPTABLE_STATES.has(info.state))
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+    const adopted = current[0];
+
+    for (const info of infos) {
+      if (info.id === adopted?.id || info.state === "Deleted") continue;
+      await this.control("remove obsolete user sandbox", client.kill(info.id));
+    }
+
+    state.sandboxId = adopted?.id;
+    state.remoteState = adopted?.state;
   }
 
   private async waitForStableState(client: OpenSandboxClient, sandboxId: string): Promise<OpenSandboxInfo> {
@@ -490,8 +602,20 @@ function guestPathToHostPath(userRoot: string, guestPath: string): string {
   return candidate;
 }
 
-function streamLine(text: string): string {
-  return text.endsWith("\n") ? text : `${text}\n`;
+function replaceOutputBytes(
+  capture: OutputCapture,
+  bytes: Uint8Array,
+  byteLimit: number,
+  maxChars: number,
+): void {
+  const complete = bytes.length < byteLimit && bytes.at(-1) === OUTPUT_SENTINEL;
+  if (!complete && bytes.length < byteLimit) {
+    throw new Error("OpenSandbox command output is missing its completion sentinel");
+  }
+  const outputBytes = complete ? bytes.subarray(0, -1) : bytes;
+  capture.text = "";
+  capture.truncated = !complete;
+  appendOutput(capture, new TextDecoder().decode(outputBytes), maxChars);
 }
 
 function appendOutput(capture: OutputCapture, chunk: string, maxChars: number): void {

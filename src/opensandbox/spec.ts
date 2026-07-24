@@ -17,14 +17,23 @@ export function managedSandboxMetadata(config: AppConfig): Record<string, string
   };
 }
 
+export function managedUserSandboxMetadata(
+  config: AppConfig,
+  userId: number,
+): Record<string, string> {
+  return {
+    ...managedSandboxMetadata(config),
+    [METADATA_USER_ID]: safeId(userId),
+  };
+}
+
 export function userSandboxMetadata(
   config: AppConfig,
   userId: number,
   fingerprint = openSandboxProvisioningFingerprint(config),
 ): Record<string, string> {
   return {
-    ...managedSandboxMetadata(config),
-    [METADATA_USER_ID]: safeId(userId),
+    ...managedUserSandboxMetadata(config, userId),
     [METADATA_FINGERPRINT]: fingerprint,
     [METADATA_LAYOUT]: String(SANDBOX_LAYOUT_VERSION),
   };

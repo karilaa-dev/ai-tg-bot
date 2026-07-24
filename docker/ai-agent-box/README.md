@@ -4,7 +4,7 @@
 
 ## Runtime contract
 
-The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. The container defaults to root because OpenSandbox's injected `execd` process needs to switch command identities; the bot runs every agent command as `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`, and owns private command-input files with `OPEN_SANDBOX_USER=agent` and `OPEN_SANDBOX_GROUP=agent`. Custom names must exist in the image and resolve to the configured numeric identity. A different numeric identity still needs suitable home/tool directories and filesystem permissions. The per-user host directory mounted by OpenSandbox at `/data` must be writable by the configured identity. The image includes:
+The image defines `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. The container defaults to root because OpenSandbox's injected `execd` process needs to switch command identities; the bot runs every agent command as `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`, and owns private command-input files with `OPEN_SANDBOX_USER=agent` and `OPEN_SANDBOX_GROUP=agent`. Custom names must exist in the image and resolve to the configured numeric identity, and `OPEN_SANDBOX_GID` must be nonzero. A different numeric identity still needs suitable home/tool directories and filesystem permissions. The per-user host directory mounted by OpenSandbox at `/data` must be writable by the configured identity. The image includes:
 
 - Python 3 with pip and venv
 - Node.js 22 with npm

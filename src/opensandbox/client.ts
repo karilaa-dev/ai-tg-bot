@@ -59,6 +59,7 @@ export interface OpenSandboxConnection {
   ): Promise<{ id?: string; exitCode?: number | null; error?: { name: string; value: string } }>;
   interrupt(executionId: string): Promise<void>;
   writeFiles(entries: WriteEntry[]): Promise<void>;
+  readBytes(path: string, options?: { offset?: number; limit?: number }): Promise<Uint8Array>;
   deleteFiles(paths: string[]): Promise<void>;
   pause(): Promise<void>;
   resume(readyTimeoutMs: number): Promise<OpenSandboxConnection>;
@@ -213,6 +214,10 @@ class SdkOpenSandboxConnection implements OpenSandboxConnection {
 
   writeFiles(entries: WriteEntry[]): Promise<void> {
     return this.sandbox.files.writeFiles(entries);
+  }
+
+  readBytes(path: string, options?: { offset?: number; limit?: number }): Promise<Uint8Array> {
+    return this.sandbox.files.readBytes(path, options);
   }
 
   deleteFiles(paths: string[]): Promise<void> {

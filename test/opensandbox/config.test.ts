@@ -50,6 +50,13 @@ describe("OpenSandbox configuration", () => {
     expect(() => loadConfig({ ...required, DOCLING_URL: "not a url" })).toThrow();
   });
 
+  it("rejects root as the OpenSandbox primary group", () => {
+    expect(() => loadConfig({
+      ...required,
+      OPEN_SANDBOX_GID: "0",
+    })).toThrow();
+  });
+
   it("requires an absolute non-root server-visible shared path", () => {
     expect(() => loadConfig({
       ...required,
