@@ -151,6 +151,23 @@ describe("UserOpenSandboxRuntimeManager", () => {
     },
   );
 
+  it("does not kill a sandbox in an unrecognized state", async () => {
+    const config = loadTestConfig();
+    const client = new FakeClient();
+    client.infos.set("future-state", info(
+      "future-state",
+      "FutureTransition",
+      userSandboxMetadata(config, 8),
+    ));
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await expect(manager.execute(command(8))).resolves.toMatchObject({ exitCode: 0 });
+
+    expect(client.killCalls).not.toContain("future-state");
+    expect(client.createCalls).toBe(1);
+    await manager.dispose();
+  });
+
   it("adopts a pending sandbox and waits for it to run", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();

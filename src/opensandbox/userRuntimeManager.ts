@@ -68,7 +68,7 @@ type SandboxStatePolicy = {
 const DEFAULT_STATE_POLICY: SandboxStatePolicy = {
   stable: false,
   adoptable: false,
-  killable: true,
+  killable: false,
 };
 const SANDBOX_STATE_POLICIES: Record<string, SandboxStatePolicy> = {
   Pending: { stable: false, adoptable: true, killable: true },
