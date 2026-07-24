@@ -50,7 +50,11 @@ describe("OpenSandbox configuration", () => {
     expect(() => loadConfig({ ...required, DOCLING_URL: "not a url" })).toThrow();
   });
 
-  it("rejects root as the OpenSandbox primary group", () => {
+  it("rejects root as the OpenSandbox command identity", () => {
+    expect(() => loadConfig({
+      ...required,
+      OPEN_SANDBOX_UID: "0",
+    })).toThrow();
     expect(() => loadConfig({
       ...required,
       OPEN_SANDBOX_GID: "0",

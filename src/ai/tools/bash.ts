@@ -84,25 +84,41 @@ async function runBashTool(
     env: {},
     async cleanup() {},
   };
+  let cleanupError: string | undefined;
   let toolResult: BashToolResult;
   try {
-    await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
-    await Promise.all([
-      fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
-      fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
-    ]);
-    stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
     if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
     const result = await input.commandRuntime.execute({
       userId: user.tg_id,
       command: "bash",
       args: ["-c", command.script, "bash", ...command.args],
-      env: { TZ: "UTC", ...stagedFiles.env },
+      env: { TZ: "UTC" },
       stdin: command.stdin,
       workingDir,
       timeoutMs: config.BASH_TIMEOUT_MS,
       maxOutputChars: config.BASH_MAX_OUTPUT_CHARS,
       signal,
+    }, {
+      async beforeExecute() {
+        await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
+        await Promise.all([
+          fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
+          fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
+        ]);
+        stagedFiles = await stageChatFiles(input, command.inputFileIds, signal);
+        return { env: stagedFiles.env };
+      },
+      async afterExecute() {
+        try {
+          await stagedFiles.cleanup();
+        } catch (error) {
+          cleanupError = formatSandboxError(error);
+          input.logger?.warn("sandbox attachment cleanup failed", {
+            threadId: thread.id,
+            error: cleanupError,
+          });
+        }
+      },
     });
     toolResult = {
       stdout: result.stdout,
@@ -129,14 +145,7 @@ async function runBashTool(
     };
   }
 
-  try {
-    await stagedFiles.cleanup();
-  } catch (error) {
-    const cleanupError = formatSandboxError(error);
-    input.logger?.warn("sandbox attachment cleanup failed", {
-      threadId: thread.id,
-      error: cleanupError,
-    });
+  if (cleanupError) {
     toolResult = {
       ...toolResult,
       error: [toolResult.error, `attachment cleanup failed: ${cleanupError}`].filter(Boolean).join("; "),

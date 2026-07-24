@@ -8,7 +8,13 @@ import { createRepos } from "../../src/db/repos/index.js";
 import type { CreatedFileAttachment, ToolBuildInput } from "../../src/ai/tools/types.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 import { botOutboxRoot, botThreadWorkspace } from "../../src/sandbox/paths.js";
-import type { SandboxCommandRequest, SandboxCommandResult, SandboxFileExportRequest, CommandRuntime } from "../../src/sandbox/types.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+  SandboxFileExportRequest,
+} from "../../src/sandbox/types.js";
 
 describe("Pi safe tool adapters", () => {
   let db: AppDatabase | undefined;
@@ -204,9 +210,21 @@ class FakeRuntime implements CommandRuntime {
     },
   ) {}
 
-  async execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
-    this.requests.push(request);
-    return this.handler(request);
+  async execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    try {
+      const prepared = await lifecycle?.beforeExecute?.();
+      const preparedRequest = {
+        ...request,
+        env: { ...request.env, ...prepared?.env },
+      };
+      this.requests.push(preparedRequest);
+      return await this.handler(preparedRequest);
+    } finally {
+      await lifecycle?.afterExecute?.();
+    }
   }
 
   exportFile(request: SandboxFileExportRequest): Promise<void> {

@@ -6,7 +6,12 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { buildToolRegistry } from "../../src/ai/tools/index.js";
-import type { SandboxCommandRequest, SandboxCommandResult, CommandRuntime } from "../../src/sandbox/types.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+} from "../../src/sandbox/types.js";
 
 const SANDBOX_USER_ID = 71;
 
@@ -120,6 +125,85 @@ describe("OpenSandbox bash tool contract", () => {
       String(thread.id),
       "attachments",
     );
+    await expect(fs.readdir(attachmentRoot)).resolves.toEqual([]);
+  });
+
+  it("does not stage a same-user attachment until the prior command releases the runtime queue", async () => {
+    const bytes = Buffer.from("queued attachment bytes");
+    const config = testConfig();
+    const user = await repos.users.ensure({ tgId: SANDBOX_USER_ID, firstName: "OpenSandbox", lang: "en" });
+    const firstThread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const secondThread = await repos.threads.create({ userId: user.tg_id, topicId: 2, title: "Second" });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: secondThread.id,
+      type: "txt",
+      name: "queued.txt",
+      path: null,
+      size: bytes.length,
+      summary: "queued",
+      isInline: true,
+    });
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const runtime = new QueueingFakeRuntime(async (request) => {
+      const guestPath = Object.values(request.env).find((value) => value.includes("/attachments/"));
+      if (!guestPath) {
+        firstStarted.resolve(undefined);
+        await releaseFirst.promise;
+        return successfulCommand("first\n");
+      }
+      const relative = path.posix.relative("/data", guestPath);
+      const hostPath = path.join(tempDir, "agent", "users", String(SANDBOX_USER_ID), relative);
+      await expect(fs.readFile(hostPath)).resolves.toEqual(bytes);
+      return successfulCommand("second\n");
+    });
+    const resolveFile = vi.fn(async () => ({
+      path: "",
+      bytes,
+      size: bytes.length,
+      mimeType: "text/plain",
+      contentSha256: "hash",
+      expiresAt: Number.POSITIVE_INFINITY,
+      source: { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: {} },
+    }));
+    const firstBash = buildToolRegistry({
+      config,
+      db,
+      repos,
+      user,
+      thread: firstThread,
+      commandRuntime: runtime,
+    }).bash;
+    const secondBash = buildToolRegistry({
+      config,
+      db,
+      repos,
+      user,
+      thread: secondThread,
+      commandRuntime: runtime,
+      resolveFile,
+    }).bash;
+
+    const first = firstBash.execute({ script: "true" });
+    await firstStarted.promise;
+    const second = secondBash.execute({ script: "true", input_file_ids: [file.id] });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const attachmentRoot = path.join(
+      tempDir,
+      "agent",
+      "users",
+      String(SANDBOX_USER_ID),
+      "threads",
+      String(secondThread.id),
+      "attachments",
+    );
+    await expect(fs.stat(attachmentRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+    releaseFirst.resolve(undefined);
+    await expect(first).resolves.toMatchObject({ exit_code: 0 });
+    await expect(second).resolves.toMatchObject({ exit_code: 0 });
     await expect(fs.readdir(attachmentRoot)).resolves.toEqual([]);
   });
 
@@ -247,6 +331,38 @@ describe("OpenSandbox bash tool contract", () => {
   }
 });
 
+class QueueingFakeRuntime implements CommandRuntime {
+  private readonly tails = new Map<number, Promise<void>>();
+
+  constructor(private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult>) {}
+
+  execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    const previous = this.tails.get(request.userId) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      try {
+        const prepared = await lifecycle?.beforeExecute?.();
+        return await this.handler({
+          ...request,
+          env: { ...request.env, ...prepared?.env },
+        });
+      } finally {
+        await lifecycle?.afterExecute?.();
+      }
+    });
+    this.tails.set(request.userId, run.then(() => undefined, () => undefined));
+    return run;
+  }
+
+  async exportFile(): Promise<void> {
+    throw new Error("export not configured");
+  }
+
+  async dispose(): Promise<void> {}
+}
+
 class FakeRuntime implements CommandRuntime {
   readonly requests: SandboxCommandRequest[] = [];
 
@@ -255,9 +371,21 @@ class FakeRuntime implements CommandRuntime {
       successfulCommand("ok\n"),
   ) {}
 
-  async execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
-    this.requests.push(request);
-    return this.handler(request);
+  async execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    try {
+      const prepared = await lifecycle?.beforeExecute?.();
+      const preparedRequest = {
+        ...request,
+        env: { ...request.env, ...prepared?.env },
+      };
+      this.requests.push(preparedRequest);
+      return await this.handler(preparedRequest);
+    } finally {
+      await lifecycle?.afterExecute?.();
+    }
   }
 
   async exportFile(): Promise<void> {
@@ -272,6 +400,14 @@ function stagedGuestPath(request: SandboxCommandRequest): string {
   const guestPath = Object.entries(request.env).find(([key]) => key.startsWith("CHAT_FILE_"))?.[1];
   if (!guestPath) throw new Error("expected a staged chat file path");
   return guestPath;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function successfulCommand(stdout: string): SandboxCommandResult {

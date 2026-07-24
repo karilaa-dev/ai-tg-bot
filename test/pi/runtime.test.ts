@@ -18,7 +18,12 @@ import { createLogger } from "../../src/logger.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
-import type { SandboxCommandRequest, SandboxCommandResult, CommandRuntime } from "../../src/sandbox/types.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+} from "../../src/sandbox/types.js";
 
 describe("PiRuntimeManager", () => {
   let db: AppDatabase | undefined;
@@ -912,15 +917,23 @@ function resolvedFile(bytes: Buffer, mimeType: string | null, fileId: number) {
 class StubCommandRuntime implements CommandRuntime {
   constructor(private readonly stdout: string) {}
 
-  async execute(_request: SandboxCommandRequest): Promise<SandboxCommandResult> {
-    return {
-      stdout: this.stdout,
-      stderr: "",
-      exitCode: 0,
-      timedOut: false,
-      stdoutTruncated: false,
-      stderrTruncated: false,
-    };
+  async execute(
+    _request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    try {
+      await lifecycle?.beforeExecute?.();
+      return {
+        stdout: this.stdout,
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      };
+    } finally {
+      await lifecycle?.afterExecute?.();
+    }
   }
 
   async exportFile(): Promise<void> {

@@ -133,6 +133,53 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it.each(["Terminated", "Deleted"])(
+    "does not kill an already removed %s sandbox while creating its replacement",
+    async (remoteState) => {
+      const config = loadTestConfig();
+      const client = new FakeClient();
+      client.infos.set("removed", info("removed", remoteState, userSandboxMetadata(config, 7)));
+      const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+      await expect(manager.execute(command(7))).resolves.toMatchObject({ exitCode: 0 });
+
+      expect(client.killCalls).not.toContain("removed");
+      expect(client.createCalls).toBe(1);
+      expect(client.connections.at(-1)?.id).not.toBe("removed");
+      await manager.dispose();
+    },
+  );
+
+  it("adopts a pending sandbox and waits for it to run", async () => {
+    const config = loadTestConfig();
+    const client = new FakeClient();
+    client.infos.set("pending", info("pending", "Pending", userSandboxMetadata(config, 8)));
+    client.getInfoStateOverrides.set("pending", "Running");
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await expect(manager.execute(command(8))).resolves.toMatchObject({ exitCode: 0 });
+
+    expect(client.connectCalls).toEqual(["pending"]);
+    expect(client.killCalls).not.toContain("pending");
+    expect(client.createCalls).toBe(0);
+    await manager.dispose();
+  });
+
+  it("waits for a stopping sandbox without killing it again", async () => {
+    const config = loadTestConfig();
+    const client = new FakeClient();
+    client.infos.set("stopping", info("stopping", "Stopping", userSandboxMetadata(config, 9)));
+    client.getInfoStateOverrides.set("stopping", "Terminated");
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await expect(manager.execute(command(9))).resolves.toMatchObject({ exitCode: 0 });
+
+    expect(client.killCalls).not.toContain("stopping");
+    expect(client.createCalls).toBe(1);
+    expect(client.connections.at(-1)?.id).not.toBe("stopping");
+    await manager.dispose();
+  });
+
   it("refuses to create when the managed-sandbox list is inconclusive", async () => {
     const client = new FakeClient({ listError: new Error("list unavailable") });
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
@@ -155,6 +202,90 @@ describe("UserOpenSandboxRuntimeManager", () => {
     expect(client.createCalls).toBe(1);
     expect(client.connectCalls).toEqual(["sandbox-1"]);
     expect(client.connections[0]?.maxActive).toBe(1);
+    await manager.dispose();
+  });
+
+  it("keeps command preparation and cleanup inside the per-user queue", async () => {
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+    const gate = deferred<void>();
+    const events: string[] = [];
+
+    const first = manager.execute(command(11), {
+      async beforeExecute() {
+        events.push("first-before");
+        await gate.promise;
+      },
+      async afterExecute() {
+        events.push("first-after");
+      },
+    });
+    await vi.waitFor(() => expect(events).toEqual(["first-before"]));
+
+    const second = manager.execute(command(11), {
+      async beforeExecute() {
+        events.push("second-before");
+      },
+      async afterExecute() {
+        events.push("second-after");
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["first-before"]);
+
+    gate.resolve(undefined);
+    await Promise.all([first, second]);
+
+    expect(events).toEqual(["first-before", "first-after", "second-before", "second-after"]);
+    await manager.dispose();
+  });
+
+  it("does not initialize OpenSandbox when canceled during command preparation", async () => {
+    const client = new FakeClient();
+    const provider = vi.fn(async () => client);
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), clientProvider: provider });
+    const preparationStarted = deferred<void>();
+    const releasePreparation = deferred<void>();
+    const cleanup = vi.fn(async () => undefined);
+    const controller = new AbortController();
+
+    const result = manager.execute({ ...command(12), signal: controller.signal }, {
+      async beforeExecute() {
+        preparationStarted.resolve(undefined);
+        await releasePreparation.promise;
+      },
+      afterExecute: cleanup,
+    });
+    await preparationStarted.promise;
+
+    controller.abort();
+    releasePreparation.resolve(undefined);
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(provider).not.toHaveBeenCalled();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    await manager.dispose();
+  });
+
+  it("preserves undefined lifecycle rejection reasons", async () => {
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client: new FakeClient() });
+
+    let received: unknown;
+    try {
+      await manager.execute(command(12), {
+        async beforeExecute() {
+          throw undefined;
+        },
+        async afterExecute() {
+          throw undefined;
+        },
+      });
+    } catch (error) {
+      received = error;
+    }
+
+    expect(received).toBeInstanceOf(AggregateError);
+    expect((received as AggregateError).errors).toEqual([undefined, undefined]);
     await manager.dispose();
   });
 
@@ -231,6 +362,37 @@ describe("UserOpenSandboxRuntimeManager", () => {
 
     await manager.execute(command(32));
 
+    expect(client.createCalls).toBe(2);
+    expect(client.connections.at(-1)?.id).not.toBe(sandboxId);
+    await manager.dispose();
+  });
+
+  it("replaces a sandbox that terminates between listing and inspection", async () => {
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await manager.execute(command(33));
+    const sandboxId = client.connections[0]!.id;
+    client.getInfoStateOverrides.set(sandboxId, "Terminated");
+
+    await manager.execute(command(33));
+
+    expect(client.createCalls).toBe(2);
+    expect(client.connections.at(-1)?.id).not.toBe(sandboxId);
+    await manager.dispose();
+  });
+
+  it("removes a sandbox that fails between listing and inspection", async () => {
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await manager.execute(command(34));
+    const sandboxId = client.connections[0]!.id;
+    client.getInfoStateOverrides.set(sandboxId, "Failed");
+
+    await manager.execute(command(34));
+
+    expect(client.killCalls).toContain(sandboxId);
     expect(client.createCalls).toBe(2);
     expect(client.connections.at(-1)?.id).not.toBe(sandboxId);
     await manager.dispose();
@@ -434,6 +596,7 @@ type FakeOptions = {
 class FakeClient implements OpenSandboxClient {
   readonly options: FakeOptions;
   readonly infos = new Map<string, OpenSandboxInfo>();
+  readonly getInfoStateOverrides = new Map<string, string>();
   readonly connections: FakeConnection[] = [];
   readonly pauseCalls: string[] = [];
   readonly resumeCalls: string[] = [];
@@ -463,7 +626,8 @@ class FakeClient implements OpenSandboxClient {
   async getInfo(id: string): Promise<OpenSandboxInfo> {
     const info = this.infos.get(id);
     if (!info) throw new Error(`missing sandbox ${id}`);
-    return info;
+    const state = this.getInfoStateOverrides.get(id);
+    return state ? { ...info, state } : info;
   }
 
   async create(spec: OpenSandboxCreateSpec): Promise<OpenSandboxConnection> {
@@ -609,6 +773,14 @@ function info(
   createdAt = new Date(),
 ): OpenSandboxInfo {
   return { id, state, metadata, createdAt };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function command(userId: number): SandboxCommandRequest {

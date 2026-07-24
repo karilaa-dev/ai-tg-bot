@@ -28,8 +28,16 @@ export interface SandboxFileExportRequest {
   signal?: AbortSignal;
 }
 
+export interface SandboxCommandLifecycle {
+  beforeExecute?(): Promise<{ env?: Record<string, string> } | void>;
+  afterExecute?(): Promise<void>;
+}
+
 export interface CommandRuntime {
-  execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
+  execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult>;
   exportFile(request: SandboxFileExportRequest): Promise<void>;
   dispose(): Promise<void>;
 }
