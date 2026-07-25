@@ -7,7 +7,6 @@ services:
     environment:
       NODE_ENV: production
       DB_URL: sqlite:/app/data/bot.db
-      BASH_WORKSPACE_ROOT: /app/data/bash
       AGENT_SHARED_ROOT: /data
       MANAGED_FILE_ROOT: /data/.chat-files
       OPEN_SANDBOX_DOMAIN: ${OPEN_SANDBOX_DOMAIN:-opensandbox-server:8080}
@@ -30,8 +29,7 @@ services:
         target: /data
         bind:
           create_host_path: false
-      # Compatibility name: upgrades reuse the former Codex volume for Pi state.
-      - codex-home:/app/data/pi
+      - pi-home:/app/data/pi
     networks:
       - opensandbox
     stop_grace_period: 60s
@@ -39,7 +37,7 @@ services:
 
 volumes:
   bot-data:
-  codex-home:
+  pi-home:
 
 networks:
   opensandbox:

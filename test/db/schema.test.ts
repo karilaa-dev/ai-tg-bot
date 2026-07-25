@@ -1,0 +1,82 @@
+import { sql } from "drizzle-orm";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadTestConfig } from "../../src/config.js";
+import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import { createRepos } from "../../src/db/repos/index.js";
+
+const CURRENT_TABLES = [
+  "chunks_fts",
+  "embeddings",
+  "file_chunks",
+  "file_sources",
+  "files",
+  "message_files",
+  "messages",
+  "messages_fts",
+  "threads",
+  "users",
+];
+
+describe("SQLite schema initialization", () => {
+  let database: AppDatabase | undefined;
+
+  afterEach(async () => {
+    await database?.destroy();
+  });
+
+  it("creates only the current schema and preserves current data when repeated", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+
+    await database.initialize();
+    const repos = createRepos(database.db, database.search);
+    await repos.users.ensure({ tgId: 42, firstName: "Current", lang: "en" });
+    await database.initialize();
+
+    const tables = await database.db.query<{ name: string }>(sql`
+      select name
+      from sqlite_master
+      where type = 'table' and name not like 'sqlite_%' and name not like '%_fts_%'
+      order by name
+    `);
+    expect(tables.map((row) => row.name)).toEqual(CURRENT_TABLES);
+    expect(await database.db.query<{ tg_id: number }>(sql`select tg_id from users`)).toEqual([{ tg_id: 42 }]);
+    expect(await tableExists(database, "schema_migrations")).toBe(false);
+    expect(await tableExists(database, "invites")).toBe(false);
+    expect(await tableExists(database, "summaries")).toBe(false);
+  });
+
+  it("creates the exact current columns", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+
+    await expect(columns(database, "users")).resolves.toEqual([
+      "tg_id", "first_name", "username", "lang", "tz_offset_min", "stream_mode", "created_at",
+    ]);
+    await expect(columns(database, "threads")).resolves.toEqual([
+      "id", "user_id", "topic_id", "parent_thread_id", "fork_point_message_id", "title",
+      "title_source", "title_attempts", "topic_title_synced", "pi_session_file", "pi_session_id",
+      "archived", "created_at",
+    ]);
+    await expect(columns(database, "messages")).resolves.toEqual([
+      "id", "thread_id", "role", "kind", "content_json", "text_plain", "thinking",
+      "tg_message_id", "pi_entry_id", "created_at",
+    ]);
+    await expect(columns(database, "files")).resolves.toEqual([
+      "id", "user_id", "thread_id", "message_id", "type", "content_sha256", "mime_type",
+      "extraction_status", "name", "path", "size", "content_md", "summary", "outline_json",
+      "is_inline", "created_at",
+    ]);
+  });
+});
+
+async function tableExists(database: AppDatabase, table: string): Promise<boolean> {
+  const rows = await database.db.query<{ name: string }>(sql`
+    select name from sqlite_master where type = 'table' and name = ${table}
+  `);
+  return rows.length > 0;
+}
+
+async function columns(database: AppDatabase, table: string): Promise<string[]> {
+  const rows = await database.db.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+  return rows.map((row) => row.name);
+}

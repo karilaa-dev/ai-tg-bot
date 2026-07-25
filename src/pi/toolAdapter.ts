@@ -6,7 +6,7 @@ import type { ToolBuildInput } from "../ai/tools/types.js";
 import { raceWithAbort } from "../files/cancel.js";
 import { asRecord, safeJson } from "../util/records.js";
 
-const LEGACY_TOOL_NAMES = [
+const BOT_TOOL_NAMES = [
   "search_thread",
   "load_message",
   "search_in_file",
@@ -24,7 +24,7 @@ export interface PiToolBridge {
 
 export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
   const initial = buildToolRegistry(bridge.buildInput());
-  return LEGACY_TOOL_NAMES.map((name) => {
+  return BOT_TOOL_NAMES.map((name) => {
     const definition = initial[name];
     if (!definition) throw new Error(`Missing bot tool ${name}`);
     return {

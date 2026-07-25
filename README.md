@@ -96,9 +96,10 @@ Run the bot from source:
 
 ```bash
 npm install
-npm run migrate
 npm run dev
 ```
+
+The bot initializes the current schema at startup. Use an empty SQLite database or PostgreSQL schema for this release; databases created by other releases are unsupported and are not transformed or cleaned automatically.
 
 For source execution, the bot-visible and server-visible shared roots can be the same absolute local directory:
 
@@ -143,35 +144,13 @@ OPEN_SANDBOX_IDLE_PAUSE_MS=300000
 OPEN_SANDBOX_IDLE_RELEASE_MS=900000
 ```
 
-The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees. The layout-v2 rollout also removes obsolete whole-user sandboxes before creating scoped replacements.
+The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees.
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
 The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. That implementation enforces the bot's ordered IP/CIDR deny rules for routed non-public IPv4 ranges despite stale FQDN-only comments in the lifecycle SDK schema; changing the egress image or mode requires fresh direct-IP validation. Unmatched public internet traffic remains allowed, and IPv6 is disabled by the sidecar by default. Keep a host/network firewall as defense in depth and test literal private, Docker/LAN, link-local/metadata, and public destinations plus DNS behavior before production exposure.
 
 For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
-
-## Data migration and rollback
-
-The database migrations preserve users and the existing documented Pi/file migrations. Before sandbox cutover, back up the database, Pi directory, legacy workspace root, shared root, and old BoxLite state.
-
-Migrate legacy thread workspaces and managed originals with a dry run first:
-
-```bash
-npm run migrate:sandbox-data:dev
-npm run migrate:sandbox-data:dev -- --apply
-```
-
-For a built image:
-
-```bash
-npm run migrate:sandbox-data
-npm run migrate:sandbox-data -- --apply
-```
-
-The temporary `migrate:boxlite-data` and `migrate:boxlite-data:dev` aliases invoke the same neutral migration for one compatibility release. The migration refuses symlinks, reports nonidentical conflicts instead of overwriting, updates managed-file paths only after successful writes, and leaves the old tree untouched for rollback.
-
-Do not delete the former BoxLite runtime data until representative workspaces, exports, pause/resume, bot restart/reconciliation, and backups have been verified. The new bot never opens the old BoxLite runtime home.
 
 ## Docker Compose
 
@@ -193,7 +172,7 @@ docker compose up --build -d
 - Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
 - The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
 
-PostgreSQL remains available through the existing override:
+PostgreSQL is available through the Compose override:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build -d
@@ -227,11 +206,9 @@ Setup:
 
 If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.
 
-Back up `/mnt/user/appdata/ai-tg-bot`, `/mnt/user/appdata/opensandbox`, and `/mnt/user/ai-tg-bot-shared`. Preserve the old BoxLite data separately during rollback validation.
-
 ## Security boundary
 
-OpenSandbox's default Docker runtime isolates workloads with Linux containers; it is not the BoxLite microVM boundary. Treat untrusted commands accordingly.
+OpenSandbox's default Docker runtime isolates workloads with Linux containers. Treat untrusted commands accordingly.
 
 - The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
 - Keep API-key authentication enabled and use a private Docker network or strict firewall rules.

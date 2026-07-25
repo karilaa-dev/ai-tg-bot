@@ -186,12 +186,12 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("removes legacy or malformed managed sandboxes without a valid thread identity", async () => {
+  it("removes managed sandboxes without a valid thread identity", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
     const metadata = threadSandboxMetadata(config, 6, 1);
     delete metadata[METADATA_THREAD_ID];
-    client.infos.set("legacy-user-sandbox", info("legacy-user-sandbox", "Running", metadata));
+    client.infos.set("missing-thread", info("missing-thread", "Running", metadata));
     client.infos.set("malformed-thread", info("malformed-thread", "Running", {
       ...threadSandboxMetadata(config, 6, 1),
       [METADATA_THREAD_ID]: "not-a-thread",
@@ -200,7 +200,7 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
 
     await manager.execute(command(6));
 
-    expect(client.killCalls).toEqual(expect.arrayContaining(["legacy-user-sandbox", "malformed-thread"]));
+    expect(client.killCalls).toEqual(expect.arrayContaining(["missing-thread", "malformed-thread"]));
     expect(client.createCalls).toBe(1);
     await manager.dispose();
   });

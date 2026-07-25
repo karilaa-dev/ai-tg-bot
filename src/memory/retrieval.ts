@@ -102,11 +102,11 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
   const messageIds = messages.map((row) => row.id);
   const messageIdSet = new Set(messageIds);
   const attachedFiles = await repos.files.listForMessages(messageIds);
-  const legacyFiles = await repos.files.listForThreads(threadIds);
+  const threadFiles = await repos.files.listForThreads(threadIds);
   const fileIds = [
     ...new Set([
       ...attachedFiles.map((file) => file.id),
-      ...legacyFiles
+      ...threadFiles
         .filter((file) => file.message_id === null || messageIdSet.has(file.message_id))
         .map((file) => file.id),
     ]),

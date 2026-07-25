@@ -33,7 +33,7 @@ describe("Pi safe tool adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-adapter-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9901, firstName: "Adapter", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Adapter" });
@@ -79,7 +79,7 @@ describe("Pi safe tool adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-cleanup-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9904, firstName: "Cleanup", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Cleanup" });
@@ -136,7 +136,7 @@ describe("Pi safe tool adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-input-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9902, firstName: "Input", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Input" });
@@ -185,7 +185,7 @@ describe("Pi safe tool adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-hint-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9905, firstName: "Hint", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Hint" });
@@ -218,7 +218,7 @@ describe("Pi safe tool adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-lazy-box-"));
     const config = testConfig(tempDir);
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9903, firstName: "Lazy", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Lazy" });
@@ -284,6 +284,5 @@ function testConfig(root: string) {
   return loadTestConfig({
     AGENT_SHARED_ROOT: path.join(root, "agent"),
     MANAGED_FILE_ROOT: path.join(root, "agent", ".chat-files"),
-    BASH_WORKSPACE_ROOT: path.join(root, "legacy-bash"),
   });
 }

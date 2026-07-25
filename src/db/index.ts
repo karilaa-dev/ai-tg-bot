@@ -7,7 +7,7 @@ import { drizzle as drizzleSqlite } from "drizzle-orm/node-sqlite";
 import pg from "pg";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
-import { up, type MigrationResult } from "./migrations/0001_init.js";
+import { initializeSchema } from "./schema.js";
 import { createTextSearch, type TextSearch } from "./search.js";
 import { normalizeRows, type SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
@@ -16,7 +16,7 @@ export interface AppDatabase {
   db: SqlExecutor;
   dialect: DialectName;
   search: TextSearch;
-  migrate(): Promise<MigrationResult>;
+  initialize(): Promise<void>;
   destroy(): Promise<void>;
 }
 
@@ -71,11 +71,10 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     db,
     dialect,
     search: createTextSearch(db, dialect),
-    migrate: async () => {
-      logger?.debug("migration starting", { dialect });
-      const result = await up(db, dialect);
-      logger?.info("migrated", { dialect, ...result });
-      return result;
+    initialize: async () => {
+      logger?.debug("database initialization starting", { dialect });
+      await initializeSchema(db, dialect);
+      logger?.info("database initialized", { dialect });
     },
     destroy: async () => {
       logger?.debug("database destroy starting", { dialect });

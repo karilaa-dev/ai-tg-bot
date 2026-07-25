@@ -86,8 +86,8 @@ describe("container entrypoint", () => {
 function runEntrypoint(environment: NodeJS.ProcessEnv) {
   return execFileAsync("/bin/sh", [
     entrypoint,
-    process.execPath,
-    "-e",
-    "process.stdout.write(JSON.stringify({ uid: process.getuid?.() }))",
+    "/bin/sh",
+    "-c",
+    "printf '{\"uid\":%s}' \"$(id -u)\"",
   ], { env: environment });
 }

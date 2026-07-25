@@ -14,7 +14,7 @@ describe("ManagedFileStore", () => {
   it("atomically preserves the first writeNew result", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "managed-file-store-"));
     roots.push(root);
-    const store = new ManagedFileStore({ BASH_WORKSPACE_ROOT: root });
+    const store = new ManagedFileStore({ MANAGED_FILE_ROOT: root });
 
     const results = await Promise.allSettled([
       store.writeNew(1, Buffer.from("first")),
@@ -28,5 +28,21 @@ describe("ManagedFileStore", () => {
     expect(["first", "second"]).toContain(await fs.readFile(store.pathFor(1), "utf8"));
     expect((await fs.stat(store.pathFor(1))).mode & 0o777).toBe(0o600);
     await expect(fs.readdir(path.dirname(store.pathFor(1)))).resolves.toEqual(["content"]);
+  });
+
+  it("reads only the canonical path for a managed file", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "managed-file-store-"));
+    roots.push(root);
+    const store = new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(root, "managed") });
+    const canonical = await store.write(1, Buffer.from("canonical"));
+    const outside = path.join(root, "outside.txt");
+    await fs.writeFile(outside, "outside");
+
+    await expect(store.readKnownPath(1, canonical)).resolves.toMatchObject({
+      path: canonical,
+      bytes: Buffer.from("canonical"),
+      managed: true,
+    });
+    await expect(store.readKnownPath(1, outside)).resolves.toBeUndefined();
   });
 });

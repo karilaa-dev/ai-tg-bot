@@ -30,7 +30,7 @@ describe("OpenSandbox bash tool contract", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-opensandbox-bash-"));
     const config = loadTestConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     repos = createRepos(db.db, db.search);
   });
 
@@ -78,6 +78,28 @@ describe("OpenSandbox bash tool contract", () => {
 
     expect(result).toMatchObject({ exit_code: 0, cwd: "/" });
     expect(runtime.requests[0]?.workingDir).toBe(`/data/threads/${thread.id}/workspace`);
+  });
+
+  it("creates the current workspace without inspecting unrelated directories", async () => {
+    const runtime = new FakeRuntime();
+    const { bash, thread } = await createBash(runtime);
+    const unrelated = path.join(tempDir, `thread-${thread.id}`);
+    await fs.mkdir(unrelated, { recursive: true });
+    await fs.writeFile(path.join(unrelated, "note.txt"), "unrelated");
+
+    await bash.execute({ script: "true" });
+
+    const workspace = path.join(
+      tempDir,
+      "agent",
+      "users",
+      String(SANDBOX_USER_ID),
+      "threads",
+      String(thread.id),
+      "workspace",
+    );
+    await expect(fs.readdir(workspace)).resolves.toEqual([]);
+    await expect(fs.readFile(path.join(unrelated, "note.txt"), "utf8")).resolves.toBe("unrelated");
   });
 
   it("stages only requested scoped attachments and removes copies after execution", async () => {
@@ -305,7 +327,6 @@ describe("OpenSandbox bash tool contract", () => {
     const config = loadTestConfig({
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "legacy-bash"),
     });
     const user = await repos.users.ensure({ tgId: 72, firstName: "Runtime", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
@@ -331,7 +352,6 @@ describe("OpenSandbox bash tool contract", () => {
     return loadTestConfig({
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "legacy-bash"),
     });
   }
 });

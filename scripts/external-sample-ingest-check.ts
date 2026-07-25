@@ -56,7 +56,7 @@ const samples: Sample[] = [
 ];
 
 try {
-  await db.migrate();
+  await db.initialize();
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 515151, firstName: "ExternalSamples", lang: "en" });
   const thread = await repos.threads.activeForUserTopic(user.tg_id, null, "External samples");

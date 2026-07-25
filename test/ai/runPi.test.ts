@@ -47,7 +47,7 @@ describe("runTurn with Pi", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7001, firstName: "Runner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi run" });
@@ -110,7 +110,7 @@ describe("runTurn with Pi", () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7002, firstName: "NoPi", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Missing Pi" });
@@ -146,11 +146,11 @@ describe("runTurn with Pi", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-zip-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7006, firstName: "ZipRunner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi ZIP run" });
@@ -271,10 +271,10 @@ describe("runTurn with Pi", () => {
 
   it("preserves an image MIME type when Telegram receives it as a document", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-document-image-"));
-    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    const config = loadTestConfig({ MANAGED_FILE_ROOT: path.join(tempDir, "managed-files") });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7004, firstName: "DocumentImage", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Document image" });
@@ -336,7 +336,7 @@ describe("runTurn with Pi", () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7005, firstName: "FailedDelivery", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Failed delivery" });
@@ -391,11 +391,11 @@ describe("runTurn with Pi", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-image-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7003, firstName: "ImageRunner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi image run" });
@@ -470,7 +470,7 @@ describe("runTurn with Pi", () => {
     expect(files[0]).toMatchObject({
       type: "image",
     });
-    expect(files[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
+    expect(files[0]?.path).toBe(path.join(config.MANAGED_FILE_ROOT, String(files[0]?.id), "content"));
     const sources = await repos.files.listSources(files[0]!.id);
     expect(sources).toMatchObject([{
       transport: "telegram",

@@ -6,7 +6,6 @@ import { createLogger } from "../src/logger.js";
 import { createOpenSandboxClientProvider } from "../src/opensandbox/client.js";
 import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
-import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/authMigration.js";
 
 const baseConfig = loadConfig();
 const config = { ...baseConfig, DB_URL: "sqlite::memory:" };
@@ -16,15 +15,10 @@ let pi: PiRuntimeManager | undefined;
 let commandRuntime: ThreadOpenSandboxRuntimeManager | undefined;
 
 try {
-  await db.migrate();
+  await db.initialize();
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9_999_001, firstName: "Pi smoke", lang: "en" });
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi smoke" });
-  await migrateLegacyCodexAuth({
-    agentDir: config.PI_CODING_AGENT_DIR,
-    logger,
-    legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
-  });
   commandRuntime = new ThreadOpenSandboxRuntimeManager({
     config,
     clientProvider: createOpenSandboxClientProvider(config),
