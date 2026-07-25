@@ -346,8 +346,33 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
   if (/permission denied|read-only file system/i.test(combined) && /apt|sudo|npm.*-g|pip.*system/i.test(`${script}\n${combined}`)) {
     return "The configured sandbox user cannot modify that system location. Install packages into user-writable locations or use an image with the required system tools preinstalled.";
   }
-  if (/\bcurl\b/.test(script) || /private|loopback|metadata|could not resolve|failed to connect/i.test(combined)) {
-    return "Use curl for internet URLs and raw APIs. Network reachability depends on the deployment firewall; do not assume private, local, or metadata destinations are blocked.";
+  const missingCommand = commandNotFoundName(combined);
+  if (missingCommand) {
+    return `The command \`${missingCommand}\` was not found. Check its spelling or use an installed equivalent; do not retry the unchanged command.`;
+  }
+  if (exitCode === 127) {
+    return "Exit status 127 commonly indicates a missing command. Inspect stderr to identify it, and do not retry the unchanged command or guess a package name without evidence.";
+  }
+  if (exitCode === 22 && (/\bcurl\b/.test(script) || /curl:|http\/?\d(?:\.\d)?\s+\d{3}|status(?: code)?\s*[:=]?\s*[45]\d\d/i.test(combined))) {
+    return "curl exit status 22 means an HTTP response was treated as a failure. Inspect the status and bounded response body, use --location and --fail-with-body where appropriate, and retry only transient 429 or 5xx responses with bounded timeouts.";
+  }
+  if (exitCode === 1) {
+    return "The command exited with status 1. Inspect the reported stderr and stdout, correct that specific validation or command failure, and do not retry unchanged.";
+  }
+  if (/could not resolve|name or service not known|failed to connect|connection (?:refused|timed out)|network is unreachable|no route to host|private|loopback|link-local|metadata/i.test(combined)) {
+    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, loopback, link-local, and cloud-metadata destinations are forbidden and must not be probed.";
+  }
+  return undefined;
+}
+
+function commandNotFoundName(output: string): string | undefined {
+  const patterns = [
+    /^(?:\/bin\/)?bash:\s*(?:line\s+\d+:\s*)?([^:\s]+):\s*command not found\s*$/im,
+    /^sh:\s*(?:line\s+\d+:\s*)?([^:\s]+):\s*not found\s*$/im,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(output);
+    if (match?.[1]) return match[1];
   }
   return undefined;
 }

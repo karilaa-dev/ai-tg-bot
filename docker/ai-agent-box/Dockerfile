@@ -22,6 +22,7 @@ RUN apk add --no-cache \
         nodejs \
         npm \
         openssh-client-default \
+        patch \
         py3-pip \
         python3 \
         ripgrep \
@@ -32,11 +33,13 @@ RUN apk add --no-cache \
         unzip \
         wget \
         xz \
-        zip
+        zip \
+        zstd
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN addgroup -g 1000 agent \
+RUN ln -s /usr/bin/python3 /usr/local/bin/python \
+    && addgroup -g 1000 agent \
     && adduser -D -u 1000 -G agent -h /home/agent -s /bin/bash agent \
     && install -d -o agent -g agent \
         /workspace \
@@ -57,7 +60,7 @@ ENV HOME=/home/agent \
     PIP_CACHE_DIR=/home/agent/.cache/pip \
     PATH=/home/agent/.local/bin:$PATH
 
-CMD ["/usr/bin/sleep", "infinity"]
+CMD ["/bin/sleep", "infinity"]
 
 FROM base AS dev
 

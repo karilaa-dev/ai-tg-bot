@@ -222,7 +222,7 @@ function toolLabel(name: string): string {
     case "generate_image":
       return "🖼️ Generating image";
     case "create_file":
-      return "📎 Creating file";
+      return "📎 Attaching file";
     case "bash":
       return "🐚 Running bash";
     default:

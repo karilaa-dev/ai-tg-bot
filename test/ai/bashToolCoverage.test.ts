@@ -11,6 +11,7 @@ import {
 } from "../../src/sandbox/lifecycle.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { buildToolRegistry } from "../../src/ai/tools/index.js";
+import { bashModelHint } from "../../src/ai/tools/helpers.js";
 import type {
   CommandRuntime,
   SandboxCommandLifecycle,
@@ -46,7 +47,6 @@ describe("OpenSandbox bash tool contract", () => {
       cwd: "/project",
       stdin: "stdin-value",
       args: ["arg-value"],
-      raw_script: true,
     });
 
     expect(result).toMatchObject({
@@ -334,6 +334,52 @@ describe("OpenSandbox bash tool contract", () => {
       BASH_WORKSPACE_ROOT: path.join(tempDir, "legacy-bash"),
     });
   }
+});
+
+describe("Bash model recovery hints", () => {
+  it.each([
+    {
+      name: "extracts a missing Bash command",
+      result: { exit_code: 127, stderr: "bash: line 3: jqx: command not found", stdout: "" },
+      input: { script: "jqx . data.json" },
+      expected: "`jqx` was not found",
+    },
+    {
+      name: "does not invent a missing command for bare exit 127",
+      result: { exit_code: 127, stderr: "", stdout: "" },
+      input: { script: "exit 127" },
+      expected: "commonly indicates a missing command",
+    },
+    {
+      name: "explains curl HTTP failures",
+      result: { exit_code: 22, stderr: "curl: (22) The requested URL returned error: 404", stdout: "" },
+      input: { script: "curl -fsSL https://example.com/missing" },
+      expected: "HTTP response was treated as a failure",
+    },
+    {
+      name: "keeps exit 1 generic",
+      result: { exit_code: 1, stderr: "assertion failed", stdout: "" },
+      input: { script: "test -s output.zip" },
+      expected: "exited with status 1",
+    },
+    {
+      name: "preserves private-network policy",
+      result: { exit_code: 7, stderr: "Failed to connect to loopback address", stdout: "" },
+      input: { script: "fetch endpoint" },
+      expected: "private, loopback, link-local, and cloud-metadata destinations are forbidden",
+    },
+  ])("$name", ({ result, input, expected }) => {
+    expect(bashModelHint(result, input)).toContain(expected);
+  });
+
+  it("does not label an unrelated exit 22 as curl", () => {
+    expect(bashModelHint({ exit_code: 22, stderr: "application rejected input", stdout: "" }, { script: "run-app" }))
+      .toBeUndefined();
+  });
+
+  it("returns no hint for a successful command", () => {
+    expect(bashModelHint({ exit_code: 0, stderr: "", stdout: "ok" }, { script: "true" })).toBeUndefined();
+  });
 });
 
 class QueueingFakeRuntime implements CommandRuntime {

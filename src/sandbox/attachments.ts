@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ToolBuildInput } from "../ai/tools/types.js";
+import { throwIfAborted } from "../files/cancel.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { botAttachmentRoot, guestAttachmentRoot } from "./paths.js";
@@ -62,12 +63,12 @@ export async function stageChatFiles(
       }
       return { file, bytes: resolved.bytes };
     }));
-    for (const { file, bytes } of resolvedFiles) {
+    files.push(...await Promise.all(resolvedFiles.map(async ({ file, bytes }) => {
       const hostPath = path.join(hostRoot, String(file.id));
       await fs.writeFile(hostPath, bytes, { flag: "wx", mode: 0o400 });
       const guestPath = path.posix.join(guestRoot, String(file.id));
-      files.push({ file_id: file.id, path: guestPath, name: file.name, size: bytes.length });
-    }
+      return { file_id: file.id, path: guestPath, name: file.name, size: bytes.length };
+    })));
   } catch (error) {
     try {
       await fs.rm(hostRoot, { recursive: true, force: true });
@@ -83,8 +84,4 @@ export async function stageChatFiles(
       await fs.rm(hostRoot, { recursive: true, force: true });
     },
   };
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason ?? new DOMException("Tool execution aborted", "AbortError");
 }

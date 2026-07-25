@@ -37,7 +37,12 @@ export interface SandboxCommandLifecycle {
   afterExecute?(): Promise<void>;
 }
 
+export interface SandboxActivityLease {
+  release(): void;
+}
+
 export interface CommandRuntime {
+  acquireActivityLease?(userId: number): SandboxActivityLease;
   execute(
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,

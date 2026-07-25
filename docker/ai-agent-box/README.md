@@ -9,11 +9,11 @@
 The `latest`, `runtime`, `sha-<commit>`, and `runtime-sha-<commit>` tags contain the default low-latency environment:
 
 - Bash and GNU core/search/text utilities
-- Python 3.12 with pip and venv
+- Python 3.12 with pip, venv, and a `python` compatibility alias for `python3`
 - Node.js 22 with npm
-- tar, gzip, bzip2, xz, ZIP, and unzip
+- tar, gzip, bzip2, xz, zstd, ZIP, and unzip
 - curl, wget, CA certificates, Git, and the OpenSSH client
-- jq, ripgrep (`rg`), fd, file, tree, and less
+- jq, ripgrep (`rg`), fd, file, tree, less, and `patch`
 - SQLite and basic process/network commands
 - `gcompat` for limited compatibility with some glibc-targeted software
 

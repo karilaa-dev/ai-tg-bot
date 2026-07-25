@@ -220,7 +220,7 @@ describe("StreamShaper", () => {
     expect(status).toContain("📄 Searching file <code>book.pdf</code>");
     expect(status).toContain("📖 Reading file <code>book.pdf</code>");
     expect(status).toContain("🖼️ Generating image <code>small red square +1 ref</code>");
-    expect(status).toContain("📎 Creating file <code>report.txt</code>");
+    expect(status).toContain("📎 Attaching file <code>report.txt</code>");
     expect(status).toContain("🐚 Running bash <code>printf hello</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
@@ -236,7 +236,7 @@ describe("StreamShaper", () => {
     const s = new StreamShaper();
     expect(handleStreamPart(s, { type: "tool-call", toolName: "create_file", input: { path: "/report.txt" } })).toBe("tool-call");
     expect(handleStreamPart(s, { type: "tool-result", toolName: "create_file", output: { file_id: 12, name: "report.txt" } })).toBe("tool-result");
-    expect(s.thinkingMd()).toContain("📎 Creating file <code>/report.txt</code> (1 file)");
+    expect(s.thinkingMd()).toContain("📎 Attaching file <code>/report.txt</code> (1 file)");
   });
 
   it("summarizes generated image outputs as images", () => {

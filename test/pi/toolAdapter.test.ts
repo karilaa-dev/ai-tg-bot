@@ -181,6 +181,39 @@ describe("Pi safe tool adapters", () => {
     expect(resolveFile).toHaveBeenCalledTimes(1);
   });
 
+  it("exposes model-facing Bash recovery hints while preserving raw details", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-hint-"));
+    const config = testConfig(tempDir);
+    db = createDatabase(config);
+    await db.migrate();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9905, firstName: "Hint", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Hint" });
+    const runtime = new FakeRuntime(async () => ({
+      ...successfulCommand(),
+      stderr: "bash: line 1: jqx: command not found\n",
+      exitCode: 127,
+      error: "CommandExecError: 127",
+    }));
+    const holdCommandActivity = vi.fn();
+    const bash = createPiToolAdapters({
+      buildInput: () => ({ config, db: db!, repos, user, thread, commandRuntime: runtime }),
+      holdCommandActivity,
+    }).find((tool) => tool.name === "bash")!;
+
+    const result = await bash.execute("missing-command", { script: "jqx . input.json" }, undefined, undefined, {} as never);
+    const modelText = result.content.find((part) => part.type === "text")?.text ?? "";
+
+    expect(JSON.parse(modelText)).toMatchObject({
+      exit_code: 127,
+      model_hint: expect.stringContaining("`jqx` was not found"),
+    });
+    expect(modelText).not.toContain('"type":"json"');
+    expect(result.details).toMatchObject({ exit_code: 127 });
+    expect(result.details).not.toHaveProperty("model_hint");
+    expect(holdCommandActivity).toHaveBeenCalledTimes(1);
+  });
+
   it("does not contact OpenSandbox while tool adapters are constructed", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-lazy-box-"));
     const config = testConfig(tempDir);
@@ -196,8 +229,11 @@ describe("Pi safe tool adapters", () => {
     });
 
     expect(tools.map((tool) => tool.name)).toContain("bash");
-    expect((tools.find((tool) => tool.name === "bash")!.parameters as { required?: string[] }).required)
-      .toEqual(["script"]);
+    const bash = tools.find((tool) => tool.name === "bash")!;
+    expect((bash.parameters as { required?: string[] }).required).toEqual(["script"]);
+    expect((bash.parameters as { properties?: Record<string, unknown> }).properties).not.toHaveProperty("raw_script");
+    const createFile = tools.find((tool) => tool.name === "create_file")!;
+    expect(createFile.promptSnippet).toContain("Attach an existing sandbox file");
     expect((tools.find((tool) => tool.name === "web_search")!.parameters as { required?: string[] }).required)
       .toEqual(["query"]);
     expect(runtime.requests).toHaveLength(0);

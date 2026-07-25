@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
+import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import type { Logger } from "../logger.js";
 import { copySandboxFileToOutbox } from "../sandbox/exportSnapshot.js";
 import {
@@ -11,11 +12,14 @@ import {
 import { botUserRoot } from "../sandbox/paths.js";
 import type {
   CommandRuntime,
+  SandboxActivityLease,
   SandboxCommandLifecycle,
   SandboxCommandRequest,
   SandboxCommandResult,
   SandboxFileExportRequest,
 } from "../sandbox/types.js";
+import { isPathWithin } from "../util/paths.js";
+import { quoteShellToken, shellJoin } from "../util/shell.js";
 import type {
   OpenSandboxClient,
   OpenSandboxClientProvider,
@@ -41,6 +45,7 @@ type ActiveExecution = {
 type UserRuntimeState = {
   tail: Promise<void>;
   pending: number;
+  activityLeases: number;
   sandboxId?: string;
   remoteState?: string;
   connection?: OpenSandboxConnection;
@@ -117,6 +122,22 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         signal: request.signal,
       });
     });
+  }
+
+  acquireActivityLease(userId: number): SandboxActivityLease {
+    if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
+    const state = this.stateFor(userId);
+    this.clearIdleTimer(state);
+    state.activityLeases += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        state.activityLeases = Math.max(0, state.activityLeases - 1);
+        if (!this.shuttingDown) this.scheduleIdlePause(userId, state);
+      },
+    };
   }
 
   dispose(): Promise<void> {
@@ -538,21 +559,22 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   private stateFor(userId: number): UserRuntimeState {
     let state = this.states.get(userId);
     if (!state) {
-      state = { tail: Promise.resolve(), pending: 0 };
+      state = { tail: Promise.resolve(), pending: 0, activityLeases: 0 };
       this.states.set(userId, state);
     }
     return state;
   }
 
   private scheduleIdlePause(userId: number, state: UserRuntimeState): void {
-    if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId || state.remoteState === "Paused") return;
+    if (!this.canPauseIdle(state)) return;
     this.clearIdleTimer(state);
     state.idleTimer = setTimeout(() => {
       state.idleTimer = undefined;
       const pause = state.tail.then(async () => {
-        if (this.shuttingDown || state.pending > 0 || state.active || !state.sandboxId || state.remoteState === "Paused") return;
+        if (!this.canPauseIdle(state)) return;
         const client = await this.ensureClient();
-        const id = state.sandboxId;
+        if (!this.canPauseIdle(state)) return;
+        const id = state.sandboxId!;
         try {
           await this.control("pause idle sandbox", client.pause(id));
           await state.connection?.close().catch(() => undefined);
@@ -570,6 +592,15 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       });
       state.tail = pause.then(() => undefined, () => undefined);
     }, this.input.config.OPEN_SANDBOX_IDLE_PAUSE_MS);
+  }
+
+  private canPauseIdle(state: UserRuntimeState): state is UserRuntimeState & { sandboxId: string } {
+    return !this.shuttingDown
+      && state.pending === 0
+      && !state.active
+      && state.activityLeases === 0
+      && Boolean(state.sandboxId)
+      && state.remoteState !== "Paused";
   }
 
   private clearIdleTimer(state: UserRuntimeState): void {
@@ -630,14 +661,6 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 }
 
-export function shellJoin(tokens: string[]): string {
-  return tokens.map(quoteShellToken).join(" ");
-}
-
-export function quoteShellToken(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 function guestPathToHostPath(userRoot: string, guestPath: string): string {
   const normalized = path.posix.normalize(guestPath);
   if (normalized !== "/data" && !normalized.startsWith("/data/")) {
@@ -646,8 +669,7 @@ function guestPathToHostPath(userRoot: string, guestPath: string): string {
   const relative = path.posix.relative("/data", normalized);
   const candidate = path.resolve(userRoot, ...relative.split("/").filter(Boolean));
   const root = path.resolve(userRoot);
-  const relation = path.relative(root, candidate);
-  if (relation === ".." || relation.startsWith(`..${path.sep}`)) throw new Error("created file path escapes the user root");
+  if (!isPathWithin(root, candidate)) throw new Error("created file path escapes the user root");
   return candidate;
 }
 
@@ -711,18 +733,6 @@ function sandboxStatePolicy(state: string): SandboxStatePolicy {
   return SANDBOX_STATE_POLICIES[state] ?? DEFAULT_STATE_POLICY;
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortReason(signal);
-}
-
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Tool execution aborted", "AbortError");
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
-}
-
-export function stableUserSandboxId(userId: number, fingerprint: string): string {
-  return createHash("sha256").update(`${userId}:${fingerprint}`).digest("hex").slice(0, 16);
 }

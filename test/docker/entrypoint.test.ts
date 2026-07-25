@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { quoteShellToken } from "../../src/util/shell.js";
 
 const execFileAsync = promisify(execFile);
 const entrypoint = path.resolve("docker/entrypoint.sh");
@@ -47,7 +48,7 @@ describe("container entrypoint", () => {
       await fs.mkdir(binDir);
       await fs.writeFile(path.join(binDir, "setpriv"), [
         "#!/bin/sh",
-        `printf '%s\\n' \"$@\" > ${shellQuote(setprivLog)}`,
+        `printf '%s\\n' \"$@\" > ${quoteShellToken(setprivLog)}`,
         "while [ \"$1\" != \"--\" ]; do shift; done",
         "shift",
         "exec \"$@\"",
@@ -89,8 +90,4 @@ function runEntrypoint(environment: NodeJS.ProcessEnv) {
     "-e",
     "process.stdout.write(JSON.stringify({ uid: process.getuid?.() }))",
   ], { env: environment });
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

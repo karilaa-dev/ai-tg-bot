@@ -16,11 +16,8 @@ import {
   METADATA_USER_ID,
   userSandboxMetadata,
 } from "../../src/opensandbox/spec.js";
-import {
-  quoteShellToken,
-  shellJoin,
-  UserOpenSandboxRuntimeManager,
-} from "../../src/opensandbox/userRuntimeManager.js";
+import { UserOpenSandboxRuntimeManager } from "../../src/opensandbox/userRuntimeManager.js";
+import { quoteShellToken, shellJoin } from "../../src/util/shell.js";
 import type { SandboxCommandRequest } from "../../src/sandbox/types.js";
 
 afterEach(() => {
@@ -37,6 +34,20 @@ describe("UserOpenSandboxRuntimeManager", () => {
 
     expect(provider).not.toHaveBeenCalled();
     expect(client.closeCalls).toBe(0);
+  });
+
+  it("keeps an unused activity lease lazy", async () => {
+    const client = new FakeClient();
+    const provider = vi.fn(async () => client);
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), clientProvider: provider });
+
+    const lease = manager.acquireActivityLease(100);
+    lease.release();
+    lease.release();
+
+    expect(provider).not.toHaveBeenCalled();
+    expect(client.createCalls).toBe(0);
+    await manager.dispose();
   });
 
   it("retries initialization after a control-plane failure", async () => {
@@ -352,6 +363,53 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.execute(command(30));
     expect(client.resumeCalls).toEqual([sandboxId]);
     expect(client.createCalls).toBe(1);
+    await manager.dispose();
+  });
+
+  it("starts the unchanged idle delay after the final activity lease releases", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const config = loadTestConfig({ OPEN_SANDBOX_IDLE_PAUSE_MS: 1000 });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(301));
+    const sandboxId = client.connections[0]!.id;
+    const first = manager.acquireActivityLease(301);
+    const second = manager.acquireActivityLease(301);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(client.pauseCalls).toEqual([]);
+
+    first.release();
+    first.release();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(client.pauseCalls).toEqual([]);
+
+    second.release();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.pauseCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.pauseCalls).toEqual([sandboxId]);
+    await manager.dispose();
+  });
+
+  it("keeps activity leases isolated by user", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const config = loadTestConfig({ OPEN_SANDBOX_IDLE_PAUSE_MS: 1000 });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(302));
+    await manager.execute(command(303));
+    const firstId = client.connections.find((connection) => connection.id === "sandbox-1")!.id;
+    const secondId = client.connections.find((connection) => connection.id === "sandbox-2")!.id;
+    const lease = manager.acquireActivityLease(302);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.pauseCalls).toContain(secondId);
+    expect(client.pauseCalls).not.toContain(firstId);
+    lease.release();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.pauseCalls).toContain(firstId);
     await manager.dispose();
   });
 

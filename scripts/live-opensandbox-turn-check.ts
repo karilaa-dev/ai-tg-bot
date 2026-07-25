@@ -26,11 +26,17 @@ import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/aut
 import { PiRuntimeManager } from "../src/pi/runtime.js";
 import { botThreadWorkspace, botUserRoot, guestThreadWorkspace } from "../src/sandbox/paths.js";
 import type { SandboxCommandResult } from "../src/sandbox/types.js";
+import { asRecord, numberField, rawStringField } from "../src/util/records.js";
+import { quoteShellToken } from "../src/util/shell.js";
+import { waitForSandboxState, waitForSingleSandbox } from "./live-opensandbox-helpers.js";
 
 const ARCHIVE_NAME = "hatsune-miku-wikimedia.zip";
 const METADATA_NAME = "metadata.json";
 const EXPECTED_IMAGES = 10;
 const MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024;
+const MAX_BASH_CALLS = 12;
+const MAX_FAILED_BASH_CALLS = 4;
+const STATE_WAIT_MS = 30_000;
 const USER_ID = 8_000_000_000_000_000 + randomInt(1, 1_000_000_000_000);
 const DEPLOYMENT_ID = `live-turn-${randomUUID()}`;
 const APPROVED_LICENSES = new Set([
@@ -47,19 +53,19 @@ const APPROVED_LICENSES = new Set([
 ]);
 
 const prompt = `
-Use the real bash and create_file tools to prepare and deliver one ZIP archive.
+Use the real bash and create_file tools to prepare and deliver one ZIP archive. Work efficiently: use one bounded Wikimedia discovery call, then one bounded build/validate/archive script where practical. Do not repeat an unchanged failed command.
 
 Requirements:
-1. Find and download exactly 10 distinct, clearly SFW artworks depicting Hatsune Miku from Wikimedia Commons only. Prefer illustrations, drawings, paintings, murals, sculptures, or other artwork rather than cosplay/event photography. Do not include sexualized, nude, suggestive, violent, or otherwise NSFW material.
-2. Use Wikimedia Commons file pages and the MediaWiki API to verify each item. Download a PNG, JPEG, or WebP rendition from upload.wikimedia.org (a Commons thumbnail URL is acceptable and recommended to keep the archive below 20 MiB). Do not use HTML page URLs as image downloads.
-3. Accept only these canonical licenses: ${[...APPROVED_LICENSES].join(", ")}.
-4. Keep the archive flat. It must contain exactly 11 root-level files: 10 uniquely named image files and ${METADATA_NAME}. No directories or extra files.
+1. Create one dedicated task directory. Find exactly 10 distinct, clearly SFW artworks depicting Hatsune Miku from Wikimedia Commons only. Prefer illustrations, drawings, paintings, murals, sculptures, or other artwork rather than cosplay/event photography.
+2. Query the MediaWiki API with a descriptive User-Agent. Request imageinfo URL, MIME type, and extmetadata including LicenseShortName, Artist, and ImageDescription. Select 10 distinct Commons file pages with distinct upload.wikimedia.org download URLs. Check titles, descriptions, and categories for unsafe terms before downloading.
+3. Accept only these canonical licenses: ${[...APPROVED_LICENSES].join(", ")}. Download PNG, JPEG, or WebP thumbnail renditions with curl using --location, bounded timeouts, --fail-with-body, and at most four concurrent downloads. Do not assume optional media tools; use installed python3, curl, jq, file, sha256sum, zip, and unzip.
+4. Keep the archive flat with exactly 11 root-level files: 10 uniquely named images and ${METADATA_NAME}. No directories or intermediate/API files. Every filename extension must match the downloaded bytes.
 5. Write ${METADATA_NAME} as UTF-8 JSON with exactly this shape:
    {"artworks":[{"filename":"...","title":"...","source_url":"https://commons.wikimedia.org/wiki/File:...","download_url":"https://upload.wikimedia.org/...","creator":"...","license":"CC BY-SA 4.0","sha256":"64 lowercase hex characters","description":"brief SFW description"}]}
-   Include exactly one record per image. Strip HTML from creator/description fields. Hash the exact downloaded bytes.
-6. Independently check in bash that every download is a real non-empty PNG/JPEG/WebP rather than HTML/JSON/error content, that all 10 SHA-256 values are unique and match metadata, and that all source/download URLs are Wikimedia URLs.
-7. Create ${ARCHIVE_NAME} with the bash zip command, not Python or JavaScript. Keep it below 20 MiB. Then verify it with unzip -t and list its contents before delivery.
-8. Call create_file exactly once with path "/${ARCHIVE_NAME}", name "${ARCHIVE_NAME}", MIME "application/zip", and delivery "document". Finish with a short confirmation.
+   Include one record per image, strip HTML, and hash the exact bytes.
+6. Before delivery, use compact validation output to prove all downloads are non-empty real raster images rather than HTML/JSON/errors, all file pages/download URLs/hashes are distinct, metadata hashes match, and the archive is below 20 MiB. Do not print full API responses, binary data, base64, or long listings.
+7. Create ${ARCHIVE_NAME} with the bash zip command, not Python or JavaScript. Run unzip -tq and verify the exact flat entry list before delivery.
+8. Only after every validation succeeds, make exactly one successful create_file call with path "/${ARCHIVE_NAME}", name "${ARCHIVE_NAME}", MIME "application/zip", and delivery "document". Finish with a short confirmation.
 
 Do not substitute generated images, non-Wikimedia sources, fewer or more than 10 images, another archive format, or prose instead of the requested file.
 `.trim();
@@ -77,17 +83,15 @@ const config = loadConfig({
   BASH_WORKSPACE_ROOT: path.join(sessionRoot, "legacy-bash"),
   FILE_CACHE_DIR: path.join(sessionRoot, "file-cache"),
   OPEN_SANDBOX_DEPLOYMENT_ID: DEPLOYMENT_ID,
-  OPEN_SANDBOX_IDLE_PAUSE_MS: "1000",
-  BASH_TIMEOUT_MS: String(Math.max(baseConfig.BASH_TIMEOUT_MS, 300_000)),
-  BASH_MAX_OUTPUT_CHARS: String(Math.max(baseConfig.BASH_MAX_OUTPUT_CHARS, 30_000)),
-  PI_TURN_TIMEOUT_MS: String(Math.max(baseConfig.PI_TURN_TIMEOUT_MS, 900_000)),
 });
 const logger = createLogger(config);
 let db: AppDatabase | undefined;
 let commandRuntime: UserOpenSandboxRuntimeManager | undefined;
 let pi: PiRuntimeManager | undefined;
 let cleanupClient: OpenSandboxClient | undefined;
+let telegram: CapturingTelegramApi | undefined;
 let failure: Error | undefined;
+const startedAt = Date.now();
 
 try {
   await seedIsolatedPiCredentials(baseConfig.PI_CODING_AGENT_DIR, isolatedAgentDir);
@@ -115,7 +119,7 @@ try {
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime });
-  const telegram = createCapturingTelegramApi(user.tg_id);
+  telegram = createCapturingTelegramApi(user.tg_id);
 
   await runTurn({
     api: telegram.api,
@@ -134,11 +138,15 @@ try {
     t: liveTranslation,
   });
 
+  assert(telegram.documents.length === 1,
+    `Expected exactly one captured Telegram document, received ${telegram.documents.length}. Captured messages: ${JSON.stringify(telegram.messages.slice(-3))}`);
   const captured = only(telegram.documents, "captured Telegram document");
   assert(captured.filename === ARCHIVE_NAME, `Telegram delivered unexpected filename: ${captured.filename}`);
   const archiveReport = inspectArchive(captured.bytes);
+  cleanupClient = await createOpenSandboxClient(config);
   const proof = await validatePersistenceAndToolUse({
     config,
+    adminClient: cleanupClient,
     repos,
     user,
     thread,
@@ -151,8 +159,11 @@ try {
 
   process.stdout.write(`${JSON.stringify({
     ok: true,
+    elapsedMs: Date.now() - startedAt,
     provider: proof.provider,
     model: proof.model,
+    configuredIdlePauseMs: config.OPEN_SANDBOX_IDLE_PAUSE_MS,
+    pauseTiming: "inherited",
     archive: {
       name: ARCHIVE_NAME,
       bytes: captured.bytes.length,
@@ -168,6 +179,8 @@ try {
     },
     proof: {
       bashToolCalls: proof.bashToolCalls,
+      failedBashToolCalls: proof.failedBashToolCalls,
+      repeatedFailedScripts: proof.repeatedFailedScripts,
       createFileToolCalls: proof.createFileToolCalls,
       zipCommandObserved: proof.zipCommandObserved,
       unzipVerificationObserved: proof.unzipVerificationObserved,
@@ -176,11 +189,33 @@ try {
       persistedFileId: proof.persistedFileId,
       persistedMessageId: proof.persistedMessageId,
       persistedSessionFile: proof.sessionFile,
-      workspaceResumeCheck: true,
+      pauseTrigger: "explicit",
+      sandboxId: proof.sandboxId,
+      pausedStateObserved: true,
+      resumedStateObserved: true,
+      sameSandboxReused: true,
     },
   }, null, 2)}\n`);
 } catch (error) {
   failure = asError(error);
+}
+
+if (failure) {
+  await fs.rm(path.join(isolatedAgentDir, "auth.json"), { force: true }).catch(() => undefined);
+  const diagnosticPath = path.join(sessionRoot, "failure-diagnostic.json");
+  await fs.writeFile(diagnosticPath, `${JSON.stringify({
+    ok: false,
+    elapsedMs: Date.now() - startedAt,
+    deploymentId: DEPLOYMENT_ID,
+    configuredIdlePauseMs: config.OPEN_SANDBOX_IDLE_PAUSE_MS,
+    pauseTiming: "inherited",
+    error: redactDiagnostic(failure.message),
+    capturedMessages: telegram?.messages.slice(-5).map(redactDiagnostic) ?? [],
+    capturedDocuments: telegram?.documents.length ?? 0,
+    sessionRoot,
+    workspaceRoot: botUserRoot(config, USER_ID),
+  }, null, 2)}\n`, { mode: 0o600 });
+  process.stderr.write(`Live turn failed; sanitized diagnostics retained at ${diagnosticPath}\n`);
 }
 
 const cleanupErrors: Error[] = [];
@@ -189,13 +224,13 @@ for (const cleanup of [
   async () => commandRuntime?.dispose(),
   async () => db?.destroy(),
   async () => {
-    cleanupClient = await createOpenSandboxClient(config);
+    cleanupClient ??= await createOpenSandboxClient(config);
     const sandboxes = await cleanupClient.list(managedSandboxMetadata(config));
     for (const sandbox of sandboxes) await cleanupClient.kill(sandbox.id);
   },
   async () => cleanupClient?.close(),
-  async () => fs.rm(botUserRoot(config, USER_ID), { recursive: true, force: true }),
-  async () => fs.rm(sessionRoot, { recursive: true, force: true }),
+  async () => failure ? undefined : fs.rm(botUserRoot(config, USER_ID), { recursive: true, force: true }),
+  async () => failure ? undefined : fs.rm(sessionRoot, { recursive: true, force: true }),
 ]) {
   try {
     await cleanup();
@@ -213,6 +248,7 @@ if (failure) throw failure;
 
 async function validatePersistenceAndToolUse(input: {
   config: AppConfig;
+  adminClient: OpenSandboxClient;
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
@@ -225,28 +261,48 @@ async function validatePersistenceAndToolUse(input: {
   provider: string;
   model: string;
   bashToolCalls: number;
+  failedBashToolCalls: number;
+  repeatedFailedScripts: number;
   createFileToolCalls: number;
   zipCommandObserved: boolean;
   unzipVerificationObserved: boolean;
   persistedFileId: number;
   persistedMessageId: number;
   sessionFile: string;
+  sandboxId: string;
 }> {
   const runtime = await input.pi.runtime(input.thread, input.user);
   const calls = collectToolCalls(runtime.session.messages);
   const bashCalls = calls.filter((call) => call.name === "bash");
   const createFileCalls = calls.filter((call) => call.name === "create_file");
   assert(bashCalls.length > 0, "The provider did not call the real bash tool.");
+  assert(bashCalls.length <= MAX_BASH_CALLS,
+    `Bash call budget exceeded: received ${bashCalls.length}, maximum ${MAX_BASH_CALLS}.`);
   assert(createFileCalls.length === 1, `Expected exactly one create_file call, received ${createFileCalls.length}.`);
   const toolResults = collectToolResults(runtime.session.messages);
+  const resultsById = new Map(toolResults.map((result) => [result.id, result]));
+  const failedBashCalls = bashCalls.filter((call) => {
+    const result = resultsById.get(call.id);
+    return !result || numberField(result.details, "exit_code") !== 0
+      || result.details.timed_out === true || Boolean(result.details.error);
+  });
+  assert(failedBashCalls.length <= MAX_FAILED_BASH_CALLS,
+    `Failed Bash call budget exceeded: received ${failedBashCalls.length}, maximum ${MAX_FAILED_BASH_CALLS}.`);
+  const failedScriptCounts = new Map<string, number>();
+  for (const call of failedBashCalls) {
+    const script = normalizeFailedScript(rawStringField(call.arguments, "script") ?? "");
+    failedScriptCounts.set(script, (failedScriptCounts.get(script) ?? 0) + 1);
+  }
+  const repeatedFailedScripts = [...failedScriptCounts.values()].filter((count) => count > 1).length;
+  assert(repeatedFailedScripts === 0, "The provider repeated an unchanged failed Bash script.");
   const successfulBashIds = new Set(toolResults
     .filter((result) => result.name === "bash" && numberField(result.details, "exit_code") === 0)
     .map((result) => result.id));
   const zipCommandObserved = bashCalls.some((call) => successfulBashIds.has(call.id)
-    && /(?:^|[;\n]|&&|\|\||\||&)\s*zip(?:\s|$)/m.test(stringField(call.arguments, "script") ?? ""));
+    && /(?:^|[;\n]|&&|\|\||\||&)\s*zip(?:\s|$)/m.test(rawStringField(call.arguments, "script") ?? ""));
   const unzipVerificationObserved = bashCalls.some((call) => {
     if (!successfulBashIds.has(call.id)) return false;
-    const script = stringField(call.arguments, "script") ?? "";
+    const script = rawStringField(call.arguments, "script") ?? "";
     return /(^|[;&|\n]\s*)unzip\s+(?:-[^\s]*t[^\s]*|[^\n;]*\s-t)(?:\s|$)/m.test(script)
       || /unzip\s+-t/i.test(script);
   });
@@ -285,20 +341,41 @@ async function validatePersistenceAndToolUse(input: {
   const workspaceBytes = await fs.readFile(workspaceArchive);
   assert(workspaceBytes.equals(input.capturedArchive), "Persistent OpenSandbox workspace archive differs from delivered bytes.");
 
-  await delay(input.config.OPEN_SANDBOX_IDLE_PAUSE_MS + 500);
+  const metadata = managedSandboxMetadata(input.config);
+  const runningSandbox = await waitForSingleSandbox({
+    client: input.adminClient,
+    metadata,
+    timeoutMs: STATE_WAIT_MS,
+    expectedState: "Running",
+  });
+  await input.adminClient.pause(runningSandbox.id);
+  await waitForSandboxState({
+    client: input.adminClient,
+    id: runningSandbox.id,
+    expectedState: "Paused",
+    timeoutMs: STATE_WAIT_MS,
+  });
   const resumeResult = await input.commandRuntime.execute({
     userId: input.user.tg_id,
     command: "bash",
-    args: ["-c", `set -eu; test -f ${shellQuote(ARCHIVE_NAME)}; unzip -tq ${shellQuote(ARCHIVE_NAME)} >/dev/null; sha256sum ${shellQuote(ARCHIVE_NAME)}`, "bash"],
+    args: ["-c", `set -eu; test -f ${quoteShellToken(ARCHIVE_NAME)}; unzip -tq ${quoteShellToken(ARCHIVE_NAME)} >/dev/null; sha256sum ${quoteShellToken(ARCHIVE_NAME)}`, "bash"],
     env: { TZ: "UTC" },
     stdin: "",
     workingDir: guestThreadWorkspace(input.thread.id),
-    timeoutMs: 60_000,
-    maxOutputChars: 4000,
+    timeoutMs: input.config.BASH_TIMEOUT_MS,
+    maxOutputChars: input.config.BASH_MAX_OUTPUT_CHARS,
   });
-  assertCommandSuccess(resumeResult, "OpenSandbox pause/resume persistence check");
+  assertCommandSuccess(resumeResult, "OpenSandbox explicit pause/resume persistence check");
   assert(resumeResult.stdout.trim().split(/\s+/)[0] === sha256Hex(input.capturedArchive),
     "OpenSandbox resume check returned a different archive hash.");
+  const resumedSandbox = await waitForSingleSandbox({
+    client: input.adminClient,
+    metadata,
+    timeoutMs: STATE_WAIT_MS,
+    expectedState: "Running",
+  });
+  assert(resumedSandbox.id === runningSandbox.id,
+    `OpenSandbox resumed ${resumedSandbox.id}, expected the same sandbox ${runningSandbox.id}.`);
 
   const storedThread = await input.repos.threads.get(input.thread.id);
   assert(Boolean(storedThread?.pi_session_file), "Thread did not persist a Pi session file.");
@@ -318,12 +395,15 @@ async function validatePersistenceAndToolUse(input: {
     provider: assistant!.provider,
     model: assistant!.model,
     bashToolCalls: bashCalls.length,
+    failedBashToolCalls: failedBashCalls.length,
+    repeatedFailedScripts,
     createFileToolCalls: createFileCalls.length,
     zipCommandObserved,
     unzipVerificationObserved,
     persistedFileId: stored.id,
     persistedMessageId: assistantMessage!.id,
     sessionFile,
+    sandboxId: runningSandbox.id,
   };
 }
 
@@ -641,8 +721,11 @@ type CapturedDocument = {
   fileUniqueId: string;
 };
 
-function createCapturingTelegramApi(expectedChatId: number): { api: Api; documents: CapturedDocument[] } {
+type CapturingTelegramApi = { api: Api; documents: CapturedDocument[]; messages: string[] };
+
+function createCapturingTelegramApi(expectedChatId: number): CapturingTelegramApi {
   const documents: CapturedDocument[] = [];
+  const messages: string[] = [];
   let nextMessageId = 50_000;
   const assertChat = (chatId: number | undefined) => {
     assert(chatId === expectedChatId, `Fake Telegram API received unexpected chat id ${String(chatId)}.`);
@@ -654,8 +737,9 @@ function createCapturingTelegramApi(expectedChatId: number): { api: Api; documen
   });
   const api = {
     raw: {
-      sendRichMessage: async (payload: { chat_id?: number }) => {
+      sendRichMessage: async (payload: { chat_id?: number; text?: unknown }) => {
         assertChat(payload.chat_id);
+        messages.push(visibleTelegramText(payload.text));
         return message();
       },
       sendRichMessageDraft: async (payload: { chat_id?: number }) => {
@@ -663,12 +747,14 @@ function createCapturingTelegramApi(expectedChatId: number): { api: Api; documen
         return true;
       },
     },
-    sendMessage: async (chatId: number) => {
+    sendMessage: async (chatId: number, text: string) => {
       assertChat(chatId);
+      messages.push(text);
       return message();
     },
-    editMessageText: async (chatId: number) => {
+    editMessageText: async (chatId: number, _messageId: number, text: string) => {
       assertChat(chatId);
+      messages.push(text);
       return message();
     },
     sendChatAction: async (chatId: number) => {
@@ -693,7 +779,12 @@ function createCapturingTelegramApi(expectedChatId: number): { api: Api; documen
       throw new Error("The live check expected ZIP document delivery, not a photo.");
     },
   } as unknown as Api;
-  return { api, documents };
+  return { api, documents, messages };
+}
+
+function visibleTelegramText(value: unknown): string {
+  if (typeof value === "string") return value;
+  return value === undefined ? "" : JSON.stringify(value);
 }
 
 async function inputFileBytes(input: InputFile): Promise<Buffer> {
@@ -717,12 +808,12 @@ function collectToolCalls(messages: AgentMessage[]): Array<{ id: string; name: s
 function collectToolResults(messages: AgentMessage[]): Array<{ id: string; name: string; details: Record<string, unknown> }> {
   return messages.flatMap((message) => {
     if (message.role !== "toolResult") return [];
-    const direct = objectOrUndefined((message as unknown as { details?: unknown }).details);
+    const direct = asRecord((message as unknown as { details?: unknown }).details);
     if (direct) return [{ id: message.toolCallId, name: message.toolName, details: direct }];
     for (const part of message.content) {
       if (part.type !== "text") continue;
       try {
-        const parsed = objectOrUndefined(JSON.parse(part.text));
+        const parsed = asRecord(JSON.parse(part.text));
         if (parsed) return [{ id: message.toolCallId, name: message.toolName, details: parsed }];
       } catch {
         // Pi tool adapters normally persist JSON text; ignore non-JSON presentation text.
@@ -754,13 +845,20 @@ function liveTranslation(key: string, params?: Record<string, string | number>):
   return params ? `${key} ${JSON.stringify(params)}` : key;
 }
 
+function normalizeFailedScript(script: string): string {
+  return script.replace(/\s+/g, " ").trim();
+}
+
+function redactDiagnostic(value: string): string {
+  return value
+    .replace(/(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/((?:api[_-]?key|token|secret)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .slice(0, 8000);
+}
+
 function assertCommandSuccess(result: SandboxCommandResult, label: string): void {
   if (result.exitCode === 0 && !result.timedOut && !result.error) return;
   throw new Error(`${label} failed: ${JSON.stringify(result)}`);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function readUInt24LE(bytes: Buffer, offset: number): number {
@@ -776,31 +874,15 @@ function parseJsonObject(text: string, label: string): Record<string, unknown> {
 }
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
-  const record = objectOrUndefined(value);
+  const record = asRecord(value);
   if (!record) throw new Error(`${label} must be a JSON object.`);
   return record;
-}
-
-function objectOrUndefined(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function requiredString(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   assert(typeof value === "string" && value.trim().length > 0, `metadata field ${key} must be a non-empty string.`);
   return value.trim();
-}
-
-function stringField(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberField(record: Record<string, unknown>, key: string): number | undefined {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function assertSameSet(actual: string[], expected: string[], label: string): void {

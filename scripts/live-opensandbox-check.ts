@@ -7,7 +7,6 @@ import {
   createOpenSandboxClient,
   createOpenSandboxClientProvider,
   type OpenSandboxClient,
-  type OpenSandboxInfo,
 } from "../src/opensandbox/client.js";
 import { userSandboxMetadata } from "../src/opensandbox/spec.js";
 import { UserOpenSandboxRuntimeManager } from "../src/opensandbox/userRuntimeManager.js";
@@ -19,6 +18,8 @@ import {
   guestThreadWorkspace,
 } from "../src/sandbox/paths.js";
 import type { SandboxCommandResult } from "../src/sandbox/types.js";
+import { quoteShellToken } from "../src/util/shell.js";
+import { waitForSandboxState, waitForSingleSandbox } from "./live-opensandbox-helpers.js";
 
 const USER_ID = 8_000_000_000_000_000 + randomInt(0, 1_000_000_000_000);
 const THREAD_ID = 8_000_000_000 + randomInt(0, 1_000_000_000);
@@ -79,14 +80,14 @@ try {
   const execution = await execute(manager, {
     script: [
       "set -euo pipefail",
-      `test \"$(pwd)\" = ${shellQuote(guestWorkspace)}`,
-      `test \"$LIVE_CHECK_ENV\" = ${shellQuote(envMarker)}`,
+      `test \"$(pwd)\" = ${quoteShellToken(guestWorkspace)}`,
+      `test \"$LIVE_CHECK_ENV\" = ${quoteShellToken(envMarker)}`,
       "IFS= read -r live_stdin",
-      `test \"$live_stdin\" = ${shellQuote(stdinMarker)}`,
-      `test \"$(cat host-visible.txt)\" = ${shellQuote(hostMarker)}`,
-      `test \"$(cat /data/shared/host-shared.txt)\" = ${shellQuote(sharedHostMarker)}`,
-      `printf '%s\\n' ${shellQuote(guestMarker)} > guest-visible.txt`,
-      `printf '%s\\n' ${shellQuote(sharedGuestMarker)} > /data/shared/guest-shared.txt`,
+      `test \"$live_stdin\" = ${quoteShellToken(stdinMarker)}`,
+      `test \"$(cat host-visible.txt)\" = ${quoteShellToken(hostMarker)}`,
+      `test \"$(cat /data/shared/host-shared.txt)\" = ${quoteShellToken(sharedHostMarker)}`,
+      `printf '%s\\n' ${quoteShellToken(guestMarker)} > guest-visible.txt`,
+      `printf '%s\\n' ${quoteShellToken(sharedGuestMarker)} > /data/shared/guest-shared.txt`,
       "printf 'execution-ok\\n'",
     ].join("\n"),
     stdin: `${stdinMarker}\n`,
@@ -118,12 +119,17 @@ try {
   await assertFile(guestOutputPath, `${guestMarker}\n`, "guest-to-host workspace visibility");
   await assertFile(guestSharedPath, `${sharedGuestMarker}\n`, "guest-to-host shared visibility");
 
-  const initial = await waitForSingleSandbox(adminClient, config, "Running");
+  const initial = await waitForSingleSandbox({
+    client: adminClient,
+    metadata: userSandboxMetadata(config, USER_ID),
+    timeoutMs: STATE_WAIT_MS,
+    expectedState: "Running",
+  });
   sandboxId = initial.id;
   knownSandboxIds.add(initial.id);
 
   await adminClient.pause(sandboxId);
-  await waitForSandboxState(adminClient, sandboxId, "Paused", STATE_WAIT_MS);
+  await waitForSandboxState({ client: adminClient, id: sandboxId, expectedState: "Paused", timeoutMs: STATE_WAIT_MS });
   const afterExternalPause = await execute(manager, { script: "printf 'resume-after-external-pause-ok\n'" });
   assertSuccess(afterExternalPause, "resume after external pause");
   assertEqual(afterExternalPause.stdout, "resume-after-external-pause-ok\n", "external-pause stdout");
@@ -156,7 +162,7 @@ try {
   await assertSameSingleSandbox(adminClient, config, sandboxId, "post-timeout reuse");
 
   const exportWrite = await execute(manager, {
-    script: `printf '%s\\n' ${shellQuote(exportMarker)} > exported.txt`,
+    script: `printf '%s\\n' ${quoteShellToken(exportMarker)} > exported.txt`,
   });
   assertSuccess(exportWrite, "export source creation");
   await manager.exportFile({
@@ -176,7 +182,7 @@ try {
     "outside /data export",
   );
 
-  await waitForSandboxState(adminClient, sandboxId, "Paused", STATE_WAIT_MS);
+  await waitForSandboxState({ client: adminClient, id: sandboxId, expectedState: "Paused", timeoutMs: STATE_WAIT_MS });
   const afterIdlePause = await execute(manager, { script: "printf 'resume-after-idle-ok\\n'" });
   assertSuccess(afterIdlePause, "resume after idle pause");
   assertEqual(afterIdlePause.stdout, "resume-after-idle-ok\n", "post-idle-resume stdout");
@@ -185,7 +191,7 @@ try {
   const firstManager = manager;
   manager = undefined;
   await firstManager.dispose();
-  await waitForSandboxState(adminClient, sandboxId, "Paused", STATE_WAIT_MS);
+  await waitForSandboxState({ client: adminClient, id: sandboxId, expectedState: "Paused", timeoutMs: STATE_WAIT_MS });
 
   manager = createManager(config);
   const adopted = await execute(manager, { script: "printf 'adopted-sandbox-ok\\n'" });
@@ -294,52 +300,22 @@ function execute(
   });
 }
 
-async function waitForSingleSandbox(
-  client: OpenSandboxClient,
-  liveConfig: AppConfig,
-  expectedState?: string,
-): Promise<OpenSandboxInfo> {
-  const deadline = Date.now() + STATE_WAIT_MS;
-  let last: OpenSandboxInfo[] = [];
-  while (Date.now() < deadline) {
-    last = await client.list(userSandboxMetadata(liveConfig, USER_ID));
-    if (last.length === 1 && (!expectedState || last[0]?.state === expectedState)) return last[0]!;
-    await delay(250);
-  }
-  throw new Error(
-    `expected one${expectedState ? ` ${expectedState}` : ""} managed sandbox, observed ${summarizeInfos(last)}`,
-  );
-}
-
 async function assertSameSingleSandbox(
   client: OpenSandboxClient,
   liveConfig: AppConfig,
   expectedId: string,
   label: string,
 ): Promise<void> {
-  const info = await waitForSingleSandbox(client, liveConfig, "Running");
+  const info = await waitForSingleSandbox({
+    client,
+    metadata: userSandboxMetadata(liveConfig, USER_ID),
+    timeoutMs: STATE_WAIT_MS,
+    expectedState: "Running",
+  });
   knownSandboxIds.add(info.id);
   if (info.id !== expectedId) {
     throw new Error(`${label} used sandbox ${info.id}, expected ${expectedId}`);
   }
-}
-
-async function waitForSandboxState(
-  client: OpenSandboxClient,
-  id: string,
-  expectedState: string,
-  timeoutMs: number,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastState = "unknown";
-  while (Date.now() < deadline) {
-    const info = await client.getInfo(id);
-    lastState = info.state;
-    if (lastState === expectedState) return;
-    if (lastState === "Deleted" || lastState === "Error") break;
-    await delay(250);
-  }
-  throw new Error(`sandbox ${id} did not reach ${expectedState}; last state was ${lastState}`);
 }
 
 function assertSuccess(result: SandboxCommandResult, label: string): void {
@@ -377,15 +353,6 @@ async function expectRejected(promise: Promise<unknown>, label: string): Promise
     return;
   }
   throw new Error(`${label} unexpectedly succeeded`);
-}
-
-function summarizeInfos(infos: OpenSandboxInfo[]): string {
-  if (infos.length === 0) return "none";
-  return infos.map((info) => `${info.id}:${info.state}`).join(", ");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function toError(error: unknown): Error {

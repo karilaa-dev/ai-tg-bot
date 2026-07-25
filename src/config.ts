@@ -2,6 +2,7 @@ import "dotenv/config";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { isPathWithin } from "./util/paths.js";
 
 export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
 
@@ -86,18 +87,13 @@ function validateStorageIsolation(
   const sharedRoot = path.resolve(config.AGENT_SHARED_ROOT);
   const managedRoot = path.resolve(config.MANAGED_FILE_ROOT);
 
-  if (pathContains(path.join(sharedRoot, "users"), managedRoot)) {
+  if (isPathWithin(path.join(sharedRoot, "users"), managedRoot)) {
     context.addIssue({
       code: "custom",
       path: ["MANAGED_FILE_ROOT"],
       message: "must be outside AGENT_SHARED_ROOT/users so canonical chat files are never mounted into a user sandbox",
     });
   }
-}
-
-function pathContains(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
 }
 
 export type AppConfig = z.infer<typeof ConfigSchema>;

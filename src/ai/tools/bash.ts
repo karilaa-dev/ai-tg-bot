@@ -37,6 +37,7 @@ type BashToolResult = {
 
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
+    holdsCommandActivity: true,
     description:
       "Run a real Bash script in this user's persistent OpenSandbox environment. Omit cwd and use relative paths for normal work. Logical cwd / means this thread's workspace, not the Linux filesystem root; this mapping is expected and does not need investigation. Inside commands the physical workspace may appear under /data/threads/<thread-id>/workspace. Never pass the bot host path or probe /home/agent or /workspace to locate files. Use /data/shared only for files intentionally shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available in the configured runner image. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage immutable copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily and pauses after its idle timeout; /data and the container state persist until the sandbox is replaced. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
     inputSchema: z.object({
@@ -44,7 +45,6 @@ export function createBashTool(input: ToolBuildInput) {
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
       stdin: z.string().max(100_000).default(""),
       args: z.array(z.string().max(4096)).max(32).default([]),
-      raw_script: z.boolean().default(false),
       input_file_ids: z.array(z.number().int().positive()).max(MAX_BASH_INPUT_FILES).default([]),
     }),
     execute: async ({ script, cwd = "/", stdin = "", args = [], input_file_ids = [] }, signal) => {

@@ -3,8 +3,8 @@ set -euo pipefail
 
 required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk tar gzip bzip2 xz
-  zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip
-  python3 pip3 node npm
+  zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip patch zstd
+  python python3 pip3 node npm
 )
 
 missing=()
@@ -25,6 +25,7 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 python3 -m venv "${tmp_dir}/venv"
 "${tmp_dir}/venv/bin/python" -c 'import json, pathlib, sqlite3, tarfile, zipfile'
 "${tmp_dir}/venv/bin/python" -m pip --version >/dev/null
+[[ "$(python -c 'import sys; print(sys.version_info[:2])')" == "$(python3 -c 'import sys; print(sys.version_info[:2])')" ]]
 [[ "$(node --version)" == v22.* ]]
 npm --version >/dev/null
 
@@ -36,6 +37,19 @@ printf 'archive-ok' > "${tmp_dir}/archive-input"
 )
 sqlite3 "${tmp_dir}/contract.db" 'create table checks(value); insert into checks values(1);'
 [[ "$(sqlite3 "${tmp_dir}/contract.db" 'select value from checks;')" == 1 ]]
+
+printf 'before\n' > "${tmp_dir}/patched.txt"
+printf '%s\n' '--- patched.txt' '+++ patched.txt' '@@ -1 +1 @@' '-before' '+after' > "${tmp_dir}/change.patch"
+(
+  cd "${tmp_dir}"
+  patch -s < change.patch
+)
+[[ "$(cat "${tmp_dir}/patched.txt")" == after ]]
+
+printf 'zstd-round-trip' > "${tmp_dir}/zstd-input"
+zstd -q "${tmp_dir}/zstd-input" -o "${tmp_dir}/zstd-input.zst"
+zstd -q -d "${tmp_dir}/zstd-input.zst" -o "${tmp_dir}/zstd-output"
+cmp "${tmp_dir}/zstd-input" "${tmp_dir}/zstd-output"
 
 source /etc/os-release
 [[ "${ID}" == alpine ]]

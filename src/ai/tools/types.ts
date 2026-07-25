@@ -52,6 +52,7 @@ export const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 
 export interface BotToolDefinition<Input = unknown, Output = unknown> {
   description: string;
+  holdsCommandActivity?: boolean;
   inputSchema: z.ZodType<Input>;
   execute: (input: Input, signal?: AbortSignal) => Promise<Output>;
   toModelOutput?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import type { FilesRepo } from "../db/repos/files.js";
+import { isPathWithin } from "../util/paths.js";
 import { MAX_FILE_BYTES } from "./limits.js";
 
 export const FILES_DIR = "data/files";
@@ -49,7 +50,7 @@ export class ManagedFileStore {
     const resolved = path.resolve(filePath);
     const managedPath = this.pathFor(fileId);
     const managed = resolved === managedPath;
-    if (!managed && !this.legacyRoots.some((root) => isPathInside(root, resolved))) return undefined;
+    if (!managed && !this.legacyRoots.some((root) => isPathWithin(root, resolved))) return undefined;
     const bytes = await readSafeRegularFile(resolved, MAX_FILE_BYTES);
     if (!bytes) return undefined;
     if (managed) await fs.chmod(resolved, 0o600);
@@ -136,11 +137,6 @@ async function readSafeRegularFile(filePath: string, maxBytes: number): Promise<
   const bytes = await fs.readFile(filePath).catch(() => undefined);
   if (!bytes || bytes.length > maxBytes) return undefined;
   return bytes;
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function assertFileId(fileId: number): void {

@@ -127,7 +127,6 @@ export async function migrateSandboxData(input: {
   return result;
 }
 
-const promotedWorkspaces = new Set<string>();
 const workspacePromotions = new Map<string, Promise<void>>();
 
 export function promoteLegacyThreadWorkspace(
@@ -136,13 +135,11 @@ export function promoteLegacyThreadWorkspace(
   threadId: number,
 ): Promise<void> {
   const key = `${path.resolve(config.BASH_WORKSPACE_ROOT)}:${path.resolve(config.AGENT_SHARED_ROOT)}:${userId}:${threadId}`;
-  if (promotedWorkspaces.has(key)) return Promise.resolve();
   const existing = workspacePromotions.get(key);
   if (existing) return existing;
-  const promotion = promoteLegacyThreadWorkspaceNow(config, userId, threadId).then(() => {
-    promotedWorkspaces.add(key);
-  }).finally(() => {
+  const promotion = promoteLegacyThreadWorkspaceNow(config, userId, threadId).catch((error) => {
     workspacePromotions.delete(key);
+    throw error;
   });
   workspacePromotions.set(key, promotion);
   return promotion;

@@ -53,12 +53,14 @@ describe("runTurn with Pi", () => {
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi run" });
     const stream = ((model: Model<Api>) => textStream(model, "Pi answered the Telegram turn.")) as PiProviderStreamOverrides["openRouter"];
     const embed = vi.fn(async () => [new Float32Array([1, 0])]);
+    const commandRuntime = new TestCommandRuntime(async () => successfulCommand());
     manager = new PiRuntimeManager({
       config,
       db,
       repos,
       logger,
       embedder: { model: "test-embed", embed },
+      commandRuntime,
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     const richMessages: unknown[] = [];
@@ -101,6 +103,7 @@ describe("runTurn with Pi", () => {
     expect(drafts.length).toBeGreaterThan(0);
     expect(richMessages).toHaveLength(1);
     expect(embed).not.toHaveBeenCalled();
+    expect(commandRuntime.activityLeaseAcquisitions).toBe(0);
   }, 20_000);
 
   it("reports Pi setup failures through the normal Telegram error boundary", async () => {
@@ -164,7 +167,6 @@ describe("runTurn with Pi", () => {
             cwd: "/",
             stdin: "",
             args: [],
-            raw_script: false,
             input_file_ids: [],
           },
         });
@@ -237,6 +239,9 @@ describe("runTurn with Pi", () => {
     });
 
     expect(providerCalls).toBe(3);
+    expect(commandRuntime.activityLeaseAcquisitions).toBe(1);
+    expect(commandRuntime.activityLeaseReleases).toBe(1);
+    expect(commandRuntime.activeActivityLeases).toBe(0);
     const runtime = await manager.runtime(thread, user);
     const toolResults = runtime.session.messages
       .filter((message) => message.role === "toolResult")
@@ -540,6 +545,9 @@ function resolvedFile(bytes: Buffer, fileId: number) {
 
 class TestCommandRuntime implements CommandRuntime {
   readonly requests: SandboxCommandRequest[] = [];
+  activityLeaseAcquisitions = 0;
+  activityLeaseReleases = 0;
+  activeActivityLeases = 0;
 
   constructor(
     private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult>,
@@ -547,6 +555,20 @@ class TestCommandRuntime implements CommandRuntime {
       throw new Error("export not configured");
     },
   ) {}
+
+  acquireActivityLease() {
+    this.activityLeaseAcquisitions += 1;
+    this.activeActivityLeases += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activityLeaseReleases += 1;
+        this.activeActivityLeases -= 1;
+      },
+    };
+  }
 
   async execute(
     request: SandboxCommandRequest,
