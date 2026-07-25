@@ -82,10 +82,13 @@ jobs:
             ai-agent-box:${{ matrix.target }}-${{ matrix.arch }} \
             /usr/local/bin/tool-contract.sh
 
-      - name: Enforce image size budget
+      - name: Enforce compressed image size budget
         run: |
           image="ai-agent-box:${{ matrix.target }}-${{ matrix.arch }}"
-          size="$(docker image inspect --format '{{.Size}}' "${image}")"
+          # Docker reports .Size differently across the classic and containerd
+          # image stores. A gzipped image archive is portable and tracks the
+          # transfer/storage size this budget is intended to constrain.
+          size="$(docker image save "${image}" | gzip -1 -c | wc -c)"
           if [[ '${{ matrix.target }}' == runtime ]]; then
             max_size=$((100 * 1024 * 1024))
           else
