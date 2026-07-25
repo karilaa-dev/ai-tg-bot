@@ -25,7 +25,7 @@ One persistent runner container per Telegram user
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`.
 - Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
 - OpenSandbox provides one persistent command environment per Telegram user. Commands are serialized for the same user while different users can execute concurrently.
-- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is shared across that user's threads.
+- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. Filesystem isolation is enforced at the per-Telegram-user sandbox and mount boundary; sibling threads share that boundary and are not mutually isolated mount namespaces.
 - The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the user's environment. Healthy idle environments are paused, not destroyed, so files and the retained container state survive pause/resume and bot restarts.
 - Chat attachments are copied into an immutable per-call staging directory only when Pi passes their exact IDs. Canonical chat files live outside `users/` and are never mounted into a sandbox.
 - Online conversation, retrieval, web, image, and ingestion turns do not require OpenSandbox. If the service is unavailable, only sandbox-backed tools fail, and later calls retry initialization.
@@ -144,7 +144,7 @@ The image reference, resources, username/group, UID/GID, shared root, and layout
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
-The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. The bot supplies ordered deny rules for routed non-public IPv4 ranges and otherwise allows public internet traffic. IPv6 is disabled by the egress sidecar by default. Keep a host/network firewall as defense in depth and test the policy against the actual LAN, Docker networks, metadata endpoints, and DNS setup before production exposure.
+The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. That implementation enforces the bot's ordered IP/CIDR deny rules for routed non-public IPv4 ranges despite stale FQDN-only comments in the lifecycle SDK schema; changing the egress image or mode requires fresh direct-IP validation. Unmatched public internet traffic remains allowed, and IPv6 is disabled by the sidecar by default. Keep a host/network firewall as defense in depth and test literal private, Docker/LAN, link-local/metadata, and public destinations plus DNS behavior before production exposure.
 
 For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
 
@@ -232,7 +232,7 @@ OpenSandbox's default Docker runtime isolates workloads with Linux containers; i
 
 - The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
 - Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
-- Mount only `<shared-root>/users/<userId>` into each runner. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets must stay outside runner mounts.
+- Mount only `<shared-root>/users/<userId>` into each runner. This isolates Telegram users from one another and keeps canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets outside runner mounts. Threads belonging to that user share the same mount and container identity; logical workspace scoping and the sibling-thread prohibition are conventions, not a kernel security boundary.
 - Do not inject Telegram, OpenRouter, Tavily, Codex, or OpenSandbox credentials into runner commands.
 - The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark IPv4 ranges before allowing unmatched public traffic. IPv6 is disabled by the sidecar by default. The sidecar permits the sandbox's own loopback interface, so do not expose sensitive services there. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
 - No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.

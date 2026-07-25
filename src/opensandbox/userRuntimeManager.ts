@@ -20,6 +20,7 @@ import type {
 } from "../sandbox/types.js";
 import { isPathWithin } from "../util/paths.js";
 import { quoteShellToken, shellJoin } from "../util/shell.js";
+import { buildBoundedCommandCapture, commandOutputReadLimit } from "./commandCapture.js";
 import type {
   OpenSandboxClient,
   OpenSandboxClientProvider,
@@ -238,13 +239,22 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     const abortController = new AbortController();
     const active: ActiveExecution = { connection, abortController };
     state.active = active;
-    const command = [
-      "umask 077",
-      `${shellJoin([request.command, ...request.args])} < ${quoteShellToken(stdinPath)} > ${quoteShellToken(stdoutPath)} 2> ${quoteShellToken(stderrPath)}`,
-    ].join("; ");
+    const command = buildBoundedCommandCapture({
+      command: request.command,
+      args: request.args,
+      stdinPath,
+      stdoutPath,
+      stderrPath,
+      maxOutputChars: request.maxOutputChars,
+    });
+    const deadline = createDeadline(request.timeoutMs, request.signal);
+    const remoteTimeoutMs = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      request.timeoutMs + this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS,
+    );
     const completion = connection.run(command, {
       workingDirectory: request.workingDir,
-      timeoutSeconds: Math.max(1, Math.ceil(request.timeoutMs / 1000)),
+      timeoutSeconds: Math.max(1, Math.ceil(remoteTimeoutMs / 1000)),
       uid: this.input.config.OPEN_SANDBOX_UID,
       gid: this.input.config.OPEN_SANDBOX_GID,
       envs: request.env,
@@ -259,7 +269,6 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
       onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
     }, abortController.signal);
-    const deadline = createDeadline(request.timeoutMs, request.signal);
 
     try {
       const outcome = await Promise.race([
@@ -347,7 +356,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     stdout: OutputCapture,
     stderr: OutputCapture,
   ): Promise<void> {
-    const byteLimit = Math.min(Number.MAX_SAFE_INTEGER, request.maxOutputChars * 4 + 5);
+    const byteLimit = commandOutputReadLimit(request.maxOutputChars);
     await this.sealCommandOutput(connection, [stdoutPath, stderrPath], request);
     const bytes = await this.readCommandOutputBytes(connection, stdoutPath, stderrPath, byteLimit);
     replaceOutputBytes(stdout, bytes[0], byteLimit, request.maxOutputChars);

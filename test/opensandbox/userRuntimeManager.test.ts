@@ -490,6 +490,22 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("uses the remote timeout only as a backstop to the local deadline", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient({ completeOnServerTimeout: true });
+    const config = loadTestConfig({ OPEN_SANDBOX_INTERRUPT_GRACE_MS: 5000 });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+    const result = manager.execute({ ...command(401), timeoutMs: 1000 });
+    await vi.waitFor(() => expect(client.connections[0]?.lastExecutionId).toBeTruthy());
+
+    expect(client.connections[0]?.runOptions[0]?.timeoutSeconds).toBe(6);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect(result).resolves.toMatchObject({ timedOut: true, exitCode: null });
+    expect(client.connections[0]?.interruptCalls).toEqual([client.connections[0]?.lastExecutionId]);
+    await manager.dispose();
+  });
+
   it("interrupts an aborted command and rejects with the abort reason", async () => {
     const client = new FakeClient({ waitForInterrupt: true });
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
@@ -577,6 +593,8 @@ describe("UserOpenSandboxRuntimeManager", () => {
       stdoutTruncated: true,
       stderrTruncated: true,
     });
+    expect(client.connections[0]?.runCommands[0]).toContain("head -c 24");
+    expect(client.connections[0]?.runCommands[0]).toContain("cat > /dev/null");
     await manager.dispose();
   });
 
@@ -663,6 +681,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
 type FakeOptions = {
   runDelayMs: number;
   waitForInterrupt: boolean;
+  completeOnServerTimeout: boolean;
   listError?: Error;
   interruptError?: Error;
   stdout: string[];
@@ -687,6 +706,7 @@ class FakeClient implements OpenSandboxClient {
     this.options = {
       runDelayMs: 0,
       waitForInterrupt: false,
+      completeOnServerTimeout: false,
       stdout: ["ok\n"],
       stderr: [],
       ...options,
@@ -761,6 +781,7 @@ class FakeConnection implements OpenSandboxConnection {
   readonly writeEntries: WriteEntry[] = [];
   readonly deleteCalls: string[][] = [];
   readonly readBytesCalls: Array<{ path: string; options?: { range?: string; offset?: number; limit?: number } }> = [];
+  readonly runCommands: string[] = [];
   readonly runOptions: RunCommandOpts[] = [];
   lastExecutionId?: string;
   active = 0;
@@ -778,6 +799,7 @@ class FakeConnection implements OpenSandboxConnection {
   }
 
   async run(command: string, options: RunCommandOpts, handlers: ExecutionHandlers) {
+    this.runCommands.push(command);
     this.runOptions.push(options);
     if (command.includes("printf '\\036'")) {
       return { id: `seal-${this.id}-${Date.now()}`, exitCode: 0 };
@@ -789,12 +811,31 @@ class FakeConnection implements OpenSandboxConnection {
     this.lastExecutionId = executionId;
     await handlers.onInit?.({ id: executionId, timestamp: Date.now() });
     try {
-      if (this.options.waitForInterrupt) {
+      let serverTimedOut = false;
+      if (this.options.completeOnServerTimeout) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            serverTimedOut = true;
+            resolve();
+          }, (options.timeoutSeconds ?? 0) * 1000);
+          this.interrupted = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      } else if (this.options.waitForInterrupt) {
         await new Promise<void>((resolve) => {
           this.interrupted = resolve;
         });
       } else if (this.options.runDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, this.options.runDelayMs));
+      }
+      if (serverTimedOut) {
+        return {
+          id: executionId,
+          exitCode: null,
+          error: { name: "TimeoutError", value: "remote command timed out" },
+        };
       }
       for (const text of this.options.stdout) {
         await handlers.onStdout?.({ text, timestamp: Date.now() });

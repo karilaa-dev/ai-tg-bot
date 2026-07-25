@@ -227,12 +227,7 @@ async function copyNewFileAtomically(source: string, target: string): Promise<vo
     const sourceStat = await fs.stat(source);
     await fs.copyFile(source, partial, fs.constants.COPYFILE_EXCL);
     await fs.chmod(partial, sourceStat.mode & 0o777);
-    if (await optionalLstat(target)) {
-      const error = new Error(`migration target already exists: ${target}`) as NodeJS.ErrnoException;
-      error.code = "EEXIST";
-      throw error;
-    }
-    await fs.rename(partial, target);
+    await fs.link(partial, target);
   } catch (error) {
     failure = error;
   }

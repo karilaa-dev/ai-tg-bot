@@ -28,6 +28,7 @@ describe("sandbox data migration", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.destroy();
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -103,6 +104,38 @@ describe("sandbox data migration", () => {
     const result = await migrateSandboxData({ config, db, apply: false });
 
     expect(result.conflicts).toBe(1);
+  });
+
+  it("does not overwrite a workspace file created during publication", async () => {
+    const user = await repos.users.ensure({ tgId: 505, firstName: "Concurrent", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Concurrent" });
+    const legacyWorkspace = path.join(config.BASH_WORKSPACE_ROOT, `thread-${thread.id}`);
+    const targetWorkspace = botThreadWorkspace(config, user.tg_id, thread.id);
+    const target = path.join(targetWorkspace, "note.txt");
+    const marker = path.join(
+      config.AGENT_SHARED_ROOT,
+      ".migrations",
+      "workspaces",
+      String(user.tg_id),
+      `${thread.id}.json`,
+    );
+    await fs.mkdir(legacyWorkspace, { recursive: true });
+    await fs.writeFile(path.join(legacyWorkspace, "note.txt"), "legacy");
+    const realLink = fs.link.bind(fs);
+    vi.spyOn(fs, "link").mockImplementation(async (existingPath, newPath) => {
+      if (String(newPath) === target) {
+        await fs.writeFile(target, "created concurrently", { flag: "wx" });
+      }
+      return realLink(existingPath, newPath);
+    });
+
+    await expect(promoteLegacyThreadWorkspace(config, user.tg_id, thread.id))
+      .rejects.toMatchObject({ code: "EEXIST" });
+
+    await expect(fs.readFile(target, "utf8")).resolves.toBe("created concurrently");
+    await expect(fs.access(marker)).rejects.toThrow();
+    const entries = await fs.readdir(targetWorkspace);
+    expect(entries.some((entry) => entry.includes(".sandbox-part-"))).toBe(false);
   });
 
   it("uses a persistent promotion marker after the module is reloaded", async () => {

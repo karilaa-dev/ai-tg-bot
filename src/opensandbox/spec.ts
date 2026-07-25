@@ -58,6 +58,10 @@ export function openSandboxProvisioningFingerprint(config: AppConfig): string {
 }
 
 export function openSandboxCreateSpec(config: AppConfig, userId: number): OpenSandboxCreateSpec {
+  // The Telegram user selects the sandbox and mount isolation boundary; the
+  // configured agent UID/GID is the guest execution identity. One persistent
+  // sandbox mounts the user's complete tree, so threads are organizational
+  // workspaces rather than mutually isolated mount namespaces.
   return {
     image: config.OPEN_SANDBOX_IMAGE,
     metadata: userSandboxMetadata(config, userId),

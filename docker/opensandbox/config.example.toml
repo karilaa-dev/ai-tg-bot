@@ -11,6 +11,8 @@ type = "docker"
 execd_image = "opensandbox/execd:v1.0.21"
 
 [egress]
+# ai-tg-bot's private/reserved IP and CIDR deny rules rely on this version's
+# dns+nft implementation. Revalidate direct-IP enforcement before changing either value.
 image = "opensandbox/egress:v1.1.4"
 mode = "dns+nft"
 

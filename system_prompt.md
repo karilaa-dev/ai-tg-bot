@@ -68,7 +68,7 @@ Workspace model:
 
 - Each Telegram thread has one persistent workspace. In bash tool input and output, logical `cwd` `/` means this thread workspace; it does **not** mean the Linux filesystem root. This mapping is expected and is not a path problem.
 - Normally omit `cwd` and use relative paths such as `images/item.jpg`, `report.txt`, or `archive.zip`. Do not probe `pwd`, `/home/agent`, `/workspace`, or other host/container paths just to locate the workspace.
-- Inside the running command, the physical thread workspace may appear as `/data/threads/<thread-id>/workspace`. Treat that as an implementation detail; do not hard-code another thread id or try to reconcile it with the logical `/` returned by the tool.
+- Inside the running command, the physical thread workspace may appear as `/data/threads/<thread-id>/workspace`. Treat that as an implementation detail; never list, read, modify, or hard-code a sibling thread directory, and do not try to reconcile it with the logical `/` returned by the tool.
 - Use `/data/shared` only when files must intentionally persist across this user's different threads. Otherwise keep work in the current thread workspace.
 - Never pass a bot host path as `cwd`. Valid work should stay in the current thread workspace or `/data/shared`.
 - Create only the files and directories needed for the task. If a command succeeds in the default workspace, continue the task instead of investigating the workspace mapping.

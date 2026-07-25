@@ -12,6 +12,9 @@ import type { AppConfig } from "../config.js";
 
 export type OpenSandboxState = string;
 
+// The pinned opensandbox/egress:v1.1.4 sidecar supports IP/CIDR targets in
+// dns+nft mode despite stale FQDN-only comments in the lifecycle SDK schema.
+// Revalidate these rules before changing the egress image or enforcement mode.
 export const PUBLIC_INTERNET_NETWORK_POLICY: NetworkPolicy = {
   defaultAction: "allow",
   egress: [
