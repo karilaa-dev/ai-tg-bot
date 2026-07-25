@@ -55,8 +55,8 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.users.get(env.user.id)).toBeUndefined();
   });
 
-  it("treats a legacy /start payload as ordinary onboarding", async () => {
-    const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start LEGACY-CODE");
+  it("ignores an unrecognized /start payload during onboarding", async () => {
+    const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start UNKNOWN-PAYLOAD");
 
     expect(JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload)).toContain("Welcome to your AI assistant");
     expect(onboarded.texts.join("\n")).toContain("Set your timezone");
@@ -650,7 +650,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const chunksBefore = await env.repos.files.chunks(file!.id);
     expect(chunksBefore.length).toBeGreaterThan(0);
-    expect(file!.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(file!.id), "content"));
+    expect(file!.path).toBe(path.join(env.config.MANAGED_FILE_ROOT, String(file!.id), "content"));
 
     const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -750,7 +750,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
     expect(files[0]?.summary).toBe("Telegram image");
-    expect(files[0]?.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
+    expect(files[0]?.path).toBe(path.join(env.config.MANAGED_FILE_ROOT, String(files[0]?.id), "content"));
     const rows = await env.repos.messages.listThread(thread.id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     const userMessage = rows.find((row) => row.role === "user");
@@ -783,7 +783,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
     expect(file?.summary).toBe("a sketched system diagram");
-    expect(file?.path).toBe(path.join(env.config.BASH_WORKSPACE_ROOT, ".chat-files", String(file?.id), "content"));
+    expect(file?.path).toBe(path.join(env.config.MANAGED_FILE_ROOT, String(file?.id), "content"));
   });
 
   it("does not expose one user's image caption when another user reuses the cached image", async () => {

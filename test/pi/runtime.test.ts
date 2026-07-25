@@ -40,13 +40,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9123, firstName: "PiTest", lang: "en" });
     const parent = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Parent" });
@@ -153,12 +152,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-title-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
       THREAD_TITLE_TIMEOUT_MS: 5_000,
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     let helperModel = "";
     let helperContext: Context | undefined;
@@ -204,7 +203,7 @@ describe("PiRuntimeManager", () => {
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const stream = (() => createAssistantMessageEventStream()) as PiProviderStreamOverrides["openRouter"];
     const manager = new PiRuntimeManager({
@@ -224,13 +223,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-tools-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9124, firstName: "ToolTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Tools" });
@@ -274,7 +272,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9129, firstName: "InlineFile", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline file" });
@@ -334,7 +332,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9132, firstName: "InlineCard", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline card" });
@@ -389,7 +387,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9130, firstName: "DurableFile", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Durable file" });
@@ -445,7 +443,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, FILE_INLINE_TOKENS: 1 });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9131, firstName: "RefreshFailure", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Refresh failure" });
@@ -503,7 +501,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9128, firstName: "ReloadTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload attachment" });
@@ -590,7 +588,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9133, firstName: "ReloadDocument", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload document" });
@@ -688,13 +686,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-terminal-image-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9127, firstName: "ImageTool", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Terminal image" });
@@ -742,7 +739,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9125, firstName: "AbortTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Abort" });
@@ -792,7 +789,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9126, firstName: "CompactTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Compact" });

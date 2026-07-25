@@ -29,7 +29,6 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     DB_URL=sqlite:/app/data/bot.db \
-    BASH_WORKSPACE_ROOT=/app/data/bash \
     AGENT_SHARED_ROOT=/data \
     MANAGED_FILE_ROOT=/data/.chat-files \
     OPEN_SANDBOX_DOMAIN=opensandbox-server:8080 \
@@ -52,7 +51,7 @@ COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
 COPY docker/entrypoint.sh /usr/local/bin/ai-tg-bot-entrypoint
 
 RUN chmod 0755 /usr/local/bin/ai-tg-bot-entrypoint \
-    && install -d -o 1000 -g 1000 /app/data /app/data/pi /app/data/bash /data
+    && install -d -o 1000 -g 1000 /app/data /app/data/pi /data
 
 VOLUME ["/app/data", "/data"]
 STOPSIGNAL SIGTERM

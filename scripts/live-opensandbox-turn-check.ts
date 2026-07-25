@@ -25,7 +25,6 @@ import {
   managedThreadSandboxMetadata,
 } from "../src/opensandbox/spec.js";
 import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
-import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/authMigration.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
 import { botThreadWorkspace, botUserRoot, guestThreadWorkspace } from "../src/sandbox/paths.js";
 import type { SandboxCommandResult } from "../src/sandbox/types.js";
@@ -83,7 +82,6 @@ const config = loadConfig({
   AGENT_SHARED_ROOT: baseConfig.AGENT_SHARED_ROOT,
   OPEN_SANDBOX_SHARED_HOST_ROOT: baseConfig.OPEN_SANDBOX_SHARED_HOST_ROOT,
   MANAGED_FILE_ROOT: path.join(sessionRoot, "managed-files"),
-  BASH_WORKSPACE_ROOT: path.join(sessionRoot, "legacy-bash"),
   FILE_CACHE_DIR: path.join(sessionRoot, "file-cache"),
   OPEN_SANDBOX_DEPLOYMENT_ID: DEPLOYMENT_ID,
 });
@@ -98,17 +96,9 @@ const startedAt = Date.now();
 
 try {
   await seedIsolatedPiCredentials(baseConfig.PI_CODING_AGENT_DIR, isolatedAgentDir);
-  await migrateLegacyCodexAuth({
-    agentDir: isolatedAgentDir,
-    logger,
-    legacyAuthPaths: [
-      path.join(path.resolve(baseConfig.PI_CODING_AGENT_DIR), "auth.json"),
-      ...legacyCodexAuthCandidates(baseConfig.PI_CODING_AGENT_DIR),
-    ],
-  });
 
   db = createDatabase(config, logger);
-  await db.migrate();
+  await db.initialize();
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: USER_ID, firstName: "OpenSandbox live check", lang: "en" });
   const thread = await repos.threads.create({

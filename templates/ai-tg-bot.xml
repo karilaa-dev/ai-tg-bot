@@ -17,7 +17,7 @@
   <ExtraParams>--stop-timeout=60</ExtraParams>
   <Requires>Telegram, OpenRouter, Tavily, and OpenSandbox API keys; a reachable OpenSandbox server; and one host folder mounted by both containers. Codex OAuth and Docling are optional.</Requires>
 
-  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database, Pi sessions/OAuth credentials, and legacy workspace data retained for migration." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database and application data." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Agent Shared Data" Target="/data" Default="/mnt/user/ai-tg-bot-shared" Mode="rw" Description="Persistent user workspaces and canonical managed chat files. Use this exact host path for OpenSandbox Shared Host Root and the server storage mount." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token." Type="Variable" Display="always" Required="true" Mask="true"/>
@@ -37,7 +37,6 @@
 
   <Config Name="Database URL" Target="DB_URL" Default="sqlite:/app/data/bot.db" Description="SQLite or PostgreSQL database URL." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Pi Agent Directory" Target="PI_CODING_AGENT_DIR" Default="/app/data/pi" Description="Persistent Pi configuration, OAuth credentials, and thread sessions." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Legacy Bash Root" Target="BASH_WORKSPACE_ROOT" Default="/app/data/bash" Description="Pre-sandbox workspace source retained for migration and rollback." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Agent Shared Root" Target="AGENT_SHARED_ROOT" Default="/data" Description="Bot-container view of the shared filesystem." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Managed File Root" Target="MANAGED_FILE_ROOT" Default="/data/.chat-files" Description="Canonical chat-file store outside scoped thread and shared sandbox mounts." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Docling URL" Target="DOCLING_URL" Default="" Description="Optional external Docling server." Type="Variable" Display="advanced" Required="false" Mask="false"/>

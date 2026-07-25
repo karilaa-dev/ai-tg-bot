@@ -55,11 +55,11 @@ try {
     const config = {
       ...baseConfig,
       DB_URL: "sqlite::memory:",
-      BASH_WORKSPACE_ROOT: path.join(tempRoot, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempRoot, "managed-files"),
       FILE_CACHE_DIR: path.join(tempRoot, "cache-first"),
     };
     smokeDb = createDatabase(config);
-    await smokeDb.migrate();
+    await smokeDb.initialize();
     const repos = createRepos(smokeDb.db, smokeDb.search);
     const user = await repos.users.ensure({ tgId: 9_999_002, firstName: "Telegram restore smoke", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Telegram restore smoke" });

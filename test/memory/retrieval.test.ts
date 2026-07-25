@@ -10,7 +10,7 @@ describe("Pi retrieval tools backend", () => {
 
   beforeEach(async () => {
     db = createDatabase(loadTestConfig());
-    await db.migrate();
+    await db.initialize();
     repos = createRepos(db.db, db.search);
   });
 

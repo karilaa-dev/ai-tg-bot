@@ -11,26 +11,26 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/im
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
 
-let bashRoot: string;
+let managedRoot: string;
 
 describe("Pi generate_image extension", () => {
   let db: AppDatabase | undefined;
 
   beforeEach(async () => {
-    bashRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
+    managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
   });
 
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db?.destroy();
     db = undefined;
-    await fs.rm(bashRoot, { recursive: true, force: true });
+    await fs.rm(managedRoot, { recursive: true, force: true });
   });
 
   it("uses Telegram-backed references and persists the generated original without putting bytes in Pi results", async () => {
     const config = testConfig({ OPENROUTER_IMAGE_MODEL: "test/image-model" });
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 815, firstName: "Image" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Images" });
@@ -114,7 +114,7 @@ describe("Pi generate_image extension", () => {
     expect(result.terminate).toBe(true);
     expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
     const generated = await repos.files.get(bridge.attachments[0]!.fileId);
-    expect(generated?.path).toBe(path.join(bashRoot, ".chat-files", String(generated?.id), "content"));
+    expect(generated?.path).toBe(path.join(managedRoot, String(generated?.id), "content"));
     await expect(fs.readFile(generated!.path!)).resolves.toEqual(outputBytes);
     await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
     const persisted = JSON.stringify({ generated, result });
@@ -125,7 +125,7 @@ describe("Pi generate_image extension", () => {
   it("uses Pi Codex OAuth headers and the hosted image_generation payload", async () => {
     const config = testConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 816, firstName: "CodexImage" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex Images" });
@@ -187,7 +187,7 @@ describe("Pi generate_image extension", () => {
   it("accepts the hosted Codex partial image when the completed item omits its result", async () => {
     const config = testConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 819, firstName: "CodexStream" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex stream" });
@@ -233,7 +233,7 @@ describe("Pi generate_image extension", () => {
   it("falls back when a Codex image stream ends after a partial without completion", async () => {
     const config = testConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 820, firstName: "CodexDisconnect" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex disconnect" });
@@ -280,7 +280,7 @@ describe("Pi generate_image extension", () => {
   it("falls back from retryable Codex image failures through the shared circuit", async () => {
     const config = testConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 817, firstName: "FallbackImage" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Fallback Images" });
@@ -322,7 +322,7 @@ describe("Pi generate_image extension", () => {
   it("closes a half-open circuit after a definitive Codex image rejection", async () => {
     const config = testConfig();
     db = createDatabase(config);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 818, firstName: "RejectedImage" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Rejected Images" });
@@ -357,7 +357,7 @@ describe("Pi generate_image extension", () => {
 });
 
 function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig({ BASH_WORKSPACE_ROOT: bashRoot, ...overrides });
+  return loadTestConfig({ MANAGED_FILE_ROOT: managedRoot, ...overrides });
 }
 
 function backendModel(): Model<Api> {

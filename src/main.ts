@@ -7,10 +7,8 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { checkDocling } from "./files/docling.js";
-import { clearManagedFiles } from "./files/storage.js";
 import { createLogger, type Logger } from "./logger.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
-import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "./pi/authMigration.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
 
 const config = loadConfig();
@@ -30,31 +28,11 @@ try {
   if (process.getuid?.() === 0) {
     throw new Error("The bot process must run as a non-root user.");
   }
-  logger.debug("running database migrations");
-  const migration = await db.migrate();
-  if (migration.piCutoverApplied) {
-    const deletedFiles = await clearManagedFiles();
-    logger.info("Pi cutover cleanup complete", { deletedRows: migration.deletedRows, deletedFiles, preserved: config.BASH_WORKSPACE_ROOT });
-  }
-  if (migration.fileSourcesApplied) {
-    logger.info("chat file source migration complete", { migratedSources: migration.migratedFileSources });
-  }
-  if (migration.inviteRemovalApplied) {
-    logger.info("built-in invite access schema removed");
-  }
-  if (migration.messageEmbeddingCleanupApplied) {
-    logger.info("obsolete message embeddings removed", {
-      deleted: migration.deletedMessageEmbeddings,
-    });
-  }
+  logger.debug("initializing database");
+  await db.initialize();
   await checkConfiguredDocling(config, logger);
   const repos = createRepos(db.db, db.search);
   const embedder = createOpenRouterTextEmbedder(config, logger);
-  await migrateLegacyCodexAuth({
-    agentDir: config.PI_CODING_AGENT_DIR,
-    logger,
-    legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
-  });
   sandboxRuntime = new ThreadOpenSandboxRuntimeManager({
     config,
     clientProvider: createOpenSandboxClientProvider(config),
@@ -72,7 +50,7 @@ try {
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });
-  logger.info("migrated, runner polling started");
+  logger.info("database initialized, runner polling started");
   await bot.init();
   const handle = run(bot);
   logger.info("bot started", { username: bot.botInfo.username });

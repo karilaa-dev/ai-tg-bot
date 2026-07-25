@@ -3,26 +3,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import type { FilesRepo } from "../db/repos/files.js";
-import { isPathWithin } from "../util/paths.js";
 import { MAX_FILE_BYTES } from "./limits.js";
 
-export const FILES_DIR = "data/files";
-export const CHAT_FILES_DIR = ".chat-files";
-
-type ManagedFileConfig = Pick<AppConfig, "BASH_WORKSPACE_ROOT"> & Partial<Pick<AppConfig, "MANAGED_FILE_ROOT">>;
+type ManagedFileConfig = Pick<AppConfig, "MANAGED_FILE_ROOT">;
 
 export class ManagedFileStore {
   readonly root: string;
-  private readonly legacyRoots: string[];
 
   constructor(config: ManagedFileConfig) {
-    this.root = config.MANAGED_FILE_ROOT
-      ? path.resolve(config.MANAGED_FILE_ROOT)
-      : path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR);
-    this.legacyRoots = [
-      path.resolve(config.BASH_WORKSPACE_ROOT, CHAT_FILES_DIR),
-      path.resolve(FILES_DIR),
-    ];
+    this.root = path.resolve(config.MANAGED_FILE_ROOT);
   }
 
   pathFor(fileId: number): string {
@@ -50,7 +39,7 @@ export class ManagedFileStore {
     const resolved = path.resolve(filePath);
     const managedPath = this.pathFor(fileId);
     const managed = resolved === managedPath;
-    if (!managed && !this.legacyRoots.some((root) => isPathWithin(root, resolved))) return undefined;
+    if (!managed) return undefined;
     const bytes = await readSafeRegularFile(resolved, MAX_FILE_BYTES);
     if (!bytes) return undefined;
     if (managed) await fs.chmod(resolved, 0o600);
@@ -102,14 +91,6 @@ export async function persistManagedFile(
   return filePath;
 }
 
-export async function clearManagedFiles(root = path.resolve(FILES_DIR)): Promise<number> {
-  const outDir = path.resolve(root);
-  const count = await countFiles(outDir);
-  await fs.rm(outDir, { recursive: true, force: true });
-  await fs.mkdir(outDir, { recursive: true });
-  return count;
-}
-
 async function cleanupPartialFile(filePath: string, primaryError?: unknown): Promise<void> {
   try {
     await fs.unlink(filePath);
@@ -141,19 +122,4 @@ async function readSafeRegularFile(filePath: string, maxBytes: number): Promise<
 
 function assertFileId(fileId: number): void {
   if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error(`Invalid chat file id: ${fileId}`);
-}
-
-async function countFiles(root: string): Promise<number> {
-  let entries: Array<import("node:fs").Dirent>;
-  try {
-    entries = await fs.readdir(root, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let count = 0;
-  for (const entry of entries) {
-    if (entry.isDirectory()) count += await countFiles(path.join(root, entry.name));
-    else count += 1;
-  }
-  return count;
 }

@@ -47,7 +47,6 @@ const ConfigSchema = z.object({
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
   FILE_CACHE_DIR: z.string().min(1).default(path.join(os.tmpdir(), "ai-tg-bot-files")),
   FILE_CACHE_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
-  BASH_WORKSPACE_ROOT: z.string().min(1).default("./data/bash"),
   AGENT_SHARED_ROOT: z.string().min(1).default("./data/agent"),
   MANAGED_FILE_ROOT: z.string().min(1).default("./data/agent/.chat-files"),
   OPEN_SANDBOX_DOMAIN: z.string().min(1).default("localhost:8080"),
@@ -125,14 +124,13 @@ export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     TAVILY_API_KEY: "test-tavily",
     OPEN_SANDBOX_API_KEY: "test-opensandbox",
   });
-  const legacyRoot = overrides.BASH_WORKSPACE_ROOT ?? base.BASH_WORKSPACE_ROOT;
-  const sharedRoot = path.resolve(legacyRoot, ".sandbox");
+  const sharedRoot = path.resolve(overrides.AGENT_SHARED_ROOT ?? base.AGENT_SHARED_ROOT);
   return {
     ...base,
     DB_URL: "sqlite::memory:",
     AGENT_SHARED_ROOT: sharedRoot,
     OPEN_SANDBOX_SHARED_HOST_ROOT: sharedRoot,
-    MANAGED_FILE_ROOT: path.join(legacyRoot, ".chat-files"),
+    MANAGED_FILE_ROOT: overrides.MANAGED_FILE_ROOT ?? path.join(sharedRoot, ".chat-files"),
     DRAFT_UPDATE_MS: 0,
     ONBOARDING_TIMEZONE_DELAY_MS: 0,
     LOG_LEVEL: "error",

@@ -7,7 +7,6 @@ import {
   type StagedInputFile,
 } from "../../sandbox/attachments.js";
 import { formatSandboxError } from "../../opensandbox/client.js";
-import { promoteLegacyThreadWorkspace } from "../../sandbox/migrateData.js";
 import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd } from "./helpers.js";
@@ -107,7 +106,6 @@ async function runBashTool(
       signal,
     }, {
       async beforeExecute() {
-        await promoteLegacyThreadWorkspace(config, user.tg_id, thread.id);
         await Promise.all([
           fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
           fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),

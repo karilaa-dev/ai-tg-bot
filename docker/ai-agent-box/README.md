@@ -34,8 +34,6 @@ OPEN_SANDBOX_IMAGE=ghcr.io/karilaa-dev/ai-agent-box:dev-sha-<commit>
 
 Alpine uses musl rather than glibc. This materially reduces image transfer and extraction work, but arbitrary precompiled Linux binaries and packages without musllinux support may not run. For example, the benchmark found that NumPy and `better-sqlite3` installed successfully while the PyPI `onnxruntime` package had no compatible Alpine distribution. Choose the development image when a compatible source distribution is available and can be compiled; choose a glibc-based custom image for workloads that require glibc-only binaries or publish no musl source package.
 
-When migrating from the former Ubuntu image, recreate persisted Python virtual environments, native npm dependencies, and compiled binaries inside the mounted current workspace or `/data/shared`; glibc-built artifacts are not expected to work on musl. Ordinary source files and other platform-independent data remain compatible.
-
 ## Runtime contract
 
 Both variants define `agent` with UID/GID `1000:1000`, home directory `/home/agent`, and working directory `/workspace`. The container defaults to root because OpenSandbox's injected `execd` process needs to switch command identities; the bot runs every agent command as `OPEN_SANDBOX_UID=1000` and `OPEN_SANDBOX_GID=1000`, and owns private command-input files with `OPEN_SANDBOX_USER=agent` and `OPEN_SANDBOX_GROUP=agent`.
