@@ -5,11 +5,11 @@ import {
   managedSandboxMetadata,
   openSandboxCreateSpec,
   openSandboxProvisioningFingerprint,
-  userSandboxMetadata,
+  threadSandboxMetadata,
 } from "../../src/opensandbox/spec.js";
 
 describe("OpenSandbox provisioning spec", () => {
-  it("builds stable deployment and per-user metadata", () => {
+  it("builds stable deployment and per-thread metadata with scoped mounts", () => {
     const config = loadTestConfig({
       OPEN_SANDBOX_DEPLOYMENT_ID: "test-deployment",
       OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
@@ -20,14 +20,34 @@ describe("OpenSandbox provisioning spec", () => {
       ai_tg_bot_managed_by: "ai-tg-bot",
       ai_tg_bot_deployment: "test-deployment",
     });
-    expect(userSandboxMetadata(config, 123)).toMatchObject({
+    expect(threadSandboxMetadata(config, 123, 456)).toMatchObject({
       ai_tg_bot_user_id: "123",
+      ai_tg_bot_thread_id: "456",
       ai_tg_bot_fingerprint: fingerprint,
-      ai_tg_bot_layout: "1",
+      ai_tg_bot_layout: "2",
     });
-    expect(openSandboxCreateSpec(config, 123)).toMatchObject({
+    expect(openSandboxCreateSpec(config, 123, 456)).toMatchObject({
       image: config.OPEN_SANDBOX_IMAGE,
-      hostPath: path.join("/mnt/shared", "users", "123"),
+      mounts: [
+        {
+          name: "thread-workspace",
+          hostPath: path.join("/mnt/shared", "users", "123", "threads", "456", "workspace"),
+          mountPath: "/data/threads/456/workspace",
+          readOnly: false,
+        },
+        {
+          name: "thread-attachments",
+          hostPath: path.join("/mnt/shared", "users", "123", "threads", "456", "attachments"),
+          mountPath: "/data/threads/456/attachments",
+          readOnly: true,
+        },
+        {
+          name: "shared-data",
+          hostPath: path.join("/mnt/shared", "users", "123", "shared"),
+          mountPath: "/data/shared",
+          readOnly: false,
+        },
+      ],
       cpu: "2",
       memory: "512Mi",
       idleReleaseMs: 900_000,

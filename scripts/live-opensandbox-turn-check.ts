@@ -20,8 +20,11 @@ import {
   createOpenSandboxClientProvider,
   type OpenSandboxClient,
 } from "../src/opensandbox/client.js";
-import { managedSandboxMetadata } from "../src/opensandbox/spec.js";
-import { UserOpenSandboxRuntimeManager } from "../src/opensandbox/userRuntimeManager.js";
+import {
+  managedSandboxMetadata,
+  managedThreadSandboxMetadata,
+} from "../src/opensandbox/spec.js";
+import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
 import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/authMigration.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
 import { botThreadWorkspace, botUserRoot, guestThreadWorkspace } from "../src/sandbox/paths.js";
@@ -86,7 +89,7 @@ const config = loadConfig({
 });
 const logger = createLogger(config);
 let db: AppDatabase | undefined;
-let commandRuntime: UserOpenSandboxRuntimeManager | undefined;
+let commandRuntime: ThreadOpenSandboxRuntimeManager | undefined;
 let pi: PiRuntimeManager | undefined;
 let cleanupClient: OpenSandboxClient | undefined;
 let telegram: CapturingTelegramApi | undefined;
@@ -113,7 +116,7 @@ try {
     topicId: null,
     title: "OpenSandbox live turn check",
   });
-  commandRuntime = new UserOpenSandboxRuntimeManager({
+  commandRuntime = new ThreadOpenSandboxRuntimeManager({
     config,
     clientProvider: createOpenSandboxClientProvider(config),
     logger,
@@ -253,7 +256,7 @@ async function validatePersistenceAndToolUse(input: {
   user: UserRow;
   thread: ThreadRow;
   pi: PiRuntimeManager;
-  commandRuntime: UserOpenSandboxRuntimeManager;
+  commandRuntime: ThreadOpenSandboxRuntimeManager;
   capturedArchive: Buffer;
   capturedDocument: CapturedDocument;
   archiveReport: ArchiveReport;
@@ -341,7 +344,7 @@ async function validatePersistenceAndToolUse(input: {
   const workspaceBytes = await fs.readFile(workspaceArchive);
   assert(workspaceBytes.equals(input.capturedArchive), "Persistent OpenSandbox workspace archive differs from delivered bytes.");
 
-  const metadata = managedSandboxMetadata(input.config);
+  const metadata = managedThreadSandboxMetadata(input.config, input.user.tg_id, input.thread.id);
   const runningSandbox = await waitForSingleSandbox({
     client: input.adminClient,
     metadata,
@@ -357,6 +360,7 @@ async function validatePersistenceAndToolUse(input: {
   });
   const resumeResult = await input.commandRuntime.execute({
     userId: input.user.tg_id,
+    threadId: input.thread.id,
     command: "bash",
     args: ["-c", `set -eu; test -f ${quoteShellToken(ARCHIVE_NAME)}; unzip -tq ${quoteShellToken(ARCHIVE_NAME)} >/dev/null; sha256sum ${quoteShellToken(ARCHIVE_NAME)}`, "bash"],
     env: { TZ: "UTC" },

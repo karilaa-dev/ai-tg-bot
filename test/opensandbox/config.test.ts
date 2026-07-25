@@ -83,7 +83,7 @@ describe("OpenSandbox configuration", () => {
       AGENT_SHARED_ROOT: "/srv/shared",
       OPEN_SANDBOX_SHARED_HOST_ROOT: "/srv/shared",
       MANAGED_FILE_ROOT: "/srv/shared/users/42/.chat-files",
-    })).toThrow("never mounted into a user sandbox");
+    })).toThrow("never mounted into a thread sandbox");
   });
 
   it("requires idle release to happen after idle pause", () => {

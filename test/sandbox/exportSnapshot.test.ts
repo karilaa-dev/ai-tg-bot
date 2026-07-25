@@ -23,7 +23,7 @@ describe("copySandboxFileToOutbox", () => {
     await fs.writeFile(source, "hello");
 
     await copySandboxFileToOutbox({
-      userRoot: path.join(root, "users", "1"),
+      scopeRoot: path.join(root, "users", "1"),
       sourcePath: source,
       destinationPath: destination,
       maxBytes: 10,
@@ -45,13 +45,13 @@ describe("copySandboxFileToOutbox", () => {
     await fs.symlink(root, path.join(userRoot, "dir-link"));
 
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: path.join(userRoot, "final-link"),
       destinationPath: destination,
       maxBytes: 100,
     })).rejects.toThrow();
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: path.join(userRoot, "dir-link", "outside.txt"),
       destinationPath: destination,
       maxBytes: 100,
@@ -67,7 +67,7 @@ describe("copySandboxFileToOutbox", () => {
     await fs.writeFile(source, Buffer.alloc(32));
 
     await expect(copySandboxFileToOutbox({
-      userRoot: path.join(root, "users", "1"),
+      scopeRoot: path.join(root, "users", "1"),
       sourcePath: source,
       destinationPath: destination,
       maxBytes: 16,
@@ -86,7 +86,7 @@ describe("copySandboxFileToOutbox", () => {
     await fs.writeFile(source, "new");
 
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: directory,
       destinationPath: destination,
       maxBytes: 100,
@@ -94,7 +94,7 @@ describe("copySandboxFileToOutbox", () => {
 
     await fs.writeFile(destination, "existing");
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: source,
       destinationPath: destination,
       maxBytes: 100,
@@ -112,7 +112,7 @@ describe("copySandboxFileToOutbox", () => {
     await execFileAsync("mkfifo", [fifo]);
 
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: fifo,
       destinationPath: destination,
       maxBytes: 100,
@@ -132,7 +132,7 @@ describe("copySandboxFileToOutbox", () => {
     controller.abort(new Error("cancelled"));
 
     await expect(copySandboxFileToOutbox({
-      userRoot,
+      scopeRoot: userRoot,
       sourcePath: source,
       destinationPath: destination,
       maxBytes: 100,

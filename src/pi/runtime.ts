@@ -355,7 +355,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
 
   holdCommandActivity(): void {
     if (this.commandActivityLease || !this.commandRuntime?.acquireActivityLease) return;
-    this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id);
+    this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
   }
 
   endTurn(): void {

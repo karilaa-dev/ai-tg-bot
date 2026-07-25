@@ -13,10 +13,13 @@ import type {
 } from "../../src/opensandbox/client.js";
 import {
   METADATA_FINGERPRINT,
+  METADATA_THREAD_ID,
   METADATA_USER_ID,
-  userSandboxMetadata,
+  threadSandboxMetadata,
 } from "../../src/opensandbox/spec.js";
-import { UserOpenSandboxRuntimeManager } from "../../src/opensandbox/userRuntimeManager.js";
+import {
+  ThreadOpenSandboxRuntimeManager as UserOpenSandboxRuntimeManager,
+} from "../../src/opensandbox/threadRuntimeManager.js";
 import { quoteShellToken, shellJoin } from "../../src/util/shell.js";
 import type { SandboxCommandRequest } from "../../src/sandbox/types.js";
 
@@ -24,7 +27,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("UserOpenSandboxRuntimeManager", () => {
+describe("ThreadOpenSandboxRuntimeManager", () => {
   it("does not initialize an unused client provider", async () => {
     const client = new FakeClient();
     const provider = vi.fn(async () => client);
@@ -41,7 +44,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     const provider = vi.fn(async () => client);
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), clientProvider: provider });
 
-    const lease = manager.acquireActivityLease(100);
+    const lease = manager.acquireActivityLease(100, 1);
     lease.release();
     lease.release();
 
@@ -67,7 +70,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
   it("adopts a sandbox created by an earlier manager instance", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
-    const metadata = userSandboxMetadata(config, 2);
+    const metadata = threadSandboxMetadata(config, 2, 1);
     client.infos.set("existing", info("existing", "Running", metadata));
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
@@ -94,10 +97,32 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("rejects symlinked mount directories before creating a sandbox", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "opensandbox-mount-symlink-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "opensandbox-mount-outside-"));
+    const config = loadTestConfig({
+      AGENT_SHARED_ROOT: root,
+      OPEN_SANDBOX_SHARED_HOST_ROOT: root,
+      MANAGED_FILE_ROOT: path.join(root, ".chat-files"),
+    });
+    const workspace = path.join(root, "users", "201", "threads", "1", "workspace");
+    await fs.mkdir(path.dirname(workspace), { recursive: true });
+    await fs.symlink(outside, workspace);
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await expect(manager.execute(command(201))).rejects.toThrow("not a plain directory");
+
+    expect(client.createCalls).toBe(0);
+    await manager.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
   it("adopts the newest duplicate and removes the others", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
-    const metadata = userSandboxMetadata(config, 3);
+    const metadata = threadSandboxMetadata(config, 3, 1);
     client.infos.set("older", info("older", "Running", metadata, new Date("2026-01-01")));
     client.infos.set("newer", info("newer", "Running", metadata, new Date("2026-01-02")));
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
@@ -114,7 +139,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     const config = loadTestConfig();
     const client = new FakeClient();
     client.infos.set("obsolete", info("obsolete", "Running", {
-      ...userSandboxMetadata(config, 4),
+      ...threadSandboxMetadata(config, 4, 1),
       [METADATA_FINGERPRINT]: "obsolete",
     }));
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
@@ -127,14 +152,14 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("removes an obsolete user sandbox discovered after initial reconciliation", async () => {
+  it("removes an obsolete thread sandbox discovered after initial reconciliation", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
     await manager.execute(command(5));
     client.infos.set("late-obsolete", info("late-obsolete", "Running", {
-      ...userSandboxMetadata(config, 5),
+      ...threadSandboxMetadata(config, 5, 1),
       [METADATA_FINGERPRINT]: "obsolete",
     }));
 
@@ -149,7 +174,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     const config = loadTestConfig();
     const client = new FakeClient();
     client.infos.set("malformed", info("malformed", "Running", {
-      ...userSandboxMetadata(config, 5),
+      ...threadSandboxMetadata(config, 5, 1),
       [METADATA_USER_ID]: "not-a-user",
     }));
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
@@ -161,12 +186,31 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("removes legacy or malformed managed sandboxes without a valid thread identity", async () => {
+    const config = loadTestConfig();
+    const client = new FakeClient();
+    const metadata = threadSandboxMetadata(config, 6, 1);
+    delete metadata[METADATA_THREAD_ID];
+    client.infos.set("legacy-user-sandbox", info("legacy-user-sandbox", "Running", metadata));
+    client.infos.set("malformed-thread", info("malformed-thread", "Running", {
+      ...threadSandboxMetadata(config, 6, 1),
+      [METADATA_THREAD_ID]: "not-a-thread",
+    }));
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(6));
+
+    expect(client.killCalls).toEqual(expect.arrayContaining(["legacy-user-sandbox", "malformed-thread"]));
+    expect(client.createCalls).toBe(1);
+    await manager.dispose();
+  });
+
   it.each(["Terminated", "Deleted"])(
     "does not kill an already removed %s sandbox while creating its replacement",
     async (remoteState) => {
       const config = loadTestConfig();
       const client = new FakeClient();
-      client.infos.set("removed", info("removed", remoteState, userSandboxMetadata(config, 7)));
+      client.infos.set("removed", info("removed", remoteState, threadSandboxMetadata(config, 7, 1)));
       const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
       await expect(manager.execute(command(7))).resolves.toMatchObject({ exitCode: 0 });
@@ -184,7 +228,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     client.infos.set("future-state", info(
       "future-state",
       "FutureTransition",
-      userSandboxMetadata(config, 8),
+      threadSandboxMetadata(config, 8, 1),
     ));
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
@@ -198,7 +242,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
   it("adopts a pending sandbox and waits for it to run", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
-    client.infos.set("pending", info("pending", "Pending", userSandboxMetadata(config, 8)));
+    client.infos.set("pending", info("pending", "Pending", threadSandboxMetadata(config, 8, 1)));
     client.getInfoStateOverrides.set("pending", "Running");
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
@@ -213,7 +257,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
   it("waits for a stopping sandbox without killing it again", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
-    client.infos.set("stopping", info("stopping", "Stopping", userSandboxMetadata(config, 9)));
+    client.infos.set("stopping", info("stopping", "Stopping", threadSandboxMetadata(config, 9, 1)));
     client.getInfoStateOverrides.set("stopping", "Terminated");
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
@@ -236,7 +280,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("reuses one sandbox per user and serializes that user's commands", async () => {
+  it("reuses one sandbox per user-thread pair and serializes that thread's commands", async () => {
     const client = new FakeClient({ runDelayMs: 10 });
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
 
@@ -250,7 +294,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("keeps command preparation and cleanup inside the per-user queue", async () => {
+  it("keeps command preparation and cleanup inside the per-thread queue", async () => {
     const client = new FakeClient();
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
     const gate = deferred<void>();
@@ -285,7 +329,7 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("does not initialize OpenSandbox when canceled during command preparation", async () => {
+  it("does not create a sandbox when canceled during command preparation", async () => {
     const client = new FakeClient();
     const provider = vi.fn(async () => client);
     const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), clientProvider: provider });
@@ -307,7 +351,8 @@ describe("UserOpenSandboxRuntimeManager", () => {
     releasePreparation.resolve(undefined);
 
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
-    expect(provider).not.toHaveBeenCalled();
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(client.createCalls).toBe(0);
     expect(cleanup).toHaveBeenCalledTimes(1);
     await manager.dispose();
   });
@@ -345,6 +390,18 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("allows different threads for one user to run concurrently in separate sandboxes", async () => {
+    const client = new FakeClient({ runDelayMs: 20 });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await Promise.all([manager.execute(command(22, 1)), manager.execute(command(22, 2))]);
+
+    expect(client.createCalls).toBe(2);
+    expect(client.maxActive).toBeGreaterThan(1);
+    expect(client.createSpecs.map((spec) => spec.metadata[METADATA_THREAD_ID]).sort()).toEqual(["1", "2"]);
+    await manager.dispose();
+  });
+
   it("pauses on idle and resumes the same sandbox", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
@@ -363,13 +420,14 @@ describe("UserOpenSandboxRuntimeManager", () => {
 
     expect(client.pauseCalls).toEqual([sandboxId]);
 
-    const sourcePath = path.join(config.AGENT_SHARED_ROOT, "users", "30", "paused-export.txt");
+    const sourcePath = path.join(config.AGENT_SHARED_ROOT, "users", "30", "shared", "paused-export.txt");
     const destinationPath = path.join(config.MANAGED_FILE_ROOT, "paused-export.txt");
     await fs.writeFile(sourcePath, "exported");
     await fs.mkdir(path.dirname(destinationPath), { recursive: true });
     await manager.exportFile({
       userId: 30,
-      guestPath: "/data/paused-export.txt",
+      threadId: 1,
+      guestPath: "/data/shared/paused-export.txt",
       hostDestination: destinationPath,
       maxBytes: 100,
     });
@@ -390,8 +448,8 @@ describe("UserOpenSandboxRuntimeManager", () => {
 
     await manager.execute(command(301));
     const sandboxId = client.connections[0]!.id;
-    const first = manager.acquireActivityLease(301);
-    const second = manager.acquireActivityLease(301);
+    const first = manager.acquireActivityLease(301, 1);
+    const second = manager.acquireActivityLease(301, 1);
     await vi.advanceTimersByTimeAsync(5000);
     expect(client.pauseCalls).toEqual([]);
 
@@ -410,17 +468,17 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
-  it("keeps activity leases isolated by user", async () => {
+  it("keeps activity leases isolated by thread", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
     const config = loadTestConfig({ OPEN_SANDBOX_IDLE_PAUSE_MS: 1000 });
     const manager = new UserOpenSandboxRuntimeManager({ config, client });
 
-    await manager.execute(command(302));
-    await manager.execute(command(303));
+    await manager.execute(command(302, 1));
+    await manager.execute(command(302, 2));
     const firstId = client.connections.find((connection) => connection.id === "sandbox-1")!.id;
     const secondId = client.connections.find((connection) => connection.id === "sandbox-2")!.id;
-    const lease = manager.acquireActivityLease(302);
+    const lease = manager.acquireActivityLease(302, 1);
 
     await vi.advanceTimersByTimeAsync(1000);
     expect(client.pauseCalls).toContain(secondId);
@@ -657,21 +715,25 @@ describe("UserOpenSandboxRuntimeManager", () => {
     expect(client.closeCalls).toBe(1);
   });
 
-  it("exports only regular files beneath the user's shared root", async () => {
+  it("exports only regular files beneath the current thread or shared mounts", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opensandbox-export-"));
     const config = loadTestConfig({
       AGENT_SHARED_ROOT: root,
       OPEN_SANDBOX_SHARED_HOST_ROOT: root,
     });
     const source = path.join(root, "users", "50", "threads", "1", "workspace", "result.txt");
+    const siblingSource = path.join(root, "users", "50", "threads", "2", "workspace", "secret.txt");
     const destination = path.join(root, ".outbox", "result.txt");
     await fs.mkdir(path.dirname(source), { recursive: true });
+    await fs.mkdir(path.dirname(siblingSource), { recursive: true });
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.writeFile(source, "result");
+    await fs.writeFile(siblingSource, "secret");
     const manager = new UserOpenSandboxRuntimeManager({ config, client: new FakeClient() });
 
     await manager.exportFile({
       userId: 50,
+      threadId: 1,
       guestPath: "/data/threads/1/workspace/result.txt",
       hostDestination: destination,
       maxBytes: 1024,
@@ -680,10 +742,18 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await expect(fs.readFile(destination, "utf8")).resolves.toBe("result");
     await expect(manager.exportFile({
       userId: 50,
+      threadId: 1,
+      guestPath: "/data/threads/2/workspace/secret.txt",
+      hostDestination: `${destination}.sibling`,
+      maxBytes: 1024,
+    })).rejects.toThrow("current thread");
+    await expect(manager.exportFile({
+      userId: 50,
+      threadId: 1,
       guestPath: "/etc/passwd",
       hostDestination: `${destination}.bad`,
       maxBytes: 1024,
-    })).rejects.toThrow("inside /data");
+    })).rejects.toThrow("current thread");
     await manager.dispose();
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -918,9 +988,10 @@ function info(
   return { id, state, metadata, createdAt };
 }
 
-function command(userId: number): SandboxCommandRequest {
+function command(userId: number, threadId = 1): SandboxCommandRequest {
   return {
     userId,
+    threadId,
     command: "bash",
     args: ["-c", "printf ok"],
     env: { TZ: "UTC" },

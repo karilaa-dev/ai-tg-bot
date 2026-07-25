@@ -4,15 +4,15 @@ import { throwIfAborted } from "../files/cancel.js";
 import { isPathWithin } from "../util/paths.js";
 
 export async function copySandboxFileToOutbox(input: {
-  userRoot: string;
+  scopeRoot: string;
   sourcePath: string;
   destinationPath: string;
   maxBytes: number;
   signal?: AbortSignal;
 }): Promise<void> {
-  const userRoot = await fs.realpath(path.resolve(input.userRoot));
+  const scopeRoot = await fs.realpath(path.resolve(input.scopeRoot));
   const source = path.resolve(input.sourcePath);
-  if (!isPathWithin(userRoot, source)) throw new Error("file path is outside the user sandbox root");
+  if (!isPathWithin(scopeRoot, source)) throw new Error("file path is outside the mounted sandbox scope");
   throwIfAborted(input.signal);
 
   let sourceHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
@@ -25,7 +25,7 @@ export async function copySandboxFileToOutbox(input: {
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
     );
     const openedPath = await fs.realpath(`/proc/self/fd/${sourceHandle.fd}`);
-    if (!isPathWithin(userRoot, openedPath)) throw new Error("file path escapes the user sandbox root");
+    if (!isPathWithin(scopeRoot, openedPath)) throw new Error("file path escapes the mounted sandbox scope");
     const stat = await sourceHandle.stat();
     if (!stat.isFile()) throw new Error("path is not a regular file");
     if (stat.size > input.maxBytes) throw new Error("file is larger than the allowed limit");

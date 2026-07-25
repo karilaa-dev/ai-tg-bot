@@ -94,7 +94,7 @@ function validateStorageIsolation(
     context.addIssue({
       code: "custom",
       path: ["MANAGED_FILE_ROOT"],
-      message: "must be outside AGENT_SHARED_ROOT/users so canonical chat files are never mounted into a user sandbox",
+      message: "must be outside AGENT_SHARED_ROOT/users so canonical chat files are never mounted into a thread sandbox",
     });
   }
 }

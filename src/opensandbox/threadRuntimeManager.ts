@@ -9,7 +9,12 @@ import {
   applySandboxCommandPreparation,
   runSandboxCommandLifecycle,
 } from "../sandbox/lifecycle.js";
-import { botUserRoot } from "../sandbox/paths.js";
+import {
+  botAttachmentRoot,
+  botSharedRoot,
+  botThreadWorkspace,
+  scopedGuestPathToHostPath,
+} from "../sandbox/paths.js";
 import type {
   CommandRuntime,
   SandboxActivityLease,
@@ -30,8 +35,9 @@ import type {
 import { formatSandboxError } from "./client.js";
 import {
   managedSandboxMetadata,
-  managedUserSandboxMetadata,
+  managedThreadSandboxMetadata,
   METADATA_FINGERPRINT,
+  METADATA_THREAD_ID,
   METADATA_USER_ID,
   openSandboxCreateSpec,
   openSandboxProvisioningFingerprint,
@@ -43,7 +49,7 @@ type ActiveExecution = {
   abortController: AbortController;
 };
 
-type UserRuntimeState = {
+type ThreadRuntimeState = {
   tail: Promise<void>;
   pending: number;
   activityLeases: number;
@@ -56,7 +62,12 @@ type UserRuntimeState = {
   quarantined?: { sandboxId: string; error: Error };
 };
 
-type UserOpenSandboxRuntimeManagerInput = {
+type SandboxScope = {
+  userId: number;
+  threadId: number;
+};
+
+type ThreadOpenSandboxRuntimeManagerInput = {
   config: AppConfig;
   client?: OpenSandboxClient;
   clientProvider?: OpenSandboxClientProvider;
@@ -92,15 +103,15 @@ const SANDBOX_STATE_POLICIES: Record<string, SandboxStatePolicy> = {
 };
 const OUTPUT_SENTINEL = 0x1e;
 
-export class UserOpenSandboxRuntimeManager implements CommandRuntime {
-  private readonly states = new Map<number, UserRuntimeState>();
+export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
+  private readonly states = new Map<string, ThreadRuntimeState>();
   private readonly fingerprint: string;
   private client?: OpenSandboxClient;
   private clientReady?: Promise<OpenSandboxClient>;
   private disposePromise?: Promise<void>;
   private shuttingDown = false;
 
-  constructor(private readonly input: UserOpenSandboxRuntimeManagerInput) {
+  constructor(private readonly input: ThreadOpenSandboxRuntimeManagerInput) {
     this.fingerprint = openSandboxProvisioningFingerprint(input.config);
   }
 
@@ -108,16 +119,22 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
-    return this.enqueue(request.userId, request.signal, (state) =>
+    const scope = sandboxScope(request.userId, request.threadId);
+    return this.enqueue(scope, request.signal, (state) =>
       this.executeWithLifecycle(state, request, lifecycle));
   }
 
   exportFile(request: SandboxFileExportRequest): Promise<void> {
-    return this.enqueue(request.userId, request.signal, async () => {
-      const userRoot = botUserRoot(this.input.config, request.userId);
-      const sourcePath = guestPathToHostPath(userRoot, request.guestPath);
+    const scope = sandboxScope(request.userId, request.threadId);
+    return this.enqueue(scope, request.signal, async () => {
+      const { scopeRoot, sourcePath } = scopedGuestPathToHostPath(
+        this.input.config,
+        request.userId,
+        request.threadId,
+        request.guestPath,
+      );
       await copySandboxFileToOutbox({
-        userRoot,
+        scopeRoot,
         sourcePath,
         destinationPath: request.hostDestination,
         maxBytes: request.maxBytes,
@@ -126,9 +143,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     });
   }
 
-  acquireActivityLease(userId: number): SandboxActivityLease {
+  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
     if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
-    const state = this.stateFor(userId);
+    const scope = sandboxScope(userId, threadId);
+    const state = this.stateFor(scope);
     this.clearIdleTimer(state);
     state.activityLeases += 1;
     let released = false;
@@ -138,7 +156,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         released = true;
         state.activityLeases = Math.max(0, state.activityLeases - 1);
         if (!this.shuttingDown && state.activityLeases === 0) {
-          this.queueIdleMaintenance(userId, state);
+          this.queueIdleMaintenance(scope, state);
         }
       },
     };
@@ -172,30 +190,31 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
 
   private async reconcile(client: OpenSandboxClient): Promise<void> {
     const infos = await this.control("list managed sandboxes", client.list(managedSandboxMetadata(this.input.config)));
-    const grouped = new Map<number, OpenSandboxInfo[]>();
+    const grouped = new Map<string, { scope: SandboxScope; infos: OpenSandboxInfo[] }>();
     for (const info of infos) {
-      const userId = Number(info.metadata[METADATA_USER_ID]);
-      if (!Number.isSafeInteger(userId) || userId <= 0) {
+      const scope = sandboxScopeFromMetadata(info);
+      if (!scope) {
         if (sandboxStatePolicy(info.state).killable) {
           await this.control("remove malformed managed sandbox", client.kill(info.id));
         }
         continue;
       }
-      const group = grouped.get(userId) ?? [];
-      group.push(info);
-      grouped.set(userId, group);
+      const key = sandboxScopeKey(scope);
+      const group = grouped.get(key) ?? { scope, infos: [] };
+      group.infos.push(info);
+      grouped.set(key, group);
     }
 
-    for (const [userId, group] of grouped) {
+    for (const { scope, infos: group } of grouped.values()) {
       const current = group
         .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && sandboxStatePolicy(info.state).adoptable)
         .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
       const adopted = current[0];
       if (adopted) {
-        const state = this.stateFor(userId);
+        const state = this.stateFor(scope);
         state.sandboxId = adopted.id;
         state.remoteState = adopted.state;
-        this.scheduleIdlePause(userId, state);
+        this.scheduleIdlePause(scope, state);
       }
       for (const info of group) {
         if (info.id === adopted?.id || !sandboxStatePolicy(info.state).killable) continue;
@@ -205,10 +224,15 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 
   private async executeWithLifecycle(
-    state: UserRuntimeState,
+    state: ThreadRuntimeState,
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
   ): Promise<SandboxCommandResult> {
+    const scope = sandboxScope(request.userId, request.threadId);
+    throwIfAborted(request.signal);
+    await this.ensureClient();
+    await ensureSandboxMountDirectories(this.input.config, scope);
+    throwIfAborted(request.signal);
     return runSandboxCommandLifecycle(lifecycle, async (preparation) => {
       throwIfAborted(request.signal);
       return this.executeLocked(
@@ -219,10 +243,11 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 
   private async executeLocked(
-    state: UserRuntimeState,
+    state: ThreadRuntimeState,
     request: SandboxCommandRequest,
   ): Promise<SandboxCommandResult> {
-    const connection = await this.acquireConnection(state, request.userId);
+    const scope = sandboxScope(request.userId, request.threadId);
+    const connection = await this.acquireConnection(state, scope);
     throwIfAborted(request.signal);
     const commandId = randomUUID();
     const stdinPath = `/tmp/ai-tg-bot-stdin-${commandId}`;
@@ -293,7 +318,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         };
       }
 
-      const termination = await this.interruptExecution(state, active, completion, request.userId);
+      const termination = await this.interruptExecution(state, active, completion, scope);
       if (!termination.confirmed) {
         state.quarantined = {
           sandboxId: connection.id,
@@ -309,6 +334,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         } catch (error) {
           this.input.logger?.warn("OpenSandbox interrupted output capture failed", {
             userId: request.userId,
+            threadId: request.threadId,
             error: formatSandboxError(error),
           });
         }
@@ -345,6 +371,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       } catch (error) {
         this.input.logger?.warn("OpenSandbox command file cleanup failed", {
           userId: request.userId,
+          threadId: request.threadId,
           error: formatSandboxError(error),
         });
       }
@@ -402,10 +429,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 
   private async interruptExecution(
-    state: UserRuntimeState,
+    state: ThreadRuntimeState,
     active: ActiveExecution,
     completion: Promise<unknown>,
-    userId: number,
+    scope: SandboxScope,
   ): Promise<{ confirmed: boolean; error?: string }> {
     if (!active.executionId) {
       active.abortController.abort();
@@ -422,7 +449,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     } catch (error) {
       active.abortController.abort();
       this.input.logger?.warn("OpenSandbox command interruption could not be confirmed", {
-        userId,
+        ...scope,
         executionId: active.executionId,
         error: formatSandboxError(error),
       });
@@ -432,10 +459,13 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  private async acquireConnection(state: UserRuntimeState, userId: number): Promise<OpenSandboxConnection> {
+  private async acquireConnection(
+    state: ThreadRuntimeState,
+    scope: SandboxScope,
+  ): Promise<OpenSandboxConnection> {
     const client = await this.ensureClient();
     await this.recoverQuarantine(state, client);
-    await this.refreshUserSandbox(state, client, userId);
+    await this.refreshThreadSandbox(state, client, scope);
 
     if (state.sandboxId) {
       const info = await this.waitForStableState(client, state.sandboxId);
@@ -464,10 +494,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       state.remoteState = undefined;
     }
 
-    await fs.mkdir(botUserRoot(this.input.config, userId), { recursive: true, mode: 0o770 });
+    await ensureSandboxMountDirectories(this.input.config, scope);
     const connection = await this.control(
       "create sandbox",
-      client.create(openSandboxCreateSpec(this.input.config, userId)),
+      client.create(openSandboxCreateSpec(this.input.config, scope.userId, scope.threadId)),
       this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS,
     );
     state.sandboxId = connection.id;
@@ -475,7 +505,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     state.connection = connection;
     const matches = await this.control(
       "reconcile created sandbox",
-      client.list(managedUserSandboxMetadata(this.input.config, userId)),
+      client.list(managedThreadSandboxMetadata(this.input.config, scope.userId, scope.threadId)),
     );
     for (const duplicate of matches) {
       if (duplicate.id !== connection.id && sandboxStatePolicy(duplicate.state).killable) {
@@ -485,10 +515,10 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     return connection;
   }
 
-  private async refreshUserSandbox(
-    state: UserRuntimeState,
+  private async refreshThreadSandbox(
+    state: ThreadRuntimeState,
     client: OpenSandboxClient,
-    userId: number,
+    scope: SandboxScope,
   ): Promise<void> {
     const cached = state.connection;
     state.connection = undefined;
@@ -497,7 +527,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         await this.control("close cached sandbox connection", cached.close());
       } catch (error) {
         this.input.logger?.warn("failed to close cached OpenSandbox connection", {
-          userId,
+          ...scope,
           sandboxId: cached.id,
           error: formatSandboxError(error),
         });
@@ -505,8 +535,8 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     }
 
     const infos = await this.control(
-      "refresh user sandbox",
-      client.list(managedUserSandboxMetadata(this.input.config, userId)),
+      "refresh thread sandbox",
+      client.list(managedThreadSandboxMetadata(this.input.config, scope.userId, scope.threadId)),
     );
     const current = infos
       .filter((info) => info.metadata[METADATA_FINGERPRINT] === this.fingerprint && sandboxStatePolicy(info.state).adoptable)
@@ -515,7 +545,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
 
     for (const info of infos) {
       if (info.id === adopted?.id || !sandboxStatePolicy(info.state).killable) continue;
-      await this.control("remove obsolete user sandbox", client.kill(info.id));
+      await this.control("remove obsolete thread sandbox", client.kill(info.id));
     }
 
     state.sandboxId = adopted?.id;
@@ -534,7 +564,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  private async recoverQuarantine(state: UserRuntimeState, client: OpenSandboxClient): Promise<void> {
+  private async recoverQuarantine(state: ThreadRuntimeState, client: OpenSandboxClient): Promise<void> {
     const quarantined = state.quarantined;
     if (!quarantined) return;
     try {
@@ -550,12 +580,12 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 
   private enqueue<T>(
-    userId: number,
+    scope: SandboxScope,
     signal: AbortSignal | undefined,
-    work: (state: UserRuntimeState) => Promise<T>,
+    work: (state: ThreadRuntimeState) => Promise<T>,
   ): Promise<T> {
     if (this.shuttingDown) return Promise.reject(new Error("OpenSandbox runtime is shutting down"));
-    const state = this.stateFor(userId);
+    const state = this.stateFor(scope);
     this.clearIdleTimer(state);
     state.pending += 1;
     const run = state.tail.then(async () => {
@@ -565,22 +595,23 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     });
     state.tail = run.then(() => undefined, () => undefined).finally(async () => {
       state.pending -= 1;
-      await this.tryRenewIdleRelease(userId, state);
-      this.scheduleIdlePause(userId, state);
+      await this.tryRenewIdleRelease(scope, state);
+      this.scheduleIdlePause(scope, state);
     });
     return run;
   }
 
-  private stateFor(userId: number): UserRuntimeState {
-    let state = this.states.get(userId);
+  private stateFor(scope: SandboxScope): ThreadRuntimeState {
+    const key = sandboxScopeKey(scope);
+    let state = this.states.get(key);
     if (!state) {
       state = { tail: Promise.resolve(), pending: 0, activityLeases: 0 };
-      this.states.set(userId, state);
+      this.states.set(key, state);
     }
     return state;
   }
 
-  private scheduleIdlePause(userId: number, state: UserRuntimeState): void {
+  private scheduleIdlePause(scope: SandboxScope, state: ThreadRuntimeState): void {
     if (!this.canPauseIdle(state)) return;
     this.clearIdleTimer(state);
     state.idleTimer = setTimeout(() => {
@@ -595,21 +626,21 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
           await state.connection?.close().catch(() => undefined);
           state.connection = undefined;
           state.remoteState = "Paused";
-          this.input.logger?.info("paused idle OpenSandbox user sandbox", { userId, sandboxId: id });
+          this.input.logger?.info("paused idle OpenSandbox thread sandbox", { ...scope, sandboxId: id });
         } catch (error) {
-          this.input.logger?.warn("failed to pause idle OpenSandbox user sandbox", {
-            userId,
+          this.input.logger?.warn("failed to pause idle OpenSandbox thread sandbox", {
+            ...scope,
             sandboxId: id,
             error: formatSandboxError(error),
           });
-          this.scheduleIdlePause(userId, state);
+          this.scheduleIdlePause(scope, state);
         }
       });
       state.tail = pause.then(() => undefined, () => undefined);
     }, this.input.config.OPEN_SANDBOX_IDLE_PAUSE_MS);
   }
 
-  private canPauseIdle(state: UserRuntimeState): state is UserRuntimeState & { sandboxId: string } {
+  private canPauseIdle(state: ThreadRuntimeState): state is ThreadRuntimeState & { sandboxId: string } {
     return !this.shuttingDown
       && state.pending === 0
       && !state.active
@@ -618,23 +649,23 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       && state.remoteState !== "Paused";
   }
 
-  private clearIdleTimer(state: UserRuntimeState): void {
+  private clearIdleTimer(state: ThreadRuntimeState): void {
     if (!state.idleTimer) return;
     clearTimeout(state.idleTimer);
     state.idleTimer = undefined;
   }
 
-  private queueIdleMaintenance(userId: number, state: UserRuntimeState): void {
+  private queueIdleMaintenance(scope: SandboxScope, state: ThreadRuntimeState): void {
     const maintenance = state.tail.then(async () => {
-      await this.tryRenewIdleRelease(userId, state);
-      this.scheduleIdlePause(userId, state);
+      await this.tryRenewIdleRelease(scope, state);
+      this.scheduleIdlePause(scope, state);
     });
     state.tail = maintenance.then(() => undefined, () => undefined);
   }
 
   private async renewIdleRelease(
     client: OpenSandboxClient,
-    state: UserRuntimeState,
+    state: ThreadRuntimeState,
     sandboxId: string,
   ): Promise<void> {
     const renewedAt = Date.now();
@@ -649,13 +680,13 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     state.idleReleaseRenewal = { sandboxId, renewedAt };
   }
 
-  private async tryRenewIdleRelease(userId: number, state: UserRuntimeState): Promise<void> {
+  private async tryRenewIdleRelease(scope: SandboxScope, state: ThreadRuntimeState): Promise<void> {
     if (this.shuttingDown || state.quarantined || !state.sandboxId || !this.client) return;
     try {
       await this.renewIdleRelease(this.client, state, state.sandboxId);
     } catch (error) {
       this.input.logger?.warn("failed to renew OpenSandbox idle release", {
-        userId,
+        ...scope,
         sandboxId: state.sandboxId,
         error: formatSandboxError(error),
       });
@@ -684,7 +715,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     }));
     await Promise.all(states.map(async (state) => {
       try {
-        await withDeadline(state.tail, this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS, "user execution queue did not stop");
+        await withDeadline(state.tail, this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS, "thread execution queue did not stop");
       } catch (error) {
         errors.push(error);
       }
@@ -714,16 +745,66 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
   }
 }
 
-function guestPathToHostPath(userRoot: string, guestPath: string): string {
-  const normalized = path.posix.normalize(guestPath);
-  if (normalized !== "/data" && !normalized.startsWith("/data/")) {
-    throw new Error("created file must be inside /data");
+function sandboxScope(userId: number, threadId: number): SandboxScope {
+  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error(`invalid user id: ${userId}`);
+  if (!Number.isSafeInteger(threadId) || threadId <= 0) throw new Error(`invalid thread id: ${threadId}`);
+  return { userId, threadId };
+}
+
+function sandboxScopeFromMetadata(info: OpenSandboxInfo): SandboxScope | undefined {
+  try {
+    return sandboxScope(
+      Number(info.metadata[METADATA_USER_ID]),
+      Number(info.metadata[METADATA_THREAD_ID]),
+    );
+  } catch {
+    return undefined;
   }
-  const relative = path.posix.relative("/data", normalized);
-  const candidate = path.resolve(userRoot, ...relative.split("/").filter(Boolean));
-  const root = path.resolve(userRoot);
-  if (!isPathWithin(root, candidate)) throw new Error("created file path escapes the user root");
-  return candidate;
+}
+
+function sandboxScopeKey(scope: SandboxScope): string {
+  return `${scope.userId}:${scope.threadId}`;
+}
+
+async function ensureSandboxMountDirectories(config: AppConfig, scope: SandboxScope): Promise<void> {
+  const sharedRoot = path.resolve(config.AGENT_SHARED_ROOT);
+  await fs.mkdir(sharedRoot, { recursive: true, mode: 0o770 });
+  await assertPlainDirectory(sharedRoot);
+
+  const user = String(scope.userId);
+  const thread = String(scope.threadId);
+  await ensurePlainDirectoryChain(sharedRoot, ["users", user, "threads", thread, "workspace"]);
+  await ensurePlainDirectoryChain(sharedRoot, ["users", user, "threads", thread, "attachments"]);
+  await ensurePlainDirectoryChain(sharedRoot, ["users", user, "shared"]);
+
+  const expected = [
+    botThreadWorkspace(config, scope.userId, scope.threadId),
+    botAttachmentRoot(config, scope.userId, scope.threadId),
+    botSharedRoot(config, scope.userId),
+  ].map((directory) => path.resolve(directory));
+  if (expected.some((directory) => !isPathWithin(sharedRoot, directory))) {
+    throw new Error("sandbox mount directory escapes AGENT_SHARED_ROOT");
+  }
+}
+
+async function ensurePlainDirectoryChain(root: string, segments: string[]): Promise<void> {
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      await fs.mkdir(current, { mode: 0o770 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    await assertPlainDirectory(current);
+  }
+}
+
+async function assertPlainDirectory(directory: string): Promise<void> {
+  const stat = await fs.lstat(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`sandbox mount path is not a plain directory: ${directory}`);
+  }
 }
 
 function replaceOutputBytes(

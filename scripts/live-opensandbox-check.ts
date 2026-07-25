@@ -8,11 +8,12 @@ import {
   createOpenSandboxClientProvider,
   type OpenSandboxClient,
 } from "../src/opensandbox/client.js";
-import { userSandboxMetadata } from "../src/opensandbox/spec.js";
-import { UserOpenSandboxRuntimeManager } from "../src/opensandbox/userRuntimeManager.js";
+import { threadSandboxMetadata } from "../src/opensandbox/spec.js";
+import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
 import {
   botOutboxRoot,
   botSharedRoot,
+  botThreadRoot,
   botThreadWorkspace,
   botUserRoot,
   guestThreadWorkspace,
@@ -23,6 +24,7 @@ import { waitForSandboxState, waitForSingleSandbox } from "./live-opensandbox-he
 
 const USER_ID = 8_000_000_000_000_000 + randomInt(0, 1_000_000_000_000);
 const THREAD_ID = 8_000_000_000 + randomInt(0, 1_000_000_000);
+const OTHER_THREAD_ID = THREAD_ID + 1;
 const RUN_ID = randomUUID();
 const IDLE_PAUSE_MS = 2_000;
 const STATE_WAIT_MS = 30_000;
@@ -43,6 +45,7 @@ const config: AppConfig = {
 
 const userRoot = botUserRoot(config, USER_ID);
 const hostWorkspace = botThreadWorkspace(config, USER_ID, THREAD_ID);
+const otherThreadRoot = botThreadRoot(config, USER_ID, OTHER_THREAD_ID);
 const hostShared = botSharedRoot(config, USER_ID);
 const guestWorkspace = guestThreadWorkspace(THREAD_ID);
 const outboxRunRoot = path.join(botOutboxRoot(config), `live-opensandbox-${RUN_ID}`);
@@ -50,6 +53,7 @@ const exportDestination = path.join(outboxRunRoot, "exported.txt");
 const hostInputPath = path.join(hostWorkspace, "host-visible.txt");
 const guestOutputPath = path.join(hostWorkspace, "guest-visible.txt");
 const hostSharedPath = path.join(hostShared, "host-shared.txt");
+const otherThreadSecretPath = path.join(otherThreadRoot, "workspace", "must-not-be-visible.txt");
 const guestSharedPath = path.join(hostShared, "guest-shared.txt");
 const hostMarker = `HOST_TO_GUEST_${RUN_ID}`;
 const guestMarker = `GUEST_TO_HOST_${RUN_ID}`;
@@ -59,7 +63,7 @@ const stdinMarker = `STDIN_${RUN_ID}`;
 const envMarker = `ENV_${RUN_ID}`;
 const exportMarker = `EXPORT_${RUN_ID}`;
 
-let manager: UserOpenSandboxRuntimeManager | undefined;
+let manager: ThreadOpenSandboxRuntimeManager | undefined;
 let adminClient: OpenSandboxClient | undefined;
 let failure: Error | undefined;
 const knownSandboxIds = new Set<string>();
@@ -70,9 +74,11 @@ let privateEgressBlocked: { verified: boolean; detail?: string } = { verified: f
 try {
   await fs.mkdir(hostWorkspace, { recursive: true, mode: 0o700 });
   await fs.mkdir(hostShared, { recursive: true, mode: 0o700 });
+  await fs.mkdir(path.dirname(otherThreadSecretPath), { recursive: true, mode: 0o700 });
   await fs.mkdir(outboxRunRoot, { recursive: true, mode: 0o700 });
   await fs.writeFile(hostInputPath, `${hostMarker}\n`, { mode: 0o600 });
   await fs.writeFile(hostSharedPath, `${sharedHostMarker}\n`, { mode: 0o600 });
+  await fs.writeFile(otherThreadSecretPath, "other-thread-secret\n", { mode: 0o600 });
 
   adminClient = await createOpenSandboxClient(config);
   manager = createManager(config);
@@ -86,6 +92,7 @@ try {
       `test \"$live_stdin\" = ${quoteShellToken(stdinMarker)}`,
       `test \"$(cat host-visible.txt)\" = ${quoteShellToken(hostMarker)}`,
       `test \"$(cat /data/shared/host-shared.txt)\" = ${quoteShellToken(sharedHostMarker)}`,
+      `test ! -e ${quoteShellToken(`/data/threads/${OTHER_THREAD_ID}`)}`,
       `printf '%s\\n' ${quoteShellToken(guestMarker)} > guest-visible.txt`,
       `printf '%s\\n' ${quoteShellToken(sharedGuestMarker)} > /data/shared/guest-shared.txt`,
       "printf 'execution-ok\\n'",
@@ -121,7 +128,7 @@ try {
 
   const initial = await waitForSingleSandbox({
     client: adminClient,
-    metadata: userSandboxMetadata(config, USER_ID),
+    metadata: threadSandboxMetadata(config, USER_ID, THREAD_ID),
     timeoutMs: STATE_WAIT_MS,
     expectedState: "Running",
   });
@@ -167,6 +174,7 @@ try {
   assertSuccess(exportWrite, "export source creation");
   await manager.exportFile({
     userId: USER_ID,
+    threadId: THREAD_ID,
     guestPath: `${guestWorkspace}/exported.txt`,
     hostDestination: exportDestination,
     maxBytes: 1024,
@@ -175,6 +183,7 @@ try {
   await expectRejected(
     manager.exportFile({
       userId: USER_ID,
+      threadId: THREAD_ID,
       guestPath: "/etc/passwd",
       hostDestination: path.join(outboxRunRoot, "unsafe-export"),
       maxBytes: 1024 * 1024,
@@ -214,6 +223,7 @@ try {
       "external pause detection and resume",
       "public HTTPS and blocked link-local metadata egress",
       "bidirectional workspace and shared host visibility",
+      "sibling thread mount is absent",
       "timeout interruption and reuse",
       "safe export and out-of-root rejection",
       "idle pause and resume",
@@ -236,7 +246,7 @@ if (manager) {
 }
 if (adminClient) {
   try {
-    const infos = await adminClient.list(userSandboxMetadata(config, USER_ID));
+    const infos = await adminClient.list(threadSandboxMetadata(config, USER_ID, THREAD_ID));
     for (const info of infos) knownSandboxIds.add(info.id);
   } catch (error) {
     cleanupErrors.push(toError(error));
@@ -270,15 +280,15 @@ if (cleanupErrors.length > 0) {
 }
 if (failure) throw failure;
 
-function createManager(liveConfig: AppConfig): UserOpenSandboxRuntimeManager {
-  return new UserOpenSandboxRuntimeManager({
+function createManager(liveConfig: AppConfig): ThreadOpenSandboxRuntimeManager {
+  return new ThreadOpenSandboxRuntimeManager({
     config: liveConfig,
     clientProvider: createOpenSandboxClientProvider(liveConfig),
   });
 }
 
 function execute(
-  runtime: UserOpenSandboxRuntimeManager,
+  runtime: ThreadOpenSandboxRuntimeManager,
   input: {
     script: string;
     stdin?: string;
@@ -290,6 +300,7 @@ function execute(
 ): Promise<SandboxCommandResult> {
   return runtime.execute({
     userId: USER_ID,
+    threadId: THREAD_ID,
     command: "bash",
     args: ["-c", input.script, "opensandbox-live-check"],
     env: input.env ?? { TZ: "UTC" },
@@ -308,7 +319,7 @@ async function assertSameSingleSandbox(
 ): Promise<void> {
   const info = await waitForSingleSandbox({
     client,
-    metadata: userSandboxMetadata(liveConfig, USER_ID),
+    metadata: threadSandboxMetadata(liveConfig, USER_ID, THREAD_ID),
     timeoutMs: STATE_WAIT_MS,
     expectedState: "Running",
   });

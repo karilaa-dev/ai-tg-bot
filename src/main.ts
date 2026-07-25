@@ -2,7 +2,7 @@ import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
 import { createOpenSandboxClientProvider } from "./opensandbox/client.js";
-import { UserOpenSandboxRuntimeManager } from "./opensandbox/userRuntimeManager.js";
+import { ThreadOpenSandboxRuntimeManager } from "./opensandbox/threadRuntimeManager.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
@@ -17,7 +17,7 @@ const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let sandboxRuntime: UserOpenSandboxRuntimeManager | undefined;
+let sandboxRuntime: ThreadOpenSandboxRuntimeManager | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
@@ -55,7 +55,7 @@ try {
     logger,
     legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
   });
-  sandboxRuntime = new UserOpenSandboxRuntimeManager({
+  sandboxRuntime = new ThreadOpenSandboxRuntimeManager({
     config,
     clientProvider: createOpenSandboxClientProvider(config),
     logger,

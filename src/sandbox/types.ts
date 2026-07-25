@@ -1,5 +1,6 @@
 export interface SandboxCommandRequest {
   userId: number;
+  threadId: number;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -22,6 +23,7 @@ export interface SandboxCommandResult {
 
 export interface SandboxFileExportRequest {
   userId: number;
+  threadId: number;
   guestPath: string;
   hostDestination: string;
   maxBytes: number;
@@ -29,7 +31,7 @@ export interface SandboxFileExportRequest {
 }
 
 export type SandboxCommandPreparation = Partial<
-  Omit<SandboxCommandRequest, "userId" | "signal">
+  Omit<SandboxCommandRequest, "userId" | "threadId" | "signal">
 >;
 
 export interface SandboxCommandLifecycle {
@@ -42,7 +44,7 @@ export interface SandboxActivityLease {
 }
 
 export interface CommandRuntime {
-  acquireActivityLease?(userId: number): SandboxActivityLease;
+  acquireActivityLease?(userId: number, threadId: number): SandboxActivityLease;
   execute(
     request: SandboxCommandRequest,
     lifecycle?: SandboxCommandLifecycle,
@@ -50,4 +52,3 @@ export interface CommandRuntime {
   exportFile(request: SandboxFileExportRequest): Promise<void>;
   dispose(): Promise<void>;
 }
-

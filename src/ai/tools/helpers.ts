@@ -135,6 +135,7 @@ async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string
   try {
     await input.commandRuntime.exportFile({
       userId: input.user.tg_id,
+      threadId: input.thread.id,
       guestPath: guestCreatedFilePath(input.thread.id, virtualPath),
       hostDestination: botPath,
       maxBytes: MAX_FILE_BYTES,

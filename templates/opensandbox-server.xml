@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/alibaba/OpenSandbox/issues</Support>
   <Project>https://github.com/alibaba/OpenSandbox</Project>
-  <Overview>Trusted OpenSandbox lifecycle service for ai-tg-bot. It owns Docker-socket access and creates persistent per-user runner containers; the bot itself remains unprivileged.</Overview>
+  <Overview>Trusted OpenSandbox lifecycle service for ai-tg-bot. It owns Docker-socket access and creates persistent per-user-and-thread runner containers; the bot itself remains unprivileged.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/opensandbox-server.xml</TemplateURL>

@@ -45,7 +45,12 @@ export interface OpenSandboxInfo {
 export interface OpenSandboxCreateSpec {
   image: string;
   metadata: Record<string, string>;
-  hostPath: string;
+  mounts: Array<{
+    name: string;
+    hostPath: string;
+    mountPath: string;
+    readOnly: boolean;
+  }>;
   cpu: string;
   memory: string;
   readyTimeoutMs: number;
@@ -152,12 +157,12 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       resource: { cpu: spec.cpu, memory: spec.memory },
       timeoutSeconds: Math.max(1, Math.ceil(spec.idleReleaseMs / 1000)),
       networkPolicy: PUBLIC_INTERNET_NETWORK_POLICY,
-      volumes: [{
-        name: "user-data",
-        host: { path: spec.hostPath },
-        mountPath: "/data",
-        readOnly: false,
-      }],
+      volumes: spec.mounts.map((mount) => ({
+        name: mount.name,
+        host: { path: mount.hostPath },
+        mountPath: mount.mountPath,
+        readOnly: mount.readOnly,
+      })),
       readyTimeoutSeconds: Math.max(1, Math.ceil(spec.readyTimeoutMs / 1000)),
     });
     return new SdkOpenSandboxConnection(sandbox);

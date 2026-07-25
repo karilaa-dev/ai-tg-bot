@@ -15,18 +15,20 @@ OpenSandbox lifecycle server (trusted Docker-socket service)
         |
         | Docker API
         v
-One persistent runner container per Telegram user
+One persistent runner container per active Telegram thread
         |
-        | host bind
+        | three scoped host binds
         v
-<shared-root>/users/<userId>  ->  /data
+<shared-root>/users/<userId>/threads/<threadId>/workspace    ->  /data/threads/<threadId>/workspace    (rw)
+<shared-root>/users/<userId>/threads/<threadId>/attachments  ->  /data/threads/<threadId>/attachments  (ro)
+<shared-root>/users/<userId>/shared                         ->  /data/shared                           (rw)
 ```
 
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`.
 - Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
-- OpenSandbox provides one persistent command environment per Telegram user. Commands are serialized for the same user while different users can execute concurrently.
-- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. Filesystem isolation is enforced at the per-Telegram-user sandbox and mount boundary; sibling threads share that boundary and are not mutually isolated mount namespaces.
-- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the user's environment. Idle environments pause after five minutes and expire after fifteen minutes by default. Bind-mounted `/data` survives expiration; container-layer state survives only while the same sandbox is retained.
+- OpenSandbox provides one persistent command environment per Telegram user-and-thread pair. Commands are serialized within that thread; different threads can execute concurrently in separate sandboxes.
+- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. A runner mounts only its current workspace, a read-only attachment-staging directory, and that user's shared directory, so sibling thread directories are absent from its mount namespace.
+- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the thread's environment. Idle environments pause after five minutes and expire after fifteen minutes by default. The mounted workspace and `/data/shared` survive expiration; container-layer state survives only while the same sandbox is retained.
 - Chat attachments are copied into an immutable per-call staging directory only when Pi passes their exact IDs. Canonical chat files live outside `users/` and are never mounted into a sandbox.
 - Online conversation, retrieval, web, image, and ingestion turns do not require OpenSandbox. If the service is unavailable, only sandbox-backed tools fail, and later calls retry initialization.
 
@@ -141,7 +143,7 @@ OPEN_SANDBOX_IDLE_PAUSE_MS=300000
 OPEN_SANDBOX_IDLE_RELEASE_MS=900000
 ```
 
-The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
+The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees. The layout-v2 rollout also removes obsolete whole-user sandboxes before creating scoped replacements.
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
@@ -233,7 +235,7 @@ OpenSandbox's default Docker runtime isolates workloads with Linux containers; i
 
 - The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
 - Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
-- Mount only `<shared-root>/users/<userId>` into each runner. This isolates Telegram users from one another and keeps canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets outside runner mounts. Threads belonging to that user share the same mount and container identity; logical workspace scoping and the sibling-thread prohibition are conventions, not a kernel security boundary.
+- Give each runner exactly three scoped binds: its workspace read-write at `/data/threads/<threadId>/workspace`, its attachment staging read-only at `/data/threads/<threadId>/attachments`, and its user-shared directory read-write at `/data/shared`. Sibling threads are not mounted. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets remain outside runner mounts.
 - Do not inject Telegram, OpenRouter, Tavily, Codex, or OpenSandbox credentials into runner commands.
 - The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark IPv4 ranges before allowing unmatched public traffic. IPv6 is disabled by the sidecar by default. The sidecar permits the sandbox's own loopback interface, so do not expose sensitive services there. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
 - No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.

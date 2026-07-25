@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/karilaa-dev/ai-tg-bot/issues</Support>
   <Project>https://github.com/karilaa-dev/ai-tg-bot</Project>
-  <Overview>Pi-powered Telegram agent using a separately operated local OpenSandbox server for persistent per-user command environments.</Overview>
+  <Overview>Pi-powered Telegram agent using a separately operated local OpenSandbox server for persistent per-user-and-thread command environments.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/ai-tg-bot.xml</TemplateURL>
@@ -39,11 +39,11 @@
   <Config Name="Pi Agent Directory" Target="PI_CODING_AGENT_DIR" Default="/app/data/pi" Description="Persistent Pi configuration, OAuth credentials, and thread sessions." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Legacy Bash Root" Target="BASH_WORKSPACE_ROOT" Default="/app/data/bash" Description="Pre-sandbox workspace source retained for migration and rollback." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Agent Shared Root" Target="AGENT_SHARED_ROOT" Default="/data" Description="Bot-container view of the shared filesystem." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Managed File Root" Target="MANAGED_FILE_ROOT" Default="/data/.chat-files" Description="Canonical chat-file store outside per-user sandbox mounts." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Managed File Root" Target="MANAGED_FILE_ROOT" Default="/data/.chat-files" Description="Canonical chat-file store outside scoped thread and shared sandbox mounts." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Docling URL" Target="DOCLING_URL" Default="" Description="Optional external Docling server." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
-  <Config Name="OpenSandbox Idle Pause" Target="OPEN_SANDBOX_IDLE_PAUSE_MS" Default="300000" Description="Pause a user's sandbox after this many idle milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="OpenSandbox Idle Release" Target="OPEN_SANDBOX_IDLE_RELEASE_MS" Default="900000" Description="Expire and release a user's sandbox after this many idle milliseconds. Must be greater than Idle Pause; bind-mounted /data survives." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OpenSandbox Idle Pause" Target="OPEN_SANDBOX_IDLE_PAUSE_MS" Default="300000" Description="Pause a thread sandbox after this many idle milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OpenSandbox Idle Release" Target="OPEN_SANDBOX_IDLE_RELEASE_MS" Default="900000" Description="Expire and release a thread sandbox after this many idle milliseconds. Must be greater than Idle Pause; mounted thread and shared files survive." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="OpenSandbox Ready Timeout" Target="OPEN_SANDBOX_READY_TIMEOUT_MS" Default="300000" Description="Maximum create/resume readiness time in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one sandbox command." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Bash Max Output" Target="BASH_MAX_OUTPUT_CHARS" Default="12000" Description="Maximum characters returned for each stdout or stderr stream." Type="Variable" Display="advanced" Required="false" Mask="false"/>

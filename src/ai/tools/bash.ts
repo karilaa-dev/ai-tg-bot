@@ -39,7 +39,7 @@ export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run a real Bash script in this user's persistent OpenSandbox environment. Omit cwd and use relative paths for normal work. Logical cwd / means this thread's workspace, not the Linux filesystem root; this mapping is expected and does not need investigation. Inside commands the physical workspace may appear under /data/threads/<thread-id>/workspace. Never pass the bot host path or probe /home/agent or /workspace to locate files. Do not inspect or modify sibling thread directories; use /data/shared only for files intentionally shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available in the configured runner image. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage immutable copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily, pauses after its idle timeout, and is released after its longer idle lifetime. Files under /data persist after release; container-layer state and packages installed elsewhere do not. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
+      "Run a real Bash script in this user-and-thread's persistent OpenSandbox environment. Omit cwd and use relative paths for normal work. Logical cwd / means this thread's workspace, not the Linux filesystem root; this mapping is expected and does not need investigation. Inside commands the physical workspace may appear under /data/threads/<thread-id>/workspace. Only the current workspace, read-only staged attachments, and /data/shared are mounted; sibling thread directories are inaccessible. Never pass the bot host path or probe /home/agent or /workspace to locate files. Use /data/shared only for files intentionally shared with the user's other threads. Python, Node.js, zip, git, curl, jq, SQLite, and common Linux tools are available in the configured runner image. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage read-only copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily, pauses after its idle timeout, and is released after its longer idle lifetime. The mounted current-workspace and shared files persist after release; container-layer state and packages installed elsewhere do not. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -96,6 +96,7 @@ async function runBashTool(
     if (!commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
     const result = await commandRuntime.execute({
       userId: user.tg_id,
+      threadId: thread.id,
       command: "bash",
       args: ["-c", command.script, "bash", ...command.args],
       env: { TZ: "UTC" },

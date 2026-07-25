@@ -4,7 +4,7 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
 import { createOpenSandboxClientProvider } from "../src/opensandbox/client.js";
-import { UserOpenSandboxRuntimeManager } from "../src/opensandbox/userRuntimeManager.js";
+import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
 import { legacyCodexAuthCandidates, migrateLegacyCodexAuth } from "../src/pi/authMigration.js";
 
@@ -13,7 +13,7 @@ const config = { ...baseConfig, DB_URL: "sqlite::memory:" };
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let commandRuntime: UserOpenSandboxRuntimeManager | undefined;
+let commandRuntime: ThreadOpenSandboxRuntimeManager | undefined;
 
 try {
   await db.migrate();
@@ -25,7 +25,7 @@ try {
     logger,
     legacyAuthPaths: legacyCodexAuthCandidates(config.PI_CODING_AGENT_DIR),
   });
-  commandRuntime = new UserOpenSandboxRuntimeManager({
+  commandRuntime = new ThreadOpenSandboxRuntimeManager({
     config,
     clientProvider: createOpenSandboxClientProvider(config),
     logger,
