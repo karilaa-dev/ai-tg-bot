@@ -52,6 +52,7 @@ type UserRuntimeState = {
   connection?: OpenSandboxConnection;
   active?: ActiveExecution;
   idleTimer?: NodeJS.Timeout;
+  idleReleaseRenewal?: { sandboxId: string; renewedAt: number };
   quarantined?: { sandboxId: string; error: Error };
 };
 
@@ -136,7 +137,9 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         if (released) return;
         released = true;
         state.activityLeases = Math.max(0, state.activityLeases - 1);
-        if (!this.shuttingDown) this.scheduleIdlePause(userId, state);
+        if (!this.shuttingDown && state.activityLeases === 0) {
+          this.queueIdleMaintenance(userId, state);
+        }
       },
     };
   }
@@ -438,6 +441,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       const info = await this.waitForStableState(client, state.sandboxId);
       state.remoteState = info.state;
       if (info.state === "Running") {
+        await this.renewIdleRelease(client, state, info.id);
         state.connection = await this.control(
           "connect to sandbox",
           client.connect(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
@@ -445,6 +449,7 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
         return state.connection;
       }
       if (info.state === "Paused") {
+        await this.renewIdleRelease(client, state, info.id);
         state.connection = await this.control(
           "resume sandbox",
           client.resume(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
@@ -558,8 +563,9 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
       if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
       return work(state);
     });
-    state.tail = run.then(() => undefined, () => undefined).finally(() => {
+    state.tail = run.then(() => undefined, () => undefined).finally(async () => {
       state.pending -= 1;
+      await this.tryRenewIdleRelease(userId, state);
       this.scheduleIdlePause(userId, state);
     });
     return run;
@@ -616,6 +622,44 @@ export class UserOpenSandboxRuntimeManager implements CommandRuntime {
     if (!state.idleTimer) return;
     clearTimeout(state.idleTimer);
     state.idleTimer = undefined;
+  }
+
+  private queueIdleMaintenance(userId: number, state: UserRuntimeState): void {
+    const maintenance = state.tail.then(async () => {
+      await this.tryRenewIdleRelease(userId, state);
+      this.scheduleIdlePause(userId, state);
+    });
+    state.tail = maintenance.then(() => undefined, () => undefined);
+  }
+
+  private async renewIdleRelease(
+    client: OpenSandboxClient,
+    state: UserRuntimeState,
+    sandboxId: string,
+  ): Promise<void> {
+    const renewedAt = Date.now();
+    if (state.idleReleaseRenewal?.sandboxId === sandboxId
+      && state.idleReleaseRenewal.renewedAt >= renewedAt) {
+      return;
+    }
+    await this.control(
+      "renew sandbox idle release",
+      client.renew(sandboxId, this.input.config.OPEN_SANDBOX_IDLE_RELEASE_MS),
+    );
+    state.idleReleaseRenewal = { sandboxId, renewedAt };
+  }
+
+  private async tryRenewIdleRelease(userId: number, state: UserRuntimeState): Promise<void> {
+    if (this.shuttingDown || state.quarantined || !state.sandboxId || !this.client) return;
+    try {
+      await this.renewIdleRelease(this.client, state, state.sandboxId);
+    } catch (error) {
+      this.input.logger?.warn("failed to renew OpenSandbox idle release", {
+        userId,
+        sandboxId: state.sandboxId,
+        error: formatSandboxError(error),
+      });
+    }
   }
 
   private control<T>(label: string, promise: Promise<T>, timeoutMs = this.input.config.OPEN_SANDBOX_CONTROL_TIMEOUT_MS): Promise<T> {

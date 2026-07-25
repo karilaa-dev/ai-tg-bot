@@ -49,6 +49,7 @@ export interface OpenSandboxCreateSpec {
   cpu: string;
   memory: string;
   readyTimeoutMs: number;
+  idleReleaseMs: number;
 }
 
 export interface OpenSandboxConnection {
@@ -75,6 +76,7 @@ export interface OpenSandboxClient {
   create(spec: OpenSandboxCreateSpec): Promise<OpenSandboxConnection>;
   connect(id: string, readyTimeoutMs: number): Promise<OpenSandboxConnection>;
   resume(id: string, readyTimeoutMs: number): Promise<OpenSandboxConnection>;
+  renew(id: string, idleReleaseMs: number): Promise<void>;
   pause(id: string): Promise<void>;
   kill(id: string): Promise<void>;
   close(): Promise<void>;
@@ -148,7 +150,7 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       metadata: spec.metadata,
       entrypoint: ["tail", "-f", "/dev/null"],
       resource: { cpu: spec.cpu, memory: spec.memory },
-      timeoutSeconds: null,
+      timeoutSeconds: Math.max(1, Math.ceil(spec.idleReleaseMs / 1000)),
       networkPolicy: PUBLIC_INTERNET_NETWORK_POLICY,
       volumes: [{
         name: "user-data",
@@ -175,6 +177,10 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       sandboxId: id,
       readyTimeoutSeconds: Math.max(1, Math.ceil(readyTimeoutMs / 1000)),
     }));
+  }
+
+  renew(id: string, idleReleaseMs: number): Promise<void> {
+    return this.manager.renewSandbox(id, Math.max(1, Math.ceil(idleReleaseMs / 1000)));
   }
 
   pause(id: string): Promise<void> {

@@ -30,6 +30,7 @@ describe("OpenSandbox provisioning spec", () => {
       hostPath: path.join("/mnt/shared", "users", "123"),
       cpu: "2",
       memory: "512Mi",
+      idleReleaseMs: 900_000,
     });
   });
 
@@ -47,6 +48,10 @@ describe("OpenSandbox provisioning spec", () => {
       loadTestConfig({
         OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
         OPEN_SANDBOX_GROUP: "runners",
+      }),
+      loadTestConfig({
+        OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
+        OPEN_SANDBOX_IDLE_RELEASE_MS: 1_200_000,
       }),
     ];
 

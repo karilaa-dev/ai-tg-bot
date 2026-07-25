@@ -74,7 +74,23 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await expect(manager.execute(command(2))).resolves.toMatchObject({ stdout: "ok\n", exitCode: 0 });
 
     expect(client.connectCalls).toEqual(["existing"]);
+    expect(client.renewCalls).toContainEqual(["existing", config.OPEN_SANDBOX_IDLE_RELEASE_MS]);
     expect(client.createCalls).toBe(0);
+    await manager.dispose();
+  });
+
+  it("creates sandboxes with a release TTL and renews it after activity", async () => {
+    const config = loadTestConfig({
+      OPEN_SANDBOX_IDLE_PAUSE_MS: 300_000,
+      OPEN_SANDBOX_IDLE_RELEASE_MS: 900_000,
+    });
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(200));
+    await vi.waitFor(() => expect(client.renewCalls).toContainEqual(["sandbox-1", 900_000]));
+
+    expect(client.createSpecs[0]?.idleReleaseMs).toBe(900_000);
     await manager.dispose();
   });
 
@@ -384,8 +400,10 @@ describe("UserOpenSandboxRuntimeManager", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(client.pauseCalls).toEqual([]);
 
+    const renewalsBeforeFinalRelease = client.renewCalls.length;
     second.release();
     await vi.advanceTimersByTimeAsync(999);
+    expect(client.renewCalls.length).toBeGreaterThan(renewalsBeforeFinalRelease);
     expect(client.pauseCalls).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(client.pauseCalls).toEqual([sandboxId]);
@@ -697,6 +715,8 @@ class FakeClient implements OpenSandboxClient {
   readonly resumeCalls: string[] = [];
   readonly connectCalls: string[] = [];
   readonly killCalls: string[] = [];
+  readonly renewCalls: Array<[string, number]> = [];
+  readonly createSpecs: OpenSandboxCreateSpec[] = [];
   createCalls = 0;
   closeCalls = 0;
   active = 0;
@@ -728,6 +748,7 @@ class FakeClient implements OpenSandboxClient {
 
   async create(spec: OpenSandboxCreateSpec): Promise<OpenSandboxConnection> {
     this.createCalls += 1;
+    this.createSpecs.push(spec);
     const id = `sandbox-${this.createCalls}`;
     this.infos.set(id, info(id, "Running", spec.metadata));
     return this.connection(id);
@@ -749,6 +770,11 @@ class FakeClient implements OpenSandboxClient {
     this.pauseCalls.push(id);
     const current = await this.getInfo(id);
     this.infos.set(id, { ...current, state: "Paused" });
+  }
+
+  async renew(id: string, idleReleaseMs: number): Promise<void> {
+    await this.getInfo(id);
+    this.renewCalls.push([id, idleReleaseMs]);
   }
 
   async kill(id: string): Promise<void> {

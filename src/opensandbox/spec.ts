@@ -50,6 +50,7 @@ export function openSandboxProvisioningFingerprint(config: AppConfig): string {
     uid: config.OPEN_SANDBOX_UID,
     gid: config.OPEN_SANDBOX_GID,
     sharedHostRoot: path.resolve(config.OPEN_SANDBOX_SHARED_HOST_ROOT),
+    idleReleaseMs: config.OPEN_SANDBOX_IDLE_RELEASE_MS,
     guestMount: "/data",
     network: "public-internet-v1",
     security: "opensandbox-secure-access-v1",
@@ -69,6 +70,7 @@ export function openSandboxCreateSpec(config: AppConfig, userId: number): OpenSa
     cpu: config.OPEN_SANDBOX_CPU,
     memory: config.OPEN_SANDBOX_MEMORY,
     readyTimeoutMs: config.OPEN_SANDBOX_READY_TIMEOUT_MS,
+    idleReleaseMs: config.OPEN_SANDBOX_IDLE_RELEASE_MS,
   };
 }
 

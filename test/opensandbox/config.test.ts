@@ -23,6 +23,8 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: "2000",
       OPEN_SANDBOX_GID: "2001",
+      OPEN_SANDBOX_IDLE_PAUSE_MS: "300000",
+      OPEN_SANDBOX_IDLE_RELEASE_MS: "900000",
     });
 
     expect(config).toMatchObject({
@@ -36,6 +38,8 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: 2000,
       OPEN_SANDBOX_GID: 2001,
+      OPEN_SANDBOX_IDLE_PAUSE_MS: 300_000,
+      OPEN_SANDBOX_IDLE_RELEASE_MS: 900_000,
     });
   });
 
@@ -80,5 +84,13 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_SHARED_HOST_ROOT: "/srv/shared",
       MANAGED_FILE_ROOT: "/srv/shared/users/42/.chat-files",
     })).toThrow("never mounted into a user sandbox");
+  });
+
+  it("requires idle release to happen after idle pause", () => {
+    expect(() => loadConfig({
+      ...required,
+      OPEN_SANDBOX_IDLE_PAUSE_MS: "300000",
+      OPEN_SANDBOX_IDLE_RELEASE_MS: "300000",
+    })).toThrow("must be greater than OPEN_SANDBOX_IDLE_PAUSE_MS");
   });
 });

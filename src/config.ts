@@ -63,7 +63,8 @@ const ConfigSchema = z.object({
   OPEN_SANDBOX_GROUP: z.string().trim().min(1).default("agent"),
   OPEN_SANDBOX_UID: z.coerce.number().int().min(1).max(MAX_LINUX_ID).default(1000),
   OPEN_SANDBOX_GID: z.coerce.number().int().min(1).max(MAX_LINUX_ID).default(1000),
-  OPEN_SANDBOX_IDLE_PAUSE_MS: z.coerce.number().int().positive().default(600_000),
+  OPEN_SANDBOX_IDLE_PAUSE_MS: z.coerce.number().int().positive().default(300_000),
+  OPEN_SANDBOX_IDLE_RELEASE_MS: z.coerce.number().int().positive().default(900_000),
   OPEN_SANDBOX_READY_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   OPEN_SANDBOX_CONTROL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   OPEN_SANDBOX_INTERRUPT_GRACE_MS: z.coerce.number().int().positive().default(5_000),
@@ -72,7 +73,9 @@ const ConfigSchema = z.object({
   DRAFT_UPDATE_MS: z.coerce.number().int().min(0).default(0),
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
-}).superRefine(validateStorageIsolation);
+})
+  .superRefine(validateStorageIsolation)
+  .superRefine(validateSandboxIdlePolicy);
 
 function normalizeOptionalUrl(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -92,6 +95,19 @@ function validateStorageIsolation(
       code: "custom",
       path: ["MANAGED_FILE_ROOT"],
       message: "must be outside AGENT_SHARED_ROOT/users so canonical chat files are never mounted into a user sandbox",
+    });
+  }
+}
+
+function validateSandboxIdlePolicy(
+  config: { OPEN_SANDBOX_IDLE_PAUSE_MS: number; OPEN_SANDBOX_IDLE_RELEASE_MS: number },
+  context: z.RefinementCtx,
+): void {
+  if (config.OPEN_SANDBOX_IDLE_RELEASE_MS <= config.OPEN_SANDBOX_IDLE_PAUSE_MS) {
+    context.addIssue({
+      code: "custom",
+      path: ["OPEN_SANDBOX_IDLE_RELEASE_MS"],
+      message: "must be greater than OPEN_SANDBOX_IDLE_PAUSE_MS",
     });
   }
 }

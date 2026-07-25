@@ -26,7 +26,7 @@ One persistent runner container per Telegram user
 - Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
 - OpenSandbox provides one persistent command environment per Telegram user. Commands are serialized for the same user while different users can execute concurrently.
 - Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. Filesystem isolation is enforced at the per-Telegram-user sandbox and mount boundary; sibling threads share that boundary and are not mutually isolated mount namespaces.
-- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the user's environment. Healthy idle environments are paused, not destroyed, so files and the retained container state survive pause/resume and bot restarts.
+- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the user's environment. Idle environments pause after five minutes and expire after fifteen minutes by default. Bind-mounted `/data` survives expiration; container-layer state survives only while the same sandbox is retained.
 - Chat attachments are copied into an immutable per-call staging directory only when Pi passes their exact IDs. Canonical chat files live outside `users/` and are never mounted into a sandbox.
 - Online conversation, retrieval, web, image, and ingestion turns do not require OpenSandbox. If the service is unavailable, only sandbox-backed tools fail, and later calls retry initialization.
 
@@ -137,10 +137,11 @@ OPEN_SANDBOX_USER=agent
 OPEN_SANDBOX_GROUP=agent
 OPEN_SANDBOX_UID=1000
 OPEN_SANDBOX_GID=1000
-OPEN_SANDBOX_IDLE_PAUSE_MS=600000
+OPEN_SANDBOX_IDLE_PAUSE_MS=300000
+OPEN_SANDBOX_IDLE_RELEASE_MS=900000
 ```
 
-The image reference, resources, username/group, UID/GID, shared root, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
+The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving each user's bind-mounted `/data` tree.
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
