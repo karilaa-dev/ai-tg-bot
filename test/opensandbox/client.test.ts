@@ -59,16 +59,22 @@ describe("OpenSandbox client provider", () => {
     expect(formatSandboxError(new Error("request failed"))).toBe("Error: request failed");
   });
 
-  it("denies non-public IPv4 ranges before allowing public traffic", () => {
+  it("denies non-public IPv4 and IPv6 ranges before allowing public traffic", () => {
     expect(PUBLIC_INTERNET_NETWORK_POLICY.defaultAction).toBe("allow");
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress).toEqual(expect.arrayContaining([
       { action: "deny", target: "10.0.0.0/8" },
       { action: "deny", target: "100.64.0.0/10" },
+      { action: "deny", target: "127.0.0.0/8" },
       { action: "deny", target: "169.254.0.0/16" },
       { action: "deny", target: "172.16.0.0/12" },
       { action: "deny", target: "192.168.0.0/16" },
       { action: "deny", target: "224.0.0.0/4" },
       { action: "deny", target: "240.0.0.0/4" },
+      { action: "deny", target: "::1/128" },
+      { action: "deny", target: "fc00::/7" },
+      { action: "deny", target: "fe80::/10" },
+      { action: "deny", target: "fec0::/10" },
+      { action: "deny", target: "ff00::/8" },
     ]));
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress?.every((rule) => rule.action === "deny")).toBe(true);
   });

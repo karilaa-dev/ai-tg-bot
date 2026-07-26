@@ -67,6 +67,35 @@ describe("SQLite schema initialization", () => {
       "is_inline", "created_at",
     ]);
   });
+
+  it("enables foreign keys and applies declared delete cascades", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+
+    await expect(database.db.query<{ foreign_keys: number }>(sql`pragma foreign_keys`))
+      .resolves.toEqual([{ foreign_keys: 1 }]);
+    await database.db.execute(sql`
+      insert into users(tg_id, first_name, lang, created_at)
+      values (7, 'Cascade', 'en', 1)
+    `);
+    await database.db.execute(sql`
+      insert into threads(id, user_id, title, created_at)
+      values (1, 7, 'Cascade', 1)
+    `);
+    await database.db.execute(sql`
+      insert into files(id, user_id, thread_id, type, name, size, is_inline, created_at)
+      values (1, 7, 1, 'txt', 'cascade.txt', 1, 0, 1)
+    `);
+    await database.db.execute(sql`
+      insert into file_sources(file_id, transport, connection_key, remote_key, locator_json, created_at)
+      values (1, 'test', 'default', 'cascade-source', '{}', 1)
+    `);
+
+    await database.db.execute(sql`delete from files where id = 1`);
+
+    await expect(database.db.query<{ count: number }>(sql`select count(*) as count from file_sources`))
+      .resolves.toEqual([{ count: 0 }]);
+  });
 });
 
 async function tableExists(database: AppDatabase, table: string): Promise<boolean> {

@@ -3,7 +3,10 @@ import type { SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
 
 export async function initializeSchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
-  if (dialect === "sqlite") await db.execute(sql`pragma journal_mode = wal`);
+  if (dialect === "sqlite") {
+    await db.execute(sql`pragma foreign_keys = on`);
+    await db.execute(sql`pragma journal_mode = wal`);
+  }
   await db.transaction(async (tx) => {
     if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
     if (dialect === "sqlite") await initializeSqlite(tx);

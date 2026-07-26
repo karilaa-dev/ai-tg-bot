@@ -13,15 +13,18 @@ import type { AppConfig } from "../config.js";
 
 export type OpenSandboxState = string;
 
-// The pinned opensandbox/egress:v1.1.4 sidecar supports IP/CIDR targets in
-// dns+nft mode despite stale FQDN-only comments in the lifecycle SDK schema.
-// Revalidate these rules before changing the egress image or enforcement mode.
+// The pinned opensandbox/egress:v1.1.4 sidecar supports IPv4/IPv6 CIDR targets
+// in dns+nft mode despite stale FQDN-only comments in the lifecycle SDK schema.
+// Its nftables rules exempt the loopback interface before consulting deny sets,
+// so loopback entries are defense in depth and must not be treated as overriding
+// that exemption. Revalidate before changing the image or enforcement mode.
 export const PUBLIC_INTERNET_NETWORK_POLICY: NetworkPolicy = {
   defaultAction: "allow",
   egress: [
     "0.0.0.0/8",
     "10.0.0.0/8",
     "100.64.0.0/10",
+    "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
     "192.0.0.0/24",
@@ -33,6 +36,24 @@ export const PUBLIC_INTERNET_NETWORK_POLICY: NetworkPolicy = {
     "203.0.113.0/24",
     "224.0.0.0/4",
     "240.0.0.0/4",
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "64:ff9b:1::/48",
+    "100::/64",
+    "100:0:0:1::/64",
+    "2001::/32",
+    "2001:2::/48",
+    "2001:10::/28",
+    "2001:20::/28",
+    "2001:db8::/32",
+    "2002::/16",
+    "3fff::/20",
+    "5f00::/16",
+    "fc00::/7",
+    "fe80::/10",
+    "fec0::/10",
+    "ff00::/8",
   ].map((target) => ({ action: "deny", target })),
 };
 
