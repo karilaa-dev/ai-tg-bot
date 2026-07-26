@@ -544,6 +544,46 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("periodically renews the release deadline while an activity lease is held", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const config = loadTestConfig({
+      OPEN_SANDBOX_IDLE_PAUSE_MS: 500,
+      OPEN_SANDBOX_IDLE_RELEASE_MS: 3000,
+    });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+
+    await manager.execute(command(303));
+    await vi.advanceTimersByTimeAsync(0);
+    const sandboxId = client.connections[0]!.id;
+    const renewalsBeforeLease = client.renewCalls.length;
+    const lease = manager.acquireActivityLease(303, 1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.renewCalls.length).toBeGreaterThan(renewalsBeforeLease);
+    expect(client.renewCalls.at(-1)).toEqual([sandboxId, 3000]);
+    const renewalsBeforeLeaseTimer = client.renewCalls.length;
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(client.renewCalls).toHaveLength(renewalsBeforeLeaseTimer);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.renewCalls.length).toBeGreaterThan(renewalsBeforeLeaseTimer);
+    expect(client.renewCalls.at(-1)).toEqual([sandboxId, 3000]);
+
+    const renewalsAfterFirstInterval = client.renewCalls.length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.renewCalls.length).toBeGreaterThan(renewalsAfterFirstInterval);
+    expect(client.pauseCalls).toEqual([]);
+
+    lease.release();
+    await vi.advanceTimersByTimeAsync(0);
+    const renewalsAfterRelease = client.renewCalls.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.pauseCalls).toEqual([sandboxId]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.renewCalls).toHaveLength(renewalsAfterRelease);
+    await manager.dispose();
+  });
+
   it("keeps activity leases isolated by thread", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
@@ -736,6 +776,49 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await expect(manager.execute(command(422))).resolves.toMatchObject({ exitCode: 0 });
     expect(client.createCalls).toBe(1);
     expect(client.killCalls).not.toContain(sandboxId);
+    await manager.dispose();
+  });
+
+  it("removes remote command files when stdin upload creates a file and then rejects", async () => {
+    const uploadError = new Error("stdin upload failed");
+    const client = new FakeClient({ writeError: uploadError });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute({ ...command(423), stdin: "partial input" })).rejects.toBe(uploadError);
+
+    const connection = client.connections[0]!;
+    expect(connection.writeEntries).toHaveLength(1);
+    expect(connection.remoteFiles).toEqual(new Set());
+    expect(connection.runCommands).toEqual([]);
+    expect(connection.deleteCalls).toHaveLength(1);
+    expect(connection.deleteCalls[0]).toEqual(expect.arrayContaining([
+      connection.writeEntries[0]!.path,
+      expect.stringMatching(/^\/tmp\/ai-tg-bot-stdout-/),
+      expect.stringMatching(/^\/tmp\/ai-tg-bot-stderr-/),
+    ]));
+    expect(client.killCalls).toEqual([]);
+    await manager.dispose();
+  });
+
+  it("removes remote command files when stdin upload times out", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient({ writeNeverSettles: true });
+    const manager = new UserOpenSandboxRuntimeManager({
+      config: loadTestConfig({ OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 100 }),
+      client,
+    });
+
+    const execution = expect(manager.execute({ ...command(424), stdin: "partial input" }))
+      .rejects.toThrow("write command stdin timed out after 100ms");
+    await vi.waitFor(() => expect(client.connections[0]?.remoteFiles.size).toBe(1));
+    await vi.advanceTimersByTimeAsync(100);
+    await execution;
+
+    const connection = client.connections[0]!;
+    expect(connection.remoteFiles).toEqual(new Set());
+    expect(connection.runCommands).toEqual([]);
+    expect(connection.deleteCalls).toHaveLength(1);
+    expect(connection.deleteCalls[0]).toHaveLength(3);
     await manager.dispose();
   });
 
@@ -1008,6 +1091,8 @@ type FakeOptions = {
   pauseNeverSettles?: boolean;
   runError?: Error;
   readBytesError?: Error;
+  writeError?: Error;
+  writeNeverSettles?: boolean;
   stdout: string[];
   stderr: string[];
 };
@@ -1114,6 +1199,7 @@ class FakeClient implements OpenSandboxClient {
 class FakeConnection implements OpenSandboxConnection {
   readonly interruptCalls: string[] = [];
   readonly writeEntries: WriteEntry[] = [];
+  readonly remoteFiles = new Set<string>();
   readonly deleteCalls: string[][] = [];
   readonly readBytesCalls: Array<{ path: string; options?: { range?: string; offset?: number; limit?: number } }> = [];
   readonly runCommands: string[] = [];
@@ -1206,6 +1292,9 @@ class FakeConnection implements OpenSandboxConnection {
 
   async writeFiles(entries: WriteEntry[]): Promise<void> {
     this.writeEntries.push(...entries);
+    for (const entry of entries) this.remoteFiles.add(entry.path);
+    if (this.options.writeError) throw this.options.writeError;
+    if (this.options.writeNeverSettles) await new Promise<void>(() => undefined);
   }
 
   async readBytes(
@@ -1226,6 +1315,7 @@ class FakeConnection implements OpenSandboxConnection {
 
   async deleteFiles(paths: string[]): Promise<void> {
     this.deleteCalls.push(paths);
+    for (const filePath of paths) this.remoteFiles.delete(filePath);
   }
   pause(): Promise<void> { return this.client.pause(this.id); }
   resume(): Promise<OpenSandboxConnection> { return this.client.resume(this.id); }

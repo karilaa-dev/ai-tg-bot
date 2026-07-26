@@ -58,6 +58,7 @@ type ThreadRuntimeState = {
   connection?: OpenSandboxConnection;
   active?: ActiveExecution;
   idleTimer?: NodeJS.Timeout;
+  activityRenewTimer?: NodeJS.Timeout;
   quarantined?: { sandboxId: string; error: Error };
   quarantinedConnection?: OpenSandboxConnection;
   shutdownInterruptPending?: boolean;
@@ -153,6 +154,9 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
     const state = this.stateFor(scope);
     this.clearIdleTimer(state);
     state.activityLeases += 1;
+    if (state.activityLeases === 1) {
+      this.queueActivityRenewal(scope, state);
+    }
     let released = false;
     return {
       release: () => {
@@ -160,6 +164,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         released = true;
         state.activityLeases = Math.max(0, state.activityLeases - 1);
         if (!this.shuttingDown && state.activityLeases === 0) {
+          this.clearActivityRenewTimer(state);
           this.queueIdleMaintenance(scope, state);
         }
       },
@@ -276,115 +281,119 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
     const stdinPath = `/tmp/ai-tg-bot-stdin-${commandId}`;
     const stdoutPath = `/tmp/ai-tg-bot-stdout-${commandId}`;
     const stderrPath = `/tmp/ai-tg-bot-stderr-${commandId}`;
-    await this.control("write command stdin", connection.writeFiles([{
-      path: stdinPath,
-      data: request.stdin,
-      // OpenSandbox encodes octal permission digits as a number; 0o600 would be sent as 384.
-      mode: 600,
-      owner: this.input.config.OPEN_SANDBOX_USER,
-      group: this.input.config.OPEN_SANDBOX_GROUP,
-    }]));
-
     const stdout: OutputCapture = { text: "", truncated: false };
     const stderr: OutputCapture = { text: "", truncated: false };
     const abortController = new AbortController();
     const active: ActiveExecution = { connection, abortController };
-    state.active = active;
-    const command = buildBoundedCommandCapture({
-      command: request.command,
-      args: request.args,
-      stdinPath,
-      stdoutPath,
-      stderrPath,
-      maxOutputChars: request.maxOutputChars,
-    });
-    const deadline = createDeadline(request.timeoutMs, request.signal);
-    const remoteTimeoutMs = Math.min(
-      Number.MAX_SAFE_INTEGER,
-      request.timeoutMs + this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS,
-    );
-    let remoteExecutionCompleted = false;
-    const completion = connection.run(command, {
-      workingDirectory: request.workingDir,
-      timeoutSeconds: Math.max(1, Math.ceil(remoteTimeoutMs / 1000)),
-      uid: this.input.config.OPEN_SANDBOX_UID,
-      gid: this.input.config.OPEN_SANDBOX_GID,
-      envs: request.env,
-    }, {
-      skipAccumulation: true,
-      onInit: (init) => {
-        active.executionId = init.id;
-      },
-      // Execd's SSE events are line-oriented and do not preserve whether a chunk ended
-      // with a newline. Keep them only as best-effort partial output; completed output
-      // is read verbatim from the redirected files below.
-      onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
-      onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
-    }, abortController.signal).then((result) => {
-      remoteExecutionCompleted = true;
-      return result;
-    });
+    let deadline: ReturnType<typeof createDeadline> | undefined;
 
     try {
-      const outcome = await Promise.race([
-        completion.then((result) => ({ kind: "completed" as const, result })),
-        deadline.promise,
-      ]);
-      if (outcome.kind === "completed") {
-        await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
+      await this.control("write command stdin", connection.writeFiles([{
+        path: stdinPath,
+        data: request.stdin,
+        // OpenSandbox encodes octal permission digits as a number; 0o600 would be sent as 384.
+        mode: 600,
+        owner: this.input.config.OPEN_SANDBOX_USER,
+        group: this.input.config.OPEN_SANDBOX_GROUP,
+      }]));
+
+      state.active = active;
+      const command = buildBoundedCommandCapture({
+        command: request.command,
+        args: request.args,
+        stdinPath,
+        stdoutPath,
+        stderrPath,
+        maxOutputChars: request.maxOutputChars,
+      });
+      deadline = createDeadline(request.timeoutMs, request.signal);
+      const remoteTimeoutMs = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        request.timeoutMs + this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS,
+      );
+      let remoteExecutionCompleted = false;
+      const completion = connection.run(command, {
+        workingDirectory: request.workingDir,
+        timeoutSeconds: Math.max(1, Math.ceil(remoteTimeoutMs / 1000)),
+        uid: this.input.config.OPEN_SANDBOX_UID,
+        gid: this.input.config.OPEN_SANDBOX_GID,
+        envs: request.env,
+      }, {
+        skipAccumulation: true,
+        onInit: (init) => {
+          active.executionId = init.id;
+        },
+        // Execd's SSE events are line-oriented and do not preserve whether a chunk ended
+        // with a newline. Keep them only as best-effort partial output; completed output
+        // is read verbatim from the redirected files below.
+        onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
+        onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
+      }, abortController.signal).then((result) => {
+        remoteExecutionCompleted = true;
+        return result;
+      });
+
+      try {
+        const outcome = await Promise.race([
+          completion.then((result) => ({ kind: "completed" as const, result })),
+          deadline.promise,
+        ]);
+        if (outcome.kind === "completed") {
+          await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
+          return {
+            stdout: stdout.text,
+            stderr: stderr.text,
+            exitCode: outcome.result.exitCode ?? null,
+            timedOut: false,
+            stdoutTruncated: stdout.truncated,
+            stderrTruncated: stderr.truncated,
+            ...(outcome.result.error
+              ? { error: `${outcome.result.error.name}: ${outcome.result.error.value}` }
+              : {}),
+          };
+        }
+
+        const termination = await this.interruptExecution(state, active, completion, scope);
+        if (!termination.confirmed) {
+          this.quarantineConnection(
+            state,
+            connection,
+            new Error(`OpenSandbox command termination is uncertain: ${termination.error}`),
+          );
+        }
+        if (outcome.kind === "aborted") throw outcome.reason;
+        if (termination.confirmed) {
+          try {
+            await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
+          } catch (error) {
+            this.input.logger?.warn("OpenSandbox interrupted output capture failed", {
+              userId: request.userId,
+              threadId: request.threadId,
+              error: formatSandboxError(error),
+            });
+          }
+        }
         return {
           stdout: stdout.text,
           stderr: stderr.text,
-          exitCode: outcome.result.exitCode ?? null,
-          timedOut: false,
+          exitCode: null,
+          timedOut: true,
           stdoutTruncated: stdout.truncated,
           stderrTruncated: stderr.truncated,
-          ...(outcome.result.error
-            ? { error: `${outcome.result.error.name}: ${outcome.result.error.value}` }
-            : {}),
+          error: `timed out after ${request.timeoutMs}ms`,
         };
-      }
-
-      const termination = await this.interruptExecution(state, active, completion, scope);
-      if (!termination.confirmed) {
-        this.quarantineConnection(
-          state,
-          connection,
-          new Error(`OpenSandbox command termination is uncertain: ${termination.error}`),
-        );
-      }
-      if (outcome.kind === "aborted") throw outcome.reason;
-      if (termination.confirmed) {
-        try {
-          await this.readCommandOutput(connection, stdoutPath, stderrPath, request, stdout, stderr);
-        } catch (error) {
-          this.input.logger?.warn("OpenSandbox interrupted output capture failed", {
-            userId: request.userId,
-            threadId: request.threadId,
-            error: formatSandboxError(error),
-          });
+      } catch (error) {
+        if (!isAbortError(error) && active.executionId && !remoteExecutionCompleted) {
+          this.quarantineConnection(
+            state,
+            connection,
+            new Error(`OpenSandbox execution failed after remote start: ${formatSandboxError(error)}`),
+          );
         }
+        throw error;
       }
-      return {
-        stdout: stdout.text,
-        stderr: stderr.text,
-        exitCode: null,
-        timedOut: true,
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated,
-        error: `timed out after ${request.timeoutMs}ms`,
-      };
-    } catch (error) {
-      if (!isAbortError(error) && active.executionId && !remoteExecutionCompleted) {
-        this.quarantineConnection(
-          state,
-          connection,
-          new Error(`OpenSandbox execution failed after remote start: ${formatSandboxError(error)}`),
-        );
-      }
-      throw error;
     } finally {
-      deadline.cancel();
+      deadline?.cancel();
       if (state.active === active) state.active = undefined;
       abortController.abort();
       const quarantined = state.quarantined?.sandboxId === connection.id;
@@ -645,6 +654,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
     state.shutdownInterruptPending = false;
     state.connection = undefined;
     state.sandboxId = connection.id;
+    this.clearActivityRenewTimer(state);
   }
 
   private enqueue<T>(
@@ -665,6 +675,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       state.pending -= 1;
       await this.tryRenewIdleRelease(scope, state);
       this.scheduleIdlePause(scope, state);
+      this.scheduleActivityRenewal(scope, state);
     });
     return run;
   }
@@ -724,6 +735,48 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
     state.idleTimer = undefined;
   }
 
+  private scheduleActivityRenewal(scope: SandboxScope, state: ThreadRuntimeState): void {
+    if (this.shuttingDown
+      || state.activityLeases === 0
+      || state.activityRenewTimer
+      || state.quarantined
+      || !state.sandboxId
+      || !this.client) return;
+    const renewalDelayMs = Math.max(
+      1,
+      Math.floor(this.input.config.OPEN_SANDBOX_IDLE_RELEASE_MS / 3),
+    );
+    state.activityRenewTimer = setTimeout(() => {
+      state.activityRenewTimer = undefined;
+      this.queueActivityRenewal(scope, state);
+    }, renewalDelayMs);
+  }
+
+  private queueActivityRenewal(scope: SandboxScope, state: ThreadRuntimeState): void {
+    if (this.shuttingDown
+      || state.activityLeases === 0
+      || state.quarantined
+      || !state.sandboxId
+      || !this.client) return;
+    const renewal = state.tail.then(async () => {
+      if (this.shuttingDown
+        || state.activityLeases === 0
+        || state.quarantined
+        || !state.sandboxId
+        || !this.client) return;
+      await this.tryRenewIdleRelease(scope, state);
+    });
+    state.tail = renewal.then(() => undefined, () => undefined).finally(() => {
+      this.scheduleActivityRenewal(scope, state);
+    });
+  }
+
+  private clearActivityRenewTimer(state: ThreadRuntimeState): void {
+    if (!state.activityRenewTimer) return;
+    clearTimeout(state.activityRenewTimer);
+    state.activityRenewTimer = undefined;
+  }
+
   private queueIdleMaintenance(scope: SandboxScope, state: ThreadRuntimeState): void {
     const maintenance = state.tail.then(async () => {
       await this.tryRenewIdleRelease(scope, state);
@@ -773,7 +826,10 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
   private async disposeInternal(): Promise<void> {
     this.shuttingDown = true;
     const states = [...this.states.values()];
-    for (const state of states) this.clearIdleTimer(state);
+    for (const state of states) {
+      this.clearIdleTimer(state);
+      this.clearActivityRenewTimer(state);
+    }
     const errors: unknown[] = [];
     const deadline = Date.now() + SHUTDOWN_DEADLINE_MS;
     const collectControlError = async (
