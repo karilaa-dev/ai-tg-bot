@@ -3,6 +3,7 @@ import {
   Sandbox,
   SandboxManager,
   type ExecutionHandlers,
+  type ListSandboxesResponse,
   type NetworkPolicy,
   type RunCommandOpts,
   type SandboxInfo,
@@ -89,6 +90,9 @@ export interface OpenSandboxClient {
 
 export type OpenSandboxClientProvider = () => Promise<OpenSandboxClient>;
 
+const SANDBOX_LIST_PAGE_SIZE = 100;
+const MAX_SANDBOX_LIST_PAGES = 1_000;
+
 export function createOpenSandboxClientProvider(config: AppConfig): OpenSandboxClientProvider {
   return createRetryableOpenSandboxClientProvider(() => createOpenSandboxClient(config));
 }
@@ -96,18 +100,17 @@ export function createOpenSandboxClientProvider(config: AppConfig): OpenSandboxC
 export function createRetryableOpenSandboxClientProvider(
   factory: () => Promise<OpenSandboxClient>,
 ): OpenSandboxClientProvider {
-  let client: OpenSandboxClient | undefined;
+  // Share concurrent factory work only. The runtime owns the returned client
+  // and closes it if later reconciliation fails, so a subsequent attempt must
+  // receive a fresh transport instead of the previously resolved client.
   let pending: Promise<OpenSandboxClient> | undefined;
-  return async () => {
-    if (client) return client;
+  return () => {
     pending ??= factory();
     const initialization = pending;
-    try {
-      client = await initialization;
-      return client;
-    } finally {
+    void initialization.finally(() => {
       if (pending === initialization) pending = undefined;
-    }
+    }).catch(() => undefined);
+    return initialization;
   };
 }
 
@@ -135,13 +138,17 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
 
   async list(metadata: Record<string, string>): Promise<OpenSandboxInfo[]> {
     const items: OpenSandboxInfo[] = [];
-    let page = 1;
-    while (true) {
-      const response = await this.manager.listSandboxInfos({ metadata, page, pageSize: 100 });
+    for (let page = 1; page <= MAX_SANDBOX_LIST_PAGES; page += 1) {
+      const response = await this.manager.listSandboxInfos({
+        metadata,
+        page,
+        pageSize: SANDBOX_LIST_PAGE_SIZE,
+      });
+      const hasNextPage = assertConsistentPagination(response, page);
       items.push(...response.items.map(toOpenSandboxInfo));
-      if (!response.pagination?.hasNextPage) return items;
-      page += 1;
+      if (!hasNextPage) return items;
     }
+    throw new Error(`OpenSandbox sandbox listing exceeded ${MAX_SANDBOX_LIST_PAGES} pages.`);
   }
 
   async getInfo(id: string): Promise<OpenSandboxInfo> {
@@ -200,6 +207,35 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
     await this.manager.close();
     await this.connectionConfig.closeTransport();
   }
+}
+
+function assertConsistentPagination(
+  response: ListSandboxesResponse,
+  requestedPage: number,
+): boolean {
+  const pagination = response.pagination;
+  if (!pagination) {
+    throw new Error(
+      `OpenSandbox returned inconsistent sandbox pagination for requested page ${requestedPage}.`,
+    );
+  }
+  const emptyPageSet = pagination.totalPages === 0
+    && requestedPage === 1
+    && pagination.hasNextPage === false;
+  const expectedHasNextPage = requestedPage < pagination.totalPages;
+  if (
+    !Number.isSafeInteger(pagination.page)
+    || pagination.page !== requestedPage
+    || !Number.isSafeInteger(pagination.totalPages)
+    || pagination.totalPages < 0
+    || (!emptyPageSet && pagination.totalPages < requestedPage)
+    || pagination.hasNextPage !== expectedHasNextPage
+  ) {
+    throw new Error(
+      `OpenSandbox returned inconsistent sandbox pagination for requested page ${requestedPage}.`,
+    );
+  }
+  return pagination.hasNextPage;
 }
 
 class SdkOpenSandboxConnection implements OpenSandboxConnection {

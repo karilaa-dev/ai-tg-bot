@@ -17,7 +17,7 @@ Pi host filesystem tools are disabled. Project-scoped Pi tools expose just-bash,
 
 ## Images
 
-The project-owned `generate_image` Pi extension supports one image, generate/edit/auto mode, PNG/JPEG/WebP output, caption, and up to five current-thread Telegram references. Codex uses hosted Responses image generation; OpenRouter uses its image API. Image bytes are transient and never enter Pi JSONL or persistent disk storage.
+The project-owned `generate_image` Pi extension supports one image, generate/edit/auto mode, PNG/JPEG/WebP output, caption, and up to five current-thread Telegram references. Codex uses hosted Responses image generation; OpenRouter uses its image API. Generated originals are persisted in managed file storage and delivered immediately; Pi JSONL and database rows retain metadata and references, not raw bytes or base64.
 
 ## Persistence
 
@@ -27,7 +27,7 @@ Pi JSONL is conversation-authoritative. Database messages retain Telegram/search
 
 - Provider routing/circuit behavior, including missing Codex, quota fallback, non-fallback errors, aborts, and partial output.
 - Session persistence/reopen, context sizing, compaction, entry mapping, branching, cancellation, and tool continuation.
-- Telegram-backed image references, Codex/OpenRouter parity, fallback, delivery/reuse, and no persisted bytes.
+- Telegram-backed image references, Codex/OpenRouter parity, fallback, delivery/reuse, durable generated originals, and no raw image bytes in Pi JSONL or database rows.
 - FTS-only message retrieval plus hybrid file-chunk retrieval with fork scoping and no summary/auto-RAG path.
 - SQLite schema idempotency and optional PostgreSQL schema initialization.
 - Typecheck, unit/integration suite, build, and optional live provider/Telegram smoke checks.

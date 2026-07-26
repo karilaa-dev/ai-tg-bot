@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
@@ -170,20 +171,27 @@ async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string
 }
 
 async function readExportedFile(filePath: string, virtualPath: string): Promise<Buffer> {
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  let handle: Awaited<ReturnType<typeof fs.open>>;
   try {
-    stat = await fs.lstat(filePath);
+    handle = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") {
       throw new Error(`file not found: ${virtualPath}`);
     }
+    if (code === "ELOOP") throw new Error("path is not a regular file");
     throw new Error(`cannot inspect exported file ${virtualPath}: ${String(error)}`);
   }
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("path is not a regular file");
-  if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-  const bytes = await fs.readFile(filePath);
-  if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-  return bytes;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("path is not a regular file");
+    if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+    const bytes = await handle.readFile();
+    if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 function createdFileDeliveryFor(

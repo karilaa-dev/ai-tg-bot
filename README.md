@@ -168,15 +168,10 @@ docker compose up --build -d
 ```
 
 - `docker-compose.opensandbox.yml` mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, and mounts the shared folder under the identical absolute host path.
-- `docker-compose.yml` mounts that folder at `/data` in the bot and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
+- `docker-compose.yml` runs the bot with PostgreSQL, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
 - Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
 - The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
-
-PostgreSQL is available through the Compose override:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build -d
-```
+- PostgreSQL is available only to the bot on an internal Compose network and is not published on a host port. Set `POSTGRES_PASSWORD` in `.env` to a long random value; the container entrypoint safely URL-encodes it when constructing `DB_URL`.
 
 ## Unraid deployment
 

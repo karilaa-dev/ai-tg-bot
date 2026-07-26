@@ -2,7 +2,7 @@
 set -euo pipefail
 
 required_commands=(
-  bash sh tail ls cp mv rm mkdir find grep sed awk tar gzip bzip2 xz
+  bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp tar gzip bzip2 xz
   zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip patch zstd
   python python3 pip3 node npm
 )

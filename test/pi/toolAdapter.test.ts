@@ -132,6 +132,32 @@ describe("Pi safe tool adapters", () => {
     }
   });
 
+  it("rejects a symlinked exported file instead of following it", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-export-link-"));
+    const config = testConfig(tempDir);
+    db = createDatabase(config);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9906, firstName: "Symlink", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Symlink" });
+    const outside = path.join(tempDir, "outside.txt");
+    await fs.writeFile(outside, "secret");
+    const runtime = new FakeRuntime(undefined, async (request) => {
+      await fs.symlink(outside, request.hostDestination);
+    });
+    const createFile = createPiToolAdapters({
+      buildInput: () => ({ config, db: db!, repos, user, thread, commandRuntime: runtime }),
+    }).find((tool) => tool.name === "create_file")!;
+
+    const result = await createFile.execute("file-link", {
+      path: "/created.txt",
+      delivery: "document",
+    }, undefined, undefined, {} as never);
+
+    expect(result.details).toEqual({ error: "Error: path is not a regular file" });
+    await expect(fs.readFile(outside, "utf8")).resolves.toBe("secret");
+  });
+
   it("stages only requested scoped attachments for the live adapter call", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-input-"));
     const config = testConfig(tempDir);

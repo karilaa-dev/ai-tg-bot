@@ -292,6 +292,7 @@ export class PiRuntimeManager implements PiRuntimeService {
         .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt);
       const victim = candidates[0];
       if (!victim) return;
+      victim[1].bridge.endTurn();
       victim[1].session.dispose();
       this.runtimes.delete(victim[0]);
     }

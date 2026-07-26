@@ -825,6 +825,44 @@ describe("PiRuntimeManager", () => {
     expect(sessionText).toContain('"type":"compaction"');
     await manager.dispose();
   }, 20_000);
+
+  it("releases a held sandbox activity lease when an idle runtime is evicted", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-eviction-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9134, firstName: "EvictionTest", lang: "en" });
+    const commandRuntime = new TrackingCommandRuntime();
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime,
+      providerStreams: echoStreams(),
+    });
+    const firstThread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "First" });
+    const firstRuntime = await manager.runtime(firstThread, user);
+    firstRuntime.lastUsedAt = 0;
+    firstRuntime.bridge.holdCommandActivity();
+    expect(commandRuntime.activeLeases).toBe(1);
+
+    for (let index = 1; index <= 32; index += 1) {
+      const thread = await repos.threads.create({
+        userId: user.tg_id,
+        topicId: index,
+        title: `Runtime ${index}`,
+      });
+      await manager.runtime(thread, user);
+    }
+
+    expect(commandRuntime.activeLeases).toBe(0);
+    expect(commandRuntime.releaseCount).toBe(1);
+    await manager.dispose();
+    expect(commandRuntime.releaseCount).toBe(1);
+  }, 20_000);
 });
 
 function echoStreams(onContext?: (context: Context) => void): PiProviderStreamOverrides {
@@ -935,4 +973,26 @@ class StubCommandRuntime implements CommandRuntime {
 
   async reconcile(): Promise<void> {}
   async dispose(): Promise<void> {}
+}
+
+class TrackingCommandRuntime extends StubCommandRuntime {
+  activeLeases = 0;
+  releaseCount = 0;
+
+  constructor() {
+    super("");
+  }
+
+  acquireActivityLease() {
+    this.activeLeases += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activeLeases -= 1;
+        this.releaseCount += 1;
+      },
+    };
+  }
 }

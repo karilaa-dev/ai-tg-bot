@@ -9,6 +9,15 @@ valid_id() {
     printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)$'
 }
 
+configure_postgres_url() {
+    if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+        return
+    fi
+    encoded_password=$(node -e 'process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))')
+    DB_URL="postgres://aibot:${encoded_password}@postgres:5432/aibot"
+    export DB_URL
+}
+
 prepare_directories() {
     mkdir -p "${APP_DATA_ROOT}" "${AGENT_SHARED_ROOT}"
     ownership_marker="${AGENT_SHARED_ROOT}/.ai-tg-bot-owner"
@@ -63,5 +72,6 @@ if [ "$#" -eq 0 ]; then
     set -- node dist/src/main.js
 fi
 
+configure_postgres_url
 prepare_directories
 run_as_application_user "$@"

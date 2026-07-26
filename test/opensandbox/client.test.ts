@@ -1,25 +1,58 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const sdkMocks = vi.hoisted(() => ({
+  listSandboxInfos: vi.fn(),
+}));
+
+vi.mock("@alibaba-group/opensandbox", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@alibaba-group/opensandbox")>();
+  return {
+    ...actual,
+    SandboxManager: {
+      create: vi.fn(() => ({
+        listSandboxInfos: sdkMocks.listSandboxInfos,
+      })),
+    },
+  };
+});
+
 import {
+  createOpenSandboxClient,
   createRetryableOpenSandboxClientProvider,
   formatSandboxError,
   PUBLIC_INTERNET_NETWORK_POLICY,
   type OpenSandboxClient,
 } from "../../src/opensandbox/client.js";
 
+const clientConfig = {
+  OPEN_SANDBOX_DOMAIN: "localhost:8080",
+  OPEN_SANDBOX_PROTOCOL: "http",
+  OPEN_SANDBOX_API_KEY: "",
+  OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 1_000,
+  OPEN_SANDBOX_USE_SERVER_PROXY: false,
+} as unknown as Parameters<typeof createOpenSandboxClient>[0];
+
 describe("OpenSandbox client provider", () => {
-  it("shares successful initialization and retries after failure", async () => {
-    const client = {} as OpenSandboxClient;
+  beforeEach(() => {
+    sdkMocks.listSandboxInfos.mockReset();
+  });
+
+  it("shares only in-flight initialization and retries with a fresh client afterward", async () => {
+    const firstClient = {} as OpenSandboxClient;
+    const secondClient = {} as OpenSandboxClient;
     const factory = vi.fn()
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValue(client);
+      .mockResolvedValueOnce(firstClient)
+      .mockResolvedValueOnce(secondClient);
     const provider = createRetryableOpenSandboxClientProvider(factory);
 
     await expect(provider()).rejects.toThrow("offline");
     const [first, second] = await Promise.all([provider(), provider()]);
 
-    expect(first).toBe(client);
-    expect(second).toBe(client);
-    expect(factory).toHaveBeenCalledTimes(2);
+    expect(first).toBe(firstClient);
+    expect(second).toBe(firstClient);
+    await expect(provider()).resolves.toBe(secondClient);
+    expect(factory).toHaveBeenCalledTimes(3);
   });
 
   it("formats SDK and transport failures without exposing special handling", () => {
@@ -39,4 +72,101 @@ describe("OpenSandbox client provider", () => {
     ]));
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress?.every((rule) => rule.action === "deny")).toBe(true);
   });
+
+  it("lists all reported sandbox pages", async () => {
+    sdkMocks.listSandboxInfos
+      .mockResolvedValueOnce({
+        items: [sandboxInfo("sandbox-1")],
+        pagination: { page: 1, pageSize: 100, totalItems: 2, totalPages: 2, hasNextPage: true },
+      })
+      .mockResolvedValueOnce({
+        items: [sandboxInfo("sandbox-2")],
+        pagination: { page: 2, pageSize: 100, totalItems: 2, totalPages: 2, hasNextPage: false },
+      });
+
+    const client = await createOpenSandboxClient(clientConfig);
+
+    await expect(client.list({ owner: "telegram" })).resolves.toEqual([
+      expect.objectContaining({ id: "sandbox-1" }),
+      expect.objectContaining({ id: "sandbox-2" }),
+    ]);
+    expect(sdkMocks.listSandboxInfos).toHaveBeenNthCalledWith(
+      1,
+      { metadata: { owner: "telegram" }, page: 1, pageSize: 100 },
+    );
+    expect(sdkMocks.listSandboxInfos).toHaveBeenNthCalledWith(
+      2,
+      { metadata: { owner: "telegram" }, page: 2, pageSize: 100 },
+    );
+  });
+
+  it("rejects a response without required pagination metadata", async () => {
+    sdkMocks.listSandboxInfos.mockResolvedValue({
+      items: [sandboxInfo("sandbox-1")],
+    });
+    const client = await createOpenSandboxClient(clientConfig);
+
+    await expect(client.list({ owner: "telegram" })).rejects.toThrow(
+      "inconsistent sandbox pagination for requested page 1",
+    );
+  });
+
+  it("rejects a repeated pagination page instead of listing forever", async () => {
+    sdkMocks.listSandboxInfos.mockResolvedValue({
+      items: [],
+      pagination: { page: 1, pageSize: 100, totalItems: 2, totalPages: 2, hasNextPage: true },
+    });
+    const client = await createOpenSandboxClient(clientConfig);
+
+    await expect(client.list({ owner: "telegram" })).rejects.toThrow(
+      "inconsistent sandbox pagination for requested page 2",
+    );
+    expect(sdkMocks.listSandboxInfos).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates and rejects a repeated terminal pagination page", async () => {
+    sdkMocks.listSandboxInfos
+      .mockResolvedValueOnce({
+        items: [sandboxInfo("sandbox-1")],
+        pagination: { page: 1, pageSize: 100, totalItems: 2, totalPages: 2, hasNextPage: true },
+      })
+      .mockResolvedValueOnce({
+        items: [sandboxInfo("sandbox-1")],
+        pagination: { page: 1, pageSize: 100, totalItems: 1, totalPages: 1, hasNextPage: false },
+      });
+    const client = await createOpenSandboxClient(clientConfig);
+
+    await expect(client.list({ owner: "telegram" })).rejects.toThrow(
+      "inconsistent sandbox pagination for requested page 2",
+    );
+    expect(sdkMocks.listSandboxInfos).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds pagination even when the server keeps extending the page count", async () => {
+    sdkMocks.listSandboxInfos.mockImplementation(async ({ page }: { page: number }) => ({
+      items: [],
+      pagination: {
+        page,
+        pageSize: 100,
+        totalItems: page + 1,
+        totalPages: page + 1,
+        hasNextPage: true,
+      },
+    }));
+    const client = await createOpenSandboxClient(clientConfig);
+
+    await expect(client.list({ owner: "telegram" })).rejects.toThrow(
+      "sandbox listing exceeded 1000 pages",
+    );
+    expect(sdkMocks.listSandboxInfos).toHaveBeenCalledTimes(1_000);
+  });
 });
+
+function sandboxInfo(id: string) {
+  return {
+    id,
+    status: { state: "Running" },
+    metadata: {},
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
+}

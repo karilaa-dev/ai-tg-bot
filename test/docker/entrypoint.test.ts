@@ -40,6 +40,17 @@ describe("container entrypoint", () => {
     await expect(fs.stat(env.AGENT_SHARED_ROOT!)).resolves.toMatchObject({});
   });
 
+  it("URL-encodes the PostgreSQL password when constructing DB_URL", async () => {
+    const result = await runEntrypoint(
+      { ...env, POSTGRES_PASSWORD: "complex:/?#[]@!$&'()*+,;=% password" },
+      "printf '%s' \"$DB_URL\"",
+    );
+
+    expect(result.stdout).toBe(
+      "postgres://aibot:complex%3A%2F%3F%23%5B%5D%40!%24%26'()*%2B%2C%3B%3D%25%20password@postgres:5432/aibot",
+    );
+  });
+
   it.skipIf((process.getuid?.() ?? 1) !== 0)(
     "drops identity and capabilities through setpriv when started as root",
     async () => {
@@ -83,11 +94,14 @@ describe("container entrypoint", () => {
   });
 });
 
-function runEntrypoint(environment: NodeJS.ProcessEnv) {
+function runEntrypoint(
+  environment: NodeJS.ProcessEnv,
+  command = "printf '{\"uid\":%s}' \"$(id -u)\"",
+) {
   return execFileAsync("/bin/sh", [
     entrypoint,
     "/bin/sh",
     "-c",
-    "printf '{\"uid\":%s}' \"$(id -u)\"",
+    command,
   ], { env: environment });
 }

@@ -6,7 +6,7 @@ services:
       - .env
     environment:
       NODE_ENV: production
-      DB_URL: sqlite:/app/data/bot.db
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
       AGENT_SHARED_ROOT: /data
       MANAGED_FILE_ROOT: /data/.chat-files
       OPEN_SANDBOX_DOMAIN: ${OPEN_SANDBOX_DOMAIN:-opensandbox-server:8080}
@@ -30,15 +30,41 @@ services:
         bind:
           create_host_path: false
       - pi-home:/app/data/pi
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - opensandbox
+      - database
     stop_grace_period: 60s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: aibot
+      POSTGRES_USER: aibot
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
 volumes:
   bot-data:
   pi-home:
+  pg-data:
 
 networks:
   opensandbox:
     name: ${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}
+    external: true
+  database:
+    internal: true

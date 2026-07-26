@@ -11,6 +11,7 @@ import type {
   OpenSandboxCreateSpec,
   OpenSandboxInfo,
 } from "../../src/opensandbox/client.js";
+import { createRetryableOpenSandboxClientProvider } from "../../src/opensandbox/client.js";
 import {
   METADATA_FINGERPRINT,
   METADATA_THREAD_ID,
@@ -67,6 +68,53 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("closes a provider-created client when reconciliation fails before retrying", async () => {
+    const failed = new FakeClient({ listError: new Error("list unavailable") });
+    const healthy = new FakeClient();
+    const factory = vi.fn()
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(healthy);
+    const provider = createRetryableOpenSandboxClientProvider(factory);
+    const manager = new UserOpenSandboxRuntimeManager({
+      config: loadTestConfig(),
+      clientProvider: provider,
+    });
+
+    await expect(manager.execute(command(101))).rejects.toThrow("list unavailable");
+    expect(failed.closeCalls).toBe(1);
+
+    await expect(manager.execute(command(101))).resolves.toMatchObject({ exitCode: 0 });
+    await manager.dispose();
+
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(failed.closeCalls).toBe(1);
+    expect(healthy.closeCalls).toBe(1);
+  });
+
+  it("preserves initialization and client-close failures together", async () => {
+    const listError = new Error("list unavailable");
+    const closeError = new Error("close unavailable");
+    const client = new FakeClient({ listError, closeError });
+    const manager = new UserOpenSandboxRuntimeManager({
+      config: loadTestConfig(),
+      clientProvider: async () => client,
+    });
+
+    let received: unknown;
+    try {
+      await manager.execute(command(102));
+    } catch (error) {
+      received = error;
+    }
+
+    expect(received).toBeInstanceOf(AggregateError);
+    expect((received as AggregateError).errors).toEqual([listError, closeError]);
+    expect(client.closeCalls).toBe(1);
+    client.options.closeError = undefined;
+    await manager.dispose();
+    expect(client.closeCalls).toBe(1);
+  });
+
   it("adopts a sandbox created by an earlier manager instance", async () => {
     const config = loadTestConfig();
     const client = new FakeClient();
@@ -94,6 +142,19 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await vi.waitFor(() => expect(client.renewCalls).toContainEqual(["sandbox-1", 900_000]));
 
     expect(client.createSpecs[0]?.idleReleaseMs).toBe(900_000);
+    await manager.dispose();
+  });
+
+  it("renews idle release after each activity even when the clock has not advanced", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await manager.execute(command(202));
+    const renewalsAfterFirstCommand = client.renewCalls.length;
+    await manager.execute(command(202));
+
+    expect(client.renewCalls.length).toBeGreaterThan(renewalsAfterFirstCommand);
     await manager.dispose();
   });
 
@@ -277,7 +338,22 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
 
     expect(client.createCalls).toBe(0);
     expect(client.killCalls).toEqual([]);
+    expect(client.closeCalls).toBe(0);
     await manager.dispose();
+    expect(client.closeCalls).toBe(1);
+  });
+
+  it("retries a directly supplied client after reconciliation failure and closes it once", async () => {
+    const client = new FakeClient({ listError: new Error("list unavailable") });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute(command(61))).rejects.toThrow("list unavailable");
+    client.options.listError = undefined;
+    await expect(manager.execute(command(61))).resolves.toMatchObject({ exitCode: 0 });
+    await manager.dispose();
+
+    expect(client.createCalls).toBe(1);
+    expect(client.closeCalls).toBe(1);
   });
 
   it("reuses one sandbox per user-thread pair and serializes that thread's commands", async () => {
@@ -606,13 +682,20 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
       waitForInterrupt: true,
       interruptError: new Error("interrupt unavailable"),
     });
-    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+    const manager = new UserOpenSandboxRuntimeManager({
+      config: loadTestConfig({ OPEN_SANDBOX_IDLE_PAUSE_MS: 1000 }),
+      client,
+    });
     const first = manager.execute({ ...command(42), timeoutMs: 1000 });
     await vi.waitFor(() => expect(client.connections[0]?.lastExecutionId).toBeTruthy());
     const quarantinedId = client.connections[0]!.id;
 
     await vi.advanceTimersByTimeAsync(1000);
     await expect(first).resolves.toMatchObject({ timedOut: true });
+    expect(client.connections[0]?.closeCalls).toBe(1);
+    expect(client.connections[0]?.deleteCalls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.pauseCalls).not.toContain(quarantinedId);
 
     client.options.waitForInterrupt = false;
     client.options.interruptError = undefined;
@@ -620,6 +703,39 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     expect(client.killCalls).toContain(quarantinedId);
     expect(client.createCalls).toBe(2);
     expect(client.connections.at(-1)?.id).not.toBe(quarantinedId);
+    await manager.dispose();
+  });
+
+  it("closes and quarantines a connection when execution fails after remote start", async () => {
+    const executionError = new Error("execution stream failed");
+    const client = new FakeClient({ runError: executionError });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute(command(421))).rejects.toBe(executionError);
+
+    expect(client.connections[0]?.closeCalls).toBe(1);
+    expect(client.connections[0]?.deleteCalls).toEqual([]);
+    const quarantinedId = client.connections[0]!.id;
+    client.options.runError = undefined;
+    await expect(manager.execute(command(421))).resolves.toMatchObject({ exitCode: 0 });
+    expect(client.killCalls).toContain(quarantinedId);
+    await manager.dispose();
+  });
+
+  it("preserves a completed sandbox when output retrieval fails", async () => {
+    const outputError = new Error("output unavailable");
+    const client = new FakeClient({ readBytesError: outputError });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    await expect(manager.execute(command(422))).rejects.toBe(outputError);
+
+    const sandboxId = client.connections[0]!.id;
+    expect(client.killCalls).not.toContain(sandboxId);
+    expect(client.connections[0]?.closeCalls).toBe(0);
+    client.options.readBytesError = undefined;
+    await expect(manager.execute(command(422))).resolves.toMatchObject({ exitCode: 0 });
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).not.toContain(sandboxId);
     await manager.dispose();
   });
 
@@ -715,6 +831,119 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     expect(client.closeCalls).toBe(1);
   });
 
+  it("aborts local execution before a stalled shutdown interrupt reaches its deadline", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient({
+      waitForInterrupt: true,
+      interruptNeverSettles: true,
+    });
+    const config = loadTestConfig({
+      OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 100,
+      OPEN_SANDBOX_INTERRUPT_GRACE_MS: 100,
+    });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+    const execution = manager.execute(command(451));
+    await vi.waitFor(() => expect(client.connections[0]?.lastExecutionId).toBeTruthy());
+
+    const disposal = expect(manager.dispose()).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: expect.stringContaining("interrupt command during shutdown") })],
+    });
+    expect(client.connections[0]?.lastRunSignal?.aborted).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(execution).resolves.toMatchObject({ exitCode: 0 });
+    await disposal;
+    const sandboxId = client.connections[0]!.id;
+    expect(client.killCalls).toContain(sandboxId);
+    expect(client.pauseCalls).not.toContain(sandboxId);
+    expect(client.connections[0]?.deleteCalls).toEqual([]);
+    expect(client.closeCalls).toBe(1);
+  });
+
+  it.each([
+    {
+      name: "fails",
+      options: { interruptError: new Error("interrupt unavailable") },
+      expectedError: "interrupt unavailable",
+    },
+    {
+      name: "has no execution id",
+      options: { omitExecutionId: true },
+      expectedError: "no execution id",
+    },
+  ])("kills rather than pauses when shutdown interrupt $name", async ({
+    options,
+    expectedError,
+  }) => {
+    const client = new FakeClient({ waitForInterrupt: true, ...options });
+    const manager = new UserOpenSandboxRuntimeManager({
+      config: loadTestConfig({ OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 100 }),
+      client,
+    });
+    const execution = manager.execute(command(454));
+    await vi.waitFor(() => expect(client.connections[0]?.active).toBe(1));
+
+    const disposal = expect(manager.dispose()).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: expect.stringContaining(expectedError) })],
+    });
+    await expect(execution).resolves.toMatchObject({ exitCode: 0 });
+    await disposal;
+
+    const sandboxId = client.connections[0]!.id;
+    expect(client.killCalls).toContain(sandboxId);
+    expect(client.pauseCalls).not.toContain(sandboxId);
+    expect(client.connections[0]?.deleteCalls).toEqual([]);
+  });
+
+  it("keeps total shutdown work within one deadline budget", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient({
+      waitForInterrupt: true,
+      interruptNeverSettles: true,
+      killNeverSettles: true,
+    });
+    const config = loadTestConfig({
+      OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 30_000,
+      OPEN_SANDBOX_INTERRUPT_GRACE_MS: 30_000,
+    });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+    manager.execute(command(453)).catch(() => undefined);
+    await vi.waitFor(() => expect(client.connections[0]?.lastExecutionId).toBeTruthy());
+
+    const disposal = expect(manager.dispose()).rejects.toBeInstanceOf(AggregateError);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(client.killCalls).toEqual([client.connections[0]!.id]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await disposal;
+
+    expect(client.pauseCalls).toEqual([]);
+    expect(client.closeCalls).toBe(0);
+  });
+
+  it("bounds and runs per-thread shutdown cleanup concurrently", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    const config = loadTestConfig({ OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 100 });
+    const manager = new UserOpenSandboxRuntimeManager({ config, client });
+    await Promise.all([
+      manager.execute(command(452, 1)),
+      manager.execute(command(452, 2)),
+    ]);
+    client.options.pauseNeverSettles = true;
+
+    const disposal = expect(manager.dispose()).rejects.toMatchObject({
+      errors: [
+        expect.objectContaining({ message: expect.stringContaining("pause sandbox during shutdown") }),
+        expect.objectContaining({ message: expect.stringContaining("pause sandbox during shutdown") }),
+      ],
+    });
+    await vi.waitFor(() => expect(client.pauseCalls).toHaveLength(2));
+
+    await vi.advanceTimersByTimeAsync(100);
+    await disposal;
+    expect(client.closeCalls).toBe(1);
+  });
+
   it("exports only regular files beneath the current thread or shared mounts", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "opensandbox-export-"));
     const config = loadTestConfig({
@@ -771,7 +1000,14 @@ type FakeOptions = {
   waitForInterrupt: boolean;
   completeOnServerTimeout: boolean;
   listError?: Error;
+  closeError?: Error;
   interruptError?: Error;
+  interruptNeverSettles?: boolean;
+  omitExecutionId?: boolean;
+  killNeverSettles?: boolean;
+  pauseNeverSettles?: boolean;
+  runError?: Error;
+  readBytesError?: Error;
   stdout: string[];
   stderr: string[];
 };
@@ -838,6 +1074,7 @@ class FakeClient implements OpenSandboxClient {
 
   async pause(id: string): Promise<void> {
     this.pauseCalls.push(id);
+    if (this.options.pauseNeverSettles) await new Promise<void>(() => undefined);
     const current = await this.getInfo(id);
     this.infos.set(id, { ...current, state: "Paused" });
   }
@@ -849,11 +1086,13 @@ class FakeClient implements OpenSandboxClient {
 
   async kill(id: string): Promise<void> {
     this.killCalls.push(id);
+    if (this.options.killNeverSettles) await new Promise<void>(() => undefined);
     this.infos.delete(id);
   }
 
   async close(): Promise<void> {
     this.closeCalls += 1;
+    if (this.options.closeError) throw this.options.closeError;
   }
 
   started(): void {
@@ -880,6 +1119,8 @@ class FakeConnection implements OpenSandboxConnection {
   readonly runCommands: string[] = [];
   readonly runOptions: RunCommandOpts[] = [];
   lastExecutionId?: string;
+  lastRunSignal?: AbortSignal;
+  closeCalls = 0;
   active = 0;
   maxActive = 0;
   private interrupted?: () => void;
@@ -894,7 +1135,12 @@ class FakeConnection implements OpenSandboxConnection {
     return this.client.getInfo(this.id);
   }
 
-  async run(command: string, options: RunCommandOpts, handlers: ExecutionHandlers) {
+  async run(
+    command: string,
+    options: RunCommandOpts,
+    handlers: ExecutionHandlers,
+    signal?: AbortSignal,
+  ) {
     this.runCommands.push(command);
     this.runOptions.push(options);
     if (command.includes("printf '\\036'")) {
@@ -905,7 +1151,10 @@ class FakeConnection implements OpenSandboxConnection {
     this.client.started();
     const executionId = `execution-${this.id}-${Date.now()}`;
     this.lastExecutionId = executionId;
-    await handlers.onInit?.({ id: executionId, timestamp: Date.now() });
+    this.lastRunSignal = signal;
+    if (!this.options.omitExecutionId) {
+      await handlers.onInit?.({ id: executionId, timestamp: Date.now() });
+    }
     try {
       let serverTimedOut = false;
       if (this.options.completeOnServerTimeout) {
@@ -922,6 +1171,7 @@ class FakeConnection implements OpenSandboxConnection {
       } else if (this.options.waitForInterrupt) {
         await new Promise<void>((resolve) => {
           this.interrupted = resolve;
+          signal?.addEventListener("abort", () => resolve(), { once: true });
         });
       } else if (this.options.runDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, this.options.runDelayMs));
@@ -933,6 +1183,7 @@ class FakeConnection implements OpenSandboxConnection {
           error: { name: "TimeoutError", value: "remote command timed out" },
         };
       }
+      if (this.options.runError) throw this.options.runError;
       for (const text of this.options.stdout) {
         await handlers.onStdout?.({ text, timestamp: Date.now() });
       }
@@ -948,6 +1199,7 @@ class FakeConnection implements OpenSandboxConnection {
 
   async interrupt(executionId: string): Promise<void> {
     this.interruptCalls.push(executionId);
+    if (this.options.interruptNeverSettles) await new Promise<void>(() => undefined);
     if (this.options.interruptError) throw this.options.interruptError;
     this.interrupted?.();
   }
@@ -961,6 +1213,7 @@ class FakeConnection implements OpenSandboxConnection {
     options?: { range?: string; offset?: number; limit?: number },
   ): Promise<Uint8Array> {
     this.readBytesCalls.push({ path: filePath, options });
+    if (this.options.readBytesError) throw this.options.readBytesError;
     const text = filePath.includes("-stdout-")
       ? this.options.stdout.join("")
       : this.options.stderr.join("");
@@ -976,7 +1229,9 @@ class FakeConnection implements OpenSandboxConnection {
   }
   pause(): Promise<void> { return this.client.pause(this.id); }
   resume(): Promise<OpenSandboxConnection> { return this.client.resume(this.id); }
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+  }
 }
 
 function info(

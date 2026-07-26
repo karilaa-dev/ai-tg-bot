@@ -58,8 +58,9 @@ type ThreadRuntimeState = {
   connection?: OpenSandboxConnection;
   active?: ActiveExecution;
   idleTimer?: NodeJS.Timeout;
-  idleReleaseRenewal?: { sandboxId: string; renewedAt: number };
   quarantined?: { sandboxId: string; error: Error };
+  quarantinedConnection?: OpenSandboxConnection;
+  shutdownInterruptPending?: boolean;
 };
 
 type SandboxScope = {
@@ -102,13 +103,16 @@ const SANDBOX_STATE_POLICIES: Record<string, SandboxStatePolicy> = {
   Error: { stable: true, adoptable: false, killable: true },
 };
 const OUTPUT_SENTINEL = 0x1e;
+const SHUTDOWN_DEADLINE_MS = 45_000;
 
 export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
   private readonly states = new Map<string, ThreadRuntimeState>();
   private readonly fingerprint: string;
   private client?: OpenSandboxClient;
+  private retainedClient?: OpenSandboxClient;
   private clientReady?: Promise<OpenSandboxClient>;
   private disposePromise?: Promise<void>;
+  private readonly closedResources = new WeakSet<object>();
   private shuttingDown = false;
 
   constructor(private readonly input: ThreadOpenSandboxRuntimeManagerInput) {
@@ -175,13 +179,32 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       : this.input.clientProvider;
     if (!provider) throw new Error("OpenSandbox command runtime is unavailable: no client provider configured");
     this.clientReady ??= provider().then(async (client) => {
-      await this.reconcile(client);
-      if (this.shuttingDown) {
-        await client.close();
-        throw new Error("OpenSandbox runtime is shutting down");
+      if (this.input.client) this.retainedClient = client;
+      try {
+        await this.reconcile(client);
+        if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
+        this.client = client;
+        return client;
+      } catch (error) {
+        // A provider-created client can be replaced after failed initialization. A
+        // directly supplied client retains explicit retry semantics, but must still
+        // be closed if shutdown won the initialization race.
+        if (!this.input.client || this.shuttingDown) {
+          try {
+            await this.closeOnce(
+              "close client after initialization failure",
+              client,
+              () => client.close(),
+            );
+          } catch (closeError) {
+            throw new AggregateError(
+              [error, closeError],
+              "OpenSandbox client initialization failed and its transport could not be closed",
+            );
+          }
+        }
+        throw error;
       }
-      this.client = client;
-      return client;
     }).finally(() => {
       this.clientReady = undefined;
     });
@@ -280,6 +303,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       Number.MAX_SAFE_INTEGER,
       request.timeoutMs + this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS,
     );
+    let remoteExecutionCompleted = false;
     const completion = connection.run(command, {
       workingDirectory: request.workingDir,
       timeoutSeconds: Math.max(1, Math.ceil(remoteTimeoutMs / 1000)),
@@ -296,7 +320,10 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       // is read verbatim from the redirected files below.
       onStdout: (message) => appendOutput(stdout, message.text, request.maxOutputChars),
       onStderr: (message) => appendOutput(stderr, message.text, request.maxOutputChars),
-    }, abortController.signal);
+    }, abortController.signal).then((result) => {
+      remoteExecutionCompleted = true;
+      return result;
+    });
 
     try {
       const outcome = await Promise.race([
@@ -320,12 +347,11 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
 
       const termination = await this.interruptExecution(state, active, completion, scope);
       if (!termination.confirmed) {
-        state.quarantined = {
-          sandboxId: connection.id,
-          error: new Error(`OpenSandbox command termination is uncertain: ${termination.error}`),
-        };
-        state.connection = undefined;
-        state.sandboxId = connection.id;
+        this.quarantineConnection(
+          state,
+          connection,
+          new Error(`OpenSandbox command termination is uncertain: ${termination.error}`),
+        );
       }
       if (outcome.kind === "aborted") throw outcome.reason;
       if (termination.confirmed) {
@@ -349,31 +375,53 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         error: `timed out after ${request.timeoutMs}ms`,
       };
     } catch (error) {
-      if (!isAbortError(error) && active.executionId) {
-        state.quarantined = {
-          sandboxId: connection.id,
-          error: new Error(`OpenSandbox execution failed after remote start: ${formatSandboxError(error)}`),
-        };
-        state.connection = undefined;
-        state.sandboxId = connection.id;
+      if (!isAbortError(error) && active.executionId && !remoteExecutionCompleted) {
+        this.quarantineConnection(
+          state,
+          connection,
+          new Error(`OpenSandbox execution failed after remote start: ${formatSandboxError(error)}`),
+        );
       }
       throw error;
     } finally {
       deadline.cancel();
       if (state.active === active) state.active = undefined;
       abortController.abort();
-      try {
-        await this.control("remove command files", connection.deleteFiles([
-          stdinPath,
-          stdoutPath,
-          stderrPath,
-        ]));
-      } catch (error) {
-        this.input.logger?.warn("OpenSandbox command file cleanup failed", {
-          userId: request.userId,
-          threadId: request.threadId,
-          error: formatSandboxError(error),
-        });
+      const quarantined = state.quarantined?.sandboxId === connection.id;
+      if (!quarantined && !state.shutdownInterruptPending) {
+        try {
+          await this.control("remove command files", connection.deleteFiles([
+            stdinPath,
+            stdoutPath,
+            stderrPath,
+          ]));
+        } catch (error) {
+          this.input.logger?.warn("OpenSandbox command file cleanup failed", {
+            userId: request.userId,
+            threadId: request.threadId,
+            error: formatSandboxError(error),
+          });
+        }
+      }
+      if (quarantined) {
+        try {
+          await this.closeOnce(
+            "close quarantined sandbox connection",
+            connection,
+            () => connection.close(),
+          );
+        } catch (error) {
+          this.input.logger?.warn("failed to close quarantined OpenSandbox connection", {
+            userId: request.userId,
+            threadId: request.threadId,
+            sandboxId: connection.id,
+            error: formatSandboxError(error),
+          });
+        } finally {
+          if (state.quarantinedConnection === connection) {
+            state.quarantinedConnection = undefined;
+          }
+        }
       }
     }
   }
@@ -471,7 +519,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       const info = await this.waitForStableState(client, state.sandboxId);
       state.remoteState = info.state;
       if (info.state === "Running") {
-        await this.renewIdleRelease(client, state, info.id);
+        await this.renewIdleRelease(client, info.id);
         state.connection = await this.control(
           "connect to sandbox",
           client.connect(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
@@ -479,7 +527,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         return state.connection;
       }
       if (info.state === "Paused") {
-        await this.renewIdleRelease(client, state, info.id);
+        await this.renewIdleRelease(client, info.id);
         state.connection = await this.control(
           "resume sandbox",
           client.resume(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
@@ -572,11 +620,31 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       state.quarantined = undefined;
       state.sandboxId = undefined;
       state.remoteState = undefined;
-      if (state.connection) await state.connection.close().catch(() => undefined);
+      state.quarantinedConnection = undefined;
+      if (state.connection) {
+        const connection = state.connection;
+        await this.closeOnce(
+          "close recovered quarantined sandbox connection",
+          connection,
+          () => connection.close(),
+        ).catch(() => undefined);
+      }
       state.connection = undefined;
     } catch (error) {
       throw new AggregateError([quarantined.error, error], "quarantined OpenSandbox instance could not be removed");
     }
+  }
+
+  private quarantineConnection(
+    state: ThreadRuntimeState,
+    connection: OpenSandboxConnection,
+    error: Error,
+  ): void {
+    state.quarantined = { sandboxId: connection.id, error };
+    state.quarantinedConnection = connection;
+    state.shutdownInterruptPending = false;
+    state.connection = undefined;
+    state.sandboxId = connection.id;
   }
 
   private enqueue<T>(
@@ -645,6 +713,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
       && state.pending === 0
       && !state.active
       && state.activityLeases === 0
+      && !state.quarantined
       && Boolean(state.sandboxId)
       && state.remoteState !== "Paused";
   }
@@ -665,25 +734,18 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
 
   private async renewIdleRelease(
     client: OpenSandboxClient,
-    state: ThreadRuntimeState,
     sandboxId: string,
   ): Promise<void> {
-    const renewedAt = Date.now();
-    if (state.idleReleaseRenewal?.sandboxId === sandboxId
-      && state.idleReleaseRenewal.renewedAt >= renewedAt) {
-      return;
-    }
     await this.control(
       "renew sandbox idle release",
       client.renew(sandboxId, this.input.config.OPEN_SANDBOX_IDLE_RELEASE_MS),
     );
-    state.idleReleaseRenewal = { sandboxId, renewedAt };
   }
 
   private async tryRenewIdleRelease(scope: SandboxScope, state: ThreadRuntimeState): Promise<void> {
     if (this.shuttingDown || state.quarantined || !state.sandboxId || !this.client) return;
     try {
-      await this.renewIdleRelease(this.client, state, state.sandboxId);
+      await this.renewIdleRelease(this.client, state.sandboxId);
     } catch (error) {
       this.input.logger?.warn("failed to renew OpenSandbox idle release", {
         ...scope,
@@ -697,49 +759,143 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
     return withDeadline(promise, timeoutMs, `${label} timed out after ${timeoutMs}ms`);
   }
 
+  private closeOnce(
+    label: string,
+    resource: object,
+    close: () => Promise<void>,
+    timeoutMs = this.input.config.OPEN_SANDBOX_CONTROL_TIMEOUT_MS,
+  ): Promise<void> {
+    if (this.closedResources.has(resource)) return Promise.resolve();
+    this.closedResources.add(resource);
+    return this.control(label, Promise.resolve().then(close), timeoutMs);
+  }
+
   private async disposeInternal(): Promise<void> {
     this.shuttingDown = true;
     const states = [...this.states.values()];
     for (const state of states) this.clearIdleTimer(state);
     const errors: unknown[] = [];
+    const deadline = Date.now() + SHUTDOWN_DEADLINE_MS;
+    const collectControlError = async (
+      label: string,
+      operation: () => Promise<unknown>,
+      timeoutMs = this.input.config.OPEN_SANDBOX_CONTROL_TIMEOUT_MS,
+    ): Promise<unknown | undefined> => {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        const error = new Error(`${label} skipped because the OpenSandbox shutdown deadline expired`);
+        errors.push(error);
+        return error;
+      }
+      try {
+        await this.control(
+          label,
+          Promise.resolve().then(operation),
+          Math.min(timeoutMs, remainingMs),
+        );
+        return undefined;
+      } catch (error) {
+        errors.push(error);
+        return error;
+      }
+    };
+    const collectCloseError = (
+      label: string,
+      resource: object,
+      close: () => Promise<void>,
+    ): Promise<unknown | undefined> => collectControlError(label, async () => {
+      if (this.closedResources.has(resource)) return;
+      this.closedResources.add(resource);
+      await close();
+    });
+    const client = this.client ?? this.retainedClient;
+    const handledQuarantines = new Set<ThreadRuntimeState>();
 
     await Promise.all(states.map(async (state) => {
       const active = state.active;
       if (!active) return;
-      try {
-        if (active.executionId) await active.connection.interrupt(active.executionId);
-        active.abortController.abort();
-      } catch (error) {
-        errors.push(error);
+      // Abort the local transport before waiting on the control plane so a stalled
+      // interrupt cannot keep command execution alive until the shutdown deadline.
+      state.shutdownInterruptPending = true;
+      active.abortController.abort();
+      let interruptionError: unknown;
+      if (active.executionId) {
+        interruptionError = await collectControlError(
+          "interrupt command during shutdown",
+          () => active.connection.interrupt(active.executionId!),
+        );
+      } else {
+        interruptionError = new Error(
+          "active OpenSandbox command had no execution id during shutdown",
+        );
+        errors.push(interruptionError);
+      }
+      if (interruptionError) {
+        this.quarantineConnection(
+          state,
+          active.connection,
+          new Error(
+            `OpenSandbox command interruption during shutdown could not be confirmed: ${formatSandboxError(interruptionError)}`,
+          ),
+        );
+        const cleanup: Promise<unknown>[] = [
+          collectCloseError(
+            "close quarantined sandbox connection during shutdown",
+            active.connection,
+            () => active.connection.close(),
+          ),
+        ];
+        if (client) {
+          cleanup.push(collectControlError(
+            "remove quarantined sandbox during shutdown",
+            () => client.kill(active.connection.id),
+          ));
+          handledQuarantines.add(state);
+        }
+        await Promise.all(cleanup);
+      } else {
+        state.shutdownInterruptPending = false;
       }
     }));
     await Promise.all(states.map(async (state) => {
-      try {
-        await withDeadline(state.tail, this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS, "thread execution queue did not stop");
-      } catch (error) {
-        errors.push(error);
-      }
+      await collectControlError(
+        "thread execution queue did not stop",
+        () => state.tail,
+        this.input.config.OPEN_SANDBOX_INTERRUPT_GRACE_MS,
+      );
     }));
 
-    const client = this.client;
     if (client) {
-      for (const state of states) {
-        try {
-          if (state.quarantined) {
-            await client.kill(state.quarantined.sandboxId);
-          } else if (state.sandboxId && state.remoteState !== "Paused") {
-            await client.pause(state.sandboxId);
+      await Promise.all(states.map(async (state) => {
+        const cleanup: Promise<unknown>[] = [];
+        if (state.quarantined) {
+          if (!handledQuarantines.has(state)) {
+            cleanup.push(collectControlError(
+              "remove quarantined sandbox during shutdown",
+              () => client.kill(state.quarantined!.sandboxId),
+            ));
           }
-          await state.connection?.close();
-        } catch (error) {
-          errors.push(error);
+        } else if (state.sandboxId && state.remoteState !== "Paused") {
+          cleanup.push(collectControlError(
+            "pause sandbox during shutdown",
+            () => client.pause(state.sandboxId!),
+          ));
         }
-      }
-      try {
-        await client.close();
-      } catch (error) {
-        errors.push(error);
-      }
+        const connection = state.quarantinedConnection ?? state.connection;
+        if (connection) {
+          cleanup.push(collectCloseError(
+            "close sandbox connection during shutdown",
+            connection,
+            () => connection.close(),
+          ));
+        }
+        await Promise.all(cleanup);
+      }));
+      await collectCloseError(
+        "close OpenSandbox client during shutdown",
+        client,
+        () => client.close(),
+      );
     }
     if (errors.length) throw new AggregateError(errors, "OpenSandbox runtime disposal failed");
   }
