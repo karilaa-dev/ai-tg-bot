@@ -8,24 +8,24 @@ import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes } from "../../src/files/ingest.js";
 
-let bashRoot: string;
+let managedRoot: string;
 
 describe("file ingestion", () => {
   let db: AppDatabase;
   let repos: Repos;
 
   beforeEach(async () => {
-    bashRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-ingest-test-"));
+    managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-ingest-test-"));
     const config = testConfig();
     db = createDatabase(config, createLogger(config));
-    await db.migrate();
+    await db.initialize();
     repos = createRepos(db.db, db.search);
   });
 
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db.destroy();
-    await fs.rm(bashRoot, { recursive: true, force: true });
+    await fs.rm(managedRoot, { recursive: true, force: true });
   });
 
   it("classifies text/csv as csv before generic text", () => {
@@ -53,7 +53,7 @@ describe("file ingestion", () => {
     expect(stored).toMatchObject({
       mime_type: "image/png",
     });
-    expect(stored?.path).toBe(path.join(bashRoot, ".chat-files", String(result.fileId), "content"));
+    expect(stored?.path).toBe(path.join(managedRoot, String(result.fileId), "content"));
     await expect(fs.readFile(stored!.path!)).resolves.toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     expect((await fs.stat(path.dirname(stored!.path!))).mode & 0o777).toBe(0o700);
     expect((await fs.stat(stored!.path!)).mode & 0o777).toBe(0o600);
@@ -230,6 +230,28 @@ describe("file ingestion", () => {
     expect(embedding.at(-1)).toMatchObject({ completed: chunks.length, total: chunks.length });
   });
 
+  it("keeps short native PDF text when Docling is disabled", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const config = testConfig({ FILE_INLINE_TOKENS: 1, DOCLING_URL: undefined });
+    const user = await repos.users.ensure({ tgId: 332, firstName: "ShortPdf", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+
+    const result = await ingestFileBytes({
+      config,
+      repo: repos.files,
+      userId: user.tg_id,
+      threadId: thread.id,
+      name: "short-note.pdf",
+      mime: "application/pdf",
+      bytes: makePdf("Short native PDF note that should remain searchable."),
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    const chunks = await repos.files.chunks(result.fileId);
+    expect(chunks.map((chunk) => chunk.content).join("\n")).toContain("Short native PDF note");
+  });
+
   it("extracts searchable text PDFs natively before falling back to docling", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("docling should not be called for native text PDFs");
@@ -262,7 +284,7 @@ describe("file ingestion", () => {
 });
 
 function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig({ BASH_WORKSPACE_ROOT: bashRoot, ...overrides });
+  return loadTestConfig({ MANAGED_FILE_ROOT: managedRoot, ...overrides });
 }
 
 function makePdf(text: string): Buffer {

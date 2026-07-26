@@ -18,6 +18,13 @@ import { createLogger } from "../../src/logger.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
+import { runSandboxCommandLifecycle } from "../../src/sandbox/lifecycle.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+} from "../../src/sandbox/types.js";
 
 describe("PiRuntimeManager", () => {
   let db: AppDatabase | undefined;
@@ -33,11 +40,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9123, firstName: "PiTest", lang: "en" });
     const parent = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Parent" });
@@ -61,7 +69,14 @@ describe("PiRuntimeManager", () => {
           : []).length;
     });
 
-    const firstManager = new PiRuntimeManager({ config, db, repos, logger, providerStreams: streams });
+    const firstManager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime: new StubCommandRuntime("8\n"),
+      providerStreams: streams,
+    });
     const first = await firstManager.runtime(parent, user);
     expect(first.session.model?.contextWindow).toBe(config.MODEL_CONTEXT_TOKENS);
     expect(first.session.settingsManager.getCompactionSettings().enabled).toBe(true);
@@ -85,7 +100,7 @@ describe("PiRuntimeManager", () => {
     expect(providerImageCount).toBe(1);
     const bash = first.session.getToolDefinition("bash")!;
     const bashResult = await bash.execute("mounted-image", {
-      script: `wc -c /attachments/${image.id}`,
+      script: `wc -c "$CHAT_FILE_${image.id}"`,
       input_file_ids: [image.id],
     }, undefined, undefined, {} as never);
     expect(bashResult.details).toMatchObject({ exit_code: 0, input_files: [{ file_id: image.id }] });
@@ -137,12 +152,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-title-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
       THREAD_TITLE_TIMEOUT_MS: 5_000,
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     let helperModel = "";
     let helperContext: Context | undefined;
@@ -188,7 +203,7 @@ describe("PiRuntimeManager", () => {
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const stream = (() => createAssistantMessageEventStream()) as PiProviderStreamOverrides["openRouter"];
     const manager = new PiRuntimeManager({
@@ -208,11 +223,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-tools-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9124, firstName: "ToolTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Tools" });
@@ -229,6 +245,7 @@ describe("PiRuntimeManager", () => {
       db,
       repos,
       logger,
+      commandRuntime: new StubCommandRuntime("pi-tool-ok\n"),
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     const runtime = await manager.runtime(thread, user);
@@ -255,7 +272,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9129, firstName: "InlineFile", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline file" });
@@ -315,7 +332,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9132, firstName: "InlineCard", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Inline card" });
@@ -370,7 +387,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9130, firstName: "DurableFile", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Durable file" });
@@ -426,7 +443,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, FILE_INLINE_TOKENS: 1 });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9131, firstName: "RefreshFailure", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Refresh failure" });
@@ -484,7 +501,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9128, firstName: "ReloadTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload attachment" });
@@ -571,7 +588,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9133, firstName: "ReloadDocument", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Reload document" });
@@ -669,11 +686,12 @@ describe("PiRuntimeManager", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-terminal-image-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9127, firstName: "ImageTool", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Terminal image" });
@@ -721,7 +739,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9125, firstName: "AbortTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Abort" });
@@ -771,7 +789,7 @@ describe("PiRuntimeManager", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 9126, firstName: "CompactTest", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Compact" });
@@ -806,6 +824,44 @@ describe("PiRuntimeManager", () => {
     const sessionText = await fs.readFile(runtime.session.sessionFile!, "utf8");
     expect(sessionText).toContain('"type":"compaction"');
     await manager.dispose();
+  }, 20_000);
+
+  it("releases a held sandbox activity lease when an idle runtime is evicted", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-eviction-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 9134, firstName: "EvictionTest", lang: "en" });
+    const commandRuntime = new TrackingCommandRuntime();
+    const manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime,
+      providerStreams: echoStreams(),
+    });
+    const firstThread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "First" });
+    const firstRuntime = await manager.runtime(firstThread, user);
+    firstRuntime.lastUsedAt = 0;
+    firstRuntime.bridge.holdCommandActivity();
+    expect(commandRuntime.activeLeases).toBe(1);
+
+    for (let index = 1; index <= 32; index += 1) {
+      const thread = await repos.threads.create({
+        userId: user.tg_id,
+        topicId: index,
+        title: `Runtime ${index}`,
+      });
+      await manager.runtime(thread, user);
+    }
+
+    expect(commandRuntime.activeLeases).toBe(0);
+    expect(commandRuntime.releaseCount).toBe(1);
+    await manager.dispose();
+    expect(commandRuntime.releaseCount).toBe(1);
   }, 20_000);
 });
 
@@ -892,4 +948,51 @@ function resolvedFile(bytes: Buffer, mimeType: string | null, fileId: number) {
     expiresAt: Number.POSITIVE_INFINITY,
     source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
   };
+}
+
+class StubCommandRuntime implements CommandRuntime {
+  constructor(private readonly stdout: string) {}
+
+  async execute(
+    _request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    return runSandboxCommandLifecycle(lifecycle, async () => ({
+      stdout: this.stdout,
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }));
+  }
+
+  async exportFile(): Promise<void> {
+    throw new Error("export not configured");
+  }
+
+  async reconcile(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+class TrackingCommandRuntime extends StubCommandRuntime {
+  activeLeases = 0;
+  releaseCount = 0;
+
+  constructor() {
+    super("");
+  }
+
+  acquireActivityLease() {
+    this.activeLeases += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activeLeases -= 1;
+        this.releaseCount += 1;
+      },
+    };
+  }
 }

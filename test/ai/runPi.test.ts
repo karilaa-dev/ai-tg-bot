@@ -8,15 +8,27 @@ import {
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
-import { unzipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runTurn, sendFinal } from "../../src/ai/run.js";
-import { loadTestConfig } from "../../src/config.js";
+import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiProviderStreamOverrides } from "../../src/pi/provider.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import {
+  applySandboxCommandPreparation,
+  runSandboxCommandLifecycle,
+} from "../../src/sandbox/lifecycle.js";
+import { botThreadWorkspace } from "../../src/sandbox/paths.js";
+import type {
+  CommandRuntime,
+  SandboxCommandLifecycle,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+  SandboxFileExportRequest,
+} from "../../src/sandbox/types.js";
 
 describe("runTurn with Pi", () => {
   let db: AppDatabase | undefined;
@@ -35,18 +47,20 @@ describe("runTurn with Pi", () => {
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7001, firstName: "Runner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi run" });
     const stream = ((model: Model<Api>) => textStream(model, "Pi answered the Telegram turn.")) as PiProviderStreamOverrides["openRouter"];
     const embed = vi.fn(async () => [new Float32Array([1, 0])]);
+    const commandRuntime = new TestCommandRuntime(async () => successfulCommand());
     manager = new PiRuntimeManager({
       config,
       db,
       repos,
       logger,
       embedder: { model: "test-embed", embed },
+      commandRuntime,
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     const richMessages: unknown[] = [];
@@ -89,13 +103,14 @@ describe("runTurn with Pi", () => {
     expect(drafts.length).toBeGreaterThan(0);
     expect(richMessages).toHaveLength(1);
     expect(embed).not.toHaveBeenCalled();
+    expect(commandRuntime.activityLeaseAcquisitions).toBe(0);
   }, 20_000);
 
   it("reports Pi setup failures through the normal Telegram error boundary", async () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7002, firstName: "NoPi", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Missing Pi" });
@@ -131,11 +146,11 @@ describe("runTurn with Pi", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-zip-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7006, firstName: "ZipRunner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi ZIP run" });
@@ -148,11 +163,10 @@ describe("runTurn with Pi", () => {
           id: "zip-bash-call",
           name: "bash",
           arguments: {
-            script: "mkdir -p /zip-smoke/nested; printf alpha > /zip-smoke/alpha.txt; printf beta > /zip-smoke/nested/beta.txt; zip -rq /zip-smoke.zip /zip-smoke",
+            script: "mkdir -p zip-smoke/nested; printf alpha > zip-smoke/alpha.txt; printf beta > zip-smoke/nested/beta.txt; zip -rq zip-smoke.zip zip-smoke",
             cwd: "/",
             stdin: "",
             args: [],
-            raw_script: false,
             input_file_ids: [],
           },
         });
@@ -167,11 +181,27 @@ describe("runTurn with Pi", () => {
       }
       return textStream(model, "ZIP_TOOL_SMOKE_OK");
     }) as PiProviderStreamOverrides["openRouter"];
+    const workspace = botThreadWorkspace(config, user.tg_id, thread.id);
+    const commandRuntime = new TestCommandRuntime(async () => {
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.writeFile(path.join(workspace, "zip-smoke.zip"), zipSync({
+        "zip-smoke/": new Uint8Array(),
+        "zip-smoke/alpha.txt": Buffer.from("alpha"),
+        "zip-smoke/nested/": new Uint8Array(),
+        "zip-smoke/nested/beta.txt": Buffer.from("beta"),
+      }));
+      return successfulCommand();
+    }, async (request) => {
+      const destination = request.hostDestination;
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.copyFile(path.join(workspace, "zip-smoke.zip"), destination);
+    });
     manager = new PiRuntimeManager({
       config,
       db,
       repos,
       logger,
+      commandRuntime,
       providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
     });
     let documentCalls = 0;
@@ -209,6 +239,9 @@ describe("runTurn with Pi", () => {
     });
 
     expect(providerCalls).toBe(3);
+    expect(commandRuntime.activityLeaseAcquisitions).toBe(1);
+    expect(commandRuntime.activityLeaseReleases).toBe(1);
+    expect(commandRuntime.activeActivityLeases).toBe(0);
     const runtime = await manager.runtime(thread, user);
     const toolResults = runtime.session.messages
       .filter((message) => message.role === "toolResult")
@@ -238,10 +271,10 @@ describe("runTurn with Pi", () => {
 
   it("preserves an image MIME type when Telegram receives it as a document", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-document-image-"));
-    const config = loadTestConfig({ BASH_WORKSPACE_ROOT: path.join(tempDir, "bash") });
+    const config = loadTestConfig({ MANAGED_FILE_ROOT: path.join(tempDir, "managed-files") });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7004, firstName: "DocumentImage", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Document image" });
@@ -303,7 +336,7 @@ describe("runTurn with Pi", () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7005, firstName: "FailedDelivery", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Failed delivery" });
@@ -358,11 +391,11 @@ describe("runTurn with Pi", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-image-"));
     const config = loadTestConfig({
       PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 7003, firstName: "ImageRunner", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi image run" });
@@ -437,7 +470,7 @@ describe("runTurn with Pi", () => {
     expect(files[0]).toMatchObject({
       type: "image",
     });
-    expect(files[0]?.path).toBe(path.join(config.BASH_WORKSPACE_ROOT, ".chat-files", String(files[0]?.id), "content"));
+    expect(files[0]?.path).toBe(path.join(config.MANAGED_FILE_ROOT, String(files[0]?.id), "content"));
     const sources = await repos.files.listSources(files[0]!.id);
     expect(sources).toMatchObject([{
       transport: "telegram",
@@ -507,5 +540,62 @@ function resolvedFile(bytes: Buffer, fileId: number) {
     contentSha256: "test-hash",
     expiresAt: Number.POSITIVE_INFINITY,
     source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
+  };
+}
+
+class TestCommandRuntime implements CommandRuntime {
+  readonly requests: SandboxCommandRequest[] = [];
+  activityLeaseAcquisitions = 0;
+  activityLeaseReleases = 0;
+  activeActivityLeases = 0;
+
+  constructor(
+    private readonly handler: (request: SandboxCommandRequest) => Promise<SandboxCommandResult>,
+    private readonly exporter: (request: SandboxFileExportRequest) => Promise<void> = async () => {
+      throw new Error("export not configured");
+    },
+  ) {}
+
+  acquireActivityLease() {
+    this.activityLeaseAcquisitions += 1;
+    this.activeActivityLeases += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activityLeaseReleases += 1;
+        this.activeActivityLeases -= 1;
+      },
+    };
+  }
+
+  async execute(
+    request: SandboxCommandRequest,
+    lifecycle?: SandboxCommandLifecycle,
+  ): Promise<SandboxCommandResult> {
+    return runSandboxCommandLifecycle(lifecycle, (preparation) => {
+      const preparedRequest = applySandboxCommandPreparation(request, preparation);
+      this.requests.push(preparedRequest);
+      return this.handler(preparedRequest);
+    });
+  }
+
+  exportFile(request: SandboxFileExportRequest): Promise<void> {
+    return this.exporter(request);
+  }
+
+  async reconcile(): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+function successfulCommand(): SandboxCommandResult {
+  return {
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
   };
 }

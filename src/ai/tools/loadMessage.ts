@@ -76,7 +76,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           name: file.name,
           summary: file.summary,
           inline: Boolean(file.is_inline),
-          bash_path: `/attachments/${file.id}`,
+          bash_input_file_id: file.id,
         })),
         images: files
           .filter((file) => file.type === "image")

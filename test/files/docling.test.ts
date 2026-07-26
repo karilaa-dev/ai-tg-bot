@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkDocling, convertWithDocling } from "../../src/files/docling.js";
+import {
+  checkDocling,
+  convertWithDocling,
+  isDoclingConversionError,
+} from "../../src/files/docling.js";
 
 describe("docling client", () => {
   afterEach(() => {
@@ -27,6 +31,24 @@ describe("docling client", () => {
     );
   });
 
+  it("does not attempt conversion when Docling is disabled", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await convertWithDocling({
+      config: { DOCLING_URL: undefined, DOCLING_TIMEOUT_MS: 300_000 },
+      filename: "sample.docx",
+      bytes: Buffer.from("abc"),
+    }).catch((caught: unknown) => caught);
+
+    expect(isDoclingConversionError(error)).toBe(true);
+    expect(error).toMatchObject({
+      kind: "unavailable",
+      message: "Docling conversion is disabled because DOCLING_URL is not configured.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("posts the file-source payload expected by current docling-serve", async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       new Response(JSON.stringify({ document: { md_content: "converted" } }), { status: 200 }),
@@ -51,6 +73,55 @@ describe("docling client", () => {
       { kind: "file", base64_string: Buffer.from("abc").toString("base64"), filename: "sample.pdf" },
     ]);
     expect(body.options).toMatchObject({ to_formats: ["md"], table_mode: "accurate", image_export_mode: "placeholder" });
+  });
+
+  it("rejects successful responses without converted Markdown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ document: {} }), { status: 200 }),
+    ));
+
+    await expect(convertWithDocling({
+      config: { DOCLING_URL: "https://docling.test", DOCLING_TIMEOUT_MS: 300_000 },
+      filename: "sample.docx",
+      bytes: Buffer.from("abc"),
+    })).rejects.toThrow("Docling returned no converted Markdown content");
+  });
+
+  it.each([
+    { status: 422, kind: "conversion" },
+    { status: 503, kind: "unavailable" },
+  ] as const)("classifies Docling HTTP $status as $kind", async ({ status, kind }) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status })));
+
+    const error = await convertWithDocling({
+      config: { DOCLING_URL: "https://docling.test", DOCLING_TIMEOUT_MS: 300_000 },
+      filename: "sample.docx",
+      bytes: Buffer.from("abc"),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ kind });
+    expect(isDoclingConversionError(error)).toBe(true);
+  });
+
+  it("preserves caller cancellation while reading a Docling response", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => ({
+      ok: true,
+      json: () => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      }),
+    }) as Response));
+
+    const conversion = convertWithDocling({
+      config: { DOCLING_URL: "https://docling.test", DOCLING_TIMEOUT_MS: 300_000 },
+      filename: "sample.docx",
+      bytes: Buffer.from("abc"),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+    controller.abort();
+
+    await expect(conversion).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("includes the underlying network failure in conversion errors", async () => {

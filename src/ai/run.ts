@@ -66,6 +66,7 @@ export const runTurn: TurnRunner = async (input) => {
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
   let generatedImageDelivered = false;
+  let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
 
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
@@ -73,6 +74,7 @@ export const runTurn: TurnRunner = async (input) => {
     const userMessage = await resolveTurnUserMessage(input);
     const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
     const runtime = await input.pi.runtime(input.thread, input.user);
+    activeBridge = runtime.bridge;
     runtime.bridge.beginTurn({
       api: input.api,
       chatId: input.chatId,
@@ -101,6 +103,8 @@ export const runTurn: TurnRunner = async (input) => {
     try {
       await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS);
     } finally {
+      runtime.bridge.endTurn();
+      activeBridge = undefined;
       unsubscribe();
       piEntries.push(...runtime.session.sessionManager.getEntries().flatMap((entry) => {
         if (existingEntryIds.has(entry.id) || entry.type !== "message") return [];
@@ -194,6 +198,7 @@ export const runTurn: TurnRunner = async (input) => {
     await streamer?.finish();
     await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
   } finally {
+    activeBridge?.endTurn();
     stop();
   }
 };

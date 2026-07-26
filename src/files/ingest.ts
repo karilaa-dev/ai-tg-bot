@@ -7,12 +7,12 @@ import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
 import { EMBEDDING_BATCH_SIZE } from "../pi/retrievalExtension.js";
-import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
+import { chunkCsv, chunkMarkdown } from "./chunker.js";
+import { chatFileMarker } from "./contextMarker.js";
 import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
-import { chatFileMarker } from "./contextMarker.js";
 import { persistManagedFile } from "./storage.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
@@ -481,17 +481,26 @@ async function contentFor(
     try {
       logger?.debug("native PDF text extraction starting", { name, bytes: bytes.length });
       const native = await extractPdfText({ bytes, signal });
+      const nativeContent = [
+        `# ${name}`,
+        `Extracted with native PDF text extraction (${native.pages} pages, ${native.textChars} text characters).`,
+        native.markdown,
+      ].join("\n\n");
       if (native.textChars >= MIN_NATIVE_PDF_TEXT_CHARS) {
         logger?.info("native PDF text extraction complete", {
           name,
           pages: native.pages,
           textChars: native.textChars,
         });
-        return [
-          `# ${name}`,
-          `Extracted with native PDF text extraction (${native.pages} pages, ${native.textChars} text characters).`,
-          native.markdown,
-        ].join("\n\n");
+        return nativeContent;
+      }
+      if (!config.DOCLING_URL && native.textChars > 0) {
+        logger?.info("keeping short native PDF text because Docling is disabled", {
+          name,
+          pages: native.pages,
+          textChars: native.textChars,
+        });
+        return nativeContent;
       }
       logger?.warn("native PDF text extraction returned little text; falling back to docling", {
         name,

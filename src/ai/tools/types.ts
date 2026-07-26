@@ -6,6 +6,7 @@ import type { FileRow, StoredFileType, ThreadRow, UserRow } from "../../db/types
 import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
 import type { ResolvedChatFile } from "../../files/source.js";
+import type { CommandRuntime } from "../../sandbox/types.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 
 export interface ToolBuildInput {
@@ -16,6 +17,7 @@ export interface ToolBuildInput {
   thread: ThreadRow;
   logger?: Logger;
   embedder?: TextEmbedder;
+  commandRuntime?: CommandRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   selectContextFiles?: (fileIds: number[]) => void;
   selectDurableContextFiles?: (fileIds: number[]) => void;
@@ -45,12 +47,12 @@ export interface CreatedFileAttachment {
 
 export type PendingCreatedFile = Promise<{ attachment?: CreatedFileAttachment; revisedPrompt?: string | null; error?: string }>;
 export type CreatedFileDeliveryPreference = "auto" | "photo" | "document";
-export const MAX_BASH_RESPONSE_BYTES = 10 * 1024 * 1024;
 export const MAX_LOADED_MESSAGE_CHARS = 8000;
 export const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 
 export interface BotToolDefinition<Input = unknown, Output = unknown> {
   description: string;
+  holdsCommandActivity?: boolean;
   inputSchema: z.ZodType<Input>;
   execute: (input: Input, signal?: AbortSignal) => Promise<Output>;
   toModelOutput?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
@@ -69,7 +71,7 @@ export interface LoadMessageFileEntry {
   name: string;
   summary: string | null;
   inline: boolean;
-  bash_path: string;
+  bash_input_file_id: number;
 }
 
 export interface LoadMessageImageEntry {

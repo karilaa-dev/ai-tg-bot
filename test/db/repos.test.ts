@@ -14,7 +14,7 @@ describe("repository round-trip on sqlite", () => {
   it("persists users, threads, messages, and searchable text", async () => {
     const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
     db = createDatabase(config, createLogger(config));
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const tgId = Date.now() + Math.floor(Math.random() * 1000);
     const user = await repos.users.ensure({ tgId, firstName: "DB", lang: "en" });

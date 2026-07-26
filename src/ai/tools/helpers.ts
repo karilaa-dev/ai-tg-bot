@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
+import { botOutboxRoot, guestCreatedFilePath } from "../../sandbox/paths.js";
 import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
@@ -53,24 +56,10 @@ export async function getScopedFile(input: ToolBuildInput, fileId: number): Prom
 export async function prepareCreatedFile(
   input: ToolBuildInput,
   file: { virtualPath: string; name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference },
+  signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
-  const root = path.resolve(input.config.BASH_WORKSPACE_ROOT, `thread-${input.thread.id}`);
-  await fs.mkdir(root, { recursive: true });
-  const rootReal = await fs.realpath(root);
   const virtualPath = normalizeBashCwd(file.virtualPath);
-  const hostPath = path.resolve(root, `.${virtualPath}`);
-  const realPath = await fs.realpath(hostPath).catch(() => {
-    throw new Error(`file not found: ${virtualPath}`);
-  });
-  if (!isPathInside(rootReal, realPath)) {
-    throw new Error("file path escapes the thread workspace");
-  }
-  const stat = await fs.stat(realPath);
-  if (!stat.isFile()) throw new Error("path is not a regular file");
-  if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-
-  const bytes = await fs.readFile(realPath);
-  if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+  const bytes = await exportCreatedFileBytes(input, virtualPath, signal);
   const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
   assertAllowedOutboundFile(displayName, file.mime, bytes);
 
@@ -134,6 +123,75 @@ export async function prepareCreatedFile(
     delivery,
     origin: "created_file",
   };
+}
+
+async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string, signal?: AbortSignal): Promise<Buffer> {
+  if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
+  const outboxId = randomUUID();
+  const botDirectory = path.join(botOutboxRoot(input.config), outboxId);
+  const botPath = path.join(botDirectory, "content");
+  await fs.mkdir(botDirectory, { recursive: true, mode: 0o700 });
+  let bytes: Buffer | undefined;
+  let failure: unknown;
+  try {
+    await input.commandRuntime.exportFile({
+      userId: input.user.tg_id,
+      threadId: input.thread.id,
+      guestPath: guestCreatedFilePath(input.thread.id, virtualPath),
+      hostDestination: botPath,
+      maxBytes: MAX_FILE_BYTES,
+      signal,
+    });
+    bytes = await readExportedFile(botPath, virtualPath);
+  } catch (error) {
+    failure = error;
+  }
+
+  let cleanupError: unknown;
+  try {
+    await fs.rm(botDirectory, { recursive: true, force: true });
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (failure !== undefined) {
+    if (cleanupError !== undefined) {
+      throw new AggregateError([failure, cleanupError], "file export and outbox cleanup both failed");
+    }
+    throw failure;
+  }
+  if (cleanupError !== undefined) {
+    input.logger?.warn("file export outbox cleanup failed", {
+      threadId: input.thread.id,
+      virtualPath,
+      error: String(cleanupError),
+    });
+  }
+  if (bytes === undefined) throw new Error("file export completed without bytes");
+  return bytes;
+}
+
+async function readExportedFile(filePath: string, virtualPath: string): Promise<Buffer> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") {
+      throw new Error(`file not found: ${virtualPath}`);
+    }
+    if (code === "ELOOP") throw new Error("path is not a regular file");
+    throw new Error(`cannot inspect exported file ${virtualPath}: ${String(error)}`);
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("path is not a regular file");
+    if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+    const bytes = await handle.readFile();
+    if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
+    return bytes;
+  } finally {
+    await handle.close();
+  }
 }
 
 function createdFileDeliveryFor(
@@ -268,11 +326,6 @@ function normalizeCreatedFileName(value: string): string {
   return base;
 }
 
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 export function normalizeBashCwd(value: string): string {
   const normalized = path.posix.normalize(value);
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
@@ -292,21 +345,43 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
   const combined = [stringField(result, "error"), stringField(result, "stderr"), stringField(result, "stdout")]
     .filter(Boolean)
     .join("\n");
-  if (timedOut) return "The bash script timed out; retry with a smaller bounded command.";
-  if (/\bnode\b/.test(script) || /this sandbox uses js-exec instead of node|node is .*stub/i.test(combined)) {
-    return "Use js-exec -c '...' for JavaScript in just-bash; node is only a help stub.";
+  if (timedOut) return "The OpenSandbox command timed out; retry with a smaller bounded command.";
+  if (/OpenSandbox.*(?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
+    return "The OpenSandbox command runtime is unavailable. Continue with online-only tools when possible, or report that sandbox command execution is unavailable.";
   }
-  if (/\$\(|<\(/.test(script) || /command substitution|process substitution|syntax error near unexpected token|bad substitution/i.test(combined)) {
-    return "Avoid just-bash command/process substitution. Write js-exec, python3, and curl outputs to temp files, then compare/read those files.";
+  if (/out of memory|oom|killed|exit code 137/i.test(combined)) {
+    return "The configured sandbox may have run out of memory. Retry with a smaller input or a less memory-intensive command.";
   }
-  if (/pipefail/i.test(script) || /pipefail/i.test(combined)) {
-    return "Retry with a simpler just-bash script without set -o pipefail; emit compact JSON with the values and checks.";
+  if (/permission denied|read-only file system/i.test(combined) && /apt|sudo|npm.*-g|pip.*system/i.test(`${script}\n${combined}`)) {
+    return "The configured sandbox user cannot modify that system location. Install packages into user-writable locations or use an image with the required system tools preinstalled.";
   }
-  if (/\bcurl\b/.test(script) || /networkaccessdenied|private\/loopback|localhost|curl:|failed to fetch|could not resolve|response.*too large/i.test(combined)) {
-    return "Use curl for public internet URLs and raw APIs; localhost/private ranges are blocked. Use web_search for discovery and web_extract for readable pages.";
+  const missingCommand = commandNotFoundName(combined);
+  if (missingCommand) {
+    return `The command \`${missingCommand}\` was not found. Check its spelling or use an installed equivalent; do not retry the unchanged command.`;
   }
-  if (/security violation|dynamic import/i.test(combined)) {
-    return "Retry with simpler just-bash syntax; some defense-in-depth paths reject dynamic imports.";
+  if (exitCode === 127) {
+    return "Exit status 127 commonly indicates a missing command. Inspect stderr to identify it, and do not retry the unchanged command or guess a package name without evidence.";
+  }
+  if (exitCode === 22 && (/\bcurl\b/.test(script) || /curl:|http\/?\d(?:\.\d)?\s+\d{3}|status(?: code)?\s*[:=]?\s*[45]\d\d/i.test(combined))) {
+    return "curl exit status 22 means an HTTP response was treated as a failure. Inspect the status and bounded response body, use --location and --fail-with-body where appropriate, and retry only transient 429 or 5xx responses with bounded timeouts.";
+  }
+  if (exitCode === 1) {
+    return "The command exited with status 1. Inspect the reported stderr and stdout, correct that specific validation or command failure, and do not retry unchanged.";
+  }
+  if (/could not resolve|name or service not known|failed to connect|connection (?:refused|timed out)|network is unreachable|no route to host|private|loopback|link-local|metadata/i.test(combined)) {
+    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, loopback, link-local, and cloud-metadata destinations are forbidden and must not be probed.";
+  }
+  return undefined;
+}
+
+function commandNotFoundName(output: string): string | undefined {
+  const patterns = [
+    /^(?:\/bin\/)?bash:\s*(?:line\s+\d+:\s*)?([^:\s]+):\s*command not found\s*$/im,
+    /^sh:\s*(?:line\s+\d+:\s*)?([^:\s]+):\s*not found\s*$/im,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(output);
+    if (match?.[1]) return match[1];
   }
   return undefined;
 }

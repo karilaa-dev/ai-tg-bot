@@ -26,6 +26,7 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtensio
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
+import type { CommandRuntime, SandboxActivityLease } from "../sandbox/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
@@ -74,6 +75,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     repos: Repos;
     logger: Logger;
     embedder?: TextEmbedder;
+    commandRuntime?: CommandRuntime;
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
@@ -207,7 +209,10 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   async dispose(): Promise<void> {
-    for (const runtime of this.runtimes.values()) runtime.session.dispose();
+    for (const runtime of this.runtimes.values()) {
+      runtime.bridge.endTurn();
+      runtime.session.dispose();
+    }
     this.runtimes.clear();
   }
 
@@ -287,6 +292,7 @@ export class PiRuntimeManager implements PiRuntimeService {
         .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt);
       const victim = candidates[0];
       if (!victim) return;
+      victim[1].bridge.endTurn();
       victim[1].session.dispose();
       this.runtimes.delete(victim[0]);
     }
@@ -301,6 +307,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   readonly repos: Repos;
   readonly logger: Logger;
   readonly embedder?: TextEmbedder;
+  readonly commandRuntime?: CommandRuntime;
   readonly modelRegistry: ModelRegistry;
   readonly providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[] = [];
@@ -309,6 +316,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
   private readonly durableContextFileIds = new Set<number>();
+  private commandActivityLease?: SandboxActivityLease;
 
   constructor(input: {
     config: AppConfig;
@@ -316,6 +324,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     repos: Repos;
     logger: Logger;
     embedder?: TextEmbedder;
+    commandRuntime?: CommandRuntime;
     user: UserRow;
     thread: ThreadRow;
     modelRegistry: ModelRegistry;
@@ -329,11 +338,13 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.repos = input.repos;
     this.logger = input.logger;
     this.embedder = input.embedder;
+    this.commandRuntime = input.commandRuntime;
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
   }
 
   beginTurn(input: PiTurnTransport): void {
+    this.endTurn();
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
@@ -341,6 +352,17 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.contextFileIds.clear();
     this.durableContextFileIds.clear();
     for (const fileId of input.currentFileIds ?? []) this.contextFileIds.add(fileId);
+  }
+
+  holdCommandActivity(): void {
+    if (this.commandActivityLease || !this.commandRuntime?.acquireActivityLease) return;
+    this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
+  }
+
+  endTurn(): void {
+    const lease = this.commandActivityLease;
+    this.commandActivityLease = undefined;
+    lease?.release();
   }
 
   buildInput(): ToolBuildInput {
@@ -352,6 +374,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       thread: this.thread,
       logger: this.logger,
       embedder: this.embedder,
+      commandRuntime: this.commandRuntime,
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),

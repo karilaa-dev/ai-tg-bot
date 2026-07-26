@@ -19,7 +19,7 @@ describe("transport-neutral file resolver", () => {
   beforeEach(async () => {
     const config = loadTestConfig();
     db = createDatabase(config, createLogger(config));
-    await db.migrate();
+    await db.initialize();
     repos = createRepos(db.db, db.search);
     cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-resolver-test-"));
   });
@@ -58,7 +58,7 @@ describe("transport-neutral file resolver", () => {
     const resolver = new FileResolver(
       repos.files,
       new FileByteCache({ FILE_CACHE_DIR: cacheRoot, FILE_CACHE_TTL_MS: 3_600_000 }),
-      new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "bash") }),
+      new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "managed-files") }),
     );
     resolver.registry.register(adapter);
 
@@ -69,7 +69,7 @@ describe("transport-neutral file resolver", () => {
     expect(first.mimeType).toBe("text/plain");
     expect(second.path).toBe(first.path);
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(first.path).toBe(path.join(cacheRoot, "bash", ".chat-files", String(file.id), "content"));
+    expect(first.path).toBe(path.join(cacheRoot, "managed-files", String(file.id), "content"));
     await expect(repos.files.get(file.id)).resolves.toMatchObject({ path: first.path });
   });
 
@@ -100,19 +100,19 @@ describe("transport-neutral file resolver", () => {
     const resolver = new FileResolver(
       repos.files,
       new FileByteCache({ FILE_CACHE_DIR: path.join(cacheRoot, "cache-a"), FILE_CACHE_TTL_MS: 3_600_000 }),
-      new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "bash") }),
+      new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "managed-files") }),
     );
     resolver.registry.register({ transport: "matrix", connectionKey: "homeserver", fetch });
 
     const first = await resolver.resolveFile(rows[0]!);
     expect(fetch).toHaveBeenCalledTimes(1);
     await expect(repos.files.get(rows[1]!.id)).resolves.toMatchObject({ path: null });
-    await fs.rm(path.join(cacheRoot, "bash", ".chat-files"), { recursive: true, force: true });
+    await fs.rm(path.join(cacheRoot, "managed-files"), { recursive: true, force: true });
 
     const restarted = new FileResolver(
       repos.files,
       new FileByteCache({ FILE_CACHE_DIR: path.join(cacheRoot, "cache-b"), FILE_CACHE_TTL_MS: 3_600_000 }),
-      new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "bash") }),
+      new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "managed-files") }),
     );
     restarted.registry.register({ transport: "matrix", connectionKey: "homeserver", fetch });
     const restored = await restarted.resolveFile({ ...rows[0]!, path: first.path });
@@ -120,7 +120,7 @@ describe("transport-neutral file resolver", () => {
     expect(restored.bytes.toString()).toBe("first");
     expect(fetch).toHaveBeenCalledTimes(2);
     await expect(repos.files.get(rows[1]!.id)).resolves.toMatchObject({ path: null });
-    await expect(fs.access(path.join(cacheRoot, "bash", ".chat-files", String(rows[1]!.id), "content")))
+    await expect(fs.access(path.join(cacheRoot, "managed-files", String(rows[1]!.id), "content")))
       .rejects.toThrow();
   });
 
@@ -145,7 +145,7 @@ describe("transport-neutral file resolver", () => {
       mimeType: "text/plain",
     });
     const fetch = vi.fn(async () => Buffer.from("shared"));
-    const store = new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "bash") });
+    const store = new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "managed-files") });
     const resolver = new FileResolver(
       repos.files,
       new FileByteCache({ FILE_CACHE_DIR: path.join(cacheRoot, "cache"), FILE_CACHE_TTL_MS: 3_600_000 }),
@@ -157,9 +157,9 @@ describe("transport-neutral file resolver", () => {
     expect(left.bytes).toEqual(right.bytes);
     expect(fetch).toHaveBeenCalledTimes(1);
 
-    await fs.rm(path.join(cacheRoot, "bash", ".chat-files"), { recursive: true, force: true });
+    await fs.rm(store.root, { recursive: true, force: true });
     await repos.files.clearPath(file.id);
-    const failingStore = new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "unwritable") });
+    const failingStore = new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "unwritable") });
     vi.spyOn(failingStore, "write").mockRejectedValue(new Error("disk full"));
     const fallback = new FileResolver(
       repos.files,
@@ -236,7 +236,7 @@ describe("transport-neutral file resolver", () => {
     const resolver = new FileResolver(
       repos.files,
       new FileByteCache({ FILE_CACHE_DIR: path.join(cacheRoot, "cache"), FILE_CACHE_TTL_MS: 3_600_000 }),
-      new ManagedFileStore({ BASH_WORKSPACE_ROOT: path.join(cacheRoot, "bash") }),
+      new ManagedFileStore({ MANAGED_FILE_ROOT: path.join(cacheRoot, "managed-files") }),
     );
 
     await expect(resolver.resolveFile(file)).rejects.toThrow("no remote or local source");

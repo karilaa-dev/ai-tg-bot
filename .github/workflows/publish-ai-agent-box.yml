@@ -1,0 +1,180 @@
+name: Publish AI agent box
+
+on:
+  pull_request:
+    paths:
+      - 'docker/ai-agent-box/**'
+      - '.github/workflows/publish-ai-agent-box.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker/ai-agent-box/**'
+      - '.github/workflows/publish-ai-agent-box.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ai-agent-box-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: karilaa-dev/ai-agent-box
+
+jobs:
+  verify:
+    name: Verify ${{ matrix.target }} on ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: runtime
+            platform: linux/amd64
+            arch: amd64
+          - target: runtime
+            platform: linux/arm64
+            arch: arm64
+          - target: dev
+            platform: linux/amd64
+            arch: amd64
+          - target: dev
+            platform: linux/arm64
+            arch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build smoke-test image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./docker/ai-agent-box
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: ai-agent-box:${{ matrix.target }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=ai-agent-box-${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ai-agent-box-${{ matrix.target }}-${{ matrix.arch }}
+
+      - name: Smoke test default process and root identity
+        run: |
+          image="ai-agent-box:${{ matrix.target }}-${{ matrix.arch }}"
+          test "$(docker run --rm --platform '${{ matrix.platform }}' "${image}" id -u)" = 0
+          container_id="$(docker run --detach --platform '${{ matrix.platform }}' "${image}")"
+          trap 'docker rm --force "${container_id}" >/dev/null' EXIT
+          sleep 1
+          test "$(docker inspect --format '{{.State.Running}}' "${container_id}")" = true
+
+      - name: Smoke test tool contract
+        run: |
+          docker run --rm \
+            --platform '${{ matrix.platform }}' \
+            --user 1000:1000 \
+            ai-agent-box:${{ matrix.target }}-${{ matrix.arch }} \
+            /usr/local/bin/tool-contract.sh
+
+      - name: Enforce compressed image size budget
+        run: |
+          image="ai-agent-box:${{ matrix.target }}-${{ matrix.arch }}"
+          # Docker reports .Size differently across the classic and containerd
+          # image stores. A gzipped image archive is portable and tracks the
+          # transfer/storage size this budget is intended to constrain.
+          size="$(docker image save "${image}" | gzip -1 -c | wc -c)"
+          if [[ '${{ matrix.target }}' == runtime ]]; then
+            max_size=$((100 * 1024 * 1024))
+          else
+            max_size=$((220 * 1024 * 1024))
+          fi
+          printf '%s/%s: %.1f MiB (budget %.1f MiB)\n' \
+            '${{ matrix.target }}' '${{ matrix.arch }}' \
+            "$((size / 1024 / 1024))" "$((max_size / 1024 / 1024))" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+          test "${size}" -le "${max_size}"
+
+  publish:
+    name: Build and publish
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract runtime image metadata
+        id: runtime-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=runtime
+            type=sha,prefix=sha-,format=long
+            type=sha,prefix=runtime-sha-,format=long
+
+      - name: Extract development image metadata
+        id: dev-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=dev
+            type=sha,prefix=dev-sha-,format=long
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./docker/ai-agent-box
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.runtime-meta.outputs.tags }}
+          labels: ${{ steps.runtime-meta.outputs.labels }}
+          cache-from: type=gha,scope=ai-agent-box-runtime
+          cache-to: type=gha,mode=max,scope=ai-agent-box-runtime
+
+      - name: Build and push development image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./docker/ai-agent-box
+          target: dev
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.dev-meta.outputs.tags }}
+          labels: ${{ steps.dev-meta.outputs.labels }}
+          cache-from: type=gha,scope=ai-agent-box-dev
+          cache-to: type=gha,mode=max,scope=ai-agent-box-dev
+
+      - name: Verify published manifests
+        run: |
+          runtime_image="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          dev_image="${REGISTRY}/${IMAGE_NAME}:dev-sha-${GITHUB_SHA}"
+          for image in "${runtime_image}" "${dev_image}"; do
+            manifest="$(docker buildx imagetools inspect "${image}")"
+            grep -q 'linux/amd64' <<<"${manifest}"
+            grep -q 'linux/arm64' <<<"${manifest}"
+          done

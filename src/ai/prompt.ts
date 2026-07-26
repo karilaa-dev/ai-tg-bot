@@ -14,7 +14,7 @@ export async function renderThreadSystemPrompt(input: {
   const files = await input.repos.files.listByIds(scope.fileIds);
   const filesOverview = files.map((file) => {
     const mode = file.type === "image" ? "chat reference" : file.is_inline ? "inline" : "searchable";
-    return `- #${file.id} ${file.name} (${file.type}, ${mode}; bash: /attachments/${file.id})${file.summary ? ` — ${file.summary.split("\n")[0]}` : ""}`;
+    return `- #${file.id} ${file.name} (${file.type}, ${mode}; stage for bash with input_file_ids: [${file.id}])${file.summary ? ` — ${file.summary.split("\n")[0]}` : ""}`;
   }).join("\n");
   return renderSystemPrompt({ ...input, filesOverview });
 }

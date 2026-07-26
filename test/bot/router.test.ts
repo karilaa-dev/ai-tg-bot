@@ -29,11 +29,11 @@ describe("bot router file adapters", () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-router-"));
     const config = loadTestConfig({
       FILE_CACHE_DIR: path.join(tempDir, "cache"),
-      BASH_WORKSPACE_ROOT: path.join(tempDir, "bash"),
+      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
     });
     const logger = createLogger(config);
     db = createDatabase(config, logger);
-    await db.migrate();
+    await db.initialize();
     const repos = createRepos(db.db, db.search);
     const resolver = new FileResolver(repos.files, new FileByteCache(config), new ManagedFileStore(config));
     const custom: ChatFileSourceAdapter = {

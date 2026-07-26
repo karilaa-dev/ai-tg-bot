@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docker/ai-agent-box/**'
+      - '.github/workflows/publish-ai-agent-box.yml'
   workflow_dispatch:
 
 permissions:

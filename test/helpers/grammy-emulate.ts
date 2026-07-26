@@ -37,17 +37,18 @@ export async function createGrammyEmulator(options: {
   const ownsCacheDir = !options.config?.FILE_CACHE_DIR;
   const cacheDir = options.config?.FILE_CACHE_DIR
     ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-files-"));
-  const ownsBashRoot = !options.config?.BASH_WORKSPACE_ROOT;
-  const bashRoot = options.config?.BASH_WORKSPACE_ROOT
-    ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-bash-"));
+  const ownsManagedRoot = !options.config?.MANAGED_FILE_ROOT;
+  const managedRoot = options.config?.MANAGED_FILE_ROOT
+    ?? await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-test-managed-"));
   const config = loadTestConfig({
+    DOCLING_URL: "http://docling.test",
     ...options.config,
     FILE_CACHE_DIR: cacheDir,
-    BASH_WORKSPACE_ROOT: bashRoot,
+    MANAGED_FILE_ROOT: managedRoot,
   });
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
-  await db.migrate();
+  await db.initialize();
   const repos = createRepos(db.db, db.search);
   const bot = new TestBot<BotContext>({
     token: config.BOT_TOKEN,
@@ -134,7 +135,7 @@ export async function createGrammyEmulator(options: {
       bot.dispose();
       await db.destroy();
       if (ownsCacheDir) await fs.rm(cacheDir, { recursive: true, force: true });
-      if (ownsBashRoot) await fs.rm(bashRoot, { recursive: true, force: true });
+      if (ownsManagedRoot) await fs.rm(managedRoot, { recursive: true, force: true });
     },
   };
 }

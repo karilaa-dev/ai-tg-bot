@@ -7,7 +7,7 @@ import { MAX_FILE_MB, defineBotTool, type ToolBuildInput } from "./types.js";
 export function createCreateFileTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      `Queue a file that you created in this thread's bash workspace to send back through the active chat. First create the file with bash, then call this tool with its absolute virtual path. Attach at most ${MAX_CREATED_FILES_PER_ANSWER} files per answer; do not call create_file more than ${MAX_CREATED_FILES_PER_ANSWER} times in one answer. If more files are needed, send the first ${MAX_CREATED_FILES_PER_ANSWER} and say the rest can be sent in another answer. Files up to ${MAX_FILE_MB} MB are allowed unless they are native/compiled executables such as exe, dll, ELF/Mach-O binaries, shared libraries, Java bytecode archives, or WebAssembly. Scripts and source files such as sh, bash, ps1, py, js, ts, and similar text/code files are allowed. Images are sent as photos by default; set delivery to document when exact bytes, transparency, metadata, print/source assets, or uncompressed delivery matters.`,
+      `Queue a file created in this thread's OpenSandbox workspace or in /data/shared to send through the active chat. Create thread files with relative Bash paths (for example, report.txt), then call this tool with the corresponding logical path (/report.txt). Absolute paths inside Bash are real guest paths and are not remapped. Explicit sandbox paths under /data/threads/<current-thread>/workspace or /data/shared are also accepted. Attach at most ${MAX_CREATED_FILES_PER_ANSWER} files per answer; do not call create_file more than ${MAX_CREATED_FILES_PER_ANSWER} times in one answer. If more files are needed, send the first ${MAX_CREATED_FILES_PER_ANSWER} and say the rest can be sent in another answer. Files up to ${MAX_FILE_MB} MB are allowed unless they are native/compiled executables such as exe, dll, ELF/Mach-O binaries, shared libraries, Java bytecode archives, or WebAssembly. Scripts and source files such as sh, bash, ps1, py, js, ts, and similar text/code files are allowed. Images are sent as photos by default; set delivery to document when exact bytes, transparency, metadata, print/source assets, or uncompressed delivery matters.`,
     inputSchema: z.object({
       path: z.string().regex(/^\//, "path must be an absolute virtual path"),
       name: z.string().min(1).max(255).optional(),
@@ -15,7 +15,7 @@ export function createCreateFileTool(input: ToolBuildInput) {
       caption: z.string().max(1024).optional(),
       delivery: z.enum(["auto", "photo", "document"]).default("auto"),
     }),
-    execute: async ({ path: virtualPath, name, mime, caption, delivery = "auto" }) => {
+    execute: async ({ path: virtualPath, name, mime, caption, delivery = "auto" }, signal) => {
       try {
         const usedBefore = assertCreatedFileCapacity(input);
         input.logger?.info("tool create_file starting", {
@@ -24,7 +24,7 @@ export function createCreateFileTool(input: ToolBuildInput) {
           name: name ?? null,
           mime: mime ?? null,
         });
-        const prepared = await prepareCreatedFile(input, { virtualPath, name, mime, caption, delivery });
+        const prepared = await prepareCreatedFile(input, { virtualPath, name, mime, caption, delivery }, signal);
         input.createdFiles?.push(prepared);
         const used = usedBefore + 1;
         input.logger?.info("tool create_file complete", {
