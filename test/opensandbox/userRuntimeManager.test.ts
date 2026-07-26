@@ -822,6 +822,45 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it("does not start a command when shutdown begins during stdin upload", async () => {
+    const upload = deferred<void>();
+    const client = new FakeClient({ writeGate: upload.promise });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    const execution = manager.execute({ ...command(425), stdin: "pending input" });
+    await vi.waitFor(() => expect(client.connections[0]?.writeEntries).toHaveLength(1));
+
+    const disposal = manager.dispose();
+    upload.resolve();
+
+    await expect(execution).rejects.toThrow("OpenSandbox runtime is shutting down");
+    await expect(disposal).resolves.toBeUndefined();
+    const connection = client.connections[0]!;
+    expect(connection.runCommands).toEqual([]);
+    expect(connection.remoteFiles).toEqual(new Set());
+    expect(connection.deleteCalls).toHaveLength(1);
+    expect(client.pauseCalls).toEqual([connection.id]);
+  });
+
+  it("does not upload stdin when shutdown begins during sandbox creation", async () => {
+    const creation = deferred<void>();
+    const client = new FakeClient({ createGate: creation.promise });
+    const manager = new UserOpenSandboxRuntimeManager({ config: loadTestConfig(), client });
+
+    const execution = manager.execute(command(426));
+    await vi.waitFor(() => expect(client.createCalls).toBe(1));
+
+    const disposal = manager.dispose();
+    creation.resolve();
+
+    await expect(execution).rejects.toThrow("OpenSandbox runtime is shutting down");
+    await expect(disposal).resolves.toBeUndefined();
+    const connection = client.connections[0]!;
+    expect(connection.writeEntries).toEqual([]);
+    expect(connection.runCommands).toEqual([]);
+    expect(client.pauseCalls).toEqual([connection.id]);
+  });
+
   it("preserves exact stdout and stderr without inventing line endings", async () => {
     const client = new FakeClient({
       stdout: ["compact", "-json"],
@@ -1093,6 +1132,8 @@ type FakeOptions = {
   readBytesError?: Error;
   writeError?: Error;
   writeNeverSettles?: boolean;
+  writeGate?: Promise<void>;
+  createGate?: Promise<void>;
   stdout: string[];
   stderr: string[];
 };
@@ -1141,6 +1182,7 @@ class FakeClient implements OpenSandboxClient {
     this.createCalls += 1;
     this.createSpecs.push(spec);
     const id = `sandbox-${this.createCalls}`;
+    await this.options.createGate;
     this.infos.set(id, info(id, "Running", spec.metadata));
     return this.connection(id);
   }
@@ -1295,6 +1337,7 @@ class FakeConnection implements OpenSandboxConnection {
     for (const entry of entries) this.remoteFiles.add(entry.path);
     if (this.options.writeError) throw this.options.writeError;
     if (this.options.writeNeverSettles) await new Promise<void>(() => undefined);
+    await this.options.writeGate;
   }
 
   async readBytes(

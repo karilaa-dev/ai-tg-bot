@@ -276,6 +276,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
   ): Promise<SandboxCommandResult> {
     const scope = sandboxScope(request.userId, request.threadId);
     const connection = await this.acquireConnection(state, scope);
+    if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
     throwIfAborted(request.signal);
     const commandId = randomUUID();
     const stdinPath = `/tmp/ai-tg-bot-stdin-${commandId}`;
@@ -297,6 +298,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         group: this.input.config.OPEN_SANDBOX_GROUP,
       }]));
 
+      if (this.shuttingDown) throw new Error("OpenSandbox runtime is shutting down");
       state.active = active;
       const command = buildBoundedCommandCapture({
         command: request.command,
