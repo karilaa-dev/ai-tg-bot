@@ -2,16 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sdkMocks = vi.hoisted(() => ({
   listSandboxInfos: vi.fn(),
+  createSandbox: vi.fn(),
+  createManager: vi.fn(),
 }));
 
 vi.mock("@alibaba-group/opensandbox", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@alibaba-group/opensandbox")>();
   return {
     ...actual,
+    Sandbox: {
+      create: sdkMocks.createSandbox,
+    },
     SandboxManager: {
-      create: vi.fn(() => ({
-        listSandboxInfos: sdkMocks.listSandboxInfos,
-      })),
+      create: sdkMocks.createManager,
     },
   };
 });
@@ -29,12 +32,18 @@ const clientConfig = {
   OPEN_SANDBOX_PROTOCOL: "http",
   OPEN_SANDBOX_API_KEY: "",
   OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 1_000,
+  OPEN_SANDBOX_READY_TIMEOUT_MS: 300_000,
   OPEN_SANDBOX_USE_SERVER_PROXY: false,
 } as unknown as Parameters<typeof createOpenSandboxClient>[0];
 
 describe("OpenSandbox client provider", () => {
   beforeEach(() => {
     sdkMocks.listSandboxInfos.mockReset();
+    sdkMocks.createSandbox.mockReset();
+    sdkMocks.createManager.mockReset();
+    sdkMocks.createManager.mockImplementation(() => ({
+      listSandboxInfos: sdkMocks.listSandboxInfos,
+    }));
   });
 
   it("shares only in-flight initialization and retries with a fresh client afterward", async () => {
@@ -57,6 +66,40 @@ describe("OpenSandbox client provider", () => {
 
   it("formats SDK and transport failures without exposing special handling", () => {
     expect(formatSandboxError(new Error("request failed"))).toBe("Error: request failed");
+  });
+
+  it("keeps the SDK transport alive for the full sandbox readiness window", async () => {
+    await createOpenSandboxClient(clientConfig);
+
+    expect(sdkMocks.createManager).toHaveBeenCalledWith({
+      connectionConfig: expect.objectContaining({ requestTimeoutSeconds: 300 }),
+    });
+  });
+
+  it("passes only the provisioning environment into Sandbox.create", async () => {
+    sdkMocks.createSandbox.mockResolvedValue({ id: "sandbox-created" });
+    const client = await createOpenSandboxClient(clientConfig);
+    await client.create({
+      image: "runner:test",
+      metadata: { owner: "test" },
+      env: {
+        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
+        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
+      },
+      mounts: [],
+      cpu: "1",
+      memory: "128Mi",
+      readyTimeoutMs: 300_000,
+      idleReleaseMs: 900_000,
+    });
+
+    expect(sdkMocks.createSandbox).toHaveBeenCalledWith(expect.objectContaining({
+      env: {
+        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
+        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
+      },
+    }));
+    expect(sdkMocks.createSandbox.mock.calls[0]?.[0]?.env).not.toHaveProperty("OPEN_SANDBOX_API_KEY");
   });
 
   it("denies non-public IPv4 and IPv6 ranges before allowing public traffic", () => {

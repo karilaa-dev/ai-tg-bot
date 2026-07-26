@@ -28,6 +28,9 @@ mode = "dns+nft"
 
 [docker]
 network_mode = "bridge"
+# The lifecycle server runs in Docker while runner ports are published by the
+# host Docker daemon. Resolve readiness checks through the host gateway.
+host_ip = "host.docker.internal"
 no_new_privileges = true
 pids_limit = 4096
 drop_capabilities = [

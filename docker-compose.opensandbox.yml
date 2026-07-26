@@ -1,10 +1,14 @@
 services:
   opensandbox-server:
-    image: docker.io/opensandbox/server:v0.2.2
+    image: ${OPEN_SANDBOX_SERVER_IMAGE:-ghcr.io/karilaa-dev/opensandbox-server:v0.2.2-ai-tg-bot.1}
+    build:
+      context: ./docker/opensandbox/server
     container_name: opensandbox-server
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
       OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?set OPEN_SANDBOX_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - opensandbox-state:/var/lib/opensandbox

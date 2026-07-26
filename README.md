@@ -140,15 +140,20 @@ OPEN_SANDBOX_USER=agent
 OPEN_SANDBOX_GROUP=agent
 OPEN_SANDBOX_UID=1000
 OPEN_SANDBOX_GID=1000
+OPENSANDBOX_EGRESS_DNS_UPSTREAM=1.1.1.1,8.8.8.8
 OPEN_SANDBOX_IDLE_PAUSE_MS=300000
 OPEN_SANDBOX_IDLE_RELEASE_MS=900000
 ```
 
-The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees.
+The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, public DNS upstreams, and layout markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees.
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
-The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. That implementation enforces the bot's IPv4 and IPv6 IP/CIDR deny rules in nftables and applies the same address-family handling to DNS A/AAAA results despite stale FQDN-only comments in the lifecycle SDK schema; changing the egress image or mode requires fresh direct-IP validation. Unmatched public internet traffic remains allowed. The pinned sidecar exempts its shared loopback interface before evaluating the policy deny sets, so do not expose sensitive services on sandbox loopback. Keep a host/network firewall as defense in depth and test literal private, Docker/LAN, link-local/metadata, and public destinations plus DNS behavior before production exposure.
+The server example config enables `opensandbox/egress:v1.1.4` in `dns+nft` mode. That implementation enforces the bot's IPv4 and IPv6 IP/CIDR deny rules in nftables and applies the same address-family handling to DNS A/AAAA results despite stale FQDN-only comments in the lifecycle SDK schema; changing the egress image or mode requires fresh direct-IP validation. Unmatched public internet traffic remains allowed. The bot provisions Cloudflare and Google as public DNS upstreams by default and automatically derives the sidecar's nameserver exemption, avoiding dependence on Docker's inherited host resolver or Tailscale MagicDNS. `OPENSANDBOX_EGRESS_DNS_UPSTREAM` accepts comma-separated public IP literals with optional ports; private, local, reserved, and named resolver values are rejected. Do not set `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT` yourself.
+
+Upstream server `v0.2.2` routes approved `OPENSANDBOX_EGRESS_*` request variables to the sidecar but omits these two documented DNS variables from its approval list. The bundled `ghcr.io/karilaa-dev/opensandbox-server:v0.2.2-ai-tg-bot.1` compatibility image is built directly from upstream `v0.2.2` and only adds `OPENSANDBOX_EGRESS_DNS_UPSTREAM` and `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT` to that list. Its fail-closed build patch stops applying once upstream contains the fix, so a future supported upstream release can replace it without carrying a fork.
+
+A Docker daemon-level DNS override is not required for OpenSandbox. If one was added while troubleshooting, keep it until the live verification below succeeds with the updated bot, then remove it if no other containers need it. The pinned sidecar exempts its shared loopback interface before evaluating the policy deny sets, so do not expose sensitive services on sandbox loopback. Keep a host/network firewall as defense in depth and test literal private, Docker/LAN, link-local/metadata, and public destinations plus DNS behavior before production exposure.
 
 For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
 
@@ -167,7 +172,7 @@ docker compose -f docker-compose.opensandbox.yml up -d
 docker compose up --build -d
 ```
 
-- `docker-compose.opensandbox.yml` mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, and mounts the shared folder under the identical absolute host path.
+- `docker-compose.opensandbox.yml` builds/uses the pinned server compatibility image, mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, mounts the shared folder under the identical absolute host path, and maps `host.docker.internal` to the Docker host gateway for runner readiness checks.
 - `docker-compose.yml` runs the bot with PostgreSQL, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
 - Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
 - The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
@@ -190,16 +195,26 @@ Setup:
 
 2. Create `/mnt/user/ai-tg-bot-shared/users` and ensure UID/GID `1000:1000` can write it.
 3. Copy `docker/opensandbox/config.example.toml` to `/mnt/user/appdata/opensandbox/config.toml`.
-4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users` and retain the pinned `dns+nft` egress image.
-5. Install and start `opensandbox-server` on `ai-tg-bot-opensandbox`. Set a long random API key.
+4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users`, retain the pinned `dns+nft` egress image, and retain `[docker] host_ip = "host.docker.internal"`.
+5. Install and start `opensandbox-server` on `ai-tg-bot-opensandbox`. Set a long random API key and retain the template's `--add-host=host.docker.internal:host-gateway` extra parameter.
 6. Install `ai-tg-bot` on the same network, use the identical API key, and keep:
    - Agent Shared Data: `/mnt/user/ai-tg-bot-shared` -> `/data`
    - OpenSandbox Shared Host Root: `/mnt/user/ai-tg-bot-shared`
    - OpenSandbox Domain: `opensandbox-server:8080`
    - Runner username/group set to `agent:agent` and UID/GID values aligned at `1000:1000`
+   - OpenSandbox Public DNS: `1.1.1.1,8.8.8.8`, unless different public resolvers are required
 7. Leave Docling URL empty unless a separately operated service is available.
 
 If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.
+
+### Upgrading an existing OpenSandbox installation
+
+1. Update the server TOML with `[docker] host_ip = "host.docker.internal"`.
+2. Select `ghcr.io/karilaa-dev/opensandbox-server:v0.2.2-ai-tg-bot.1`, add `--add-host=host.docker.internal:host-gateway` to the server container, and recreate it.
+3. Update and recreate `ai-tg-bot`; the default public DNS setting requires no manual change.
+4. Run `npm run live:opensandbox-check` from a configured checkout or execute the equivalent DNS, public HTTPS, and private-address checks from a bot-managed sandbox.
+5. Confirm the egress log reports that a configured upstream is in the nameserver exempt list and therefore does not use `SO_MARK`.
+6. After verification succeeds, remove any Docker daemon DNS override that was added solely for OpenSandbox and restart Docker at a suitable maintenance time.
 
 ## Security boundary
 

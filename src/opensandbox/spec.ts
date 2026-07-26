@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import type { OpenSandboxCreateSpec } from "./client.js";
+import { normalizeOpenSandboxDnsUpstreams } from "./network.js";
 
 export const SANDBOX_LAYOUT_VERSION = 2;
 export const METADATA_MANAGED_BY = "ai_tg_bot_managed_by";
@@ -65,7 +66,8 @@ export function openSandboxProvisioningFingerprint(config: AppConfig): string {
     sharedHostRoot: path.resolve(config.OPEN_SANDBOX_SHARED_HOST_ROOT),
     idleReleaseMs: config.OPEN_SANDBOX_IDLE_RELEASE_MS,
     guestMounts: ["current-workspace-rw", "current-attachments-ro", "user-shared-rw"],
-    network: "public-internet-v1",
+    network: "public-internet-v2",
+    dnsUpstream: config.OPENSANDBOX_EGRESS_DNS_UPSTREAM,
     security: "opensandbox-secure-access-v1",
   };
   return createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 12);
@@ -78,9 +80,14 @@ export function openSandboxCreateSpec(
 ): OpenSandboxCreateSpec {
   const userRoot = path.join(path.resolve(config.OPEN_SANDBOX_SHARED_HOST_ROOT), "users", safeId(userId, "user"));
   const thread = safeId(threadId, "thread");
+  const dns = normalizeOpenSandboxDnsUpstreams(config.OPENSANDBOX_EGRESS_DNS_UPSTREAM);
   return {
     image: config.OPEN_SANDBOX_IMAGE,
     metadata: threadSandboxMetadata(config, userId, threadId),
+    env: {
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: dns.upstream,
+      OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: dns.nameserverExempt,
+    },
     mounts: [
       {
         name: "thread-workspace",

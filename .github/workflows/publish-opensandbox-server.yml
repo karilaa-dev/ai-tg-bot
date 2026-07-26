@@ -1,12 +1,14 @@
-name: Publish container
+name: Publish OpenSandbox server compatibility image
 
 on:
+  pull_request:
+    paths:
+      - 'docker/opensandbox/server/**'
+      - '.github/workflows/publish-opensandbox-server.yml'
   push:
     branches:
       - main
-    paths-ignore:
-      - 'docker/ai-agent-box/**'
-      - '.github/workflows/publish-ai-agent-box.yml'
+    paths:
       - 'docker/opensandbox/server/**'
       - '.github/workflows/publish-opensandbox-server.yml'
   workflow_dispatch:
@@ -15,39 +17,42 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-container-${{ github.ref }}
+  group: publish-opensandbox-server-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: karilaa-dev/ai-tg-bot
+  IMAGE_NAME: karilaa-dev/opensandbox-server
 
 jobs:
   verify:
-    name: Typecheck and test
+    name: Verify compatibility image
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
-          node-version: 22
-          cache: npm
+          context: ./docker/opensandbox/server
+          load: true
+          tags: opensandbox-server:verify
+          cache-from: type=gha,scope=opensandbox-server
+          cache-to: type=gha,mode=max,scope=opensandbox-server
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test
-        run: npm test
+      - name: Verify permitted egress variables
+        run: |
+          docker run --rm --entrypoint python opensandbox-server:verify -c \
+            "from opensandbox_server.services.constants import ALLOWED_EGRESS_ENV_VARS as a; assert {'OPENSANDBOX_EGRESS_DNS_UPSTREAM', 'OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT'} <= a"
 
   publish:
     name: Build and publish
     needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,16 +80,17 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha,prefix=sha-,format=long
+            type=raw,value=v0.2.2-ai-tg-bot
+            type=raw,value=v0.2.2-ai-tg-bot.1
+            type=sha,prefix=v0.2.2-ai-tg-bot-sha-,format=long
 
       - name: Build and push image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
-          context: .
+          context: ./docker/opensandbox/server
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=opensandbox-server
+          cache-to: type=gha,mode=max,scope=opensandbox-server

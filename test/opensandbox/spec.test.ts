@@ -28,6 +28,10 @@ describe("OpenSandbox provisioning spec", () => {
     });
     expect(openSandboxCreateSpec(config, 123, 456)).toMatchObject({
       image: config.OPEN_SANDBOX_IMAGE,
+      env: {
+        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
+        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
+      },
       mounts: [
         {
           name: "thread-workspace",
@@ -72,6 +76,10 @@ describe("OpenSandbox provisioning spec", () => {
       loadTestConfig({
         OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
         OPEN_SANDBOX_IDLE_RELEASE_MS: 1_200_000,
+      }),
+      loadTestConfig({
+        OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
+        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "9.9.9.9:53",
       }),
     ];
 

@@ -23,6 +23,7 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: "2000",
       OPEN_SANDBOX_GID: "2001",
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: " 1.1.1.1, 8.8.8.8:5353 ",
       OPEN_SANDBOX_IDLE_PAUSE_MS: "300000",
       OPEN_SANDBOX_IDLE_RELEASE_MS: "900000",
     });
@@ -38,6 +39,7 @@ describe("OpenSandbox configuration", () => {
       OPEN_SANDBOX_GROUP: "runners",
       OPEN_SANDBOX_UID: 2000,
       OPEN_SANDBOX_GID: 2001,
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:5353",
       OPEN_SANDBOX_IDLE_PAUSE_MS: 300_000,
       OPEN_SANDBOX_IDLE_RELEASE_MS: 900_000,
     });
@@ -47,11 +49,23 @@ describe("OpenSandbox configuration", () => {
     expect(loadConfig({ ...required, DOCLING_URL: "   " })).toMatchObject({
       OPEN_SANDBOX_USER: "agent",
       OPEN_SANDBOX_GROUP: "agent",
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
       DOCLING_URL: undefined,
     });
     expect(loadConfig({ ...required, DOCLING_URL: "  https://docling.example.test/api  " }).DOCLING_URL)
       .toBe("https://docling.example.test/api");
     expect(() => loadConfig({ ...required, DOCLING_URL: "not a url" })).toThrow();
+  });
+
+  it("rejects private or named DNS upstreams", () => {
+    expect(() => loadConfig({
+      ...required,
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: "100.100.100.100",
+    })).toThrow("globally routable public IP");
+    expect(() => loadConfig({
+      ...required,
+      OPENSANDBOX_EGRESS_DNS_UPSTREAM: "resolver.internal",
+    })).toThrow("IPv4 or IPv6 literal");
   });
 
   it("rejects root as the OpenSandbox command identity", () => {

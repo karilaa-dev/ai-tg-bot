@@ -534,6 +534,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         state.connection = await this.control(
           "connect to sandbox",
           client.connect(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
+          this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS,
         );
         return state.connection;
       }
@@ -542,6 +543,7 @@ export class ThreadOpenSandboxRuntimeManager implements CommandRuntime {
         state.connection = await this.control(
           "resume sandbox",
           client.resume(info.id, this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS),
+          this.input.config.OPEN_SANDBOX_READY_TIMEOUT_MS,
         );
         state.remoteState = "Running";
         return state.connection;
