@@ -68,7 +68,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
   private readonly runtimes = new Map<number, PiThreadRuntime>();
-  private readonly initialization: Promise<void>;
+  private initialization?: Promise<void>;
 
   constructor(private readonly input: {
     config: AppConfig;
@@ -80,10 +80,10 @@ export class PiRuntimeManager implements PiRuntimeService {
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
-    this.initialization = this.initializeModelRuntime();
   }
 
   async initialize(): Promise<void> {
+    this.initialization ??= this.initializeModelRuntime();
     await this.initialization;
   }
 
@@ -92,7 +92,11 @@ export class PiRuntimeManager implements PiRuntimeService {
       authPath: path.join(this.agentDir, "auth.json"),
       modelsPath: path.join(this.agentDir, "models.json"),
     });
-    await this.modelRuntime.setRuntimeApiKey("openrouter", this.input.config.OPENROUTER_API_KEY);
+    await this.modelRuntime.setRuntimeApiKey(
+      "openrouter",
+      this.input.config.OPENROUTER_API_KEY,
+      { allowNetwork: false },
+    );
     this.modelRegistry = new ModelRegistry(this.modelRuntime);
     this.providerRouter = registerPiProviderRouter({
       config: this.input.config,

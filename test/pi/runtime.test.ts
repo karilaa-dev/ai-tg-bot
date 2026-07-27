@@ -36,6 +36,30 @@ describe("PiRuntimeManager", () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
+  it("initializes lazily without refreshing remote model catalogs", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-init-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const fetch = vi.fn(async () => {
+      throw new Error("unexpected remote model catalog request");
+    });
+    vi.stubGlobal("fetch", fetch);
+    const manager = new PiRuntimeManager({ config, db, repos, logger });
+    const authPath = path.join(config.PI_CODING_AGENT_DIR, "auth.json");
+
+    await expect(fs.access(authPath)).rejects.toThrow();
+    await manager.initialize();
+
+    await expect(fs.access(authPath)).resolves.toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+    await manager.dispose();
+  });
+
   it("persists, reopens, maps, and forks text-only Pi sessions", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-"));
     const config = loadTestConfig({
