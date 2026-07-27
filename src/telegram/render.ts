@@ -102,26 +102,44 @@ function splitRich(md: string): string[] {
   let inFence = false;
   let fenceOpener = "```";
   for (const line of linesWithEndings(md)) {
-    let remainder = line;
-    while (remainder) {
-      const closingFence = inFence ? "\n```" : "";
-      if (withinRichLimits(`${current}${remainder}${closingFence}`)) {
-        current += remainder;
-        remainder = "";
-        break;
+    const characters = Array.from(line);
+    const togglesFence = /^```/.test(line.trim());
+    let offset = 0;
+    while (offset < characters.length) {
+      if (inFence && !withinRichLimits(`${fenceOpener}\n\n\`\`\``)) fenceOpener = "```";
+      const closingFence = inFence || togglesFence ? "\n```" : "";
+      const remainingCount = characters.length - offset;
+      if (fitsCharacterLimit(current, remainingCount, closingFence)) {
+        const remainder = characters.slice(offset).join("");
+        if (withinRichLimits(`${current}${remainder}${closingFence}`)) {
+          current += remainder;
+          offset = characters.length;
+          break;
+        }
       }
 
       const reopenedFence = inFence ? `${fenceOpener}\n` : "";
       if (current && current !== reopenedFence) {
-        parts.push(finalizeRichPart(current, inFence));
+        pushRichPart(parts, current, inFence);
         current = reopenedFence;
         continue;
       }
 
-      const split = takeFittingPrefix(remainder, current, closingFence);
+      const split = takeFittingPrefix(characters, offset, current, closingFence);
+      if (!split) {
+        const fallback = characters[offset]!;
+        if (!withinRichLimits(fallback)) {
+          throw new Error("Unable to split rich message within Telegram limits.");
+        }
+        parts.push(fallback);
+        offset += 1;
+        current = reopenedFence;
+        continue;
+      }
+
       current += split.head;
-      remainder = split.tail;
-      parts.push(finalizeRichPart(current, inFence));
+      offset = split.end;
+      pushRichPart(parts, current, inFence);
       current = reopenedFence;
     }
 
@@ -136,8 +154,16 @@ function splitRich(md: string): string[] {
       }
     }
   }
-  if (current.trim()) parts.push(finalizeRichPart(current, inFence));
+  if (current.trim()) pushRichPart(parts, current, inFence);
   return parts;
+}
+
+function pushRichPart(parts: string[], current: string, inFence: boolean): void {
+  const part = finalizeRichPart(current, inFence);
+  if (!withinRichLimits(part)) {
+    throw new Error("Rich message splitter produced a part outside Telegram limits.");
+  }
+  parts.push(part);
 }
 
 function finalizeRichPart(current: string, inFence: boolean): string {
@@ -145,14 +171,20 @@ function finalizeRichPart(current: string, inFence: boolean): string {
   return inFence ? `${trimmed}\n\`\`\`` : trimmed;
 }
 
-function takeFittingPrefix(text: string, prefix: string, suffix: string): { head: string; tail: string } {
-  const characters = Array.from(text);
-  let low = 1;
-  let high = characters.length;
-  let best = 0;
+function takeFittingPrefix(
+  characters: string[],
+  start: number,
+  prefix: string,
+  suffix: string,
+): { head: string; end: number } | undefined {
+  if (!withinRichLimits(`${prefix}${suffix}`)) return undefined;
+  const capacity = RICH_MESSAGE_CHARACTER_LIMIT - richCharacterLength(prefix) - richCharacterLength(suffix);
+  let low = start + 1;
+  let high = Math.min(characters.length, start + capacity);
+  let best = start;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = `${prefix}${characters.slice(0, middle).join("")}${suffix}`;
+    const candidate = `${prefix}${characters.slice(start, middle).join("")}${suffix}`;
     if (withinRichLimits(candidate)) {
       best = middle;
       low = middle + 1;
@@ -160,11 +192,16 @@ function takeFittingPrefix(text: string, prefix: string, suffix: string): { head
       high = middle - 1;
     }
   }
-  const length = Math.max(1, best);
+  if (best === start) return undefined;
   return {
-    head: characters.slice(0, length).join(""),
-    tail: characters.slice(length).join(""),
+    head: characters.slice(start, best).join(""),
+    end: best,
   };
+}
+
+function fitsCharacterLimit(prefix: string, contentCharacters: number, suffix: string): boolean {
+  return richCharacterLength(prefix) + contentCharacters + richCharacterLength(suffix)
+    <= RICH_MESSAGE_CHARACTER_LIMIT;
 }
 
 function withinRichLimits(md: string): boolean {

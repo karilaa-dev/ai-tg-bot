@@ -70,6 +70,45 @@ describe("renderFinal", () => {
     expect(parts.some((part) => (part.markdown ?? "").includes("[truncated]"))).toBe(false);
   });
 
+  it("splits very large single lines without rescanning and copying the full remainder", () => {
+    const answer = `${"y".repeat(300_000)}performance-tail`;
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts.length).toBeGreaterThan(5);
+    expect(parts.map((part) => part.markdown ?? "").join("")).toBe(answer);
+    expect(parts.every((part) => Array.from(part.markdown ?? "").length <= 32768)).toBe(true);
+  });
+
+  it("normalizes oversized reopened fence wrappers and keeps every emitted part within rich limits", () => {
+    const oversizedFenceOpener = `\`\`\`${"<p>".repeat(600)}`;
+    const answer = `${oversizedFenceOpener}\n${"z".repeat(70_000)}fence-tail\n\`\`\``;
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.map((part) => part.markdown ?? "").join("")).toContain("fence-tail");
+    expect(parts.some((part) => (part.markdown ?? "").includes("[truncated]"))).toBe(false);
+    for (const part of parts) {
+      const markdown = part.markdown ?? "";
+      const nonEmptyLines = markdown.split("\n").filter((line) => line.trim()).length;
+      const explicitBlocks = markdown.match(
+        /<(?:details|p|footer|hr|ul|ol|li|table|tr|blockquote|aside|figure|pre|h[1-6]|tg-(?:math-block|map|collage|slideshow|thinking))\b/gi,
+      )?.length ?? 0;
+      const media = (markdown.match(/!\[[^\]]*\]\([^)\n]+\)/g)?.length ?? 0)
+        + (markdown.match(/<(?:img|video|audio)\b/gi)?.length ?? 0);
+      expect(Array.from(markdown).length).toBeLessThanOrEqual(32768);
+      expect(nonEmptyLines + explicitBlocks).toBeLessThanOrEqual(500);
+      expect(media).toBeLessThanOrEqual(50);
+    }
+  });
+
   it("uses Telegram's UTF-8 character limit rather than splitting by encoded byte size", () => {
     const answer = "🙂".repeat(40_000);
     const parts = renderFinal({
