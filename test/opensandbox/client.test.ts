@@ -76,16 +76,12 @@ describe("OpenSandbox client provider", () => {
     });
   });
 
-  it("passes only the provisioning environment into Sandbox.create", async () => {
+  it("does not inject bot configuration into the runner environment", async () => {
     sdkMocks.createSandbox.mockResolvedValue({ id: "sandbox-created" });
     const client = await createOpenSandboxClient(clientConfig);
     await client.create({
       image: "runner:test",
       metadata: { owner: "test" },
-      env: {
-        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
-        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
-      },
       mounts: [],
       cpu: "1",
       memory: "128Mi",
@@ -94,12 +90,10 @@ describe("OpenSandbox client provider", () => {
     });
 
     expect(sdkMocks.createSandbox).toHaveBeenCalledWith(expect.objectContaining({
-      env: {
-        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
-        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
-      },
+      image: "runner:test",
+      metadata: { owner: "test" },
     }));
-    expect(sdkMocks.createSandbox.mock.calls[0]?.[0]?.env).not.toHaveProperty("OPEN_SANDBOX_API_KEY");
+    expect(sdkMocks.createSandbox.mock.calls[0]?.[0]).not.toHaveProperty("env");
   });
 
   it("denies non-public IPv4 and IPv6 ranges before allowing public traffic", () => {
@@ -107,17 +101,19 @@ describe("OpenSandbox client provider", () => {
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress).toEqual(expect.arrayContaining([
       { action: "deny", target: "10.0.0.0/8" },
       { action: "deny", target: "100.64.0.0/10" },
-      { action: "deny", target: "127.0.0.0/8" },
       { action: "deny", target: "169.254.0.0/16" },
       { action: "deny", target: "172.16.0.0/12" },
       { action: "deny", target: "192.168.0.0/16" },
       { action: "deny", target: "224.0.0.0/4" },
       { action: "deny", target: "240.0.0.0/4" },
-      { action: "deny", target: "::1/128" },
       { action: "deny", target: "fc00::/7" },
       { action: "deny", target: "fe80::/10" },
       { action: "deny", target: "fec0::/10" },
       { action: "deny", target: "ff00::/8" },
+    ]));
+    expect(PUBLIC_INTERNET_NETWORK_POLICY.egress).not.toEqual(expect.arrayContaining([
+      { action: "deny", target: "127.0.0.0/8" },
+      { action: "deny", target: "::1/128" },
     ]));
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress?.every((rule) => rule.action === "deny")).toBe(true);
   });

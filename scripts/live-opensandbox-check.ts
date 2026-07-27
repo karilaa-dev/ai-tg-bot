@@ -154,7 +154,6 @@ try {
   const privateResult = await execute(manager, {
     script: [
       "for private_url in \\",
-      "  http://127.0.0.1:80/ \\",
       "  http://10.0.0.1:80/ \\",
       "  http://100.100.100.100:80/ \\",
       "  http://169.254.169.254/latest/meta-data/ \\",
@@ -168,8 +167,12 @@ try {
       "done",
     ].join("\n"),
   });
-  assertSuccess(privateResult, "private, Docker/LAN, CGNAT, loopback, and metadata egress blocking");
+  assertSuccess(privateResult, "private, Docker/LAN, CGNAT, and metadata egress blocking");
   privateEgressBlocked = { verified: true, detail: resultDetail(privateResult) };
+  const afterNetworkChecks = await execute(manager, { script: "printf 'reuse-after-network-checks-ok\\n'" });
+  assertSuccess(afterNetworkChecks, "sandbox reuse after network checks");
+  assertEqual(afterNetworkChecks.stdout, "reuse-after-network-checks-ok\n", "post-network-check stdout");
+  await assertSameSingleSandbox(adminClient, config, sandboxId, "post-network-check reuse");
 
   const timed = await execute(manager, {
     script: "printf 'timeout-started\\n'; sleep 30",

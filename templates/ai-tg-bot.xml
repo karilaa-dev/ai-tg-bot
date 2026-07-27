@@ -32,7 +32,6 @@
   <Config Name="OpenSandbox Group" Target="OPEN_SANDBOX_GROUP" Default="agent" Description="Group name used to own private stdin files inside the runner. It must exist in the image and resolve to OpenSandbox GID." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="OpenSandbox UID" Target="OPEN_SANDBOX_UID" Default="1000" Description="Nonzero numeric UID used for commands inside the sandbox; keep it aligned with APP_UID for shared-file exports." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="OpenSandbox GID" Target="OPEN_SANDBOX_GID" Default="1000" Description="Nonzero numeric GID used for commands inside the sandbox." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox Public DNS" Target="OPENSANDBOX_EGRESS_DNS_UPSTREAM" Default="1.1.1.1,8.8.8.8" Description="Comma-separated public resolver IPs with optional ports. The bot validates and forwards these to each egress sidecar; private and local resolver addresses are rejected." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used by the bot. Keep aligned with the runner image and shared-folder ownership." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used by the bot." Type="Variable" Display="always" Required="true" Mask="false"/>
 

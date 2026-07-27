@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Container version="2">
   <Name>opensandbox-server</Name>
-  <Repository>ghcr.io/karilaa-dev/opensandbox-server:v0.2.2-ai-tg-bot.1</Repository>
-  <Registry>https://github.com/karilaa-dev/ai-tg-bot/pkgs/container/opensandbox-server</Registry>
+  <Repository>docker.io/opensandbox/server:v0.2.2</Repository>
+  <Registry>https://hub.docker.com/r/opensandbox/server</Registry>
   <Network>ai-tg-bot-opensandbox</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/karilaa-dev/ai-tg-bot/issues</Support>
-  <Project>https://github.com/karilaa-dev/ai-tg-bot</Project>
-  <Overview>Trusted OpenSandbox v0.2.2 lifecycle service for ai-tg-bot, with a minimal compatibility patch permitting documented per-sandbox DNS upstream settings. It owns Docker-socket access and creates persistent per-user-and-thread runner containers; the bot itself remains unprivileged.</Overview>
+  <Support>https://github.com/opensandbox-group/OpenSandbox/issues</Support>
+  <Project>https://github.com/opensandbox-group/OpenSandbox</Project>
+  <Overview>Trusted stock OpenSandbox lifecycle service for ai-tg-bot. It owns Docker-socket access and creates persistent per-user-and-thread runner containers; the bot itself remains unprivileged.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/opensandbox-server.xml</TemplateURL>

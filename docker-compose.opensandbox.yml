@@ -1,8 +1,6 @@
 services:
   opensandbox-server:
-    image: ${OPEN_SANDBOX_SERVER_IMAGE:-ghcr.io/karilaa-dev/opensandbox-server:v0.2.2-ai-tg-bot.1}
-    build:
-      context: ./docker/opensandbox/server
+    image: docker.io/opensandbox/server:v0.2.2
     container_name: opensandbox-server
     environment:
       SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml

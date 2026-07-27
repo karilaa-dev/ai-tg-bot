@@ -2,10 +2,6 @@ import "dotenv/config";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import {
-  DEFAULT_OPENSANDBOX_EGRESS_DNS_UPSTREAM,
-  normalizeOpenSandboxDnsUpstreams,
-} from "./opensandbox/network.js";
 import { isPathWithin } from "./util/paths.js";
 
 export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
@@ -26,22 +22,6 @@ const AbsoluteHostPathSchema = z.string().min(1).superRefine((value, context) =>
     context.addIssue({ code: "custom", message: "must not be the filesystem root" });
   }
 });
-const OpenSandboxDnsUpstreamSchema = z.preprocess(
-  (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
-  z.string()
-    .default(DEFAULT_OPENSANDBOX_EGRESS_DNS_UPSTREAM)
-    .transform((value, context) => {
-      try {
-        return normalizeOpenSandboxDnsUpstreams(value).upstream;
-      } catch (error) {
-        context.addIssue({
-          code: "custom",
-          message: error instanceof Error ? error.message : String(error),
-        });
-        return z.NEVER;
-      }
-    }),
-);
 
 const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
@@ -82,7 +62,6 @@ const ConfigSchema = z.object({
   OPEN_SANDBOX_GROUP: z.string().trim().min(1).default("agent"),
   OPEN_SANDBOX_UID: z.coerce.number().int().min(1).max(MAX_LINUX_ID).default(1000),
   OPEN_SANDBOX_GID: z.coerce.number().int().min(1).max(MAX_LINUX_ID).default(1000),
-  OPENSANDBOX_EGRESS_DNS_UPSTREAM: OpenSandboxDnsUpstreamSchema,
   OPEN_SANDBOX_IDLE_PAUSE_MS: z.coerce.number().int().positive().default(300_000),
   OPEN_SANDBOX_IDLE_RELEASE_MS: z.coerce.number().int().positive().default(900_000),
   OPEN_SANDBOX_READY_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),

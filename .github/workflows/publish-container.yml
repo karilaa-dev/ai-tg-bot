@@ -7,8 +7,6 @@ on:
     paths-ignore:
       - 'docker/ai-agent-box/**'
       - '.github/workflows/publish-ai-agent-box.yml'
-      - 'docker/opensandbox/server/**'
-      - '.github/workflows/publish-opensandbox-server.yml'
   workflow_dispatch:
 
 permissions:

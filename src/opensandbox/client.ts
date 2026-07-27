@@ -25,7 +25,6 @@ export interface OpenSandboxInfo {
 export interface OpenSandboxCreateSpec {
   image: string;
   metadata: Record<string, string>;
-  env: Record<string, string>;
   mounts: Array<{
     name: string;
     hostPath: string;
@@ -146,7 +145,6 @@ class SdkOpenSandboxClient implements OpenSandboxClient {
       connectionConfig: this.connectionConfig,
       image: spec.image,
       metadata: spec.metadata,
-      env: spec.env,
       entrypoint: ["tail", "-f", "/dev/null"],
       resource: { cpu: spec.cpu, memory: spec.memory },
       timeoutSeconds: Math.max(1, Math.ceil(spec.idleReleaseMs / 1000)),

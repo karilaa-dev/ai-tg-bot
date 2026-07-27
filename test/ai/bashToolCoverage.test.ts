@@ -386,7 +386,7 @@ describe("Bash model recovery hints", () => {
       name: "preserves private-network policy",
       result: { exit_code: 7, stderr: "Failed to connect to loopback address", stdout: "" },
       input: { script: "fetch endpoint" },
-      expected: "private, loopback, link-local, and cloud-metadata destinations are forbidden",
+      expected: "private, link-local, and cloud-metadata destinations are forbidden",
     },
   ])("$name", ({ result, input, expected }) => {
     expect(bashModelHint(result, input)).toContain(expected);

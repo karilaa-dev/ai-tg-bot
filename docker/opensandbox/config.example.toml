@@ -12,8 +12,9 @@ execd_image = "opensandbox/execd:v1.0.21"
 
 [egress]
 # ai-tg-bot's private/reserved IPv4 and IPv6 CIDR deny rules rely on this
-# version's dns+nft implementation. It exempts loopback before policy denies;
-# revalidate direct-IP enforcement before changing either value.
+# version's dns+nft implementation. Its DNS proxy listens on sandbox loopback,
+# so the bot denies routed private networks without denying loopback itself.
+# Revalidate DNS and direct-IP enforcement before changing either value.
 image = "opensandbox/egress:v1.1.4"
 mode = "dns+nft"
 

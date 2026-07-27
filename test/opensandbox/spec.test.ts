@@ -1,6 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
+import { SANDBOX_NETWORK_POLICY_VERSION } from "../../src/opensandbox/network.js";
 import {
   managedSandboxMetadata,
   openSandboxCreateSpec,
@@ -9,6 +10,13 @@ import {
 } from "../../src/opensandbox/spec.js";
 
 describe("OpenSandbox provisioning spec", () => {
+  it("fingerprints the public-internet-v2 network policy", () => {
+    const config = loadTestConfig({ OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared" });
+
+    expect(SANDBOX_NETWORK_POLICY_VERSION).toBe("public-internet-v2");
+    expect(openSandboxProvisioningFingerprint(config)).toBe("0bf8dc13922e");
+  });
+
   it("builds stable deployment and per-thread metadata with scoped mounts", () => {
     const config = loadTestConfig({
       OPEN_SANDBOX_DEPLOYMENT_ID: "test-deployment",
@@ -28,10 +36,6 @@ describe("OpenSandbox provisioning spec", () => {
     });
     expect(openSandboxCreateSpec(config, 123, 456)).toMatchObject({
       image: config.OPEN_SANDBOX_IMAGE,
-      env: {
-        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "1.1.1.1:53,8.8.8.8:53",
-        OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT: "1.1.1.1,8.8.8.8",
-      },
       mounts: [
         {
           name: "thread-workspace",
@@ -76,10 +80,6 @@ describe("OpenSandbox provisioning spec", () => {
       loadTestConfig({
         OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
         OPEN_SANDBOX_IDLE_RELEASE_MS: 1_200_000,
-      }),
-      loadTestConfig({
-        OPEN_SANDBOX_SHARED_HOST_ROOT: "/mnt/shared",
-        OPENSANDBOX_EGRESS_DNS_UPSTREAM: "9.9.9.9:53",
       }),
     ];
 
