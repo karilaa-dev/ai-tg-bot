@@ -1,5 +1,11 @@
 FROM node:24.18.0-bookworm-slim AS build
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        make \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package.json package-lock.json ./
