@@ -369,7 +369,7 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
     return "The command exited with status 1. Inspect the reported stderr and stdout, correct that specific validation or command failure, and do not retry unchanged.";
   }
   if (/could not resolve|name or service not known|failed to connect|connection (?:refused|timed out)|network is unreachable|no route to host|private|loopback|link-local|metadata/i.test(combined)) {
-    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, loopback, link-local, and cloud-metadata destinations are forbidden and must not be probed.";
+    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, link-local, and cloud-metadata destinations are forbidden, while sandbox loopback is reserved for OpenSandbox internals.";
   }
   return undefined;
 }

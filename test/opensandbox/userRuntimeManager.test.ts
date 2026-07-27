@@ -130,6 +130,32 @@ describe("ThreadOpenSandboxRuntimeManager", () => {
     await manager.dispose();
   });
 
+  it.each([
+    ["Running", "connect"],
+    ["Paused", "resume"],
+  ] as const)(
+    "allows a %s sandbox readiness operation to exceed the shorter control timeout",
+    async (state, operation) => {
+      const gate = deferred<void>();
+      const config = loadTestConfig({
+        OPEN_SANDBOX_CONTROL_TIMEOUT_MS: 10,
+        OPEN_SANDBOX_READY_TIMEOUT_MS: 200,
+      });
+      const client = new FakeClient(operation === "connect"
+        ? { connectGate: gate.promise }
+        : { resumeGate: gate.promise });
+      client.infos.set("existing", info("existing", state, threadSandboxMetadata(config, 203, 1)));
+      const manager = new UserOpenSandboxRuntimeManager({ config, client });
+      const timer = setTimeout(() => gate.resolve(undefined), 40);
+
+      await expect(manager.execute(command(203))).resolves.toMatchObject({ exitCode: 0 });
+
+      clearTimeout(timer);
+      expect(operation === "connect" ? client.connectCalls : client.resumeCalls).toEqual(["existing"]);
+      await manager.dispose();
+    },
+  );
+
   it("creates sandboxes with a release TTL and renews it after activity", async () => {
     const config = loadTestConfig({
       OPEN_SANDBOX_IDLE_PAUSE_MS: 300_000,
@@ -1134,6 +1160,8 @@ type FakeOptions = {
   writeNeverSettles?: boolean;
   writeGate?: Promise<void>;
   createGate?: Promise<void>;
+  connectGate?: Promise<void>;
+  resumeGate?: Promise<void>;
   stdout: string[];
   stderr: string[];
 };
@@ -1189,11 +1217,13 @@ class FakeClient implements OpenSandboxClient {
 
   async connect(id: string): Promise<OpenSandboxConnection> {
     this.connectCalls.push(id);
+    await this.options.connectGate;
     return this.connection(id);
   }
 
   async resume(id: string): Promise<OpenSandboxConnection> {
     this.resumeCalls.push(id);
+    await this.options.resumeGate;
     const current = await this.getInfo(id);
     this.infos.set(id, { ...current, state: "Running" });
     return this.connection(id);

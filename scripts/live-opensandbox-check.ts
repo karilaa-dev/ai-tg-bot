@@ -143,18 +143,36 @@ try {
   await assertSameSingleSandbox(adminClient, config, sandboxId, "external pause/resume");
 
   const httpsResult = await execute(manager, {
-    script: "curl -fsS --max-time 15 https://example.com/ >/dev/null",
+    script: [
+      "getent hosts example.com >/dev/null",
+      "curl -fsS --max-time 15 https://example.com/ >/dev/null",
+    ].join("\n"),
   });
-  assertSuccess(httpsResult, "public HTTPS egress");
+  assertSuccess(httpsResult, "public DNS and HTTPS egress");
   publicHttps = { verified: true };
 
   const privateResult = await execute(manager, {
-    script: "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://169.254.169.254/latest/meta-data/",
+    script: [
+      "for private_url in \\",
+      "  http://10.0.0.1:80/ \\",
+      "  http://100.100.100.100:80/ \\",
+      "  http://169.254.169.254/latest/meta-data/ \\",
+      "  http://172.17.0.1:80/ \\",
+      "  http://192.168.0.1:80/",
+      "do",
+      "  if curl -sS -o /dev/null --connect-timeout 1 --max-time 2 \"$private_url\"; then",
+      "    printf 'private destination unexpectedly reachable: %s\\n' \"$private_url\" >&2",
+      "    exit 97",
+      "  fi",
+      "done",
+    ].join("\n"),
   });
-  if (privateResult.exitCode === 0) {
-    throw new Error("private/link-local egress unexpectedly reached the cloud metadata address");
-  }
+  assertSuccess(privateResult, "private, Docker/LAN, CGNAT, and metadata egress blocking");
   privateEgressBlocked = { verified: true, detail: resultDetail(privateResult) };
+  const afterNetworkChecks = await execute(manager, { script: "printf 'reuse-after-network-checks-ok\\n'" });
+  assertSuccess(afterNetworkChecks, "sandbox reuse after network checks");
+  assertEqual(afterNetworkChecks.stdout, "reuse-after-network-checks-ok\n", "post-network-check stdout");
+  await assertSameSingleSandbox(adminClient, config, sandboxId, "post-network-check reuse");
 
   const timed = await execute(manager, {
     script: "printf 'timeout-started\\n'; sleep 30",
