@@ -225,7 +225,6 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   async dispose(): Promise<void> {
-    await this.initialize();
     for (const runtime of this.runtimes.values()) {
       runtime.bridge.endTurn();
       runtime.session.dispose();
