@@ -160,7 +160,7 @@ try {
       "  http://172.17.0.1:80/ \\",
       "  http://192.168.0.1:80/",
       "do",
-      "  if curl -fsS -o /dev/null --connect-timeout 1 --max-time 2 \"$private_url\"; then",
+      "  if curl -sS -o /dev/null --connect-timeout 1 --max-time 2 \"$private_url\"; then",
       "    printf 'private destination unexpectedly reachable: %s\\n' \"$private_url\" >&2",
       "    exit 97",
       "  fi",
