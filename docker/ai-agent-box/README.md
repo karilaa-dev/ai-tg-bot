@@ -1,6 +1,6 @@
 # AI agent box image
 
-`ghcr.io/karilaa-dev/ai-agent-box` provides lightweight Alpine 3.22 environments for isolated AI agent workloads. The images contain tools only; they do not contain the Telegram bot application, repository source, or credentials.
+`ghcr.io/karilaa-dev/ai-agent-box` provides lightweight Alpine 3.24.1 environments for isolated AI agent workloads. The images contain tools only; they do not contain the Telegram bot application, repository source, or credentials.
 
 ## Image variants
 
@@ -9,8 +9,8 @@
 The `latest`, `runtime`, `sha-<commit>`, and `runtime-sha-<commit>` tags contain the default low-latency environment:
 
 - Bash and GNU core/search/text utilities
-- Python 3.12 with pip, venv, and a `python` compatibility alias for `python3`
-- Node.js 22 with npm
+- Python 3.14 with pip, venv, and a `python` compatibility alias for `python3`
+- Node.js 24 with npm
 - tar, gzip, bzip2, xz, zstd, ZIP, and unzip
 - curl, wget, CA certificates, Git, and the OpenSSH client
 - jq, ripgrep (`rg`), fd, file, tree, less, and `patch`
@@ -52,7 +52,7 @@ docker run --rm --user 1000:1000 \
 
 ## Size and startup findings
 
-Local amd64 benchmarks compared equivalent candidates on an 8-core Docker host. Sizes below are Docker's unpacked image size; cached startup measured `docker run` through the first successful non-root command. OpenSandbox measured sandbox creation through the first successful command.
+The historical local amd64 benchmarks below compared equivalent candidates on an 8-core Docker host before the current Alpine 3.24.1 upgrade. Sizes are Docker's unpacked image size; cached startup measured `docker run` through the first successful non-root command. OpenSandbox measured sandbox creation through the first successful command.
 
 | Candidate | Size | Cached Docker median | Cached OpenSandbox median |
 |---|---:|---:|---:|

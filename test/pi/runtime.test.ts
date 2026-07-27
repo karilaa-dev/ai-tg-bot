@@ -10,6 +10,7 @@ import {
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
@@ -31,9 +32,70 @@ describe("PiRuntimeManager", () => {
   let tempDir: string | undefined;
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     await db?.destroy();
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("disposes an unused manager without initializing model state", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-dispose-unused-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const createModelRuntime = vi.spyOn(ModelRuntime, "create");
+    const manager = new PiRuntimeManager({ config, db, repos, logger });
+
+    await expect(manager.dispose()).resolves.toBeUndefined();
+
+    expect(createModelRuntime).not.toHaveBeenCalled();
+  });
+
+  it("disposes safely after model initialization fails", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-dispose-failed-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const createModelRuntime = vi.spyOn(ModelRuntime, "create")
+      .mockRejectedValueOnce(new Error("model initialization failed"));
+    const manager = new PiRuntimeManager({ config, db, repos, logger });
+
+    await expect(manager.initialize()).rejects.toThrow("model initialization failed");
+    await expect(manager.dispose()).resolves.toBeUndefined();
+
+    expect(createModelRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it("initializes lazily without refreshing remote model catalogs", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-pi-init-"));
+    const config = loadTestConfig({
+      PI_CODING_AGENT_DIR: path.join(tempDir, "pi"),
+    });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const fetch = vi.fn(async () => {
+      throw new Error("unexpected remote model catalog request");
+    });
+    vi.stubGlobal("fetch", fetch);
+    const manager = new PiRuntimeManager({ config, db, repos, logger });
+    const authPath = path.join(config.PI_CODING_AGENT_DIR, "auth.json");
+
+    await expect(fs.access(authPath)).rejects.toThrow();
+    await manager.initialize();
+
+    await expect(fs.access(authPath)).resolves.toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+    await manager.dispose();
   });
 
   it("persists, reopens, maps, and forks text-only Pi sessions", async () => {

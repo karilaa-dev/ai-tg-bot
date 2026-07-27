@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 import { type SQL } from "drizzle-orm";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
-import { drizzle as drizzleSqlite } from "drizzle-orm/node-sqlite";
 import pg from "pg";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -32,7 +32,7 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     const sqlitePath = target === ":memory:" ? ":memory:" : path.resolve(target);
     if (sqlitePath !== ":memory:") fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
     logger?.debug("opening sqlite database", { path: sqlitePath });
-    const sqlite = drizzleSqlite({ client: new DatabaseSync(sqlitePath) });
+    const sqlite = drizzleSqlite({ client: new Database(sqlitePath) });
     let sqliteExecutor: SqlExecutor;
     sqliteExecutor = {
       dialect,

@@ -39,6 +39,7 @@ try {
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, embedder, commandRuntime: sandboxRuntime });
+  await pi.initialize();
   const bot = createBot({
     config,
     db,
