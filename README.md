@@ -53,7 +53,7 @@ Main, helper, and image calls share one Codex circuit breaker. While it is open,
 
 ## Requirements
 
-- Node.js 22.19 or newer for source development.
+- Node.js 24.18 or newer for source development.
 - Telegram bot token.
 - OpenRouter API key.
 - Tavily API key.
@@ -148,7 +148,7 @@ The image reference, resources, username/group, UID/GID, shared root, idle-relea
 
 The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
-The server example pins the stock `opensandbox/server:v0.2.2` lifecycle image and `opensandbox/egress:v1.1.4` sidecar in `dns+nft` mode. The sidecar inherits the normal Docker resolver configuration and redirects sandbox DNS through its internal `127.0.0.1:15353` proxy. The bot therefore leaves sandbox loopback available while denying routed private, Docker/LAN, CGNAT, link-local/metadata, reserved, multicast, and documentation ranges. Unmatched public internet traffic remains allowed.
+The server example pins the stock `opensandbox/server:v0.2.2` lifecycle image and `opensandbox/egress:v1.1.5` sidecar in `dns+nft` mode. The sidecar inherits the normal Docker resolver configuration and redirects sandbox DNS through its internal `127.0.0.1:15353` proxy. The bot therefore leaves sandbox loopback available while denying routed private, Docker/LAN, CGNAT, link-local/metadata, reserved, multicast, and documentation ranges. Unmatched public internet traffic remains allowed.
 
 Do not configure per-sandbox DNS upstream variables or use a patched OpenSandbox server. A Docker daemon-level DNS override is also unnecessary when ordinary Docker containers can resolve public hostnames. If an override was added while troubleshooting, remove it after the live verification below succeeds and after confirming no other containers depend on it. Fix host or Docker resolver configuration if ordinary bridge containers cannot resolve names; the bot does not rewrite runner `/etc/resolv.conf`.
 
@@ -170,7 +170,7 @@ docker compose up --build -d
 ```
 
 - `docker-compose.opensandbox.yml` uses the pinned stock server image, mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, mounts the shared folder under the identical absolute host path, and maps `host.docker.internal` to the Docker host gateway for runner readiness checks.
-- `docker-compose.yml` runs the bot with PostgreSQL, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
+- `docker-compose.yml` runs the bot with PostgreSQL 17.10, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
 - Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
 - The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
 - PostgreSQL is available only to the bot on an internal Compose network and is not published on a host port. Set `POSTGRES_PASSWORD` in `.env` to a long random value; the container entrypoint safely URL-encodes it when constructing `DB_URL`.
@@ -207,7 +207,7 @@ If the shared location changes, update all four places together: bot bind source
 
 1. Update the server TOML with `[docker] host_ip = "host.docker.internal"`.
 2. Select the stock `docker.io/opensandbox/server:v0.2.2` image, add `--add-host=host.docker.internal:host-gateway` to the server container, and recreate it.
-3. Retain `opensandbox/egress:v1.1.4` in the TOML, then update and recreate `ai-tg-bot`. The `public-internet-v2` fingerprint replaces obsolete managed sandboxes on their next use.
+3. Retain `opensandbox/egress:v1.1.5` in the TOML, then update and recreate `ai-tg-bot`. The `public-internet-v3` fingerprint replaces obsolete managed sandboxes on their next use.
 4. Run `npm run live:opensandbox-check` from a configured checkout or execute equivalent hostname, public HTTPS, and private-address checks from a bot-managed sandbox.
 5. Confirm public DNS/HTTPS succeeds and a known reachable LAN service remains unreachable from the sandbox. Egress logs should show normal DNS outbound events without custom upstream or nameserver-exemption settings.
 6. After verification succeeds, remove any Docker daemon DNS override added solely for OpenSandbox and restart Docker at a suitable maintenance time.

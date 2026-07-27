@@ -15,7 +15,7 @@ execd_image = "opensandbox/execd:v1.0.21"
 # version's dns+nft implementation. Its DNS proxy listens on sandbox loopback,
 # so the bot denies routed private networks without denying loopback itself.
 # Revalidate DNS and direct-IP enforcement before changing either value.
-image = "opensandbox/egress:v1.1.4"
+image = "opensandbox/egress:v1.1.5"
 mode = "dns+nft"
 
 # Optional stronger isolation for hosts with Kata installed and registered in Docker.

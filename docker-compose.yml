@@ -40,7 +40,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.10-alpine
     environment:
       POSTGRES_DB: aibot
       POSTGRES_USER: aibot

@@ -7,7 +7,7 @@ import {
 
 describe("OpenSandbox public-only networking", () => {
   it("allows loopback for the stock egress DNS proxy while denying routed non-public networks", () => {
-    expect(SANDBOX_NETWORK_POLICY_VERSION).toBe("public-internet-v2");
+    expect(SANDBOX_NETWORK_POLICY_VERSION).toBe("public-internet-v3");
     expect(PUBLIC_INTERNET_NETWORK_POLICY.defaultAction).toBe("allow");
     expect(PUBLIC_INTERNET_NETWORK_POLICY.egress).toEqual(expect.arrayContaining([
       { action: "deny", target: "0.0.0.0/8" },

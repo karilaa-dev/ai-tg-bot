@@ -1,6 +1,6 @@
 import type { NetworkPolicy } from "@alibaba-group/opensandbox";
 
-export const SANDBOX_NETWORK_POLICY_VERSION = "public-internet-v2";
+export const SANDBOX_NETWORK_POLICY_VERSION = "public-internet-v3";
 
 export const NON_PUBLIC_NETWORK_CIDRS = [
   "0.0.0.0/8",
@@ -36,7 +36,7 @@ export const NON_PUBLIC_NETWORK_CIDRS = [
   "ff00::/8",
 ] as const;
 
-// The pinned opensandbox/egress:v1.1.4 sidecar supports IPv4/IPv6 CIDR
+// The pinned opensandbox/egress:v1.1.5 sidecar supports IPv4/IPv6 CIDR
 // targets in dns+nft mode despite stale FQDN-only SDK schema comments. Its DNS
 // redirect terminates on 127.0.0.1:15353, so loopback must remain available
 // inside the shared sandbox/egress network namespace. Loopback is not a route

@@ -4,10 +4,10 @@ import type { Api } from "grammy";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import {
-  AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
   ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
@@ -63,11 +63,12 @@ export interface PiRuntimeService {
 }
 
 export class PiRuntimeManager implements PiRuntimeService {
-  readonly authStorage: AuthStorage;
-  readonly modelRegistry: ModelRegistry;
-  readonly providerRouter: PiProviderRouter;
+  modelRuntime!: ModelRuntime;
+  modelRegistry!: ModelRegistry;
+  providerRouter!: PiProviderRouter;
   readonly agentDir: string;
   private readonly runtimes = new Map<number, PiThreadRuntime>();
+  private readonly initialization: Promise<void>;
 
   constructor(private readonly input: {
     config: AppConfig;
@@ -79,18 +80,30 @@ export class PiRuntimeManager implements PiRuntimeService {
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
-    this.authStorage = AuthStorage.create(path.join(this.agentDir, "auth.json"));
-    this.authStorage.setRuntimeApiKey("openrouter", input.config.OPENROUTER_API_KEY);
-    this.modelRegistry = ModelRegistry.create(this.authStorage, path.join(this.agentDir, "models.json"));
+    this.initialization = this.initializeModelRuntime();
+  }
+
+  async initialize(): Promise<void> {
+    await this.initialization;
+  }
+
+  private async initializeModelRuntime(): Promise<void> {
+    this.modelRuntime = await ModelRuntime.create({
+      authPath: path.join(this.agentDir, "auth.json"),
+      modelsPath: path.join(this.agentDir, "models.json"),
+    });
+    await this.modelRuntime.setRuntimeApiKey("openrouter", this.input.config.OPENROUTER_API_KEY);
+    this.modelRegistry = new ModelRegistry(this.modelRuntime);
     this.providerRouter = registerPiProviderRouter({
-      config: input.config,
+      config: this.input.config,
       modelRegistry: this.modelRegistry,
-      logger: input.logger,
-      streams: input.providerStreams,
+      logger: this.input.logger,
+      streams: this.input.providerStreams,
     });
   }
 
   async runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime> {
+    await this.initialize();
     const cached = this.runtimes.get(thread.id);
     if (cached) {
       cached.bridge.user = user;
@@ -132,8 +145,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     const { session } = await createAgentSession({
       cwd: process.cwd(),
       agentDir: this.agentDir,
-      authStorage: this.authStorage,
-      modelRegistry: this.modelRegistry,
+      modelRuntime: this.modelRuntime,
       model: this.providerRouter.mainModel,
       thinkingLevel: normalizeThinkingLevel(this.input.config.PI_THINKING_LEVEL),
       noTools: "builtin",
@@ -209,6 +221,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   async dispose(): Promise<void> {
+    await this.initialize();
     for (const runtime of this.runtimes.values()) {
       runtime.bridge.endTurn();
       runtime.session.dispose();
@@ -222,6 +235,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     images?: ImageContent[];
     timeoutMs: number;
   }): Promise<string> {
+    await this.initialize();
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
@@ -242,8 +256,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     const { session } = await createAgentSession({
       cwd: process.cwd(),
       agentDir: this.agentDir,
-      authStorage: this.authStorage,
-      modelRegistry: this.modelRegistry,
+      modelRuntime: this.modelRuntime,
       model: this.providerRouter.helperModel,
       thinkingLevel: "low",
       noTools: "all",

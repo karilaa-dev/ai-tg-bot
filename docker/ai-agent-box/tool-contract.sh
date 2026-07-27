@@ -26,7 +26,7 @@ python3 -m venv "${tmp_dir}/venv"
 "${tmp_dir}/venv/bin/python" -c 'import json, pathlib, sqlite3, tarfile, zipfile'
 "${tmp_dir}/venv/bin/python" -m pip --version >/dev/null
 [[ "$(python -c 'import sys; print(sys.version_info[:2])')" == "$(python3 -c 'import sys; print(sys.version_info[:2])')" ]]
-[[ "$(node --version)" == v22.* ]]
+[[ "$(node --version)" == v24.* ]]
 npm --version >/dev/null
 
 printf 'archive-ok' > "${tmp_dir}/archive-input"
@@ -53,7 +53,7 @@ cmp "${tmp_dir}/zstd-input" "${tmp_dir}/zstd-output"
 
 source /etc/os-release
 [[ "${ID}" == alpine ]]
-[[ "${VERSION_ID}" == 3.22.* ]]
+[[ "${VERSION_ID}" == 3.24.* ]]
 
 [[ "$(id -u)" == 1000 ]]
 [[ "$(id -g)" == 1000 ]]

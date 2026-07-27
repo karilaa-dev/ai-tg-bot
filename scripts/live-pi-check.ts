@@ -25,6 +25,7 @@ try {
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime });
+  await pi.initialize();
   if (process.env.PI_SMOKE_FORCE_OPENROUTER === "1") pi.providerRouter.circuit.recordFailure();
   const runtime = await pi.runtime(thread, user);
   runtime.bridge.beginTurn({

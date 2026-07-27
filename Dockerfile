@@ -1,4 +1,4 @@
-FROM node:22.19.0-bookworm-slim AS build
+FROM node:24.18.0-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY locales ./locales
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM node:22.19.0-bookworm-slim AS runtime
+FROM node:24.18.0-bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot" \
       org.opencontainers.image.description="Pi-powered Telegram agent with OpenSandbox command execution"
