@@ -1,8 +1,14 @@
 import type { InputRichMessage } from "./richApi.js";
-import { RICH_MESSAGE_BYTE_LIMIT, repairLadder, sanitize } from "./mdRepair.js";
+import {
+  RICH_MESSAGE_BLOCK_LIMIT,
+  RICH_MESSAGE_CHARACTER_LIMIT,
+  RICH_MESSAGE_MEDIA_LIMIT,
+  repairLadder,
+  sanitize,
+} from "./mdRepair.js";
 
-const SHOW_MORE_THRESHOLD = 3500;
-const FINAL_THINKING_WRAPPER_RESERVE_BYTES = 1024;
+const FINAL_THINKING_WRAPPER_RESERVE_CHARACTERS = 1024;
+const FINAL_THINKING_WRAPPER_RESERVE_BLOCKS = 4;
 const THINKING_TRUNCATION_MARKER = "…";
 
 export type RenderT = (key: string, params?: Record<string, string | number>) => string;
@@ -22,10 +28,26 @@ export interface RenderDraftInput {
 }
 
 export function renderFinal(input: RenderFinalInput): InputRichMessage[] {
+  return [
+    ...renderFinalThinking(input),
+    ...renderFinalAnswer(input),
+  ];
+}
+
+export function renderFinalThinking(input: Pick<RenderFinalInput, "thinkingLog" | "elapsedMs" | "t">): InputRichMessage[] {
   const thinkingLog = capFinalThinking(input.thinkingLog);
   const thinking = renderThinkingDetails(thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs));
-  const answer = withShowMore(sanitize(input.answerMd, { enforceLimit: false }), SHOW_MORE_THRESHOLD, input.t);
-  return splitRich(`${thinking}${answer}`).map((markdown) => ({ markdown: sanitize(markdown) }));
+  return thinking ? splitRich(thinking.trimEnd()).map((markdown) => ({ markdown: sanitize(markdown) })) : [];
+}
+
+export function renderFinalAnswer(input: Pick<RenderFinalInput, "answerMd">): InputRichMessage[] {
+  const answer = sanitize(input.answerMd, { enforceLimit: false });
+  return answer.trim() ? splitRich(answer).map((markdown) => ({ markdown: sanitize(markdown) })) : [];
+}
+
+export function renderAnswerDraft(answerMd: string): InputRichMessage {
+  const answer = sanitize(answerMd, { enforceLimit: false });
+  return { markdown: sanitize(splitRich(answer).at(-1) ?? "") };
 }
 
 export function renderDraft(input: RenderDraftInput): InputRichMessage {
@@ -42,14 +64,6 @@ export function variantsForRichRetry(markdown: string): InputRichMessage[] {
   return repairLadder(markdown).map((variant) => ({ markdown: variant }));
 }
 
-function withShowMore(md: string, threshold: number, t: (key: string) => string): string {
-  if (md.length <= threshold) return md;
-  const cut = findBlockBoundary(md, threshold);
-  const head = md.slice(0, cut).trimEnd();
-  const tailText = md.slice(cut).trimStart();
-  return `${head}\n\n<details><summary>${t("show-more")}</summary>\n\n${tailText}\n\n</details>`;
-}
-
 function renderThinkingDetails(thinkingLog: string | undefined, title: string): string {
   const trimmed = thinkingLog?.trim();
   if (!trimmed) return "";
@@ -59,42 +73,22 @@ function renderThinkingDetails(thinkingLog: string | undefined, title: string): 
 function capFinalThinking(thinkingLog: string | undefined): string | undefined {
   const sanitized = thinkingLog ? sanitize(thinkingLog, { enforceLimit: false }).trim() : "";
   if (!sanitized) return undefined;
-  const maxBytes = RICH_MESSAGE_BYTE_LIMIT - FINAL_THINKING_WRAPPER_RESERVE_BYTES;
-  if (Buffer.byteLength(sanitized, "utf8") <= maxBytes) return sanitized;
+  const maxCharacters = RICH_MESSAGE_CHARACTER_LIMIT - FINAL_THINKING_WRAPPER_RESERVE_CHARACTERS;
+  const maxBlocks = RICH_MESSAGE_BLOCK_LIMIT - FINAL_THINKING_WRAPPER_RESERVE_BLOCKS;
+  if (richCharacterLength(sanitized) <= maxCharacters && estimateRichBlocks(sanitized) <= maxBlocks) return sanitized;
 
   const marker = `\n\n${THINKING_TRUNCATION_MARKER}`;
   const blocks = sanitized.split(/\n{2,}/);
   let capped = "";
   for (const block of blocks) {
     const candidate = capped ? `${capped}\n\n${block}` : block;
-    if (Buffer.byteLength(`${candidate}${marker}`, "utf8") > maxBytes) break;
+    if (
+      richCharacterLength(`${candidate}${marker}`) > maxCharacters
+      || estimateRichBlocks(`${candidate}${marker}`) > maxBlocks
+    ) break;
     capped = candidate;
   }
   return capped ? `${capped}${marker}` : THINKING_TRUNCATION_MARKER;
-}
-
-function findBlockBoundary(md: string, threshold: number): number {
-  const boundaries: number[] = [];
-  const min = threshold * 0.5;
-  let offset = 0;
-  let inFence = false;
-  for (const line of linesWithEndings(md)) {
-    const start = offset;
-    const end = offset + line.length;
-    const trimmed = line.trim();
-    if (/^```/.test(trimmed)) {
-      inFence = !inFence;
-      if (!inFence) boundaries.push(end);
-      offset = end;
-      continue;
-    }
-    if (!inFence) {
-      if (!trimmed) boundaries.push(start);
-      else if (!line.includes("|")) boundaries.push(end);
-    }
-    offset = end;
-  }
-  return boundaries.filter((boundary) => boundary <= threshold && boundary > min).at(-1) ?? boundaries.find((boundary) => boundary > threshold) ?? threshold;
 }
 
 function linesWithEndings(text: string): string[] {
@@ -102,24 +96,35 @@ function linesWithEndings(text: string): string[] {
 }
 
 function splitRich(md: string): string[] {
-  const max = RICH_MESSAGE_BYTE_LIMIT;
-  if (Buffer.byteLength(md, "utf8") <= max) return [md];
+  if (withinRichLimits(md)) return [md];
   const parts: string[] = [];
   let current = "";
   let inFence = false;
   let fenceOpener = "```";
   for (const line of linesWithEndings(md)) {
-    const closingFence = inFence ? "\n```" : "";
-    if (current && Buffer.byteLength(current + line + closingFence, "utf8") > max) {
-      if (inFence) {
-        parts.push(`${current.trimEnd()}\n\`\`\``);
-        current = `${fenceOpener}\n`;
-      } else {
-        parts.push(current.trimEnd());
-        current = "";
+    let remainder = line;
+    while (remainder) {
+      const closingFence = inFence ? "\n```" : "";
+      if (withinRichLimits(`${current}${remainder}${closingFence}`)) {
+        current += remainder;
+        remainder = "";
+        break;
       }
+
+      const reopenedFence = inFence ? `${fenceOpener}\n` : "";
+      if (current && current !== reopenedFence) {
+        parts.push(finalizeRichPart(current, inFence));
+        current = reopenedFence;
+        continue;
+      }
+
+      const split = takeFittingPrefix(remainder, current, closingFence);
+      current += split.head;
+      remainder = split.tail;
+      parts.push(finalizeRichPart(current, inFence));
+      current = reopenedFence;
     }
-    current += line;
+
     const trimmed = line.trim();
     if (/^```/.test(trimmed)) {
       if (inFence) {
@@ -131,8 +136,59 @@ function splitRich(md: string): string[] {
       }
     }
   }
-  if (current.trim()) parts.push(current.trimEnd());
+  if (current.trim()) parts.push(finalizeRichPart(current, inFence));
   return parts;
+}
+
+function finalizeRichPart(current: string, inFence: boolean): string {
+  const trimmed = current.trimEnd();
+  return inFence ? `${trimmed}\n\`\`\`` : trimmed;
+}
+
+function takeFittingPrefix(text: string, prefix: string, suffix: string): { head: string; tail: string } {
+  const characters = Array.from(text);
+  let low = 1;
+  let high = characters.length;
+  let best = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = `${prefix}${characters.slice(0, middle).join("")}${suffix}`;
+    if (withinRichLimits(candidate)) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const length = Math.max(1, best);
+  return {
+    head: characters.slice(0, length).join(""),
+    tail: characters.slice(length).join(""),
+  };
+}
+
+function withinRichLimits(md: string): boolean {
+  return richCharacterLength(md) <= RICH_MESSAGE_CHARACTER_LIMIT
+    && estimateRichBlocks(md) <= RICH_MESSAGE_BLOCK_LIMIT
+    && estimateRichMedia(md) <= RICH_MESSAGE_MEDIA_LIMIT;
+}
+
+function richCharacterLength(text: string): number {
+  return Array.from(text).length;
+}
+
+function estimateRichBlocks(md: string): number {
+  const nonEmptyLines = md.split("\n").filter((line) => line.trim()).length;
+  const explicitBlocks = md.match(
+    /<(?:details|p|footer|hr|ul|ol|li|table|tr|blockquote|aside|figure|pre|h[1-6]|tg-(?:math-block|map|collage|slideshow|thinking))\b/gi,
+  )?.length ?? 0;
+  return nonEmptyLines + explicitBlocks;
+}
+
+function estimateRichMedia(md: string): number {
+  const markdownMedia = md.match(/!\[[^\]]*\]\([^)\n]+\)/g)?.length ?? 0;
+  const htmlMedia = md.match(/<(?:img|video|audio)\b/gi)?.length ?? 0;
+  return markdownMedia + htmlMedia;
 }
 
 function thinkingTitle(t: RenderT, state: "running" | "final", elapsedMs: number): string {

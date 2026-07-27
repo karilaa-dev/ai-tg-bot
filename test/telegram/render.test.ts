@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderDraft, renderFinal } from "../../src/telegram/render.js";
+import { renderAnswerDraft, renderDraft, renderFinal } from "../../src/telegram/render.js";
 
 describe("renderFinal", () => {
   const t = (key: string, params?: Record<string, string | number>) => {
@@ -23,16 +23,19 @@ describe("renderFinal", () => {
     expect(parts.map((part) => part.markdown ?? "").join("")).not.toContain("[truncated]");
   });
 
-  it("places Show More after a closing code fence when the threshold falls inside the fence", () => {
+  it("keeps long answers fully visible without inserting expandable details", () => {
     const answer = `Intro\n\n\`\`\`ts\n${"const value = 1;\n".repeat(300)}\`\`\`\n\nTail`;
-    const [part] = renderFinal({
+    const parts = renderFinal({
       answerMd: answer,
       elapsedMs: 0,
       t,
     });
-    const markdown = part?.markdown ?? "";
+    const markdown = parts[0]?.markdown ?? "";
 
-    expect(markdown.indexOf("```", markdown.indexOf("```") + 1)).toBeLessThan(markdown.indexOf("<details>"));
+    expect(parts).toHaveLength(1);
+    expect(markdown).toContain("Tail");
+    expect(markdown).not.toContain("<details>");
+    expect(markdown).not.toContain("Show more");
   });
 
   it("closes and reopens oversized code fences across split rich messages", () => {
@@ -51,6 +54,68 @@ describe("renderFinal", () => {
       expect(Buffer.byteLength(markdown, "utf8")).toBeLessThanOrEqual(32768);
     }
     expect(parts.slice(1).some((part) => (part.markdown ?? "").startsWith("```ts\n"))).toBe(true);
+  });
+
+  it("continues a single overlong line in new messages without truncation", () => {
+    const answer = `${"x".repeat(70_000)}tail-marker`;
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.map((part) => part.markdown ?? "").join("")).toBe(answer);
+    expect(parts.every((part) => Array.from(part.markdown ?? "").length <= 32768)).toBe(true);
+    expect(parts.some((part) => (part.markdown ?? "").includes("[truncated]"))).toBe(false);
+  });
+
+  it("uses Telegram's UTF-8 character limit rather than splitting by encoded byte size", () => {
+    const answer = "🙂".repeat(40_000);
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts).toHaveLength(2);
+    expect(parts.map((part) => part.markdown ?? "").join("")).toBe(answer);
+    expect(parts.every((part) => Array.from(part.markdown ?? "").length <= 32768)).toBe(true);
+  });
+
+  it("continues in a new message before exceeding the rich-message block limit", () => {
+    const answer = Array.from({ length: 600 }, (_, index) => `- item ${index + 1}`).join("\n");
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.map((part) => part.markdown ?? "").join("\n")).toBe(answer);
+    expect(parts.every((part) =>
+      (part.markdown ?? "").split("\n").filter((line) => line.trim()).length <= 500)).toBe(true);
+  });
+
+  it("continues in a new message before exceeding the rich-message media limit", () => {
+    const answer = Array.from({ length: 51 }, (_, index) => `![image ${index + 1}](https://example.com/${index + 1}.png)`).join("\n");
+    const parts = renderFinal({
+      answerMd: answer,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts).toHaveLength(2);
+    expect(parts.map((part) => part.markdown ?? "").join("\n")).toBe(answer);
+    expect(parts.every((part) => ((part.markdown ?? "").match(/!\[/g)?.length ?? 0) <= 50)).toBe(true);
+  });
+
+  it("streams the active continuation chunk after an answer exceeds one message", () => {
+    const payload = renderAnswerDraft(`${"a".repeat(32768)}continuation-tail`);
+    const markdown = payload.markdown ?? "";
+
+    expect(markdown).toBe("continuation-tail");
+    expect(Array.from(markdown).length).toBeLessThanOrEqual(32768);
   });
 
   it("renders an empty draft as the plain thinking placeholder without a details block", () => {
@@ -126,7 +191,7 @@ describe("renderFinal", () => {
     expect(markdown).not.toContain("\n\n...");
   });
 
-  it("renders final thinking with a final elapsed title instead of step counts", () => {
+  it("renders final thinking as a collapsed message separate from the answer", () => {
     const thinkingLog = [
       "Tool calls: 1",
       "",
@@ -140,17 +205,20 @@ describe("renderFinal", () => {
       "",
       "- 💬 Searching chat: 1",
     ].join("\n");
-    const [payload] = renderFinal({
+    const [thinkingPayload, answerPayload] = renderFinal({
       thinkingLog,
       answerMd: "Answer.",
       elapsedMs: 65_000,
       t,
     });
-    const markdown = payload?.markdown ?? "";
+    const markdown = thinkingPayload?.markdown ?? "";
 
     expect(markdown).toContain("<details>\n<summary>Thought for 1m 05s</summary>");
     expect(markdown).toContain(`${thinkingLog}\n\n</details>`);
     expect(markdown).not.toContain("steps");
+    expect(markdown).not.toContain("Answer.");
+    expect(answerPayload?.markdown).toBe("Answer.");
+    expect(answerPayload?.markdown).not.toContain("<details>");
   });
 
   it("caps oversized final thinking without splitting its details wrapper", () => {
@@ -162,15 +230,16 @@ describe("renderFinal", () => {
       t,
     });
 
-    expect(parts).toHaveLength(1);
+    expect(parts).toHaveLength(2);
     const markdown = parts[0]?.markdown ?? "";
     expect(markdown).toContain("Tool calls: 2 · Reasoning blocks: 1");
     expect(markdown).toContain("…");
     expect(markdown).not.toContain("tail-marker");
-    expect(markdown).toContain("Answer remains visible.");
+    expect(markdown).not.toContain("Answer remains visible.");
     expect(markdown.match(/<details>/g)).toHaveLength(1);
     expect(markdown.match(/<\/details>/g)).toHaveLength(1);
     expect(Buffer.byteLength(markdown, "utf8")).toBeLessThanOrEqual(32768);
+    expect(parts[1]?.markdown).toBe("Answer remains visible.");
   });
 
 });
