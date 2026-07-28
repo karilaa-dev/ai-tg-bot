@@ -107,6 +107,78 @@ describe("runTurn with Pi", () => {
     expect(commandRuntime.activityLeaseAcquisitions).toBe(0);
   }, 20_000);
 
+  it("keeps adjacent streamed thinking blocks separate in live and final Markdown", async () => {
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7012, firstName: "ThinkingBlocks", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Thinking blocks" });
+    const stream = ((model: Model<Api>) => thinkingThenTextStream(model, [
+      "**Planning image sourcing for presentation**",
+      "**Evaluating image placement and slide restructuring**",
+    ], "The presentation plan is ready.")) as PiProviderStreamOverrides["openRouter"];
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const drafts: Record<string, unknown>[] = [];
+    const sent: Record<string, unknown>[] = [];
+    let messageId = 9050;
+    const api = {
+      raw: {
+        sendRichMessage: async (payload: Record<string, unknown>) => {
+          sent.push(payload);
+          return {
+            message_id: ++messageId,
+            date: 1,
+            chat: { id: user.tg_id, type: "private", first_name: "ThinkingBlocks" },
+          };
+        },
+        sendRichMessageDraft: async (payload: Record<string, unknown>) => {
+          drafts.push(payload);
+          return true;
+        },
+      },
+    } as unknown as import("grammy").Api;
+
+    await runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "Plan the presentation.",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key, params) => params ? `${key}:${params.count ?? params.time ?? ""}` : key,
+    });
+
+    const liveThinking = drafts.map(richMarkdown).find((markdown) =>
+      markdown.includes("Planning image sourcing") && markdown.includes("Evaluating image placement"));
+    expect(liveThinking).toContain("**Planning image sourcing for presentation**\n\n**Evaluating image placement");
+    expect(liveThinking).not.toContain("****");
+
+    const finalThinking = sent.map(richMarkdown).find((markdown) =>
+      markdown.includes("<details>") && markdown.includes("Planning image sourcing"));
+    expect(finalThinking).toContain("- **Planning image sourcing for presentation**");
+    expect(finalThinking).toContain("- **Evaluating image placement and slide restructuring**");
+    expect(finalThinking).not.toContain("****");
+    const messages = await repos.messages.listThread(thread.id);
+    expect(messages.at(-1)?.thinking).toContain([
+      "- **Planning image sourcing for presentation**",
+      "",
+      "- **Evaluating image placement and slide restructuring**",
+    ].join("\n"));
+  }, 20_000);
+
   it("finalizes collapsed thoughts and starts a separate answer draft when final text begins", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-split-final-"));
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, DRAFT_UPDATE_MS: 0 });
@@ -846,6 +918,44 @@ function textStream(model: Model<Api>, text: string) {
   stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: assistant(model, text) });
   stream.push({ type: "text_end", contentIndex: 0, content: text, partial: assistant(model, text) });
   stream.push({ type: "done", reason: "stop", message: assistant(model, text) });
+  return stream;
+}
+
+function thinkingThenTextStream(model: Model<Api>, thinkingBlocks: string[], text: string) {
+  const stream = createAssistantMessageEventStream();
+  const empty = assistant(model, "");
+  const completedThinking: AssistantMessage["content"] = [];
+  stream.push({ type: "start", partial: empty });
+  for (const thinking of thinkingBlocks) {
+    const pendingBlock = { type: "thinking" as const, thinking: "" };
+    stream.push({
+      type: "thinking_start",
+      contentIndex: completedThinking.length,
+      partial: { ...empty, content: [...completedThinking, pendingBlock] },
+    });
+    const completedBlock = { type: "thinking" as const, thinking };
+    stream.push({
+      type: "thinking_delta",
+      contentIndex: completedThinking.length,
+      delta: thinking,
+      partial: { ...empty, content: [...completedThinking, completedBlock] },
+    });
+    completedThinking.push(completedBlock);
+    stream.push({
+      type: "thinking_end",
+      contentIndex: completedThinking.length - 1,
+      content: thinking,
+      partial: { ...empty, content: [...completedThinking] },
+    });
+  }
+  const finalMessage = {
+    ...assistant(model, text),
+    content: [...completedThinking, { type: "text" as const, text }],
+  };
+  stream.push({ type: "text_start", contentIndex: completedThinking.length, partial: finalMessage });
+  stream.push({ type: "text_delta", contentIndex: completedThinking.length, delta: text, partial: finalMessage });
+  stream.push({ type: "text_end", contentIndex: completedThinking.length, content: text, partial: finalMessage });
+  stream.push({ type: "done", reason: "stop", message: finalMessage });
   return stream;
 }
 

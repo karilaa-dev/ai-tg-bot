@@ -43,6 +43,7 @@ export class StreamShaper {
   thinking: ThinkingItem[] = [];
   private seg = new SentenceAssembler();
   private finalText: string | undefined;
+  private startsNewReasoningBlock = false;
   private toolStatus = new Map<string, { label: string; summary?: string }>();
   private toolCalls: ToolCallRecord[] = [];
 
@@ -68,13 +69,22 @@ export class StreamShaper {
     this.thinking.push({ kind: "tool", name, key: display.key, label: display.label, summary: opts.summary });
   }
 
+  onReasoningStart(): void {
+    this.startsNewReasoningBlock = true;
+  }
+
   onReasoningDelta(text: string): void {
     const startsNewSection = /^\s*\n/.test(text);
     const delta = startsNewSection ? text.trimStart() : text;
     if (!delta) return;
     const last = this.thinking.at(-1);
-    if (!startsNewSection && last?.kind === "reasoning") last.text += delta;
+    if (!this.startsNewReasoningBlock && !startsNewSection && last?.kind === "reasoning") last.text += delta;
     else this.thinking.push({ kind: "reasoning", text: delta });
+    this.startsNewReasoningBlock = false;
+  }
+
+  onReasoningEnd(): void {
+    this.startsNewReasoningBlock = true;
   }
 
   onTextDelta(text: string): void {

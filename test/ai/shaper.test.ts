@@ -121,6 +121,31 @@ describe("StreamShaper", () => {
     });
   });
 
+  it("keeps consecutive protocol reasoning blocks separate without an intervening tool call", () => {
+    const s = new StreamShaper();
+    s.onReasoningStart();
+    s.onReasoningDelta("**Planning image ");
+    s.onReasoningDelta("sourcing**");
+    s.onReasoningEnd();
+    s.onReasoningStart();
+    s.onReasoningDelta("**Evaluating image placement and slide restructuring**");
+    s.onReasoningEnd();
+
+    expect(s.streamingThinkingMd()).toBe([
+      "**Planning image sourcing**",
+      "**Evaluating image placement and slide restructuring**",
+    ].join("\n\n"));
+    expect(s.streamingThinkingMd()).not.toContain("****");
+    expect(s.runSummary()).toEqual({
+      reasoningSummaries: [
+        "**Planning image sourcing**",
+        "**Evaluating image placement and slide restructuring**",
+      ],
+      toolCallCount: 0,
+      toolCounts: [],
+    });
+  });
+
   it("keeps only streamed section titles from verbose reasoning text", () => {
     const s = new StreamShaper();
     s.onReasoningDelta([

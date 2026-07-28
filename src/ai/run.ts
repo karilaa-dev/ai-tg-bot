@@ -447,9 +447,13 @@ function createPiStreamLoop(
       if (update.type === "text_delta") {
         shaper.onTextDelta(update.delta);
         counts.contentEvents += 1;
+      } else if (update.type === "thinking_start") {
+        shaper.onReasoningStart();
       } else if (update.type === "thinking_delta") {
         shaper.onReasoningDelta(update.delta);
         counts.contentEvents += 1;
+      } else if (update.type === "thinking_end") {
+        shaper.onReasoningEnd();
       }
       updatePresenter();
       return;
