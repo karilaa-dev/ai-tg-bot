@@ -528,6 +528,165 @@ describe("runTurn with Pi", () => {
     expect(JSON.parse(source!.locator_json)).toMatchObject({ file_id: "BQAC-original-png" });
   });
 
+  it("sends 25 photos in Telegram-sized galleries with captions only on each first photo", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7025, firstName: "GalleryRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Gallery run" });
+    const bytes = Buffer.from("photo-bytes");
+    const attachments = [];
+    for (let index = 0; index < 25; index += 1) {
+      const file = await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: thread.id,
+        type: "image",
+        mimeType: "image/jpeg",
+        name: `photo-${index + 1}.jpg`,
+        path: null,
+        size: bytes.length,
+        isInline: false,
+      });
+      attachments.push({
+        fileId: file.id,
+        type: "image" as const,
+        name: file.name,
+        mimeType: "image/jpeg",
+        data: bytes,
+        size: bytes.length,
+        caption: `Credit ${index + 1} <artist>`,
+        inline: false,
+        card: `photo ${index + 1}`,
+        delivery: "photo" as const,
+        origin: "created_file" as const,
+      });
+    }
+    const galleries: Array<Array<Record<string, unknown>>> = [];
+    let messageId = 9300;
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9299,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "GalleryRunner" },
+        }),
+      },
+      sendMediaGroup: async (_chatId: number, media: Array<Record<string, unknown>>) => {
+        galleries.push(media);
+        return media.map(() => {
+          messageId += 1;
+          return {
+            message_id: messageId,
+            photo: [{
+              file_id: `AgAC-gallery-${messageId}`,
+              file_unique_id: `unique-gallery-${messageId}`,
+              width: 10,
+              height: 10,
+            }],
+          };
+        });
+      },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here are the photos.", 0, attachments);
+
+    expect(galleries.map((gallery) => gallery.length)).toEqual([10, 10, 5]);
+    for (const gallery of galleries) {
+      expect(gallery[0]).toMatchObject({ parse_mode: "HTML" });
+      expect(gallery[0]?.caption).toContain("<blockquote>Photo 1: Credit");
+      expect(gallery[0]?.caption).toContain("&lt;artist&gt;");
+      expect(gallery.slice(1).every((photo) => photo.caption === undefined)).toBe(true);
+    }
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(25);
+    const messages = await repos.messages.listThread(thread.id);
+    const content = JSON.parse(messages.at(-1)!.content_json) as { files?: unknown[] };
+    expect(content.files).toHaveLength(25);
+  });
+
+  it("rebalances 11 files into two valid media groups instead of leaving a singleton", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7026, firstName: "BatchRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Batch run" });
+    const bytes = Buffer.from("document-bytes");
+    const attachments = [];
+    for (let index = 0; index < 11; index += 1) {
+      const file = await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: thread.id,
+        type: "other",
+        name: `file-${index + 1}.txt`,
+        path: null,
+        size: bytes.length,
+        isInline: false,
+      });
+      attachments.push({
+        fileId: file.id,
+        type: "other" as const,
+        name: file.name,
+        data: bytes,
+        size: bytes.length,
+        inline: false,
+        card: `file ${index + 1}`,
+        delivery: "document" as const,
+        origin: "created_file" as const,
+      });
+    }
+    const groupSizes: number[] = [];
+    let messageId = 9400;
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9399,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "BatchRunner" },
+        }),
+      },
+      sendMediaGroup: async (_chatId: number, media: unknown[]) => {
+        groupSizes.push(media.length);
+        return media.map(() => ({
+          message_id: ++messageId,
+          document: {
+            file_id: `BQAC-batch-${messageId}`,
+            file_unique_id: `unique-batch-${messageId}`,
+          },
+        }));
+      },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here are the files.", 0, attachments);
+
+    expect(groupSizes).toEqual([9, 2]);
+  });
+
   it("removes an undelivered attachment that has no durable path or transport source", async () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
