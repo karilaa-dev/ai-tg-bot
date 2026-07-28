@@ -11,6 +11,7 @@ import { renderFinalAnswer, renderFinalThinking, variantsForRichRetry } from "..
 import {
   isRichParseError,
   isThreadNotFound,
+  editRich,
   prefixPlainForThreadFallback,
   prefixRichForThreadFallback,
   sendRich,
@@ -306,6 +307,9 @@ class TurnDraftStreamer {
   private readonly thinking: DraftStreamer;
   private readonly answer: DraftStreamer;
   private answerStarted = false;
+  private answerReady = false;
+  private latestAnswerMd = "";
+  private deliveredThinkingMd = "";
   private thinkingDelivery?: Promise<number[]>;
   private thinkingDeliveryError: unknown;
 
@@ -327,30 +331,44 @@ class TurnDraftStreamer {
   }
 
   update(frame: { thinkingMd: string; answerMd: string }, finalThinkingMd = ""): void {
-    if (!this.answerStarted && frame.answerMd.trim()) this.startAnswer(finalThinkingMd);
-    if (this.answerStarted) {
-      if (frame.answerMd.trim()) this.answer.update({ thinkingMd: "", answerMd: frame.answerMd });
+    if (frame.answerMd.trim()) {
+      this.latestAnswerMd = frame.answerMd;
+      if (!this.answerStarted) this.startAnswer(finalThinkingMd);
+      if (this.answerReady) this.updateAnswerDraft();
       return;
     }
+    if (this.answerStarted) return;
     this.thinking.update({ thinkingMd: frame.thinkingMd, answerMd: "" });
   }
 
   async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
     if (!frame) {
-      if (this.answerStarted) await this.answer.finish();
-      else await this.thinking.finish();
-      return undefined;
+      if (!this.answerStarted) {
+        await this.thinking.finish();
+        return undefined;
+      }
+      const messageIds = await this.waitForThinkingDelivery();
+      await this.answer.finish();
+      return { handled: true, messageIds };
     }
 
+    this.latestAnswerMd = frame.answerMd;
     if (!this.answerStarted) this.startAnswer(frame.thinkingMd);
-    const answerFinished = frame.answerMd.trim()
-      ? this.answer.finish({ thinkingMd: "", answerMd: frame.answerMd })
-      : Promise.resolve(this.answer.stop());
-    const [messageIds] = await Promise.all([
-      this.thinkingDelivery ?? Promise.resolve([]),
-      answerFinished,
-    ]);
-    if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
+    let messageIds = await this.waitForThinkingDelivery();
+    if (frame.thinkingMd !== this.deliveredThinkingMd) {
+      messageIds = await refreshFinalThinkingVisible(
+        this.input,
+        messageIds,
+        frame.thinkingMd,
+        Math.max(0, Date.now() - this.startedAt),
+      );
+      this.deliveredThinkingMd = frame.thinkingMd;
+    }
+    if (frame.answerMd.trim()) {
+      await this.answer.finish({ thinkingMd: "", answerMd: frame.answerMd });
+    } else {
+      this.answer.stop();
+    }
     return { handled: true, messageIds };
   }
 
@@ -362,12 +380,29 @@ class TurnDraftStreamer {
   private startAnswer(finalThinkingMd: string): void {
     if (this.answerStarted) return;
     this.answerStarted = true;
+    this.deliveredThinkingMd = finalThinkingMd;
     this.thinking.stop();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
     this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
       this.thinkingDeliveryError = err;
       return [];
     });
+    void this.thinkingDelivery.then(() => {
+      if (this.thinkingDeliveryError) return;
+      this.answerReady = true;
+      this.updateAnswerDraft();
+    });
+  }
+
+  private async waitForThinkingDelivery(): Promise<number[]> {
+    const messageIds = await (this.thinkingDelivery ?? Promise.resolve([]));
+    if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
+    return messageIds;
+  }
+
+  private updateAnswerDraft(): void {
+    if (!this.answerReady || !this.latestAnswerMd.trim()) return;
+    this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
   }
 }
 
@@ -807,6 +842,60 @@ async function sendFinalThinkingVisible(
     ids.push(...sent.map((message) => message.message_id));
   }
   return ids;
+}
+
+async function refreshFinalThinkingVisible(
+  input: TurnInput,
+  existingMessageIds: number[],
+  visibleThinking: string,
+  elapsedMs: number,
+): Promise<number[]> {
+  const messages = renderFinalThinking({
+    thinkingLog: visibleThinking,
+    elapsedMs,
+    t: input.t,
+  });
+  const messageId = existingMessageIds.find((id) => id > 0);
+  if (messageId && messages.length === 1) {
+    const edited = await editFinalThinkingVisible(input, messageId, messages[0]!);
+    if (edited) return existingMessageIds;
+  }
+  const sent = await sendFinalThinkingVisible(input, visibleThinking, elapsedMs);
+  return [...existingMessageIds, ...sent];
+}
+
+async function editFinalThinkingVisible(
+  input: TurnInput,
+  messageId: number,
+  rich: InputRichMessage,
+): Promise<boolean> {
+  const variants = [rich, ...variantsForRichRetry(rich.markdown ?? rich.html ?? "")];
+  const seen = new Set<string>();
+  for (const variant of variants) {
+    const hash = JSON.stringify(variant);
+    if (seen.has(hash)) continue;
+    seen.add(hash);
+    try {
+      const edited = await editRich(input.api, {
+        chat_id: input.chatId,
+        message_id: messageId,
+        rich_message: variant,
+      });
+      if (edited) return true;
+    } catch (err) {
+      if (!isRichParseError(err)) throw err;
+      input.logger.debug("final thinking edit parse failed; trying repaired variant", {
+        threadId: input.thread.id,
+        telegramMessageId: messageId,
+        err: String(err),
+      });
+    }
+  }
+  input.logger.warn("failed to edit stale final thinking; sending corrected thinking separately", {
+    threadId: input.thread.id,
+    telegramMessageId: messageId,
+  });
+  return false;
 }
 
 async function sendCreatedFileAttachments(
