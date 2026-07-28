@@ -106,7 +106,7 @@ function splitRich(md: string): string[] {
     const togglesFence = /^```/.test(line.trim());
     let offset = 0;
     while (offset < characters.length) {
-      if (inFence && !withinRichLimits(`${fenceOpener}\n\n\`\`\``)) fenceOpener = "```";
+      if (inFence && !withinRichLimits(`${fenceOpener}\nX\n\`\`\``)) fenceOpener = "```";
       const closingFence = inFence || togglesFence ? "\n```" : "";
       const remainingCount = characters.length - offset;
       if (fitsCharacterLimit(current, remainingCount, closingFence)) {

@@ -109,6 +109,21 @@ describe("renderFinal", () => {
     }
   });
 
+  it("normalizes an exact-limit fence wrapper before streaming fenced content", () => {
+    const exactLimitFenceOpener = `\`\`\`${"x".repeat(32760)}`;
+    expect(Array.from(`${exactLimitFenceOpener}\n\n\`\`\``)).toHaveLength(32768);
+    const parts = renderFinal({
+      answerMd: `${exactLimitFenceOpener}\nABC\n\`\`\``,
+      elapsedMs: 0,
+      t,
+    });
+
+    expect(parts).toHaveLength(2);
+    expect(parts[1]?.markdown).toBe("```\nABC\n```");
+    expect(parts.every((part) => Array.from(part.markdown ?? "").length <= 32768)).toBe(true);
+    expect(parts.some((part) => Array.from(part.markdown ?? "").length === 1)).toBe(false);
+  });
+
   it("uses Telegram's UTF-8 character limit rather than splitting by encoded byte size", () => {
     const answer = "🙂".repeat(40_000);
     const parts = renderFinal({
