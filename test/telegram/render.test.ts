@@ -268,7 +268,9 @@ describe("renderFinal", () => {
     const markdown = thinkingPayload?.markdown ?? "";
 
     expect(markdown).toContain("<details>\n<summary>Thought for 1m 05s</summary>");
-    expect(markdown).toContain(`${thinkingLog}\n\n</details>`);
+    expect(markdown).toContain(`${thinkingLog}\n</details>`);
+    expect(markdown).not.toContain("\n\n</details>");
+    expect(markdown.endsWith("</details>")).toBe(true);
     expect(markdown).not.toContain("steps");
     expect(markdown).not.toContain("Answer.");
     expect(answerPayload?.markdown).toBe("Answer.");

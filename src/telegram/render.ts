@@ -36,7 +36,7 @@ export function renderFinal(input: RenderFinalInput): InputRichMessage[] {
 
 export function renderFinalThinking(input: Pick<RenderFinalInput, "thinkingLog" | "elapsedMs" | "t">): InputRichMessage[] {
   const thinkingLog = capFinalThinking(input.thinkingLog);
-  const thinking = renderThinkingDetails(thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs));
+  const thinking = renderThinkingDetails(thinkingLog, thinkingTitle(input.t, "final", input.elapsedMs), true);
   return thinking ? splitRich(thinking.trimEnd()).map((markdown) => ({ markdown: sanitize(markdown) })) : [];
 }
 
@@ -64,10 +64,11 @@ export function variantsForRichRetry(markdown: string): InputRichMessage[] {
   return repairLadder(markdown).map((variant) => ({ markdown: variant }));
 }
 
-function renderThinkingDetails(thinkingLog: string | undefined, title: string): string {
+function renderThinkingDetails(thinkingLog: string | undefined, title: string, compactEnd = false): string {
   const trimmed = thinkingLog?.trim();
   if (!trimmed) return "";
-  return `<details>\n<summary>${title}</summary>\n\n${trimmed}\n\n</details>\n\n`;
+  const end = compactEnd ? "\n</details>" : "\n\n</details>\n\n";
+  return `<details>\n<summary>${title}</summary>\n\n${trimmed}${end}`;
 }
 
 function capFinalThinking(thinkingLog: string | undefined): string | undefined {

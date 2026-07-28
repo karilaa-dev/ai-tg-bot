@@ -107,6 +107,78 @@ describe("runTurn with Pi", () => {
     expect(commandRuntime.activityLeaseAcquisitions).toBe(0);
   }, 20_000);
 
+  it("keeps adjacent streamed thinking blocks separate in live and final Markdown", async () => {
+    const config = loadTestConfig({ DRAFT_UPDATE_MS: 0 });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7012, firstName: "ThinkingBlocks", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Thinking blocks" });
+    const stream = ((model: Model<Api>) => thinkingThenTextStream(model, [
+      "**Planning image sourcing for presentation**",
+      "**Evaluating image placement and slide restructuring**",
+    ], "The presentation plan is ready.")) as PiProviderStreamOverrides["openRouter"];
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const drafts: Record<string, unknown>[] = [];
+    const sent: Record<string, unknown>[] = [];
+    let messageId = 9050;
+    const api = {
+      raw: {
+        sendRichMessage: async (payload: Record<string, unknown>) => {
+          sent.push(payload);
+          return {
+            message_id: ++messageId,
+            date: 1,
+            chat: { id: user.tg_id, type: "private", first_name: "ThinkingBlocks" },
+          };
+        },
+        sendRichMessageDraft: async (payload: Record<string, unknown>) => {
+          drafts.push(payload);
+          return true;
+        },
+      },
+    } as unknown as import("grammy").Api;
+
+    await runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "Plan the presentation.",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key, params) => params ? `${key}:${params.count ?? params.time ?? ""}` : key,
+    });
+
+    const liveThinking = drafts.map(richMarkdown).find((markdown) =>
+      markdown.includes("Planning image sourcing") && markdown.includes("Evaluating image placement"));
+    expect(liveThinking).toContain("**Planning image sourcing for presentation**\n\n**Evaluating image placement");
+    expect(liveThinking).not.toContain("****");
+
+    const finalThinking = sent.map(richMarkdown).find((markdown) =>
+      markdown.includes("<details>") && markdown.includes("Planning image sourcing"));
+    expect(finalThinking).toContain("- **Planning image sourcing for presentation**");
+    expect(finalThinking).toContain("- **Evaluating image placement and slide restructuring**");
+    expect(finalThinking).not.toContain("****");
+    const messages = await repos.messages.listThread(thread.id);
+    expect(messages.at(-1)?.thinking).toContain([
+      "- **Planning image sourcing for presentation**",
+      "",
+      "- **Evaluating image placement and slide restructuring**",
+    ].join("\n"));
+  }, 20_000);
+
   it("finalizes collapsed thoughts and starts a separate answer draft when final text begins", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-split-final-"));
     const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, DRAFT_UPDATE_MS: 0 });
@@ -528,6 +600,174 @@ describe("runTurn with Pi", () => {
     expect(JSON.parse(source!.locator_json)).toMatchObject({ file_id: "BQAC-original-png" });
   });
 
+  it("sends 25 photos in Telegram-sized galleries with captions only on each first photo", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7025, firstName: "GalleryRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Gallery run" });
+    const bytes = Buffer.from("photo-bytes");
+    const attachments = [];
+    for (let index = 0; index < 25; index += 1) {
+      const file = await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: thread.id,
+        type: "image",
+        mimeType: "image/jpeg",
+        name: `photo-${index + 1}.jpg`,
+        path: null,
+        size: bytes.length,
+        isInline: false,
+      });
+      attachments.push({
+        fileId: file.id,
+        type: "image" as const,
+        name: file.name,
+        mimeType: "image/jpeg",
+        data: bytes,
+        size: bytes.length,
+        caption: index === 0
+          ? `${"x".repeat(1011)}😀overflow`
+          : `Credit ${index + 1} <artist>`,
+        inline: false,
+        card: `photo ${index + 1}`,
+        delivery: "photo" as const,
+        origin: "created_file" as const,
+      });
+    }
+    const galleries: Array<Array<Record<string, unknown>>> = [];
+    let messageId = 9300;
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9299,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "GalleryRunner" },
+        }),
+      },
+      sendMediaGroup: async (_chatId: number, media: Array<Record<string, unknown>>) => {
+        galleries.push(media);
+        return media.map(() => {
+          messageId += 1;
+          return {
+            message_id: messageId,
+            photo: [{
+              file_id: `AgAC-gallery-${messageId}`,
+              file_unique_id: `unique-gallery-${messageId}`,
+              width: 10,
+              height: 10,
+            }],
+          };
+        });
+      },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here are the photos.", 0, attachments);
+
+    expect(galleries.map((gallery) => gallery.length)).toEqual([10, 10, 5]);
+    for (const gallery of galleries) {
+      expect(gallery[0]).toMatchObject({ parse_mode: "HTML" });
+      expect(gallery[0]?.caption).toContain("<blockquote>Photo 1:");
+      expect(gallery.slice(1).every((photo) => photo.caption === undefined)).toBe(true);
+    }
+    const boundaryCaption = String(galleries[0]?.[0]?.caption);
+    expect(boundaryCaption).toContain("😀...</blockquote>");
+    expect(boundaryCaption).not.toContain("�");
+    expect(Array.from(boundaryCaption).some((character) => {
+      const firstCodeUnit = character.charCodeAt(0);
+      return character.length === 1 && firstCodeUnit >= 0xD800 && firstCodeUnit <= 0xDFFF;
+    })).toBe(false);
+    expect(galleries[1]?.[0]?.caption).toContain("&lt;artist&gt;");
+    const files = await repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(25);
+    const messages = await repos.messages.listThread(thread.id);
+    const content = JSON.parse(messages.at(-1)!.content_json) as { files?: unknown[] };
+    expect(content.files).toHaveLength(25);
+  });
+
+  it("rebalances 11 files into two valid media groups instead of leaving a singleton", async () => {
+    const config = loadTestConfig();
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7026, firstName: "BatchRunner", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Batch run" });
+    const bytes = Buffer.from("document-bytes");
+    const attachments = [];
+    for (let index = 0; index < 11; index += 1) {
+      const file = await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: thread.id,
+        type: "other",
+        name: `file-${index + 1}.txt`,
+        path: null,
+        size: bytes.length,
+        isInline: false,
+      });
+      attachments.push({
+        fileId: file.id,
+        type: "other" as const,
+        name: file.name,
+        data: bytes,
+        size: bytes.length,
+        inline: false,
+        card: `file ${index + 1}`,
+        delivery: "document" as const,
+        origin: "created_file" as const,
+      });
+    }
+    const groupSizes: number[] = [];
+    let messageId = 9400;
+    const api = {
+      raw: {
+        sendRichMessage: async () => ({
+          message_id: 9399,
+          date: 1,
+          chat: { id: user.tg_id, type: "private", first_name: "BatchRunner" },
+        }),
+      },
+      sendMediaGroup: async (_chatId: number, media: unknown[]) => {
+        groupSizes.push(media.length);
+        return media.map(() => ({
+          message_id: ++messageId,
+          document: {
+            file_id: `BQAC-batch-${messageId}`,
+            file_unique_id: `unique-batch-${messageId}`,
+          },
+        }));
+      },
+    } as unknown as import("grammy").Api;
+
+    await sendFinal({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "",
+      t: (key) => key,
+    }, "", "Here are the files.", 0, attachments);
+
+    expect(groupSizes).toEqual([9, 2]);
+  });
+
   it("removes an undelivered attachment that has no durable path or transport source", async () => {
     const config = loadTestConfig();
     const logger = createLogger(config);
@@ -687,6 +927,44 @@ function textStream(model: Model<Api>, text: string) {
   stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: assistant(model, text) });
   stream.push({ type: "text_end", contentIndex: 0, content: text, partial: assistant(model, text) });
   stream.push({ type: "done", reason: "stop", message: assistant(model, text) });
+  return stream;
+}
+
+function thinkingThenTextStream(model: Model<Api>, thinkingBlocks: string[], text: string) {
+  const stream = createAssistantMessageEventStream();
+  const empty = assistant(model, "");
+  const completedThinking: AssistantMessage["content"] = [];
+  stream.push({ type: "start", partial: empty });
+  for (const thinking of thinkingBlocks) {
+    const pendingBlock = { type: "thinking" as const, thinking: "" };
+    stream.push({
+      type: "thinking_start",
+      contentIndex: completedThinking.length,
+      partial: { ...empty, content: [...completedThinking, pendingBlock] },
+    });
+    const completedBlock = { type: "thinking" as const, thinking };
+    stream.push({
+      type: "thinking_delta",
+      contentIndex: completedThinking.length,
+      delta: thinking,
+      partial: { ...empty, content: [...completedThinking, completedBlock] },
+    });
+    completedThinking.push(completedBlock);
+    stream.push({
+      type: "thinking_end",
+      contentIndex: completedThinking.length - 1,
+      content: thinking,
+      partial: { ...empty, content: [...completedThinking] },
+    });
+  }
+  const finalMessage = {
+    ...assistant(model, text),
+    content: [...completedThinking, { type: "text" as const, text }],
+  };
+  stream.push({ type: "text_start", contentIndex: completedThinking.length, partial: finalMessage });
+  stream.push({ type: "text_delta", contentIndex: completedThinking.length, delta: text, partial: finalMessage });
+  stream.push({ type: "text_end", contentIndex: completedThinking.length, content: text, partial: finalMessage });
+  stream.push({ type: "done", reason: "stop", message: finalMessage });
   return stream;
 }
 

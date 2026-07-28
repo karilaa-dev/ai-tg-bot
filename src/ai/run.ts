@@ -32,6 +32,7 @@ import { telegramFileSource } from "../files/telegramSource.js";
 const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
+const TG_MEDIA_GROUP_LIMIT = 10;
 const MIN_SPLIT_RATIO = 0.5;
 
 export interface TurnInput {
@@ -446,9 +447,13 @@ function createPiStreamLoop(
       if (update.type === "text_delta") {
         shaper.onTextDelta(update.delta);
         counts.contentEvents += 1;
+      } else if (update.type === "thinking_start") {
+        shaper.onReasoningStart();
       } else if (update.type === "thinking_delta") {
         shaper.onReasoningDelta(update.delta);
         counts.contentEvents += 1;
+      } else if (update.type === "thinking_end") {
+        shaper.onReasoningEnd();
       }
       updatePresenter();
       return;
@@ -917,28 +922,31 @@ async function sendGeneratedImageAttachmentsEarly(
   const generated = attachments
     .slice(0, MAX_CREATED_FILES_PER_ANSWER)
     .filter((attachment) => attachment.origin === "generated_image" && attachment.delivery === "photo");
-  let delivered = 0;
-  for (const attachment of generated) {
-    if (attachment.telegramDelivery) {
-      delivered += 1;
-      continue;
-    }
+  let delivered = generated.filter((attachment) => attachment.telegramDelivery).length;
+  const pending = generated.filter((attachment) => !attachment.telegramDelivery);
+  for (const batch of attachmentBatches(pending)) {
     try {
-      const sent = await sendPhotoWithThreadFallback(input, attachment);
-      attachment.telegramDelivery = telegramDeliveryFromSent(sent);
-      delivered += 1;
-      await rememberTelegramDeliverySource(input, attachment).catch((err: unknown) => {
-        input.logger.warn("failed to persist early generated image Telegram reference", {
-          threadId: input.thread.id,
-          fileId: attachment.fileId,
-          telegramMessageId: attachment.telegramDelivery?.messageId,
-          err: String(err),
+      const sent = batch.length === 1
+        ? [await sendPhotoWithThreadFallback(input, batch[0]!)]
+        : await sendPhotoMediaGroupWithThreadFallback(input, batch);
+      for (let index = 0; index < batch.length; index += 1) {
+        const attachment = batch[index]!;
+        attachment.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
+        delivered += 1;
+        await rememberTelegramDeliverySource(input, attachment).catch((err: unknown) => {
+          input.logger.warn("failed to persist early generated image Telegram reference", {
+            threadId: input.thread.id,
+            fileId: attachment.fileId,
+            telegramMessageId: attachment.telegramDelivery?.messageId,
+            err: String(err),
+          });
         });
-      });
+      }
     } catch (err) {
       input.logger.warn("early generated image delivery failed; retrying during final attachment delivery", {
         threadId: input.thread.id,
-        fileId: attachment.fileId,
+        files: batch.length,
+        fileIds: batch.map((attachment) => attachment.fileId),
         err: String(err),
       });
     }
@@ -977,53 +985,69 @@ async function sendAttachmentBatch(
   }
   const pending = attachments.filter((attachment) => !attachment.telegramDelivery);
   if (!pending.length) return;
-  if (pending.length === 1) {
-    const attachment = pending[0]!;
+  for (const batch of attachmentBatches(pending)) {
+    if (batch.length === 1) {
+      const attachment = batch[0]!;
+      try {
+        const sent = await strategy.sendOne(input, attachment);
+        await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+        input.logger.info(`${strategy.label} sent`, {
+          threadId: input.thread.id,
+          messageId: assistantMessage.id,
+          fileId: attachment.fileId,
+          telegramMessageId: sent.message_id,
+          name: attachment.name,
+        });
+      } catch (err) {
+        input.logger.warn(`failed to send ${strategy.label}`, {
+          threadId: input.thread.id,
+          messageId: assistantMessage.id,
+          fileId: attachment.fileId,
+          name: attachment.name,
+          err: String(err),
+        });
+        await removeUnresolvableUndeliveredAttachment(input, attachment);
+      }
+      continue;
+    }
+
     try {
-      const sent = await strategy.sendOne(input, attachment);
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
-      input.logger.info(`${strategy.label} sent`, {
+      const sent = await strategy.sendGroup(input, batch);
+      for (let index = 0; index < batch.length; index += 1) {
+        const attachment = batch[index]!;
+        await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
+      }
+      input.logger.info(`${strategy.label} media group sent`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
-        fileId: attachment.fileId,
-        telegramMessageId: sent.message_id,
-        name: attachment.name,
+        files: batch.length,
+        telegramMessages: sent.map((message) => message.message_id),
       });
     } catch (err) {
-      input.logger.warn(`failed to send ${strategy.label}`, {
+      input.logger.warn(`failed to send ${strategy.label} media group`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
-        fileId: attachment.fileId,
-        name: attachment.name,
+        files: batch.length,
+        fileIds: batch.map((attachment) => attachment.fileId),
         err: String(err),
       });
-      await removeUnresolvableUndeliveredAttachment(input, attachment);
+      for (const attachment of batch) await removeUnresolvableUndeliveredAttachment(input, attachment);
     }
-    return;
   }
+}
 
-  try {
-    const sent = await strategy.sendGroup(input, pending);
-    for (let index = 0; index < pending.length; index += 1) {
-      const attachment = pending[index]!;
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
-    }
-    input.logger.info(`${strategy.label} media group sent`, {
-      threadId: input.thread.id,
-      messageId: assistantMessage.id,
-      files: pending.length,
-      telegramMessages: sent.map((message) => message.message_id),
-    });
-  } catch (err) {
-    input.logger.warn(`failed to send ${strategy.label} media group`, {
-      threadId: input.thread.id,
-      messageId: assistantMessage.id,
-      files: pending.length,
-      fileIds: pending.map((attachment) => attachment.fileId),
-      err: String(err),
-    });
-    for (const attachment of pending) await removeUnresolvableUndeliveredAttachment(input, attachment);
+function attachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
+  const batches: CreatedFileAttachment[][] = [];
+  let index = 0;
+  while (index < attachments.length) {
+    const remaining = attachments.length - index;
+    const batchSize = remaining === TG_MEDIA_GROUP_LIMIT + 1
+      ? TG_MEDIA_GROUP_LIMIT - 1
+      : Math.min(remaining, TG_MEDIA_GROUP_LIMIT);
+    batches.push(attachments.slice(index, index + batchSize));
+    index += batchSize;
   }
+  return batches;
 }
 
 async function removeUnresolvableUndeliveredAttachment(
@@ -1221,11 +1245,39 @@ function documentMediaGroup(
 function photoMediaGroup(
   attachments: CreatedFileAttachment[],
 ): Parameters<Api["sendMediaGroup"]>[1] {
-  return attachments.map((attachment) => ({
+  const combinedCaption = combinedPhotoCaption(attachments);
+  return attachments.map((attachment, index) => ({
     type: "photo" as const,
     media: attachmentInput(attachment),
-    caption: attachment.caption ?? undefined,
+    caption: index === 0 ? combinedCaption?.caption : undefined,
+    parse_mode: index === 0 ? combinedCaption?.parseMode : undefined,
   }));
+}
+
+function combinedPhotoCaption(
+  attachments: CreatedFileAttachment[],
+): { caption: string; parseMode?: "HTML" } | undefined {
+  const captions = attachments.flatMap((attachment, index) => {
+    const caption = attachment.caption?.trim();
+    return caption ? [{ index, caption }] : [];
+  });
+  if (!captions.length) return undefined;
+  if (captions.length === 1 && captions[0]!.index === 0) {
+    return { caption: truncateCaption(captions[0]!.caption) };
+  }
+  const combined = captions
+    .map(({ index, caption }) => `Photo ${index + 1}: ${caption}`)
+    .join("\n");
+  return {
+    caption: `<blockquote>${escapeHtml(truncateCaption(combined))}</blockquote>`,
+    parseMode: "HTML",
+  };
+}
+
+function truncateCaption(caption: string): string {
+  const characters = Array.from(caption);
+  if (characters.length <= TG_CAPTION_LIMIT) return caption;
+  return `${characters.slice(0, TG_CAPTION_LIMIT - 3).join("")}...`;
 }
 
 function attachmentInput(attachment: CreatedFileAttachment): InputFile {
