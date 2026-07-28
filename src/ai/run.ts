@@ -7,10 +7,11 @@ import type { Repos } from "../db/repos/index.js";
 import type { MessageKind, MessageRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
-import { renderFinal, variantsForRichRetry } from "../telegram/render.js";
+import { renderFinalAnswer, renderFinalThinking, variantsForRichRetry } from "../telegram/render.js";
 import {
   isRichParseError,
   isThreadNotFound,
+  editRich,
   prefixPlainForThreadFallback,
   prefixRichForThreadFallback,
   sendRich,
@@ -97,7 +98,7 @@ export const runTurn: TurnRunner = async (input) => {
       sessionId: runtime.session.sessionId,
     });
     streamer?.update({ thinkingMd: "", answerMd: "" });
-    const stats = createPiStreamLoop(input, shaper, streamer, status);
+    const stats = createPiStreamLoop(input, shaper, streamer, status, () => runtime.bridge.attachments);
     const existingEntryIds = new Set(runtime.session.sessionManager.getEntries().map((entry) => entry.id));
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
     try {
@@ -163,7 +164,6 @@ export const runTurn: TurnRunner = async (input) => {
     if (hasGeneratedImage) {
       const delivered = await sendGeneratedImageAttachmentsEarly(input, createdFiles);
       generatedImageDelivered = delivered > 0;
-      streamer?.stop();
       input.logger.info("generated image delivered after tool completion", {
         threadId: input.thread.id,
         images: delivered,
@@ -171,11 +171,18 @@ export const runTurn: TurnRunner = async (input) => {
           ? Math.max(0, Date.now() - stats.counts.generateImageReadyAt)
           : undefined,
       });
-    } else {
-      await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
     }
+    const thinkingDelivery = await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
     const assistantEntry = [...piEntries].reverse().find((entry) => entry.role === "assistant");
-    await sendFinalVisible(input, finalThinking, finalAnswer, Date.now() - startedAt, createdFiles, assistantEntry?.id);
+    await sendFinalVisible(
+      input,
+      finalThinking,
+      finalAnswer,
+      Date.now() - startedAt,
+      createdFiles,
+      assistantEntry?.id,
+      thinkingDelivery,
+    );
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
       threadId: input.thread.id,
@@ -251,22 +258,14 @@ function lastAssistantStopReason(messages: AgentMessage[]): string | undefined {
 }
 
 interface TurnPresenter {
-  streamer: DraftStreamer | undefined;
+  streamer: TurnDraftStreamer | undefined;
   status: TurnStatusMessage | undefined;
   stop: () => void;
 }
 
 function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter {
   const streamer = input.user.stream_mode
-    ? new DraftStreamer({
-        api: input.api,
-        chatId: input.chatId,
-        messageThreadId: input.messageThreadId,
-        threadTitle: input.thread.title,
-        startedAt,
-        updateMs: input.config.DRAFT_UPDATE_MS,
-        t: input.t,
-      })
+    ? new TurnDraftStreamer(input, startedAt)
     : undefined;
   const status = streamer ? undefined : new TurnStatusMessage(input);
   input.logger.debug("turn response mode selected", {
@@ -299,6 +298,114 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
   };
 }
 
+type ThinkingDelivery = {
+  handled: true;
+  messageIds: number[];
+};
+
+class TurnDraftStreamer {
+  private readonly thinking: DraftStreamer;
+  private readonly answer: DraftStreamer;
+  private answerStarted = false;
+  private answerReady = false;
+  private latestAnswerMd = "";
+  private deliveredThinkingMd = "";
+  private thinkingDelivery?: Promise<number[]>;
+  private thinkingDeliveryError: unknown;
+
+  constructor(
+    private readonly input: TurnInput,
+    private readonly startedAt: number,
+  ) {
+    const common = {
+      api: input.api,
+      chatId: input.chatId,
+      messageThreadId: input.messageThreadId,
+      threadTitle: input.thread.title,
+      startedAt,
+      updateMs: input.config.DRAFT_UPDATE_MS,
+      t: input.t,
+    };
+    this.thinking = new DraftStreamer(common);
+    this.answer = new DraftStreamer({ ...common, answerOnly: true });
+  }
+
+  update(frame: { thinkingMd: string; answerMd: string }, finalThinkingMd = ""): void {
+    if (frame.answerMd.trim()) {
+      this.latestAnswerMd = frame.answerMd;
+      if (!this.answerStarted) this.startAnswer(finalThinkingMd);
+      if (this.answerReady) this.updateAnswerDraft();
+      return;
+    }
+    if (this.answerStarted) return;
+    this.thinking.update({ thinkingMd: frame.thinkingMd, answerMd: "" });
+  }
+
+  async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
+    if (!frame) {
+      if (!this.answerStarted) {
+        await this.thinking.finish();
+        return undefined;
+      }
+      const messageIds = await this.waitForThinkingDelivery();
+      await this.answer.finish();
+      return { handled: true, messageIds };
+    }
+
+    this.latestAnswerMd = frame.answerMd;
+    if (!this.answerStarted) this.startAnswer(frame.thinkingMd);
+    let messageIds = await this.waitForThinkingDelivery();
+    if (frame.thinkingMd !== this.deliveredThinkingMd) {
+      messageIds = await refreshFinalThinkingVisible(
+        this.input,
+        messageIds,
+        frame.thinkingMd,
+        Math.max(0, Date.now() - this.startedAt),
+      );
+      this.deliveredThinkingMd = frame.thinkingMd;
+    }
+    if (frame.answerMd.trim()) {
+      await this.answer.finish({ thinkingMd: "", answerMd: frame.answerMd });
+    } else {
+      this.answer.stop();
+    }
+    return { handled: true, messageIds };
+  }
+
+  stop(): void {
+    this.thinking.stop();
+    this.answer.stop();
+  }
+
+  private startAnswer(finalThinkingMd: string): void {
+    if (this.answerStarted) return;
+    this.answerStarted = true;
+    this.deliveredThinkingMd = finalThinkingMd;
+    this.thinking.stop();
+    const elapsedMs = Math.max(0, Date.now() - this.startedAt);
+    this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
+      this.thinkingDeliveryError = err;
+      return [];
+    });
+    void this.thinkingDelivery.then(() => {
+      if (this.thinkingDeliveryError) return;
+      this.answerReady = true;
+      this.updateAnswerDraft();
+    });
+  }
+
+  private async waitForThinkingDelivery(): Promise<number[]> {
+    const messageIds = await (this.thinkingDelivery ?? Promise.resolve([]));
+    if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
+    return messageIds;
+  }
+
+  private updateAnswerDraft(): void {
+    if (!this.answerReady || !this.latestAnswerMd.trim()) return;
+    this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
+  }
+}
+
 interface TurnStreamStats {
   contentEvents: number;
   toolCalls: number;
@@ -311,8 +418,9 @@ interface TurnStreamStats {
 function createPiStreamLoop(
   input: TurnInput,
   shaper: StreamShaper,
-  streamer: DraftStreamer | undefined,
+  streamer: TurnDraftStreamer | undefined,
   status: TurnStatusMessage | undefined,
+  attachments: () => CreatedFileAttachment[],
 ): { counts: TurnStreamStats; onEvent: (event: AgentSessionEvent) => void } {
   const counts: TurnStreamStats = {
     contentEvents: 0,
@@ -326,7 +434,7 @@ function createPiStreamLoop(
     streamer?.update({
       thinkingMd: shaper.streamingThinkingMd(),
       answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), counts.generateImageToolCalls > 0),
-    });
+    }, buildFinalThinkingSummary({ t: input.t, shaper, attachments: attachments() }));
   };
   const updateStatus = () => {
     void status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd())).catch((err) =>
@@ -647,6 +755,7 @@ async function sendFinalVisible(
   elapsedMs: number,
   attachments: CreatedFileAttachment[],
   piEntryId?: string,
+  thinkingDelivery?: ThinkingDelivery,
 ): Promise<void> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
   if (attachments.length > outboundAttachments.length) {
@@ -657,27 +766,34 @@ async function sendFinalVisible(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const shouldSendFinalMessage = visibleAnswer.trim() || visibleThinking.trim();
-  const messages = shouldSendFinalMessage
-    ? renderFinal({
+  const thinkingMessages = thinkingDelivery?.handled
+    ? []
+    : renderFinalThinking({
         thinkingLog: visibleThinking,
-        answerMd: visibleAnswer,
         elapsedMs,
         t: input.t,
-      })
-    : [];
+      });
+  const answerMessages = renderFinalAnswer({
+    answerMd: visibleAnswer,
+  });
   const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(outboundAttachments);
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
-    parts: messages.length,
+    thinkingParts: thinkingMessages.length,
+    answerParts: answerMessages.length,
     answerChars: visibleAnswer.length,
     persistedChars: persistedText.length,
     thinkingChars: visibleThinking.length,
   });
-  const ids: number[] = [];
-  for (const rich of messages) {
+  const thinkingIds = [...(thinkingDelivery?.messageIds ?? [])];
+  for (const rich of thinkingMessages) {
     const sent = await sendRichWithFallback(input, rich);
-    ids.push(...sent.map((message) => message.message_id));
+    thinkingIds.push(...sent.map((message) => message.message_id));
+  }
+  const answerIds: number[] = [];
+  for (const rich of answerMessages) {
+    const sent = await sendRichWithFallback(input, rich);
+    answerIds.push(...sent.map((message) => message.message_id));
   }
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
@@ -696,7 +812,8 @@ async function sendFinalVisible(
       : { text: persistedText },
     textPlain: persistedText,
     thinking: visibleThinking,
-    tgMessageId: ids.find((id) => id > 0)
+    tgMessageId: answerIds.find((id) => id > 0)
+      ?? thinkingIds.find((id) => id > 0)
       ?? outboundAttachments.map((attachment) => attachment.telegramDelivery?.messageId).find((id) => typeof id === "number" && id > 0)
       ?? null,
     piEntryId: piEntryId ?? null,
@@ -705,9 +822,80 @@ async function sendFinalVisible(
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
-    telegramMessages: ids.length,
+    telegramMessages: thinkingIds.length + answerIds.length,
     files: outboundAttachments.length,
   });
+}
+
+async function sendFinalThinkingVisible(
+  input: TurnInput,
+  visibleThinking: string,
+  elapsedMs: number,
+): Promise<number[]> {
+  const ids: number[] = [];
+  for (const rich of renderFinalThinking({
+    thinkingLog: visibleThinking,
+    elapsedMs,
+    t: input.t,
+  })) {
+    const sent = await sendRichWithFallback(input, rich);
+    ids.push(...sent.map((message) => message.message_id));
+  }
+  return ids;
+}
+
+async function refreshFinalThinkingVisible(
+  input: TurnInput,
+  existingMessageIds: number[],
+  visibleThinking: string,
+  elapsedMs: number,
+): Promise<number[]> {
+  const messages = renderFinalThinking({
+    thinkingLog: visibleThinking,
+    elapsedMs,
+    t: input.t,
+  });
+  const messageId = existingMessageIds.find((id) => id > 0);
+  if (messageId && messages.length === 1) {
+    const edited = await editFinalThinkingVisible(input, messageId, messages[0]!);
+    if (edited) return existingMessageIds;
+  }
+  const sent = await sendFinalThinkingVisible(input, visibleThinking, elapsedMs);
+  return [...existingMessageIds, ...sent];
+}
+
+async function editFinalThinkingVisible(
+  input: TurnInput,
+  messageId: number,
+  rich: InputRichMessage,
+): Promise<boolean> {
+  const variants = [rich, ...variantsForRichRetry(rich.markdown ?? rich.html ?? "")];
+  const seen = new Set<string>();
+  for (const variant of variants) {
+    const hash = JSON.stringify(variant);
+    if (seen.has(hash)) continue;
+    seen.add(hash);
+    try {
+      const edited = await editRich(input.api, {
+        chat_id: input.chatId,
+        message_id: messageId,
+        rich_message: variant,
+      });
+      if (edited) return true;
+    } catch (err) {
+      if (!isRichParseError(err)) throw err;
+      input.logger.debug("final thinking edit parse failed; trying repaired variant", {
+        threadId: input.thread.id,
+        telegramMessageId: messageId,
+        err: String(err),
+      });
+    }
+  }
+  input.logger.warn("failed to edit stale final thinking; sending corrected thinking separately", {
+    threadId: input.thread.id,
+    telegramMessageId: messageId,
+  });
+  return false;
 }
 
 async function sendCreatedFileAttachments(

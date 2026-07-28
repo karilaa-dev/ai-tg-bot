@@ -1,4 +1,6 @@
-export const RICH_MESSAGE_BYTE_LIMIT = 32768;
+export const RICH_MESSAGE_CHARACTER_LIMIT = 32768;
+export const RICH_MESSAGE_BLOCK_LIMIT = 500;
+export const RICH_MESSAGE_MEDIA_LIMIT = 50;
 
 const allowedHtmlTags = new Set([
   "b",
@@ -187,10 +189,8 @@ function flattenDeepNesting(md: string): string {
 }
 
 function enforceRichLimit(md: string): string {
-  const limit = RICH_MESSAGE_BYTE_LIMIT;
-  if (Buffer.byteLength(md, "utf8") <= limit) return md;
-  const bytes = Buffer.from(md, "utf8");
-  let end = limit - 32;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString("utf8") + "\n\n[truncated]";
+  const limit = RICH_MESSAGE_CHARACTER_LIMIT;
+  const characters = Array.from(md);
+  if (characters.length <= limit) return md;
+  return `${characters.slice(0, limit - 32).join("")}\n\n[truncated]`;
 }

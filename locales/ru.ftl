@@ -59,7 +59,6 @@ thinking-final-reasoning = Блоков рассуждений: { $count }
 thinking-final-tools = Инструменты:
 thinking-final-files = Отправлено файлов: { $count }
 thinking-final-files-capped = Отправлено файлов: { $sent } из { $requested } (лимит { $limit })
-show-more = 📖 Показать еще
 compacting = 🗜 Сжимаю память...
 compacted = ✅ Сжато сообщений: { $count }.
 busy = ⏳ Я еще работаю в этой теме. Сообщение сохранено для следующего хода.

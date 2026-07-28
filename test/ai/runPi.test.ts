@@ -29,6 +29,7 @@ import type {
   SandboxCommandResult,
   SandboxFileExportRequest,
 } from "../../src/sandbox/types.js";
+import { deferred } from "../helpers/async.js";
 
 describe("runTurn with Pi", () => {
   let db: AppDatabase | undefined;
@@ -104,6 +105,201 @@ describe("runTurn with Pi", () => {
     expect(richMessages).toHaveLength(1);
     expect(embed).not.toHaveBeenCalled();
     expect(commandRuntime.activityLeaseAcquisitions).toBe(0);
+  }, 20_000);
+
+  it("finalizes collapsed thoughts and starts a separate answer draft when final text begins", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-split-final-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, DRAFT_UPDATE_MS: 0 });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7010, firstName: "SplitFinal", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Split final" });
+    let providerCalls = 0;
+    const stream = ((model: Model<Api>) => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "split-final-bash",
+          name: "bash",
+          arguments: { script: "pwd", cwd: "/", stdin: "", args: [], input_file_ids: [] },
+        });
+      }
+      return textStream(model, "This answer streams separately.");
+    }) as PiProviderStreamOverrides["openRouter"];
+    const commandRuntime = new TestCommandRuntime(async () => successfulCommand());
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime,
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const events: Array<{ kind: "draft" | "message"; payload: Record<string, unknown> }> = [];
+    const thinkingStarted = deferred<void>();
+    const releaseThinking = deferred<void>();
+    let messageId = 9100;
+    const api = {
+      raw: {
+        sendRichMessage: async (payload: Record<string, unknown>) => {
+          events.push({ kind: "message", payload });
+          if (richMarkdown(payload).includes("<details>")) {
+            thinkingStarted.resolve();
+            await releaseThinking.promise;
+          }
+          messageId += 1;
+          return { message_id: messageId, date: 1, chat: { id: user.tg_id, type: "private", first_name: "SplitFinal" } };
+        },
+        sendRichMessageDraft: async (payload: Record<string, unknown>) => {
+          events.push({ kind: "draft", payload });
+          return true;
+        },
+      },
+    } as unknown as import("grammy").Api;
+
+    const turn = runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "Run a check and answer.",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key, params) => {
+        if (key === "thinking-placeholder") return "Thinking...";
+        if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
+        if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
+        if (key === "thinking-final-tool-calls") return `Tool calls: ${params?.count}`;
+        if (key === "thinking-final-tools") return "Tools:";
+        return key;
+      },
+    });
+    await thinkingStarted.promise;
+    expect(events.some((event) =>
+      event.kind === "draft" && richMarkdown(event.payload).includes("This answer streams separately."))).toBe(false);
+    releaseThinking.resolve();
+    await turn;
+
+    const messages = events.filter((event) => event.kind === "message");
+    expect(messages).toHaveLength(2);
+    expect(richMarkdown(messages[0]!.payload)).toContain("<details>");
+    expect(richMarkdown(messages[0]!.payload)).toContain("Thought for ");
+    expect(richMarkdown(messages[0]!.payload)).not.toContain("This answer streams separately.");
+    expect(richMarkdown(messages[1]!.payload)).toBe("This answer streams separately.");
+    expect(richMarkdown(messages[1]!.payload)).not.toContain("<details>");
+
+    const answerDraftIndex = events.findIndex((event) =>
+      event.kind === "draft" && richMarkdown(event.payload).includes("This answer streams separately."));
+    const thinkingMessageIndex = events.findIndex((event) =>
+      event.kind === "message" && richMarkdown(event.payload).includes("<details>"));
+    expect(thinkingMessageIndex).toBeGreaterThanOrEqual(0);
+    expect(answerDraftIndex).toBeGreaterThan(thinkingMessageIndex);
+    const thinkingDraft = events.find((event) => event.kind === "draft" && !richMarkdown(event.payload).includes("This answer streams separately."));
+    const answerDraft = events[answerDraftIndex];
+    expect(answerDraft?.payload.draft_id).not.toBe(thinkingDraft?.payload.draft_id);
+    expect(richMarkdown(answerDraft!.payload)).not.toContain("Thought for ");
+    expect(richMarkdown(answerDraft!.payload)).not.toContain("<details>");
+  }, 20_000);
+
+  it("refreshes finalized thoughts when a later tool call resumes reasoning", async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-run-pi-refresh-thinking-"));
+    const config = loadTestConfig({ PI_CODING_AGENT_DIR: tempDir, DRAFT_UPDATE_MS: 0 });
+    const logger = createLogger(config);
+    db = createDatabase(config, logger);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 7011, firstName: "RefreshThinking", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Refresh thinking" });
+    let providerCalls = 0;
+    const stream = ((model: Model<Api>) => {
+      providerCalls += 1;
+      if (providerCalls === 1) {
+        return toolStream(model, {
+          type: "toolCall",
+          id: "refresh-first-bash",
+          name: "bash",
+          arguments: { script: "pwd", cwd: "/", stdin: "", args: [], input_file_ids: [] },
+        });
+      }
+      if (providerCalls === 2) {
+        return textThenToolStream(model, "I need one more check.", {
+          type: "toolCall",
+          id: "refresh-second-bash",
+          name: "bash",
+          arguments: { script: "ls", cwd: "/", stdin: "", args: [], input_file_ids: [] },
+        });
+      }
+      return textStream(model, "The final checked answer.");
+    }) as PiProviderStreamOverrides["openRouter"];
+    manager = new PiRuntimeManager({
+      config,
+      db,
+      repos,
+      logger,
+      commandRuntime: new TestCommandRuntime(async () => successfulCommand()),
+      providerStreams: { openRouter: stream, codex: stream as PiProviderStreamOverrides["codex"] },
+    });
+    const events: Array<{ kind: "draft" | "edit" | "message"; payload: Record<string, unknown> }> = [];
+    let messageId = 9200;
+    const api = {
+      raw: {
+        sendRichMessage: async (payload: Record<string, unknown>) => {
+          events.push({ kind: "message", payload });
+          messageId += 1;
+          return { message_id: messageId, date: 1, chat: { id: user.tg_id, type: "private", first_name: "RefreshThinking" } };
+        },
+        editMessageText: async (payload: Record<string, unknown>) => {
+          events.push({ kind: "edit", payload });
+          return true;
+        },
+        sendRichMessageDraft: async (payload: Record<string, unknown>) => {
+          events.push({ kind: "draft", payload });
+          return true;
+        },
+      },
+    } as unknown as import("grammy").Api;
+
+    await runTurn({
+      api,
+      chatId: user.tg_id,
+      config,
+      db,
+      repos,
+      logger,
+      user,
+      thread,
+      text: "Check twice, then answer.",
+      pi: manager,
+      resolveFile: async (file) => resolvedFile(Buffer.from("unused"), file.id),
+      t: (key, params) => {
+        if (key === "thinking-placeholder") return "Thinking...";
+        if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
+        if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
+        if (key === "thinking-final-tool-calls") return `Tool calls: ${params?.count}`;
+        if (key === "thinking-final-tools") return "Tools:";
+        return key;
+      },
+    });
+
+    expect(providerCalls).toBe(3);
+    const sentThinking = events.find((event) =>
+      event.kind === "message" && richMarkdown(event.payload).includes("<details>"));
+    const editedThinking = events.find((event) => event.kind === "edit");
+    expect(richMarkdown(sentThinking!.payload)).toContain("Tool calls: 1");
+    expect(richMarkdown(editedThinking!.payload)).toContain("Tool calls: 2");
+    expect(events.filter((event) =>
+      event.kind === "message" && richMarkdown(event.payload).includes("<details>"))).toHaveLength(1);
+    expect(events.some((event) =>
+      event.kind === "message" && richMarkdown(event.payload) === "The final checked answer.")).toBe(true);
+    const messages = await repos.messages.listThread(thread.id);
+    expect(messages.at(-1)?.thinking).toContain("Tool calls: 2");
   }, 20_000);
 
   it("reports Pi setup failures through the normal Telegram error boundary", async () => {
@@ -494,6 +690,35 @@ function textStream(model: Model<Api>, text: string) {
   return stream;
 }
 
+function textThenToolStream(model: Model<Api>, text: string, toolCall: ToolCall) {
+  const stream = createAssistantMessageEventStream();
+  const start = assistant(model, "");
+  const textMessage = assistant(model, text);
+  const message: AssistantMessage = {
+    ...textMessage,
+    content: [...textMessage.content, toolCall],
+    stopReason: "toolUse",
+  };
+  stream.push({ type: "start", partial: start });
+  stream.push({ type: "text_start", contentIndex: 0, partial: start });
+  stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: textMessage });
+  stream.push({ type: "text_end", contentIndex: 0, content: text, partial: textMessage });
+  stream.push({
+    type: "toolcall_start",
+    contentIndex: 1,
+    partial: { ...textMessage, content: [...textMessage.content, { ...toolCall, arguments: {} }] },
+  });
+  stream.push({
+    type: "toolcall_delta",
+    contentIndex: 1,
+    delta: JSON.stringify(toolCall.arguments),
+    partial: { ...textMessage, content: [...textMessage.content, { ...toolCall, arguments: {} }] },
+  });
+  stream.push({ type: "toolcall_end", contentIndex: 1, toolCall, partial: message });
+  stream.push({ type: "done", reason: "toolUse", message });
+  return stream;
+}
+
 function toolStream(model: Model<Api>, toolCall: ToolCall) {
   const stream = createAssistantMessageEventStream();
   const start = assistant(model, "");
@@ -541,6 +766,10 @@ function resolvedFile(bytes: Buffer, fileId: number) {
     expiresAt: Number.POSITIVE_INFINITY,
     source: { transport: "test", connectionKey: "default", remoteKey: String(fileId), locator: {} },
   };
+}
+
+function richMarkdown(payload: Record<string, unknown>): string {
+  return ((payload.rich_message as { markdown?: string } | undefined)?.markdown) ?? "";
 }
 
 class TestCommandRuntime implements CommandRuntime {

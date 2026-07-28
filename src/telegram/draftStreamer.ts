@@ -1,6 +1,6 @@
 import { GrammyError } from "grammy";
 import { isRichParseError, isThreadNotFound, prefixRichForThreadFallback, sendRichDraft, type InputRichMessage, type RawRichApi } from "./richApi.js";
-import { renderDraft, type RenderT, variantsForRichRetry } from "./render.js";
+import { renderAnswerDraft, renderDraft, type RenderT, variantsForRichRetry } from "./render.js";
 
 type DraftFrame = { thinkingMd: string; answerMd: string };
 type PendingDraft = { frame: DraftFrame; force: boolean; elapsedMs: number };
@@ -8,6 +8,13 @@ type DraftSendResult = "sent" | "dropped" | { retryAfterMs: number };
 
 const floodWaitSafetyMs = 100;
 const thinkingElapsedTickMs = 10_000;
+const maxDraftId = 0x7fffffff;
+let lastDraftId = (Date.now() & maxDraftId) || 1;
+
+function allocateDraftId(): number {
+  lastDraftId = lastDraftId >= maxDraftId ? 1 : lastDraftId + 1;
+  return lastDraftId;
+}
 
 export interface DraftStreamerOptions {
   api: RawRichApi;
@@ -17,10 +24,11 @@ export interface DraftStreamerOptions {
   startedAt: number;
   updateMs: number;
   t: RenderT;
+  answerOnly?: boolean;
 }
 
 export class DraftStreamer {
-  private readonly draftId = (Date.now() & 0x7fffffff) || 1;
+  private readonly draftId = allocateDraftId();
   private lastSentAt = 0;
   private lastHash = "";
   private latest?: DraftFrame;
@@ -80,6 +88,7 @@ export class DraftStreamer {
   }
 
   private renderPending(pending: PendingDraft): InputRichMessage {
+    if (this.options.answerOnly) return renderAnswerDraft(pending.frame.answerMd);
     return renderDraft({ ...pending.frame, elapsedMs: pending.elapsedMs, t: this.options.t });
   }
 
@@ -240,4 +249,3 @@ function retryAfterMs(err: unknown): number | undefined {
   if (typeof retryAfter !== "number" || !Number.isFinite(retryAfter) || retryAfter < 0) return floodWaitSafetyMs;
   return retryAfter * 1000 + floodWaitSafetyMs;
 }
-

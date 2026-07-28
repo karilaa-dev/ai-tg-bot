@@ -31,6 +31,12 @@ export interface SendRichMessageDraftParams {
   rich_message: InputRichMessage;
 }
 
+export interface EditRichMessageParams {
+  chat_id: number;
+  message_id: number;
+  rich_message: InputRichMessage;
+}
+
 export async function sendRich(
   api: RawRichApi,
   params: SendRichMessageParams,
@@ -57,6 +63,13 @@ export async function sendRichDraft(
   params: SendRichMessageDraftParams,
 ): Promise<boolean> {
   return Boolean(await api.raw.sendRichMessageDraft(params));
+}
+
+export async function editRich(
+  api: RawRichApi,
+  params: EditRichMessageParams,
+): Promise<boolean> {
+  return Boolean(await api.raw.editMessageText(params));
 }
 
 export function isThreadNotFound(err: unknown): boolean {

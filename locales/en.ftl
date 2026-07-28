@@ -59,7 +59,6 @@ thinking-final-reasoning = Reasoning blocks: { $count }
 thinking-final-tools = Tools:
 thinking-final-files = Files sent: { $count }
 thinking-final-files-capped = Files sent: { $sent } of { $requested } (limit { $limit })
-show-more = 📖 Show more
 compacting = 🗜 Compacting memory...
 compacted = ✅ Compacted { $count } messages.
 busy = ⏳ I am still working in this thread. I saved your message for the next turn.
