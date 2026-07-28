@@ -1275,8 +1275,9 @@ function combinedPhotoCaption(
 }
 
 function truncateCaption(caption: string): string {
-  if (caption.length <= TG_CAPTION_LIMIT) return caption;
-  return `${caption.slice(0, TG_CAPTION_LIMIT - 3)}...`;
+  const characters = Array.from(caption);
+  if (characters.length <= TG_CAPTION_LIMIT) return caption;
+  return `${characters.slice(0, TG_CAPTION_LIMIT - 3).join("")}...`;
 }
 
 function attachmentInput(attachment: CreatedFileAttachment): InputFile {

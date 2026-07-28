@@ -628,7 +628,9 @@ describe("runTurn with Pi", () => {
         mimeType: "image/jpeg",
         data: bytes,
         size: bytes.length,
-        caption: `Credit ${index + 1} <artist>`,
+        caption: index === 0
+          ? `${"x".repeat(1011)}😀overflow`
+          : `Credit ${index + 1} <artist>`,
         inline: false,
         card: `photo ${index + 1}`,
         delivery: "photo" as const,
@@ -678,10 +680,17 @@ describe("runTurn with Pi", () => {
     expect(galleries.map((gallery) => gallery.length)).toEqual([10, 10, 5]);
     for (const gallery of galleries) {
       expect(gallery[0]).toMatchObject({ parse_mode: "HTML" });
-      expect(gallery[0]?.caption).toContain("<blockquote>Photo 1: Credit");
-      expect(gallery[0]?.caption).toContain("&lt;artist&gt;");
+      expect(gallery[0]?.caption).toContain("<blockquote>Photo 1:");
       expect(gallery.slice(1).every((photo) => photo.caption === undefined)).toBe(true);
     }
+    const boundaryCaption = String(galleries[0]?.[0]?.caption);
+    expect(boundaryCaption).toContain("😀...</blockquote>");
+    expect(boundaryCaption).not.toContain("�");
+    expect(Array.from(boundaryCaption).some((character) => {
+      const firstCodeUnit = character.charCodeAt(0);
+      return character.length === 1 && firstCodeUnit >= 0xD800 && firstCodeUnit <= 0xDFFF;
+    })).toBe(false);
+    expect(galleries[1]?.[0]?.caption).toContain("&lt;artist&gt;");
     const files = await repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(25);
     const messages = await repos.messages.listThread(thread.id);
