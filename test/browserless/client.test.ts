@@ -227,6 +227,8 @@ describe("Browserless client", () => {
         <img src="http://metadata.internal/image">
         <img src="data:image/png;base64,iVBORw0KGgo=">
         <source srcset="http://metadata.internal/image 1x">
+        <source srcset="data:image/png;base64,iVBORw0KGgo= 2x, https://metadata.internal/image 1x">
+        <link rel="preload" imagesrcset="data:image/png;base64,iVBORw0KGgo= 2x, https://metadata.internal/image 1x">
         <template><script>alert("template")</script><p onclick="steal()">template text</p></template>
         <p style="background: \\75rl(http://metadata.internal/image)">leak</p>
         <p style="color: red">report</p>
@@ -235,7 +237,7 @@ describe("Browserless client", () => {
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const sanitized = JSON.parse(String(request.body)).html as string;
     expect(sanitized).not.toMatch(
-      /<script|<iframe|<base|<style|http-equiv="refresh"|onload=|onclick=|javascript:|metadata\.internal|data:text\/html|srcset=/i,
+      /<script|<iframe|<base|<style|http-equiv="refresh"|onload=|onclick=|javascript:|metadata\.internal|data:text\/html|(?:image)?srcset=/i,
     );
     expect(sanitized).toContain("<p>template text</p>");
     expect(sanitized).toContain('<img src="data:image/png;base64,iVBORw0KGgo=">');

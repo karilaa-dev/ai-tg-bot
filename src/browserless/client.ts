@@ -42,7 +42,6 @@ const RESOURCE_URL_ATTRIBUTES = new Set([
   "poster",
   "profile",
   "src",
-  "srcset",
   "usemap",
   "xlink:href",
 ]);
@@ -263,7 +262,7 @@ function sanitizeChildren(parent: HtmlParentNode): void {
     }
     child.attrs = child.attrs.filter((attribute) => {
       const name = attribute.name.toLowerCase();
-      if (name.startsWith("on") || name === "srcdoc") return false;
+      if (name.startsWith("on") || name === "srcdoc" || name === "srcset" || name === "imagesrcset") return false;
       if (name === "style" && containsCssResourceLoad(attribute.value)) return false;
       return !RESOURCE_URL_ATTRIBUTES.has(name) || isSafeInlineResource(attribute.value);
     });
