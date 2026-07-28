@@ -129,6 +129,8 @@ BROWSERLESS_TIMEOUT_MS=30000
 
 WebSocket URLs must end in `/playwright`; tokenless endpoints are supported. `BROWSERLESS_ALLOWED_ORIGINS` is a comma-separated exact allowlist and must include the configured URL's origin (scheme, hostname, and port). HTTP(S) base URLs use Browserless's `/active` and `/screenshot` REST endpoints. The bot container must be able to reach Browserless, but the OpenSandbox runner must not receive Browserless configuration or network access.
 
+REST requests send `BROWSERLESS_TOKEN` in an `Authorization: Bearer` header. Browserless requires the token as a query parameter for native Playwright WebSocket connections, so use a narrowly scoped, rotatable token and configure Browserless, proxies, and tracing systems to redact WebSocket query strings.
+
 To configure Codex OAuth in the same Pi directory used by the bot:
 
 ```bash

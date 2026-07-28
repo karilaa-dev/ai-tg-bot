@@ -39,6 +39,7 @@ describe("render_office_preview Pi adapter", () => {
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
       BROWSERLESS_URL: "ws://browserless:3000/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: ["ws://browserless:3000"],
     });
     db = createDatabase(config);
     await db.initialize();
@@ -103,6 +104,7 @@ describe("render_office_preview Pi adapter", () => {
       AGENT_SHARED_ROOT: path.join(tempDir, "agent"),
       MANAGED_FILE_ROOT: path.join(tempDir, "agent", ".chat-files"),
       BROWSERLESS_URL: "ws://browserless:3000/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: ["ws://browserless:3000"],
     });
     db = createDatabase(config);
     await db.initialize();

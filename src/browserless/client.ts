@@ -83,6 +83,7 @@ export async function checkBrowserless(config: BrowserlessConfig): Promise<void>
     }
     const response = await fetch(browserlessHttpEndpoint(config, "active"), {
       method: "GET",
+      headers: browserlessRestHeaders(config),
       redirect: "error",
       signal: AbortSignal.timeout(5_000),
     });
@@ -154,7 +155,7 @@ async function renderWithRest(
   const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response = await fetch(browserlessHttpEndpoint(config, "screenshot"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: browserlessRestHeaders(config, "application/json"),
     body: JSON.stringify({
       html: sanitizeActiveHtml(html),
       options: {
@@ -226,8 +227,17 @@ function browserlessEndpoint(config: BrowserlessConfig): string {
 function browserlessHttpEndpoint(config: BrowserlessConfig, action: "active" | "screenshot"): string {
   const url = trustedBrowserlessUrl(config);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/${action}`;
-  if (config.BROWSERLESS_TOKEN) url.searchParams.set("token", config.BROWSERLESS_TOKEN);
   return url.toString();
+}
+
+function browserlessRestHeaders(
+  config: BrowserlessConfig,
+  contentType?: "application/json",
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) headers["content-type"] = contentType;
+  if (config.BROWSERLESS_TOKEN) headers.authorization = `Bearer ${config.BROWSERLESS_TOKEN}`;
+  return headers;
 }
 
 function trustedBrowserlessUrl(config: BrowserlessConfig): URL {

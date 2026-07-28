@@ -166,13 +166,19 @@ describe("Browserless client", () => {
     const result = await renderOfficeHtml(config, "<html><body>report</body></html>");
 
     expect(result).toEqual({ bytes: PNG, mediaType: "image/png" });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://browserless.example/base/active?token=rest-secret");
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://browserless.example/base/screenshot?token=rest-secret");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://browserless.example/base/active");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: { authorization: "Bearer rest-secret" },
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://browserless.example/base/screenshot");
     const request = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(request).toMatchObject({
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer rest-secret",
+      },
       redirect: "error",
     });
     expect(JSON.parse(String(request.body))).toEqual({
