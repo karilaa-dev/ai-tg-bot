@@ -122,11 +122,12 @@ Optional Office visual preview configuration stays on the bot side:
 
 ```dotenv
 BROWSERLESS_URL=ws://browserless:3000/chromium/playwright
+BROWSERLESS_ALLOWED_ORIGINS=ws://browserless:3000
 BROWSERLESS_TIMEOUT_MS=30000
 # BROWSERLESS_TOKEN=
 ```
 
-WebSocket URLs must end in `/playwright`; tokenless endpoints are supported. HTTP(S) base URLs use Browserless's `/active` and `/screenshot` REST endpoints. The bot container must be able to reach Browserless, but the OpenSandbox runner must not receive Browserless configuration or network access.
+WebSocket URLs must end in `/playwright`; tokenless endpoints are supported. `BROWSERLESS_ALLOWED_ORIGINS` is a comma-separated exact allowlist and must include the configured URL's origin (scheme, hostname, and port). HTTP(S) base URLs use Browserless's `/active` and `/screenshot` REST endpoints. The bot container must be able to reach Browserless, but the OpenSandbox runner must not receive Browserless configuration or network access.
 
 To configure Codex OAuth in the same Pi directory used by the bot:
 

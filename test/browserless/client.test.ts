@@ -27,6 +27,7 @@ describe("Browserless client", () => {
     playwright.connect.mockResolvedValue({ close });
     const config = loadTestConfig({
       BROWSERLESS_URL: "ws://browserless:3000/chromium/playwright?blockAds=true",
+      BROWSERLESS_ALLOWED_ORIGINS: ["ws://browserless:3000"],
     });
 
     await checkBrowserless(config);
@@ -59,6 +60,7 @@ describe("Browserless client", () => {
     playwright.connect.mockResolvedValue(browser);
     const config = loadTestConfig({
       BROWSERLESS_URL: "wss://browserless.example/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: ["wss://browserless.example"],
       BROWSERLESS_TOKEN: "secret token",
       BROWSERLESS_TIMEOUT_MS: 12_345,
     });
@@ -101,6 +103,7 @@ describe("Browserless client", () => {
   it("closes failed WebSocket renders and redacts the URL and token", async () => {
     const config = loadTestConfig({
       BROWSERLESS_URL: "WSS://BROWSERLESS.EXAMPLE:443/chromium/playwright?label=hello%20world",
+      BROWSERLESS_ALLOWED_ORIGINS: ["wss://browserless.example"],
       BROWSERLESS_TOKEN: "top secret",
     });
     const context = {
@@ -136,6 +139,7 @@ describe("Browserless client", () => {
     playwright.connect.mockResolvedValue(browser);
     const config = loadTestConfig({
       BROWSERLESS_URL: "ws://browserless:3000/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: ["ws://browserless:3000"],
       BROWSERLESS_TIMEOUT_MS: 10,
     });
 
@@ -154,6 +158,7 @@ describe("Browserless client", () => {
     vi.stubGlobal("fetch", fetchMock);
     const config = loadTestConfig({
       BROWSERLESS_URL: "https://browserless.example/base",
+      BROWSERLESS_ALLOWED_ORIGINS: ["https://browserless.example"],
       BROWSERLESS_TOKEN: "rest-secret",
     });
 
@@ -168,9 +173,10 @@ describe("Browserless client", () => {
     expect(request).toMatchObject({
       method: "POST",
       headers: { "content-type": "application/json" },
+      redirect: "error",
     });
     expect(JSON.parse(String(request.body))).toEqual({
-      html: "<html><body>report</body></html>",
+      html: "<html><head></head><body>report</body></html>",
       options: { fullPage: true, type: "png" },
       rejectRequestPattern: ["/^https?:/i", "/^wss?:/i", "/^ftp:/i", "/^file:/i"],
       waitForTimeout: 250,
@@ -178,7 +184,10 @@ describe("Browserless client", () => {
   });
 
   it("rejects oversized and non-image REST responses", async () => {
-    const config = loadTestConfig({ BROWSERLESS_URL: "http://browserless:3000" });
+    const config = loadTestConfig({
+      BROWSERLESS_URL: "http://browserless:3000",
+      BROWSERLESS_ALLOWED_ORIGINS: ["http://browserless:3000"],
+    });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new Uint8Array(PNG), {
       status: 200,
       headers: { "content-length": String(20 * 1024 * 1024 + 1) },
@@ -187,6 +196,47 @@ describe("Browserless client", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not an image", { status: 200 })));
     await expect(renderOfficeHtml(config, "<html></html>")).rejects.toThrow("unsupported image format");
+  });
+
+  it("sanitizes active content before using the REST screenshot API", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array(PNG), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const config = loadTestConfig({
+      BROWSERLESS_URL: "https://browserless.example",
+      BROWSERLESS_ALLOWED_ORIGINS: ["https://browserless.example"],
+    });
+
+    await renderOfficeHtml(config, `<!doctype html>
+      <html><head>
+        <meta http-equiv="refresh" content="0;url=http://metadata.internal">
+        <script>alert("head")</script>
+      </head><body onload="steal()">
+        <iframe srcdoc="<script>alert(1)</script>"></iframe>
+        <svg><script>alert("svg")</script><a xlink:href="javascript:steal()">safe</a></svg>
+        <a href="&#x6a;avascript:steal()">link</a>
+        <template><script>alert("template")</script><p onclick="steal()">template text</p></template>
+        <p style="color: red">report</p>
+      </body></html>`);
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const sanitized = JSON.parse(String(request.body)).html as string;
+    expect(sanitized).not.toMatch(/<script|<iframe|http-equiv="refresh"|onload=|onclick=|javascript:/i);
+    expect(sanitized).toContain("<p>template text</p>");
+    expect(sanitized).toContain('<p style="color: red">report</p>');
+  });
+
+  it("rejects a Browserless URL whose origin is not explicitly trusted", async () => {
+    const config = loadTestConfig({
+      BROWSERLESS_URL: "https://metadata.internal",
+      BROWSERLESS_ALLOWED_ORIGINS: ["https://browserless.example"],
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(checkBrowserless(config)).rejects.toThrow("origin is not trusted");
+    await expect(renderOfficeHtml(config, "<html></html>")).rejects.toThrow("origin is not trusted");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(playwright.connect).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext } from "playwright-core";
+import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 import type { AppConfig } from "../config.js";
 import { raceWithAbort, throwIfAborted } from "../files/cancel.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
@@ -8,8 +9,32 @@ const REMOTE_CLEANUP_TIMEOUT_MS = 5_000;
 
 type BrowserlessConfig = Pick<
   AppConfig,
-  "BROWSERLESS_URL" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
+  "BROWSERLESS_URL" | "BROWSERLESS_ALLOWED_ORIGINS" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
 >;
+
+type HtmlNode = DefaultTreeAdapterMap["node"];
+type HtmlParentNode = DefaultTreeAdapterMap["parentNode"];
+type HtmlElement = DefaultTreeAdapterMap["element"];
+
+const ACTIVE_HTML_ELEMENTS = new Set([
+  "applet",
+  "embed",
+  "frame",
+  "frameset",
+  "iframe",
+  "object",
+  "script",
+]);
+const SCRIPTABLE_URL_ATTRIBUTES = new Set([
+  "action",
+  "background",
+  "formaction",
+  "href",
+  "poster",
+  "src",
+  "xlink:href",
+]);
+const ACTIVE_URL_PATTERN = /^\s*(?:javascript|vbscript|data\s*:\s*text\/html)\s*:/i;
 
 export interface BrowserlessRenderResult {
   bytes: Buffer;
@@ -23,7 +48,7 @@ export async function renderOfficeHtml(
 ): Promise<BrowserlessRenderResult> {
   if (!config.BROWSERLESS_URL) throw new Error("Browserless is not configured.");
   try {
-    const url = new URL(config.BROWSERLESS_URL);
+    const url = trustedBrowserlessUrl(config);
     const result = url.protocol === "ws:" || url.protocol === "wss:"
       ? await renderWithPlaywright(config, html, signal)
       : await renderWithRest(config, html, signal);
@@ -38,14 +63,15 @@ export async function renderOfficeHtml(
 export async function checkBrowserless(config: BrowserlessConfig): Promise<void> {
   if (!config.BROWSERLESS_URL) throw new Error("Browserless is not configured.");
   try {
-    const url = new URL(config.BROWSERLESS_URL);
+    const url = trustedBrowserlessUrl(config);
     if (url.protocol === "ws:" || url.protocol === "wss:") {
       const browser = await chromium.connect(browserlessEndpoint(config), { timeout: 5_000 });
-      await browser.close();
+      await closeWithTimeout(() => browser.close());
       return;
     }
     const response = await fetch(browserlessHttpEndpoint(config, "active"), {
       method: "GET",
+      redirect: "error",
       signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new Error(`Browserless healthcheck returned HTTP ${response.status}.`);
@@ -118,7 +144,7 @@ async function renderWithRest(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      html,
+      html: sanitizeActiveHtml(html),
       options: {
         fullPage: true,
         type: "png",
@@ -131,6 +157,7 @@ async function renderWithRest(
       ],
       waitForTimeout: 250,
     }),
+    redirect: "error",
     signal: requestSignal,
   });
   if (!response.ok) throw new Error(`Browserless screenshot returned HTTP ${response.status}.`);
@@ -184,16 +211,59 @@ async function closeWithTimeout(close: () => Promise<void>): Promise<void> {
 }
 
 function browserlessEndpoint(config: BrowserlessConfig): string {
-  const url = new URL(config.BROWSERLESS_URL!);
+  const url = trustedBrowserlessUrl(config);
   if (config.BROWSERLESS_TOKEN) url.searchParams.set("token", config.BROWSERLESS_TOKEN);
   return url.toString();
 }
 
 function browserlessHttpEndpoint(config: BrowserlessConfig, action: "active" | "screenshot"): string {
-  const url = new URL(config.BROWSERLESS_URL!);
+  const url = trustedBrowserlessUrl(config);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/${action}`;
   if (config.BROWSERLESS_TOKEN) url.searchParams.set("token", config.BROWSERLESS_TOKEN);
   return url.toString();
+}
+
+function trustedBrowserlessUrl(config: BrowserlessConfig): URL {
+  const url = new URL(config.BROWSERLESS_URL!);
+  if (!config.BROWSERLESS_ALLOWED_ORIGINS?.includes(url.origin)) {
+    throw new Error("Browserless URL origin is not trusted.");
+  }
+  return url;
+}
+
+function sanitizeActiveHtml(html: string): string {
+  const document = parse(html);
+  sanitizeChildren(document);
+  return serialize(document);
+}
+
+function sanitizeChildren(parent: HtmlParentNode): void {
+  for (const child of [...parent.childNodes]) {
+    if (!isHtmlElement(child)) continue;
+    if (isActiveElement(child)) {
+      parent.childNodes.splice(parent.childNodes.indexOf(child), 1);
+      continue;
+    }
+    child.attrs = child.attrs.filter((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc") return false;
+      return !SCRIPTABLE_URL_ATTRIBUTES.has(name) || !ACTIVE_URL_PATTERN.test(attribute.value);
+    });
+    sanitizeChildren(child);
+    if ("content" in child) sanitizeChildren(child.content);
+  }
+}
+
+function isHtmlElement(node: HtmlNode): node is HtmlElement {
+  return "tagName" in node;
+}
+
+function isActiveElement(element: HtmlElement): boolean {
+  if (ACTIVE_HTML_ELEMENTS.has(element.tagName)) return true;
+  if (element.tagName !== "meta") return false;
+  return element.attrs.some((attribute) =>
+    attribute.name.toLowerCase() === "http-equiv" && attribute.value.trim().toLowerCase() === "refresh"
+  );
 }
 
 function browserlessError(config: BrowserlessConfig, error: unknown): Error {

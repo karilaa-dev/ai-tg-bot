@@ -79,7 +79,10 @@ try {
 }
 
 async function checkConfiguredBrowserless(
-  config: Pick<AppConfig, "BROWSERLESS_URL" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS">,
+  config: Pick<
+    AppConfig,
+    "BROWSERLESS_URL" | "BROWSERLESS_ALLOWED_ORIGINS" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
+  >,
   logger: Logger,
 ): Promise<void> {
   if (!config.BROWSERLESS_URL) {

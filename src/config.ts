@@ -15,6 +15,10 @@ const BrowserlessUrlSchema = z.preprocess(
   normalizeOptionalUrl,
   z.string().optional().superRefine(validateBrowserlessUrl),
 );
+const BrowserlessAllowedOriginsSchema = z.preprocess(
+  normalizeOptionalCsv,
+  z.array(z.string().superRefine(validateBrowserlessAllowedOrigin)).min(1).optional(),
+);
 const BooleanEnvSchema = z.preprocess((value) => {
   if (typeof value !== "string") return value;
   if (value === "true" || value === "1") return true;
@@ -50,6 +54,7 @@ const ConfigSchema = z.object({
   DOCLING_URL: OptionalUrlSchema,
   DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   BROWSERLESS_URL: BrowserlessUrlSchema,
+  BROWSERLESS_ALLOWED_ORIGINS: BrowserlessAllowedOriginsSchema,
   BROWSERLESS_TOKEN: OptionalStringSchema,
   BROWSERLESS_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
@@ -83,7 +88,7 @@ const ConfigSchema = z.object({
 })
   .superRefine(validateStorageIsolation)
   .superRefine(validateSandboxIdlePolicy)
-  .superRefine(validateBrowserlessToken);
+  .superRefine(validateBrowserlessConfig);
 
 function normalizeOptionalUrl(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -95,6 +100,28 @@ function normalizeOptionalString(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim();
   return normalized === "" ? undefined : normalized;
+}
+
+function normalizeOptionalCsv(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const values = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  return values.length === 0 ? undefined : values;
+}
+
+function validateBrowserlessAllowedOrigin(value: string, context: z.RefinementCtx): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    context.addIssue({ code: "custom", message: "must be a valid URL origin" });
+    return;
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+    context.addIssue({ code: "custom", message: "must use http, https, ws, or wss" });
+  }
+  if (value !== url.origin) {
+    context.addIssue({ code: "custom", message: "must contain only an exact URL origin without a path, query, or fragment" });
+  }
 }
 
 function validateBrowserlessUrl(value: string | undefined, context: z.RefinementCtx): void {
@@ -126,8 +153,12 @@ function validateBrowserlessUrl(value: string | undefined, context: z.Refinement
   }
 }
 
-function validateBrowserlessToken(
-  config: { BROWSERLESS_URL?: string; BROWSERLESS_TOKEN?: string },
+function validateBrowserlessConfig(
+  config: {
+    BROWSERLESS_URL?: string;
+    BROWSERLESS_ALLOWED_ORIGINS?: string[];
+    BROWSERLESS_TOKEN?: string;
+  },
   context: z.RefinementCtx,
 ): void {
   if (config.BROWSERLESS_TOKEN && !config.BROWSERLESS_URL) {
@@ -135,6 +166,28 @@ function validateBrowserlessToken(
       code: "custom",
       path: ["BROWSERLESS_TOKEN"],
       message: "requires BROWSERLESS_URL",
+    });
+  }
+  if (!config.BROWSERLESS_URL) return;
+  if (!config.BROWSERLESS_ALLOWED_ORIGINS) {
+    context.addIssue({
+      code: "custom",
+      path: ["BROWSERLESS_ALLOWED_ORIGINS"],
+      message: "is required when BROWSERLESS_URL is configured",
+    });
+    return;
+  }
+  let origin: string;
+  try {
+    origin = new URL(config.BROWSERLESS_URL).origin;
+  } catch {
+    return;
+  }
+  if (!config.BROWSERLESS_ALLOWED_ORIGINS.includes(origin)) {
+    context.addIssue({
+      code: "custom",
+      path: ["BROWSERLESS_URL"],
+      message: "origin must be listed exactly in BROWSERLESS_ALLOWED_ORIGINS",
     });
   }
 }
