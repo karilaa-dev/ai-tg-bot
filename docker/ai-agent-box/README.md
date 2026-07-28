@@ -16,8 +16,9 @@ The `latest`, `runtime`, `sha-<commit>`, and `runtime-sha-<commit>` tags contain
 - jq, ripgrep (`rg`), fd, file, tree, less, and `patch`
 - SQLite and basic process/network commands
 - `gcompat` for limited compatibility with some glibc-targeted software
+- OfficeCLI 1.0.142 plus pinned PPTX and DOCX agent skills
 
-The runtime image intentionally omits compilers and the larger diagnostic suites. Native Python or npm dependencies work when they publish compatible musllinux packages; packages that require local compilation need the development image.
+The runtime image intentionally omits compilers and the larger diagnostic suites. It also intentionally has no Chromium, Playwright browser bundle, fontconfig, or browser-specific fonts. OfficeCLI produces self-contained HTML; visual rendering is performed by the bot through its separately configured Browserless service, and Browserless settings or credentials are never installed in the runner. Native Python or npm dependencies work when they publish compatible musllinux packages; packages that require local compilation need the development image.
 
 ### Development image
 
@@ -63,7 +64,7 @@ The historical local amd64 benchmarks below compared equivalent candidates on an
 
 A separate three-run cold load-and-first-command benchmark measured medians of 7.90 seconds for Ubuntu, 6.74 seconds for Debian full, and 4.33 seconds for Alpine full. Cached container creation and OpenSandbox provisioning were effectively independent of image size: OpenSandbox's runtime injection and egress setup dominated the roughly five-second cached path. The runtime image therefore primarily improves first pull/unpack on a new or pruned host; normal pause/resume is not expected to improve.
 
-The publish workflow enforces unpacked budgets of 100 MiB for runtime and 220 MiB for dev on both amd64 and arm64.
+The publish workflow enforces compressed-image budgets of 140 MiB for runtime and 260 MiB for dev on both amd64 and arm64.
 
 ## Use
 

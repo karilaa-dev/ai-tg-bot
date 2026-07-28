@@ -4,7 +4,7 @@ set -euo pipefail
 required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp tar gzip bzip2 xz
   zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip patch zstd
-  python python3 pip3 node npm
+  python python3 pip3 node npm officecli
 )
 
 missing=()
@@ -28,6 +28,31 @@ python3 -m venv "${tmp_dir}/venv"
 [[ "$(python -c 'import sys; print(sys.version_info[:2])')" == "$(python3 -c 'import sys; print(sys.version_info[:2])')" ]]
 [[ "$(node --version)" == v24.* ]]
 npm --version >/dev/null
+officecli --version
+
+(
+  cd "${tmp_dir}"
+  officecli create contract.pptx
+  officecli open contract.pptx
+  officecli add contract.pptx / --type slide --prop layout=blank --prop background=FFFFFF
+  officecli add contract.pptx "/slide[1]" --type shape \
+    --prop text="OfficeCLI contract" \
+    --prop x=2cm --prop y=2cm --prop width=20cm --prop height=2cm \
+    --prop size=36 --prop color=111111
+  officecli save contract.pptx
+  officecli validate contract.pptx
+  officecli view contract.pptx html --page 1 --out contract-slide.html
+  grep -qi '<html' contract-slide.html
+  officecli close contract.pptx
+
+  officecli create contract.docx
+  officecli open contract.docx
+  officecli add contract.docx /body --type paragraph \
+    --prop text="OfficeCLI contract" --prop style=Heading1
+  officecli save contract.docx
+  officecli validate contract.docx
+  officecli close contract.docx
+)
 
 printf 'archive-ok' > "${tmp_dir}/archive-input"
 (

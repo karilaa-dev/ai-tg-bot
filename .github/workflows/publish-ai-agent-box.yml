@@ -90,9 +90,9 @@ jobs:
           # transfer/storage size this budget is intended to constrain.
           size="$(docker image save "${image}" | gzip -1 -c | wc -c)"
           if [[ '${{ matrix.target }}' == runtime ]]; then
-            max_size=$((100 * 1024 * 1024))
+            max_size=$((140 * 1024 * 1024))
           else
-            max_size=$((220 * 1024 * 1024))
+            max_size=$((260 * 1024 * 1024))
           fi
           printf '%s/%s: %.1f MiB (budget %.1f MiB)\n' \
             '${{ matrix.target }}' '${{ matrix.arch }}' \

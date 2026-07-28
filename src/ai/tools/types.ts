@@ -56,6 +56,7 @@ export interface BotToolDefinition<Input = unknown, Output = unknown> {
   inputSchema: z.ZodType<Input>;
   execute: (input: Input, signal?: AbortSignal) => Promise<Output>;
   toModelOutput?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
+  toToolDetails?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
 }
 
 export type BotToolRegistry = Record<string, BotToolDefinition<any, any>>;
