@@ -3,7 +3,7 @@ set -euo pipefail
 
 required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp tar gzip bzip2 xz
-  zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip patch zstd
+  zip unzip curl wget git ssh jq rg fd file tree less sqlite3 ps ip patch zstd magick
   python python3 pip3 node npm officecli
 )
 
@@ -29,6 +29,11 @@ python3 -m venv "${tmp_dir}/venv"
 [[ "$(node --version)" == v24.* ]]
 npm --version >/dev/null
 officecli --version
+
+magick -size 2x2 xc:red "${tmp_dir}/image.png"
+[[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]
+magick "${tmp_dir}/image.png" -resize 1x1 -strip "${tmp_dir}/image.jpg"
+[[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.jpg")" == "1x1" ]]
 
 (
   export OFFICECLI_NO_AUTO_RESIDENT=1

@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { renderSystemPrompt } from "../../src/ai/prompt.js";
 import type { ThreadRow, UserRow } from "../../src/db/types.js";
@@ -29,12 +30,29 @@ const thread: ThreadRow = {
 };
 
 describe("renderSystemPrompt", () => {
-  it("defaults file archives to zip through the bash zip command", async () => {
+  it("archives only when requested and otherwise preserves natural file delivery", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser, thread });
 
+    expect(prompt).toContain("deliver those files individually in their natural format");
+    expect(prompt).toContain("Create an archive only when the user explicitly asks");
+    expect(prompt).toContain("Never create an archive merely to work around attachment count or size limits");
+    expect(prompt).toContain("do not substitute an archive");
     expect(prompt).toContain("default to ZIP");
     expect(prompt).toContain("zip -r archive.zip folder");
     expect(prompt).toContain("do not use Python or JavaScript to build an archive");
+  });
+
+  it("lists every contracted runner command and recommends the modern ImageMagick CLI", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, thread });
+    const contract = await fs.readFile("docker/ai-agent-box/tool-contract.sh", "utf8");
+    const requiredBlock = contract.match(/required_commands=\(\n([\s\S]*?)\n\)/)?.[1];
+
+    expect(requiredBlock).toBeDefined();
+    const commands = requiredBlock!.trim().split(/\s+/);
+    for (const command of commands) expect(prompt).toContain(`\`${command}\``);
+    expect(prompt).toContain("ImageMagick 7 through `magick`");
+    expect(prompt).toContain("Use `magick identify`");
+    expect(prompt).toContain("do not use the legacy `convert` command");
   });
 
   it("uses UTC time and timezone when the user has no stored timezone", async () => {

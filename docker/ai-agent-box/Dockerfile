@@ -25,6 +25,7 @@ RUN apk add --no-cache \
         git \
         grep \
         gzip \
+        imagemagick \
         jq \
         less \
         libgcc \

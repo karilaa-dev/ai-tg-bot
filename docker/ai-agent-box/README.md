@@ -14,6 +14,7 @@ The `latest`, `runtime`, `sha-<commit>`, and `runtime-sha-<commit>` tags contain
 - tar, gzip, bzip2, xz, zstd, ZIP, and unzip
 - curl, wget, CA certificates, Git, and the OpenSSH client
 - jq, ripgrep (`rg`), fd, file, tree, less, and `patch`
+- ImageMagick 7 through the modern `magick` CLI for image conversion, resizing, optimization, and inspection
 - SQLite and basic process/network commands
 - `gcompat` for limited compatibility with some glibc-targeted software
 - OfficeCLI 1.0.142 plus pinned PPTX and DOCX agent skills
