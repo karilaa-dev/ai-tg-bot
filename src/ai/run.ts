@@ -1444,7 +1444,8 @@ export function normalizeStreamPart(part: unknown): NormalizedStreamPart | undef
 }
 
 function summarizeToolOutput(toolName: string, value: unknown): string {
-  const record = asRecord(value);
+  const wrapper = asRecord(value);
+  const record = asRecord(wrapper?.details) ?? wrapper;
   if (toolName === "bash" && record) {
     if (record.timed_out === true) return "timed out";
     if (typeof record.exit_code === "number") return `exit ${record.exit_code}`;
@@ -1458,6 +1459,10 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
   if (toolName === "generate_image" && record) {
     if (record.pending === true) return "generating";
     return record.file_id === undefined ? "done" : formatCount(1, "image");
+  }
+
+  if (toolName === "render_office_preview" && record) {
+    return record.rendered === true ? formatCount(1, "preview") : "done";
   }
 
   const results = Array.isArray(record?.results) ? record.results : undefined;

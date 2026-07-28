@@ -64,4 +64,15 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain("Date:");
     expect(prompt).not.toContain("unknown (suggest /timezone)");
   });
+
+  it("routes Office work through the installed OfficeCLI skills and visual QA tool", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, thread });
+
+    expect(prompt).toContain("/usr/local/share/officecli/skills/officecli-pptx/SKILL.md");
+    expect(prompt).toContain("/usr/local/share/officecli/skills/officecli-docx/SKILL.md");
+    expect(prompt).toContain("officecli validate output.pptx");
+    expect(prompt).toContain("render_office_preview");
+    expect(prompt).toContain("visually inspect every PPTX slide");
+    expect(prompt).toContain("Do not download OfficeCLI");
+  });
 });

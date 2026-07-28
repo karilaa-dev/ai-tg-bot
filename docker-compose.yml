@@ -22,6 +22,10 @@ services:
       APP_UID: ${APP_UID:-1000}
       APP_GID: ${APP_GID:-1000}
       PI_CODING_AGENT_DIR: /app/data/pi
+      BROWSERLESS_URL: "${BROWSERLESS_URL:-}"
+      BROWSERLESS_ALLOWED_ORIGINS: "${BROWSERLESS_ALLOWED_ORIGINS:-}"
+      BROWSERLESS_TOKEN: "${BROWSERLESS_TOKEN:-}"
+      BROWSERLESS_TIMEOUT_MS: "${BROWSERLESS_TIMEOUT_MS:-30000}"
     volumes:
       - bot-data:/app/data
       - type: bind

@@ -7,6 +7,7 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { checkDocling } from "./files/docling.js";
+import { checkBrowserless } from "./browserless/client.js";
 import { createLogger, type Logger } from "./logger.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
@@ -31,6 +32,7 @@ try {
   logger.debug("initializing database");
   await db.initialize();
   await checkConfiguredDocling(config, logger);
+  await checkConfiguredBrowserless(config, logger);
   const repos = createRepos(db.db, db.search);
   const embedder = createOpenRouterTextEmbedder(config, logger);
   sandboxRuntime = new ThreadOpenSandboxRuntimeManager({
@@ -74,6 +76,29 @@ try {
   });
   logger.debug("destroying database connection");
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
+}
+
+async function checkConfiguredBrowserless(
+  config: Pick<
+    AppConfig,
+    "BROWSERLESS_URL" | "BROWSERLESS_ALLOWED_ORIGINS" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
+  >,
+  logger: Logger,
+): Promise<void> {
+  if (!config.BROWSERLESS_URL) {
+    logger.info("browserless disabled; Office visual previews are unavailable");
+    return;
+  }
+
+  logger.debug("checking browserless health");
+  try {
+    await checkBrowserless(config);
+    logger.info("browserless healthcheck passed");
+  } catch (err) {
+    logger.warn("browserless healthcheck failed; Office visual previews will be unavailable", {
+      err: String(err),
+    });
+  }
 }
 
 async function checkConfiguredDocling(

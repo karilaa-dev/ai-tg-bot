@@ -54,6 +54,66 @@ describe("OpenSandbox configuration", () => {
     expect(() => loadConfig({ ...required, DOCLING_URL: "not a url" })).toThrow();
   });
 
+  it("accepts tokenless Browserless WebSocket and REST configurations", () => {
+    expect(loadConfig({
+      ...required,
+      BROWSERLESS_URL: "  ws://browserless:3000/chromium/playwright?blockAds=true  ",
+      BROWSERLESS_ALLOWED_ORIGINS: " ws://browserless:3000, https://browserless.example ",
+    })).toMatchObject({
+      BROWSERLESS_URL: "ws://browserless:3000/chromium/playwright?blockAds=true",
+      BROWSERLESS_ALLOWED_ORIGINS: ["ws://browserless:3000", "https://browserless.example"],
+      BROWSERLESS_TIMEOUT_MS: 30_000,
+    });
+    expect(loadConfig({
+      ...required,
+      BROWSERLESS_URL: "https://browserless.example",
+      BROWSERLESS_ALLOWED_ORIGINS: "https://browserless.example",
+      BROWSERLESS_TOKEN: " secret ",
+      BROWSERLESS_TIMEOUT_MS: "45000",
+    })).toMatchObject({
+      BROWSERLESS_URL: "https://browserless.example",
+      BROWSERLESS_TOKEN: "secret",
+      BROWSERLESS_TIMEOUT_MS: 45_000,
+    });
+  });
+
+  it("rejects unsafe Browserless URLs and tokens without a URL", () => {
+    for (const BROWSERLESS_URL of [
+      "ftp://browserless.example/chromium/playwright",
+      "ws://browserless:3000/chromium",
+      "https://browserless.example?blockAds=true",
+      "wss://browserless.example/chromium/playwright?token=secret",
+      "wss://user:pass@browserless.example/chromium/playwright",
+      "wss://browserless.example/chromium/playwright#fragment",
+    ]) {
+      expect(() => loadConfig({
+        ...required,
+        BROWSERLESS_URL,
+        BROWSERLESS_ALLOWED_ORIGINS: new URL(BROWSERLESS_URL).origin,
+      })).toThrow();
+    }
+    expect(() => loadConfig({
+      ...required,
+      BROWSERLESS_URL: "not a URL",
+      BROWSERLESS_ALLOWED_ORIGINS: "wss://browserless.example",
+    })).toThrow("valid URL");
+    expect(() => loadConfig({ ...required, BROWSERLESS_TOKEN: "secret" })).toThrow("requires BROWSERLESS_URL");
+    expect(() => loadConfig({
+      ...required,
+      BROWSERLESS_URL: "wss://browserless.example/chromium/playwright",
+    })).toThrow("BROWSERLESS_ALLOWED_ORIGINS");
+    expect(() => loadConfig({
+      ...required,
+      BROWSERLESS_URL: "wss://browserless.example/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: "wss://other.example",
+    })).toThrow("must be listed exactly");
+    expect(() => loadConfig({
+      ...required,
+      BROWSERLESS_URL: "wss://browserless.example/chromium/playwright",
+      BROWSERLESS_ALLOWED_ORIGINS: "wss://browserless.example/path",
+    })).toThrow("only an exact URL origin");
+  });
+
   it("rejects root as the OpenSandbox command identity", () => {
     expect(() => loadConfig({
       ...required,

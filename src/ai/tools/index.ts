@@ -4,6 +4,7 @@ import { createLoadMessageTool } from "./loadMessage.js";
 import { createSearchInFileTool } from "./searchInFile.js";
 import { createReadFileSectionTool } from "./readFileSection.js";
 import { createCreateFileTool } from "./createFile.js";
+import { createRenderOfficePreviewTool } from "./renderOfficePreview.js";
 import { createBashTool } from "./bash.js";
 import { createWebSearchTool } from "./webSearch.js";
 import { createWebExtractTool } from "./webExtract.js";
@@ -25,6 +26,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     search_in_file: createSearchInFileTool(input, embedder),
     read_file_section: createReadFileSectionTool(input),
     create_file: createCreateFileTool(input),
+    render_office_preview: createRenderOfficePreviewTool(input),
     bash: createBashTool(input),
     web_search: createWebSearchTool(input),
     web_extract: createWebExtractTool(input),

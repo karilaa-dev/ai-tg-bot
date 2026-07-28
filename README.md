@@ -8,9 +8,11 @@ Telegram controls who can reach the bot. The bot accepts private-chat senders de
 
 ```text
 Telegram / Pi bot container (non-root)
+        |\
+        | \ optional Office HTML preview -> External Browserless service
         |
-        | OpenSandbox HTTP API + API key
-        v
+        +-- OpenSandbox HTTP API + API key
+            v
 OpenSandbox lifecycle server (trusted Docker-socket service)
         |
         | Docker API
@@ -25,7 +27,7 @@ One persistent runner container per active Telegram thread
 ```
 
 - Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`.
-- Pi receives only the bot's scoped tools: `bash`, `create_file`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
+- Pi receives only the bot's scoped tools: `bash`, `create_file`, `render_office_preview`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
 - OpenSandbox provides one persistent command environment per Telegram user-and-thread pair. Commands are serialized within that thread; different threads can execute concurrently in separate sandboxes.
 - Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. A runner mounts only its current workspace, a read-only attachment-staging directory, and that user's shared directory, so sibling thread directories are absent from its mount namespace.
 - The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the thread's environment. Idle environments pause after five minutes and expire after fifteen minutes by default. The mounted workspace and `/data/shared` survive expiration; container-layer state survives only while the same sandbox is retained.
@@ -50,6 +52,7 @@ Main, helper, and image calls share one Codex circuit breaker. While it is open,
 - `[[chat-file:<id>]]` markers are durable Pi references. `search_thread` and metadata-only `load_message` discover older files; selecting exact IDs restores only those files.
 - Large documents use full-text plus vector chunk search. Searchable PDFs have native extraction; DOCX, scanned PDFs, and PDFs without usable native text require an optional external Docling service.
 - Sandbox exports are copied through a private outbox using no-follow file opens, descriptor-path validation, regular-file and byte-limit checks, exclusive mode-`0600` destinations, and partial-output cleanup.
+- The runner has pinned OfficeCLI PPTX/DOCX skills but intentionally no Chromium or local Playwright browser. OfficeCLI emits page HTML, and the optional bot-side Browserless integration renders model-only PNG previews for visual QA without persisting screenshot base64 or sending previews to Telegram.
 
 ## Requirements
 
@@ -62,6 +65,7 @@ Main, helper, and image calls share one Codex circuit breaker. While it is open,
 - One absolute host folder visible under the same path to the bot deployment, OpenSandbox server, host Docker daemon, and runner bind mounts.
 - Optional Codex OAuth login through Pi.
 - Optional external Docling server.
+- Optional external Browserless service reachable from the bot container for Office visual previews.
 
 The bot container itself does **not** need `/dev/kvm`, `/var/run/docker.sock`, privileged mode, writable/private cgroups, or unconfined security profiles.
 
@@ -114,6 +118,19 @@ OPEN_SANDBOX_API_KEY=<same-secret-as-server>
 
 `MANAGED_FILE_ROOT` must remain outside `AGENT_SHARED_ROOT/users`.
 
+Optional Office visual preview configuration stays on the bot side:
+
+```dotenv
+BROWSERLESS_URL=ws://browserless:3000/chromium/playwright
+BROWSERLESS_ALLOWED_ORIGINS=ws://browserless:3000
+BROWSERLESS_TIMEOUT_MS=30000
+# BROWSERLESS_TOKEN=
+```
+
+WebSocket URLs must end in `/playwright`; tokenless endpoints are supported. `BROWSERLESS_ALLOWED_ORIGINS` is a comma-separated exact allowlist and must include the configured URL's origin (scheme, hostname, and port). HTTP(S) base URLs use Browserless's `/active` and `/screenshot` REST endpoints. The bot container must be able to reach Browserless, but the OpenSandbox runner must not receive Browserless configuration or network access.
+
+REST requests send `BROWSERLESS_TOKEN` in an `Authorization: Bearer` header. Browserless requires the token as a query parameter for native Playwright WebSocket connections, so use a narrowly scoped, rotatable token and configure Browserless, proxies, and tracing systems to redact WebSocket query strings.
+
 To configure Codex OAuth in the same Pi directory used by the bot:
 
 ```bash
@@ -146,7 +163,7 @@ OPEN_SANDBOX_IDLE_RELEASE_MS=900000
 
 The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout/network markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees.
 
-The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, and common utilities. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
+The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, common utilities, and pinned OfficeCLI PPTX/DOCX skills. Chromium is intentionally absent; the bot renders OfficeCLI HTML through external Browserless. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
 
 The server example pins the stock `opensandbox/server:v0.2.2` lifecycle image and `opensandbox/egress:v1.1.5` sidecar in `dns+nft` mode. The sidecar inherits the normal Docker resolver configuration and redirects sandbox DNS through its internal `127.0.0.1:15353` proxy. The bot therefore leaves sandbox loopback available while denying routed private, Docker/LAN, CGNAT, link-local/metadata, reserved, multicast, and documentation ranges. Unmatched public internet traffic remains allowed.
 
@@ -171,6 +188,7 @@ docker compose up --build -d
 
 - `docker-compose.opensandbox.yml` uses the pinned stock server image, mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, mounts the shared folder under the identical absolute host path, and maps `host.docker.internal` to the Docker host gateway for runner readiness checks.
 - `docker-compose.yml` runs the bot with PostgreSQL 17.10, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
+- Browserless configuration is passed only to the bot. Put Browserless on a bot-reachable network or use a reachable URL; do not expose it to runner sandboxes.
 - Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
 - The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
 - PostgreSQL is available only to the bot on an internal Compose network and is not published on a host port. Set `POSTGRES_PASSWORD` in `.env` to a long random value; the container entrypoint safely URL-encodes it when constructing `DB_URL`.
@@ -199,7 +217,7 @@ Setup:
    - OpenSandbox Shared Host Root: `/mnt/user/ai-tg-bot-shared`
    - OpenSandbox Domain: `opensandbox-server:8080`
    - Runner username/group set to `agent:agent` and UID/GID values aligned at `1000:1000`
-7. Leave Docling URL empty unless a separately operated service is available.
+7. Leave Docling URL empty unless a separately operated service is available. Configure Browserless URL/token only when a separately operated Browserless service is reachable from the bot.
 
 If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.
 
@@ -219,7 +237,7 @@ OpenSandbox's default Docker runtime isolates workloads with Linux containers. T
 - The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
 - Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
 - Give each runner exactly three scoped binds: its workspace read-write at `/data/threads/<threadId>/workspace`, its attachment staging read-only at `/data/threads/<threadId>/attachments`, and its user-shared directory read-write at `/data/shared`. Sibling threads are not mounted. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets remain outside runner mounts.
-- Do not inject Telegram, OpenRouter, Tavily, Codex, or OpenSandbox credentials into runner commands.
+- Do not inject Telegram, OpenRouter, Tavily, Codex, Browserless, or OpenSandbox credentials into runner commands.
 - The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark ranges for IPv4 and IPv6 before allowing unmatched public traffic. Sandbox loopback is intentionally available because the stock egress DNS proxy uses it; it is inside the shared runner/sidecar network namespace and is not a route to the Docker host or LAN. Treat loopback as reserved for OpenSandbox internals. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
 - No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.
 

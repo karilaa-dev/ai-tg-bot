@@ -59,7 +59,7 @@ export async function prepareCreatedFile(
   signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
   const virtualPath = normalizeBashCwd(file.virtualPath);
-  const bytes = await exportCreatedFileBytes(input, virtualPath, signal);
+  const bytes = await exportSandboxFileBytes(input, virtualPath, signal);
   const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
   assertAllowedOutboundFile(displayName, file.mime, bytes);
 
@@ -125,7 +125,11 @@ export async function prepareCreatedFile(
   };
 }
 
-async function exportCreatedFileBytes(input: ToolBuildInput, virtualPath: string, signal?: AbortSignal): Promise<Buffer> {
+export async function exportSandboxFileBytes(
+  input: ToolBuildInput,
+  virtualPath: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
   if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
   const outboxId = randomUUID();
   const botDirectory = path.join(botOutboxRoot(input.config), outboxId);

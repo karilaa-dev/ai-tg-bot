@@ -10,6 +10,15 @@ export const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", 
 
 const MAX_LINUX_ID = 4_294_967_294;
 const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.url().optional());
+const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
+const BrowserlessUrlSchema = z.preprocess(
+  normalizeOptionalUrl,
+  z.string().optional().superRefine(validateBrowserlessUrl),
+);
+const BrowserlessAllowedOriginsSchema = z.preprocess(
+  normalizeOptionalCsv,
+  z.array(z.string().superRefine(validateBrowserlessAllowedOrigin)).min(1).optional(),
+);
 const BooleanEnvSchema = z.preprocess((value) => {
   if (typeof value !== "string") return value;
   if (value === "true" || value === "1") return true;
@@ -44,6 +53,10 @@ const ConfigSchema = z.object({
   TAVILY_API_KEY: z.string().min(1),
   DOCLING_URL: OptionalUrlSchema,
   DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  BROWSERLESS_URL: BrowserlessUrlSchema,
+  BROWSERLESS_ALLOWED_ORIGINS: BrowserlessAllowedOriginsSchema,
+  BROWSERLESS_TOKEN: OptionalStringSchema,
+  BROWSERLESS_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
   FILE_CACHE_DIR: z.string().min(1).default(path.join(os.tmpdir(), "ai-tg-bot-files")),
   FILE_CACHE_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
@@ -74,12 +87,109 @@ const ConfigSchema = z.object({
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 })
   .superRefine(validateStorageIsolation)
-  .superRefine(validateSandboxIdlePolicy);
+  .superRefine(validateSandboxIdlePolicy)
+  .superRefine(validateBrowserlessConfig);
 
 function normalizeOptionalUrl(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim();
   return normalized === "" ? undefined : normalized;
+}
+
+function normalizeOptionalString(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim();
+  return normalized === "" ? undefined : normalized;
+}
+
+function normalizeOptionalCsv(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const values = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  return values.length === 0 ? undefined : values;
+}
+
+function validateBrowserlessAllowedOrigin(value: string, context: z.RefinementCtx): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    context.addIssue({ code: "custom", message: "must be a valid URL origin" });
+    return;
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+    context.addIssue({ code: "custom", message: "must use http, https, ws, or wss" });
+  }
+  if (value !== url.origin) {
+    context.addIssue({ code: "custom", message: "must contain only an exact URL origin without a path, query, or fragment" });
+  }
+}
+
+function validateBrowserlessUrl(value: string | undefined, context: z.RefinementCtx): void {
+  if (!value) return;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    context.addIssue({ code: "custom", message: "must be a valid URL" });
+    return;
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+    context.addIssue({ code: "custom", message: "must use http, https, ws, or wss" });
+  }
+  if (url.username || url.password) {
+    context.addIssue({ code: "custom", message: "must not contain embedded credentials" });
+  }
+  if (url.hash) {
+    context.addIssue({ code: "custom", message: "must not contain a URL fragment" });
+  }
+  if ([...url.searchParams.keys()].some((key) => key.toLowerCase() === "token")) {
+    context.addIssue({ code: "custom", message: "must not contain a token query parameter; use BROWSERLESS_TOKEN" });
+  }
+  if ((url.protocol === "http:" || url.protocol === "https:") && url.search) {
+    context.addIssue({ code: "custom", message: "HTTP Browserless URLs must not contain query parameters" });
+  }
+  if ((url.protocol === "ws:" || url.protocol === "wss:") && !url.pathname.endsWith("/playwright")) {
+    context.addIssue({ code: "custom", message: "WebSocket Browserless URLs must end in /playwright" });
+  }
+}
+
+function validateBrowserlessConfig(
+  config: {
+    BROWSERLESS_URL?: string;
+    BROWSERLESS_ALLOWED_ORIGINS?: string[];
+    BROWSERLESS_TOKEN?: string;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (config.BROWSERLESS_TOKEN && !config.BROWSERLESS_URL) {
+    context.addIssue({
+      code: "custom",
+      path: ["BROWSERLESS_TOKEN"],
+      message: "requires BROWSERLESS_URL",
+    });
+  }
+  if (!config.BROWSERLESS_URL) return;
+  if (!config.BROWSERLESS_ALLOWED_ORIGINS) {
+    context.addIssue({
+      code: "custom",
+      path: ["BROWSERLESS_ALLOWED_ORIGINS"],
+      message: "is required when BROWSERLESS_URL is configured",
+    });
+    return;
+  }
+  let origin: string;
+  try {
+    origin = new URL(config.BROWSERLESS_URL).origin;
+  } catch {
+    return;
+  }
+  if (!config.BROWSERLESS_ALLOWED_ORIGINS.includes(origin)) {
+    context.addIssue({
+      code: "custom",
+      path: ["BROWSERLESS_URL"],
+      message: "origin must be listed exactly in BROWSERLESS_ALLOWED_ORIGINS",
+    });
+  }
 }
 
 function validateStorageIsolation(

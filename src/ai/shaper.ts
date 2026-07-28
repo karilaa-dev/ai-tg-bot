@@ -223,6 +223,8 @@ function toolLabel(name: string): string {
       return "🖼️ Generating image";
     case "create_file":
       return "📎 Attaching file";
+    case "render_office_preview":
+      return "🖥️ Rendering Office preview";
     case "bash":
       return "🐚 Running bash";
     default:
@@ -256,6 +258,8 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return generateImageSubject(record);
     case "create_file":
       return truncateSubject(stringField(record, "name") ?? stringField(record, "path"), 64);
+    case "render_office_preview":
+      return truncateSubject(stringField(record, "path"), 64);
     case "load_message": {
       const messageId = numberField(record, "message_id");
       return messageId === undefined ? undefined : `#${messageId}`;
