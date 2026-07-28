@@ -178,7 +178,7 @@ describe("Browserless client", () => {
     expect(JSON.parse(String(request.body))).toEqual({
       html: "<html><head></head><body>report</body></html>",
       options: { fullPage: true, type: "png" },
-      rejectRequestPattern: ["/^https?:/i", "/^wss?:/i", "/^ftp:/i", "/^file:/i"],
+      rejectRequestPattern: ["/^(?!about:|data:)/i"],
       waitForTimeout: 250,
     });
   });
@@ -209,19 +209,31 @@ describe("Browserless client", () => {
     await renderOfficeHtml(config, `<!doctype html>
       <html><head>
         <meta http-equiv="refresh" content="0;url=http://metadata.internal">
+        <base href="http://metadata.internal/">
+        <link rel="stylesheet" href="http://metadata.internal/style.css">
         <script>alert("head")</script>
+        <style>.leak { background: u/**/rl(http://metadata.internal/image) }</style>
       </head><body onload="steal()">
         <iframe srcdoc="<script>alert(1)</script>"></iframe>
         <svg><script>alert("svg")</script><a xlink:href="javascript:steal()">safe</a></svg>
         <a href="&#x6a;avascript:steal()">link</a>
+        <img src="data:text/html,<script>alert(1)</script>">
+        <img src="http://metadata.internal/image">
+        <img src="data:image/png;base64,iVBORw0KGgo=">
+        <source srcset="http://metadata.internal/image 1x">
         <template><script>alert("template")</script><p onclick="steal()">template text</p></template>
+        <p style="background: \\75rl(http://metadata.internal/image)">leak</p>
         <p style="color: red">report</p>
       </body></html>`);
 
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const sanitized = JSON.parse(String(request.body)).html as string;
-    expect(sanitized).not.toMatch(/<script|<iframe|http-equiv="refresh"|onload=|onclick=|javascript:/i);
+    expect(sanitized).not.toMatch(
+      /<script|<iframe|<base|<style|http-equiv="refresh"|onload=|onclick=|javascript:|metadata\.internal|data:text\/html|srcset=/i,
+    );
     expect(sanitized).toContain("<p>template text</p>");
+    expect(sanitized).toContain('<img src="data:image/png;base64,iVBORw0KGgo=">');
+    expect(sanitized).toContain("<p>leak</p>");
     expect(sanitized).toContain('<p style="color: red">report</p>');
   });
 

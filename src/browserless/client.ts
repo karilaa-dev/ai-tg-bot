@@ -18,6 +18,7 @@ type HtmlElement = DefaultTreeAdapterMap["element"];
 
 const ACTIVE_HTML_ELEMENTS = new Set([
   "applet",
+  "base",
   "embed",
   "frame",
   "frameset",
@@ -25,16 +26,27 @@ const ACTIVE_HTML_ELEMENTS = new Set([
   "object",
   "script",
 ]);
-const SCRIPTABLE_URL_ATTRIBUTES = new Set([
+const RESOURCE_URL_ATTRIBUTES = new Set([
   "action",
+  "archive",
   "background",
+  "cite",
+  "codebase",
+  "data",
   "formaction",
   "href",
+  "longdesc",
+  "lowsrc",
+  "manifest",
+  "ping",
   "poster",
+  "profile",
   "src",
+  "srcset",
+  "usemap",
   "xlink:href",
 ]);
-const ACTIVE_URL_PATTERN = /^\s*(?:javascript|vbscript|data\s*:\s*text\/html)\s*:/i;
+const SAFE_INLINE_RESOURCE_PATTERN = /^(?:#[^\s]*|data:image\/(?:avif|gif|jpeg|png|webp)(?:;[^,]*)?,)/i;
 
 export interface BrowserlessRenderResult {
   bytes: Buffer;
@@ -149,12 +161,7 @@ async function renderWithRest(
         fullPage: true,
         type: "png",
       },
-      rejectRequestPattern: [
-        "/^https?:/i",
-        "/^wss?:/i",
-        "/^ftp:/i",
-        "/^file:/i",
-      ],
+      rejectRequestPattern: ["/^(?!about:|data:)/i"],
       waitForTimeout: 250,
     }),
     redirect: "error",
@@ -247,7 +254,8 @@ function sanitizeChildren(parent: HtmlParentNode): void {
     child.attrs = child.attrs.filter((attribute) => {
       const name = attribute.name.toLowerCase();
       if (name.startsWith("on") || name === "srcdoc") return false;
-      return !SCRIPTABLE_URL_ATTRIBUTES.has(name) || !ACTIVE_URL_PATTERN.test(attribute.value);
+      if (name === "style" && containsCssResourceLoad(attribute.value)) return false;
+      return !RESOURCE_URL_ATTRIBUTES.has(name) || isSafeInlineResource(attribute.value);
     });
     sanitizeChildren(child);
     if ("content" in child) sanitizeChildren(child.content);
@@ -260,10 +268,33 @@ function isHtmlElement(node: HtmlNode): node is HtmlElement {
 
 function isActiveElement(element: HtmlElement): boolean {
   if (ACTIVE_HTML_ELEMENTS.has(element.tagName)) return true;
+  if (element.tagName === "style") {
+    return element.childNodes.some((child) =>
+      "value" in child && containsCssResourceLoad(child.value)
+    );
+  }
   if (element.tagName !== "meta") return false;
   return element.attrs.some((attribute) =>
     attribute.name.toLowerCase() === "http-equiv" && attribute.value.trim().toLowerCase() === "refresh"
   );
+}
+
+function isSafeInlineResource(value: string): boolean {
+  return SAFE_INLINE_RESOURCE_PATTERN.test(value.trim());
+}
+
+function containsCssResourceLoad(css: string): boolean {
+  const normalized = css
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\\([0-9a-f]{1,6}\s?|[\s\S])/gi, (_match, escaped: string) => {
+      const hex = escaped.trim();
+      if (/^[0-9a-f]+$/i.test(hex)) {
+        const codePoint = Number.parseInt(hex, 16);
+        return codePoint > 0 && codePoint <= 0x10_FFFF ? String.fromCodePoint(codePoint) : "\uFFFD";
+      }
+      return escaped;
+    });
+  return /@import\b|url\s*\(/i.test(normalized);
 }
 
 function browserlessError(config: BrowserlessConfig, error: unknown): Error {
