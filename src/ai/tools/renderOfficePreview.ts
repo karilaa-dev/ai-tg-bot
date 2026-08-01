@@ -1,66 +1,147 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
-import { renderOfficeHtml } from "../../browserless/client.js";
-import { exportSandboxFileBytes, normalizeBashCwd, toToolError } from "./helpers.js";
+import { sanitizeOfficeHtml } from "../../camofox/html.js";
+import { renderHtmlWithCamofox } from "../../camofox/renderHtml.js";
+import { disposableCamofoxUserId } from "../../camofox/session.js";
+import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../../e2b/paths.js";
+import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
+import { MAX_FILE_BYTES } from "../../files/limits.js";
+import { normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
 type RenderOfficePreviewResult =
-  | { error: string }
+  | { error: string; missing?: string[]; template?: string; message?: string }
   | {
       rendered: true;
       path: string;
-      media_type: "image/png" | "image/jpeg" | "image/webp";
+      page: number;
+      media_type: string;
       size: number;
       image_base64: string;
     };
 
 export function createRenderOfficePreviewTool(input: ToolBuildInput) {
   return defineBotTool({
+    holdsCommandActivity: true,
     description:
-      "Render an OfficeCLI-generated HTML page through the bot's Browserless service and return the image for visual QA. Browserless is not accessible from bash. The HTML must be in this thread's OpenSandbox workspace or /data/shared. This preview is visible only to the model and is not sent to Telegram.",
+      "Render one page or slide of an OfficeCLI-compatible DOCX, PPTX, or XLSX file from this thread's E2B workspace through the configured Camofox server. Returns a model-only PNG for visual QA and never sends the preview to Telegram.",
     inputSchema: z.object({
       path: z.string().regex(/^\//, "path must be an absolute virtual path"),
+      page: z.number().int().positive().default(1),
     }),
-    execute: async ({ path: virtualPath }, signal): Promise<RenderOfficePreviewResult> => {
+    execute: async ({ path: virtualPath, page = 1 }, signal): Promise<RenderOfficePreviewResult> => {
       const normalizedPath = normalizeBashCwd(virtualPath);
+      const extension = path.posix.extname(normalizedPath).toLowerCase();
+      if (![".docx", ".pptx", ".xlsx"].includes(extension)) {
+        return { error: "Office preview path must end in .docx, .pptx, or .xlsx." };
+      }
+      if (!input.commandRuntime) return { error: "E2B command runtime is unavailable." };
+      const sourcePath = sandboxWorkspaceFile(normalizedPath);
+      const outputName = `.office-preview-${randomUUID()}.html`;
+      const outputPath = path.posix.join(E2B_WORKSPACE, outputName);
+      const threadFiles = await resolveThreadFileDescriptors(input, signal);
+      const script = [
+        "if ! command -v officecli >/dev/null 2>&1; then printf 'MISSING:officecli\\n' >&2; exit 127; fi",
+        "officecli view \"$1\" html --page \"$3\" --out \"$2\"",
+      ].join("\n");
       try {
-        const extension = path.posix.extname(normalizedPath).toLowerCase();
-        if (extension !== ".html" && extension !== ".htm") {
-          throw new Error("Office preview path must end in .html or .htm.");
-        }
         input.logger?.info("tool render_office_preview starting", {
           threadId: input.thread.id,
           path: normalizedPath,
+          page,
         });
-        const bytes = await exportSandboxFileBytes(input, normalizedPath, signal);
+        const rendered = await input.commandRuntime.execute({
+          userId: input.user.tg_id,
+          threadId: input.thread.id,
+          command: "bash",
+          args: ["-c", script, "bash", sourcePath, outputPath, String(page)],
+          env: { TZ: "UTC" },
+          stdin: "",
+          workingDir: E2B_WORKSPACE,
+          timeoutMs: input.config.BASH_TIMEOUT_MS,
+          maxOutputChars: input.config.BASH_MAX_OUTPUT_CHARS,
+          threadFiles,
+          signal,
+        });
+        if (rendered.exitCode === 127 && rendered.stderr.includes("MISSING:officecli")) {
+          return {
+            error: "tool_unavailable",
+            missing: ["officecli"],
+            template: input.config.E2B_TEMPLATE,
+            message: "The current E2B template does not contain OfficeCLI.",
+          };
+        }
+        if (rendered.exitCode !== 0) {
+          return {
+            error: rendered.error || rendered.stderr.trim() || `OfficeCLI exited with ${String(rendered.exitCode)}.`,
+          };
+        }
+        const previewHtml = await input.commandRuntime.readWorkspaceFile({
+          userId: input.user.tg_id,
+          threadId: input.thread.id,
+          virtualPath: `/${outputName}`,
+          maxBytes: MAX_FILE_BYTES,
+          threadFiles,
+          signal,
+        });
         let html: string;
         try {
-          html = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          html = new TextDecoder("utf-8", { fatal: true }).decode(previewHtml.bytes);
         } catch {
-          throw new Error("Office preview HTML must be valid UTF-8.");
+          return { error: "OfficeCLI preview HTML must be valid UTF-8." };
         }
         if (!/(?:<!doctype\s+html\b|<html(?:\s|>))/i.test(html)) {
-          throw new Error("Office preview input must contain an HTML document.");
+          return { error: "OfficeCLI did not produce an HTML document." };
         }
-        const rendered = await renderOfficeHtml(input.config, html, signal);
+        const userId = disposableCamofoxUserId(
+          input.config,
+          input.user.tg_id,
+          input.thread.id,
+          "office-preview",
+        );
+        const screenshot = await renderHtmlWithCamofox(
+          input.config,
+          userId,
+          sanitizeOfficeHtml(html),
+          signal,
+        );
         input.logger?.info("tool render_office_preview complete", {
           threadId: input.thread.id,
           path: normalizedPath,
-          mediaType: rendered.mediaType,
-          bytes: rendered.bytes.length,
+          page,
+          bytes: screenshot.bytes.length,
         });
         return {
           rendered: true,
           path: normalizedPath,
-          media_type: rendered.mediaType,
-          size: rendered.bytes.length,
-          image_base64: rendered.bytes.toString("base64"),
+          page,
+          media_type: screenshot.mediaType,
+          size: screenshot.bytes.length,
+          image_base64: screenshot.bytes.toString("base64"),
         };
       } catch (error) {
-        return toToolError(input, "render_office_preview", error, {
+        input.logger?.warn("tool render_office_preview failed", {
           threadId: input.thread.id,
           path: normalizedPath,
+          page,
+          error: String(error),
         });
+        return { error: String(error) };
+      } finally {
+        await input.commandRuntime.execute({
+          userId: input.user.tg_id,
+          threadId: input.thread.id,
+          command: "rm",
+          args: ["-f", "--", outputPath],
+          env: { TZ: "UTC" },
+          stdin: "",
+          workingDir: E2B_WORKSPACE,
+          timeoutMs: Math.min(input.config.BASH_TIMEOUT_MS, 10_000),
+          maxOutputChars: 1_000,
+          threadFiles,
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => undefined);
       }
     },
     toModelOutput: ({ output }) => {
@@ -70,7 +151,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
         value: [
           {
             type: "text",
-            text: `Rendered Office preview ${output.path} (${output.media_type}, ${output.size} bytes).`,
+            text: `Rendered Office preview ${output.path}, page ${output.page} (${output.media_type}, ${output.size} bytes).`,
           },
           {
             type: "image-data",
@@ -85,6 +166,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
       return {
         rendered: output.rendered,
         path: output.path,
+        page: output.page,
         media_type: output.media_type,
         size: output.size,
       };

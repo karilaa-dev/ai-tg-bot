@@ -3,52 +3,42 @@
   <Name>ai-tg-bot</Name>
   <Repository>ghcr.io/karilaa-dev/ai-tg-bot:latest</Repository>
   <Registry>https://github.com/karilaa-dev/ai-tg-bot/pkgs/container/ai-tg-bot</Registry>
-  <Network>ai-tg-bot-opensandbox</Network>
+  <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/karilaa-dev/ai-tg-bot/issues</Support>
   <Project>https://github.com/karilaa-dev/ai-tg-bot</Project>
-  <Overview>Pi-powered Telegram agent using a separately operated local OpenSandbox server for persistent per-user-and-thread command environments.</Overview>
+  <Overview>Pi-powered Telegram agent with one persistent custom E2B Base sandbox per Telegram thread.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/templates/ai-tg-bot.xml</TemplateURL>
   <ReadMe>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/README.md</ReadMe>
   <Icon>https://telegram.org/img/t_logo.png</Icon>
   <ExtraParams>--stop-timeout=60</ExtraParams>
-  <Requires>Telegram, OpenRouter, Tavily, and OpenSandbox API keys; a reachable OpenSandbox server; and one host folder mounted by both containers. Codex OAuth, Docling, and Browserless are optional.</Requires>
+  <Requires>Telegram, E2B, OpenRouter, and Tavily API keys. Codex OAuth and Docling are optional.</Requires>
 
-  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent SQLite database and application data." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="Agent Shared Data" Target="/data" Default="/mnt/user/ai-tg-bot-shared" Mode="rw" Description="Persistent user workspaces and canonical managed chat files. Use this exact host path for OpenSandbox Shared Host Root and the server storage mount." Type="Path" Display="always" Required="true" Mask="false"/>
-
+  <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent database, Pi sessions, and OAuth configuration." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="E2B API Key" Target="E2B_API_KEY" Default="" Description="E2B API key used to create and resume per-thread sandboxes." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Telegram File Gateway URL" Target="TELEGRAM_FILE_GATEWAY_URL" Default="" Description="HTTPS URL of a deployed telegram-file-gateway Worker. E2B restores shared Telegram files through this gateway." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Telegram File Gateway Signing Key" Target="TELEGRAM_FILE_GATEWAY_HMAC_KEY" Default="" Description="Base64url 32-byte key shared with the gateway for short-lived file grants." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter key for fallback inference, image generation, and embeddings." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily key for web search and extraction." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="OpenSandbox API Key" Target="OPEN_SANDBOX_API_KEY" Default="" Description="Must match OPENSANDBOX_SERVER_API_KEY on the OpenSandbox server." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="OpenSandbox Domain" Target="OPEN_SANDBOX_DOMAIN" Default="opensandbox-server:8080" Description="OpenSandbox lifecycle server host and port. Put both containers on the same custom Docker network when using this container name." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox Protocol" Target="OPEN_SANDBOX_PROTOCOL" Default="http" Description="Use http on the private Docker network or https when a trusted reverse proxy terminates TLS." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox Shared Host Root" Target="OPEN_SANDBOX_SHARED_HOST_ROOT" Default="/mnt/user/ai-tg-bot-shared" Description="Unraid host path selected for Agent Shared Data. OpenSandbox passes this path to the host Docker daemon, so it must match exactly." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox Image" Target="OPEN_SANDBOX_IMAGE" Default="ghcr.io/karilaa-dev/ai-agent-box:latest" Description="Lightweight Alpine runtime image. Use a dev-sha-* tag for compilers and pin an immutable tag in production." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox User" Target="OPEN_SANDBOX_USER" Default="agent" Description="Username used to own private stdin files inside the runner. It must exist in the image and resolve to OpenSandbox UID." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox Group" Target="OPEN_SANDBOX_GROUP" Default="agent" Description="Group name used to own private stdin files inside the runner. It must exist in the image and resolve to OpenSandbox GID." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox UID" Target="OPEN_SANDBOX_UID" Default="1000" Description="Nonzero numeric UID used for commands inside the sandbox; keep it aligned with APP_UID for shared-file exports." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="OpenSandbox GID" Target="OPEN_SANDBOX_GID" Default="1000" Description="Nonzero numeric GID used for commands inside the sandbox." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used by the bot. Keep aligned with the runner image and shared-folder ownership." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used by the bot." Type="Variable" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="E2B Template" Target="E2B_TEMPLATE" Default="ai-tg-bot-tools:production" Description="Reusable custom E2B template reference. Build it explicitly before starting the bot; runtime never installs it." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="E2B Deployment ID" Target="E2B_DEPLOYMENT_ID" Default="ai-tg-bot" Description="Stable ownership namespace for sandbox recovery. Use a different value for each deployment sharing an E2B account." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="E2B Request Timeout" Target="E2B_REQUEST_TIMEOUT_MS" Default="30000" Description="Control-plane request timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Telegram File Gateway Issuer" Target="TELEGRAM_FILE_GATEWAY_ISSUER" Default="ai-tg-bot" Description="JWT issuer configured on the gateway deployment." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Telegram File Gateway Audience" Target="TELEGRAM_FILE_GATEWAY_AUDIENCE" Default="telegram-file-gateway" Description="JWT audience configured on the gateway deployment." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Telegram Restore Timeout" Target="TELEGRAM_FILE_RESTORE_TIMEOUT_MS" Default="300000" Description="Maximum sandbox-side Telegram restoration time in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Telegram Restore Concurrency" Target="TELEGRAM_FILE_RESTORE_CONCURRENCY" Default="4" Description="Concurrent sandbox-side Telegram downloads." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="Database URL" Target="DB_URL" Default="sqlite:/app/data/bot.db" Description="SQLite or PostgreSQL database URL." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Pi Agent Directory" Target="PI_CODING_AGENT_DIR" Default="/app/data/pi" Description="Persistent Pi configuration, OAuth credentials, and thread sessions." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Agent Shared Root" Target="AGENT_SHARED_ROOT" Default="/data" Description="Bot-container view of the shared filesystem." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Managed File Root" Target="MANAGED_FILE_ROOT" Default="/data/.chat-files" Description="Canonical chat-file store outside scoped thread and shared sandbox mounts." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Docling URL" Target="DOCLING_URL" Default="" Description="Optional external Docling server." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Browserless URL" Target="BROWSERLESS_URL" Default="" Description="Optional bot-reachable Browserless Playwright WebSocket endpoint ending in /playwright, or HTTP(S) base URL." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Browserless Allowed Origins" Target="BROWSERLESS_ALLOWED_ORIGINS" Default="" Description="Comma-separated exact URL origins trusted for Browserless connections. Required when Browserless URL is set." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Browserless Token" Target="BROWSERLESS_TOKEN" Default="" Description="Optional Browserless authentication token. Leave empty for tokenless deployments." Type="Variable" Display="advanced" Required="false" Mask="true"/>
-  <Config Name="Browserless Timeout" Target="BROWSERLESS_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for Browserless preview rendering." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-
-  <Config Name="OpenSandbox Idle Pause" Target="OPEN_SANDBOX_IDLE_PAUSE_MS" Default="300000" Description="Pause a thread sandbox after this many idle milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="OpenSandbox Idle Release" Target="OPEN_SANDBOX_IDLE_RELEASE_MS" Default="900000" Description="Expire and release a thread sandbox after this many idle milliseconds. Must be greater than Idle Pause; mounted thread and shared files survive." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="OpenSandbox Ready Timeout" Target="OPEN_SANDBOX_READY_TIMEOUT_MS" Default="300000" Description="Maximum create/resume readiness time in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one sandbox command." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used by the bot." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used by the bot." Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one foreground sandbox command." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Bash Max Output" Target="BASH_MAX_OUTPUT_CHARS" Default="12000" Description="Maximum characters returned for each stdout or stderr stream." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Pi Turn Timeout" Target="PI_TURN_TIMEOUT_MS" Default="900000" Description="Maximum milliseconds for a Pi turn." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Log Level" Target="LOG_LEVEL" Default="info" Description="debug, info, warn, or error." Type="Variable" Display="advanced" Required="false" Mask="false"/>

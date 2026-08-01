@@ -1,0 +1,1071 @@
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { Api } from "grammy";
+import type { AppConfig } from "../config.js";
+import type { Repos } from "../db/repos/index.js";
+import { throwIfAborted } from "../files/cancel.js";
+import { sha256Hex } from "../files/hash.js";
+import { downloadTelegramFile } from "../files/telegram.js";
+import type { Logger } from "../logger.js";
+import type {
+  CommandRuntime,
+  PublishWebsiteRequest,
+  PublishedWebsite,
+  SandboxActivityLease,
+  SandboxCommandRequest,
+  SandboxCommandResult,
+  SandboxFileReadRequest,
+  SandboxFileReadResult,
+  SandboxSourceFileReadRequest,
+  SandboxThreadFile,
+  SandboxThreadFileSyncResult,
+} from "../sandbox/types.js";
+import { quoteShellToken, shellJoin } from "../util/shell.js";
+import { buildBoundedCommandCapture, commandOutputReadLimit } from "./commandCapture.js";
+import {
+  createE2BClient,
+  E2B_IDLE_PAUSE_MS,
+  E2B_WEBSITE_IDLE_PAUSE_MINUTES,
+  E2B_WEBSITE_IDLE_PAUSE_MS,
+  FileType,
+  type E2BClient,
+  type E2BSandbox,
+} from "./client.js";
+import {
+  E2B_CONTROL_TMP,
+  E2B_RUNTIME_TMP,
+  E2B_TELEGRAM_FILES,
+  E2B_WORKSPACE,
+  isSameOrDescendant,
+  sandboxWorkspaceFile,
+} from "./paths.js";
+import { MAX_FILE_BYTES } from "../files/limits.js";
+
+type SandboxScope = { userId: number; threadId: number };
+type RuntimeState = {
+  tail: Promise<void>;
+  leases: number;
+  websitePublished: boolean;
+  connection?: E2BSandbox;
+  sandboxId?: string;
+  continuousStartedAt?: number;
+  renewTimer?: NodeJS.Timeout;
+};
+
+type ThreadFileIndexEntry = {
+  file_id: number;
+  message_id: number | null;
+  original_name: string;
+  sandbox_name: string;
+  mime_type: string | null;
+  size: number | null;
+  sha256: string | null;
+  status: "available" | "error";
+  error_code?: string;
+  error_detail?: string;
+};
+
+type ThreadFileIndex = {
+  version: 2;
+  generated_at: string;
+  files: ThreadFileIndexEntry[];
+};
+
+type TelegramRestoreResult = {
+  file_id: number;
+  status: "available" | "error";
+  ref_id: number | null;
+  size?: number;
+  sha256?: string;
+  error_code?: string;
+  error_detail?: string;
+};
+
+const RENEW_INTERVAL_MS = 60_000;
+const CONTINUOUS_ROTATE_MS = 55 * 60_000;
+const ROTATION_GUARD_MS = 5 * 60_000;
+const MAX_FOREGROUND_COMMAND_MS = 45 * 60_000;
+const WEBSITE_MIN_PORT = 1024;
+const WEBSITE_MAX_PORT = 65_535;
+const RESERVED_PORTS = new Set([49_983, 49_999, 50_005]);
+
+export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
+  private readonly states = new Map<string, RuntimeState>();
+  private readonly client: E2BClient;
+  private readonly downloadTelegramBytes: (fileId: string, signal?: AbortSignal) => Promise<Buffer>;
+  private shuttingDown = false;
+
+  constructor(private readonly input: {
+    config: AppConfig;
+    repos: Repos;
+    logger?: Logger;
+    client?: E2BClient;
+    downloadTelegramBytes?: (fileId: string, signal?: AbortSignal) => Promise<Buffer>;
+  }) {
+    this.client = input.client ?? createE2BClient(input.config);
+    if (input.downloadTelegramBytes) {
+      this.downloadTelegramBytes = input.downloadTelegramBytes;
+    } else {
+      const telegramApi = new Api(input.config.BOT_TOKEN);
+      this.downloadTelegramBytes = async (fileId, signal) =>
+        (await downloadTelegramFile({
+          api: telegramApi,
+          config: input.config,
+          fileId,
+          signal,
+        })).bytes;
+    }
+  }
+
+  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
+    if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
+    const scope = { userId, threadId };
+    const state = this.stateFor(scope);
+    if (state.leases === 0) state.websitePublished = false;
+    state.leases += 1;
+    this.scheduleRenewal(scope, state);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        state.leases = Math.max(0, state.leases - 1);
+        if (state.leases !== 0) return;
+        this.clearRenewal(state);
+        const timeoutMs = state.websitePublished ? E2B_WEBSITE_IDLE_PAUSE_MS : E2B_IDLE_PAUSE_MS;
+        void this.enqueue(scope, undefined, async () => {
+          if (!state.connection) return;
+          await state.connection.setTimeout(timeoutMs);
+          this.input.logger?.info("E2B sandbox idle timeout armed", {
+            ...scope,
+            sandboxId: state.sandboxId,
+            timeoutMs,
+            website: state.websitePublished,
+          });
+        }).catch((error) => {
+          this.input.logger?.warn("failed to arm E2B sandbox idle timeout", {
+            ...scope,
+            sandboxId: state.sandboxId,
+            error: String(error),
+          });
+        });
+      },
+    };
+  }
+
+  execute(request: SandboxCommandRequest): Promise<SandboxCommandResult> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      const timeoutMs = Math.min(request.timeoutMs, MAX_FOREGROUND_COMMAND_MS);
+      const prepared = await this.prepareSandbox(state, scope, request.threadFiles ?? [], timeoutMs, request.signal);
+      return this.executeLocked(prepared.sandbox, request, timeoutMs, prepared.threadFiles);
+    });
+  }
+
+  readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      const prepared = await this.prepareSandbox(
+        state,
+        scope,
+        request.threadFiles ?? [],
+        ROTATION_GUARD_MS,
+        request.signal,
+      );
+      const candidate = sandboxWorkspaceFile(request.virtualPath);
+      const result = await this.readCanonicalFile(prepared.sandbox, candidate, request.maxBytes, request.signal);
+      return {
+        sandboxId: prepared.sandbox.id,
+        canonicalPath: result.canonicalPath,
+        bytes: result.bytes,
+      };
+    });
+  }
+
+  readSourceFile(request: SandboxSourceFileReadRequest): Promise<Buffer> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      if (!isSameOrDescendant(request.canonicalPath, E2B_WORKSPACE)) {
+        throw new Error("E2B file source path is outside this thread's workspace");
+      }
+      const mapping = await this.input.repos.threadSandboxes.get(
+        this.input.config.E2B_DEPLOYMENT_ID,
+        request.threadId,
+      );
+      if (
+        !mapping
+        || mapping.sandbox_id !== request.sandboxId
+        || mapping.user_id !== request.userId
+      ) {
+        throw new Error("E2B file source does not belong to this Telegram thread");
+      }
+      let sandbox = state.connection?.id === request.sandboxId ? state.connection : undefined;
+      if (!sandbox || !await sandbox.isRunning(request.signal).catch(() => false)) {
+        sandbox = await this.client.connect(
+          request.sandboxId,
+          E2B_IDLE_PAUSE_MS,
+          request.signal,
+        );
+      }
+      if (state.sandboxId === request.sandboxId) state.connection = sandbox;
+      try {
+        return (await this.readCanonicalFile(
+          sandbox,
+          request.canonicalPath,
+          request.maxBytes,
+          request.signal,
+        )).bytes;
+      } finally {
+        await sandbox.setTimeout(E2B_IDLE_PAUSE_MS, request.signal).catch(() => undefined);
+      }
+    });
+  }
+
+  publishWebsite(request: PublishWebsiteRequest): Promise<PublishedWebsite> {
+    validateWebsitePort(request.port);
+    const sitePath = normalizeWebsitePath(request.path);
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      const prepared = await this.prepareSandbox(
+        state,
+        scope,
+        request.threadFiles ?? [],
+        ROTATION_GUARD_MS,
+        request.signal,
+      );
+      const url = new URL(sitePath, `https://${prepared.sandbox.getHost(request.port)}`).toString();
+      await verifyWebsite(url, this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal);
+      state.websitePublished = true;
+      this.input.logger?.info("E2B website published", {
+        ...scope,
+        sandboxId: prepared.sandbox.id,
+        port: request.port,
+        url,
+      });
+      return {
+        sandboxId: prepared.sandbox.id,
+        port: request.port,
+        path: sitePath,
+        url,
+        pausesAfterMinutes: E2B_WEBSITE_IDLE_PAUSE_MINUTES,
+      };
+    });
+  }
+
+  async dispose(): Promise<void> {
+    this.shuttingDown = true;
+    for (const state of this.states.values()) this.clearRenewal(state);
+    await Promise.allSettled([...this.states.values()].map((state) => state.tail));
+    this.states.clear();
+  }
+
+  private async prepareSandbox(
+    state: RuntimeState,
+    scope: SandboxScope,
+    files: SandboxThreadFile[],
+    requestedDurationMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
+    throwIfAborted(signal);
+    const operationWindowMs = Math.min(
+      CONTINUOUS_ROTATE_MS,
+      Math.max(
+        E2B_IDLE_PAUSE_MS,
+        requestedDurationMs
+          + (files.length ? this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS : 0)
+          + ROTATION_GUARD_MS,
+      ),
+    );
+    let sandbox = await this.acquireConnection(state, scope, operationWindowMs, signal);
+    sandbox = await this.rotateIfNeeded(state, scope, sandbox, operationWindowMs, signal);
+    await sandbox.setTimeout(operationWindowMs, signal);
+    await this.ensureLayout(sandbox, signal);
+    const threadFiles = await this.syncThreadFiles(scope, sandbox, files, signal);
+    return { sandbox, threadFiles };
+  }
+
+  private async acquireConnection(
+    state: RuntimeState,
+    scope: SandboxScope,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<E2BSandbox> {
+    if (state.connection && await state.connection.isRunning(signal).catch(() => false)) {
+      await state.connection.setTimeout(timeoutMs, signal);
+      return state.connection;
+    }
+
+    const acquired = await this.input.repos.threadSandboxes.withCreationLock(
+      this.input.config.E2B_DEPLOYMENT_ID,
+      scope.threadId,
+      async (repo) => {
+        let mapping = await repo.get(this.input.config.E2B_DEPLOYMENT_ID, scope.threadId);
+        if (mapping) {
+          try {
+            const info = await this.client.getInfo(mapping.sandbox_id, signal);
+            return { mapping, info, created: undefined as E2BSandbox | undefined };
+          } catch (error) {
+            if (!isSandboxMissing(error)) throw error;
+            await repo.remove(this.input.config.E2B_DEPLOYMENT_ID, scope.threadId);
+            mapping = undefined;
+          }
+        }
+
+        const metadata = sandboxMetadata(this.input.config, scope);
+        const candidates = await this.client.list(metadata, signal);
+        if (candidates.length > 1) {
+          throw new Error(
+            `Multiple E2B sandboxes match thread ${scope.threadId}; refusing to delete or choose between them.`,
+          );
+        }
+        if (candidates[0]) {
+          const info = candidates[0];
+          const adopted = await repo.upsert({
+            deploymentId: this.input.config.E2B_DEPLOYMENT_ID,
+            userId: scope.userId,
+            threadId: scope.threadId,
+            sandboxId: info.sandboxId,
+          });
+          return { mapping: adopted, info, created: undefined as E2BSandbox | undefined };
+        }
+
+        const created = await this.client.create(metadata, signal);
+        const now = Date.now();
+        const inserted = await repo.upsert({
+          deploymentId: this.input.config.E2B_DEPLOYMENT_ID,
+          userId: scope.userId,
+          threadId: scope.threadId,
+          sandboxId: created.id,
+        });
+        return {
+          mapping: inserted,
+          info: {
+            sandboxId: created.id,
+            state: "running" as const,
+            startedAt: new Date(now),
+          },
+          created,
+        };
+      },
+    );
+
+    let sandbox = acquired.created;
+    const resumed = acquired.info.state === "paused";
+    if (!sandbox) {
+      sandbox = await this.client.connect(
+        acquired.mapping.sandbox_id,
+        timeoutMs,
+        signal,
+      );
+    }
+    const continuousStartedAt = resumed ? Date.now() : acquired.info.startedAt.getTime();
+    state.connection = sandbox;
+    state.sandboxId = sandbox.id;
+    state.continuousStartedAt = continuousStartedAt;
+    await sandbox.setTimeout(timeoutMs, signal);
+    this.input.logger?.info(acquired.created ? "E2B sandbox created" : resumed ? "E2B sandbox resumed" : "E2B sandbox connected", {
+      ...scope,
+      sandboxId: sandbox.id,
+    });
+    return sandbox;
+  }
+
+  private async rotateIfNeeded(
+    state: RuntimeState,
+    scope: SandboxScope,
+    sandbox: E2BSandbox,
+    requestedDurationMs: number,
+    signal?: AbortSignal,
+  ): Promise<E2BSandbox> {
+    const startedAt = state.continuousStartedAt ?? Date.now();
+    if (Date.now() - startedAt + requestedDurationMs + ROTATION_GUARD_MS < CONTINUOUS_ROTATE_MS) {
+      return sandbox;
+    }
+    this.input.logger?.info("rotating E2B sandbox before continuous runtime limit", {
+      ...scope,
+      sandboxId: sandbox.id,
+      continuousStartedAt: startedAt,
+    });
+    await sandbox.pause(signal);
+    const resumed = await this.client.connect(
+      sandbox.id,
+      E2B_IDLE_PAUSE_MS,
+      signal,
+    );
+    const now = Date.now();
+    state.connection = resumed;
+    state.continuousStartedAt = now;
+    return resumed;
+  }
+
+  private async ensureLayout(sandbox: E2BSandbox, signal?: AbortSignal): Promise<void> {
+    const command = [
+      `mkdir -p ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_TELEGRAM_FILES)} ${quoteShellToken(E2B_RUNTIME_TMP)} ${quoteShellToken(E2B_CONTROL_TMP)}`,
+      `chown user ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_RUNTIME_TMP)}`,
+      `chmod 700 ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_RUNTIME_TMP)}`,
+      `chown root ${quoteShellToken(E2B_CONTROL_TMP)}`,
+      `chmod 700 ${quoteShellToken(E2B_CONTROL_TMP)}`,
+      `chown root ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
+      `chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
+    ].join(" && ");
+    await runControl(sandbox, command, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+  }
+
+  private async syncThreadFiles(
+    scope: SandboxScope,
+    sandbox: E2BSandbox,
+    files: SandboxThreadFile[],
+    signal?: AbortSignal,
+  ): Promise<SandboxThreadFileSyncResult> {
+    const indexPath = path.posix.join(E2B_TELEGRAM_FILES, "INDEX.json");
+    const previous = await readThreadFileIndex(sandbox, indexPath, signal);
+    const previousById = new Map(previous.files.map((entry) => [entry.file_id, entry]));
+    const next: ThreadFileIndexEntry[] = [];
+    const desiredNames = new Set<string>();
+    const pending: Array<{
+      file: SandboxThreadFile;
+      sandboxName: string;
+    }> = [];
+
+    await runControl(
+      sandbox,
+      `chmod 755 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
+      this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      signal,
+    );
+    try {
+      for (const file of files) {
+        throwIfAborted(signal);
+        const sandboxName = `${file.fileId}--${sanitizeFileName(file.name)}`;
+        desiredNames.add(sandboxName);
+        const destination = path.posix.join(E2B_TELEGRAM_FILES, sandboxName);
+        const old = previousById.get(file.fileId);
+        const existingInfo = old?.status === "available"
+          ? await sandbox.fileInfo(destination, signal).catch(() => undefined)
+          : undefined;
+        const expectedUnchanged = old?.status === "available"
+          && old.sandbox_name === sandboxName
+          && existingInfo?.type === FileType.FILE
+          && !existingInfo.symlinkTarget
+          && (old.size === null || existingInfo.size === old.size);
+        if (expectedUnchanged) {
+          next.push(old);
+          await this.recordRestoreStatus({
+            threadId: scope.threadId,
+            sandbox,
+            file,
+            sandboxName,
+            status: "available",
+            restoredSize: old.size,
+            restoredSha256: old.sha256,
+            attemptedAt: Date.now(),
+            completedAt: Date.now(),
+          });
+          continue;
+        }
+        pending.push({ file, sandboxName });
+      }
+
+      const restored = await this.restoreTelegramFiles(sandbox, pending, signal);
+      const restoredById = new Map(restored.map((entry) => [entry.file_id, entry]));
+      for (const item of pending) {
+        const attemptedAt = Date.now();
+        const result = restoredById.get(item.file.fileId) ?? {
+          file_id: item.file.fileId,
+          status: "error" as const,
+          ref_id: null,
+          error_code: "restore_process_failed",
+          error_detail: "the sandbox restore process returned no result",
+        };
+        if (result.status === "available") {
+          next.push({
+            file_id: item.file.fileId,
+            message_id: item.file.messageId,
+            original_name: item.file.name,
+            sandbox_name: item.sandboxName,
+            mime_type: item.file.mimeType,
+            size: result.size ?? null,
+            sha256: result.sha256 ?? null,
+            status: "available",
+          });
+          await this.recordRestoreStatus({
+            threadId: scope.threadId,
+            sandbox,
+            file: item.file,
+            sandboxName: item.sandboxName,
+            telegramFileRefId: result.ref_id,
+            status: "available",
+            restoredSize: result.size ?? null,
+            restoredSha256: result.sha256 ?? null,
+            attemptedAt,
+            completedAt: Date.now(),
+          });
+        } else {
+          const errorCode = sanitizeRestoreCode(result.error_code);
+          const errorDetail = sanitizeRestoreDetail(result.error_detail);
+          next.push({
+            file_id: item.file.fileId,
+            message_id: item.file.messageId,
+            original_name: item.file.name,
+            sandbox_name: item.sandboxName,
+            mime_type: item.file.mimeType,
+            size: null,
+            sha256: null,
+            status: "error",
+            error_code: errorCode,
+            error_detail: errorDetail,
+          });
+          await this.recordRestoreStatus({
+            threadId: scope.threadId,
+            sandbox,
+            file: item.file,
+            sandboxName: item.sandboxName,
+            telegramFileRefId: result.ref_id,
+            status: "error",
+            errorCode,
+            errorDetail,
+            attemptedAt,
+          });
+          this.input.logger?.warn("E2B Telegram file restore failed", {
+            sandboxId: sandbox.id,
+            fileId: item.file.fileId,
+            errorCode,
+            errorDetail,
+          });
+        }
+      }
+
+      for (const old of previous.files) {
+        if (old.sandbox_name === "INDEX.json" || desiredNames.has(old.sandbox_name)) continue;
+        await sandbox.removeFile(path.posix.join(E2B_TELEGRAM_FILES, old.sandbox_name), "root", signal)
+          .catch(() => undefined);
+      }
+      const index: ThreadFileIndex = {
+        version: 2,
+        generated_at: new Date().toISOString(),
+        files: next,
+      };
+      const stagingIndex = path.posix.join(E2B_CONTROL_TMP, `index-${randomUUID()}.json`);
+      await sandbox.writeFile(stagingIndex, `${JSON.stringify(index, null, 2)}\n`, "root", signal);
+      await runControl(
+        sandbox,
+        [
+          `chown root ${quoteShellToken(stagingIndex)}`,
+          `chmod 444 ${quoteShellToken(stagingIndex)}`,
+          `mv -f ${quoteShellToken(stagingIndex)} ${quoteShellToken(indexPath)}`,
+        ].join(" && "),
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+        signal,
+      );
+    } finally {
+      await runControl(
+        sandbox,
+        `chown -R root ${quoteShellToken(E2B_TELEGRAM_FILES)} && find ${quoteShellToken(E2B_TELEGRAM_FILES)} -type f -exec chmod 444 {} + && chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      ).catch((error) => {
+        this.input.logger?.warn("failed to seal E2B Telegram files directory", {
+          sandboxId: sandbox.id,
+          error: String(error),
+        });
+      });
+    }
+    return {
+      directory: E2B_TELEGRAM_FILES,
+      available: next.filter((entry) => entry.status === "available").length,
+    };
+  }
+
+  private async restoreTelegramFiles(
+    sandbox: E2BSandbox,
+    pending: Array<{ file: SandboxThreadFile; sandboxName: string }>,
+    signal?: AbortSignal,
+  ): Promise<TelegramRestoreResult[]> {
+    if (!pending.length) return [];
+    const results = new Array<TelegramRestoreResult>(pending.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor;
+        cursor += 1;
+        const item = pending[index];
+        if (!item) return;
+        results[index] = await this.restoreTelegramFile(sandbox, item, signal);
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(pending.length, this.input.config.TELEGRAM_FILE_RESTORE_CONCURRENCY) },
+        () => worker(),
+      ),
+    );
+    return results;
+  }
+
+  private async restoreTelegramFile(
+    sandbox: E2BSandbox,
+    item: { file: SandboxThreadFile; sandboxName: string },
+    signal?: AbortSignal,
+  ): Promise<TelegramRestoreResult> {
+    const candidates = item.file.telegramRefs
+      .filter((ref) => ref.isPrimary)
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
+    let lastRefId: number | null = null;
+    let lastError: unknown = candidates.length ? undefined : new Error("no primary Telegram file reference");
+    for (const candidate of candidates) {
+      throwIfAborted(signal);
+      lastRefId = candidate.id;
+      try {
+        const timeoutSignal = AbortSignal.timeout(this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
+        const transferSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+        const bytes = await this.downloadTelegramBytes(candidate.telegramFileId, transferSignal);
+        if (bytes.length > MAX_FILE_BYTES) throw new Error("file exceeds the configured size limit");
+        if (candidate.telegramSize !== null && bytes.length !== candidate.telegramSize) {
+          throw new Error("Telegram file size did not match the recorded representation");
+        }
+        const sha256 = sha256Hex(bytes);
+        const exactRepresentation = candidate.telegramSize !== null
+          && item.file.expectedSize !== null
+          && candidate.telegramSize === item.file.expectedSize;
+        if (exactRepresentation && item.file.expectedSha256 && sha256 !== item.file.expectedSha256) {
+          throw new Error("Telegram file hash did not match the recorded representation");
+        }
+        const stagingPath = path.posix.join(E2B_CONTROL_TMP, `restore-${randomUUID()}`);
+        const destination = path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName);
+        await sandbox.writeFile(stagingPath, bytes, "root", transferSignal);
+        try {
+          await runControl(
+            sandbox,
+            [
+              `chown root ${quoteShellToken(stagingPath)}`,
+              `chmod 444 ${quoteShellToken(stagingPath)}`,
+              `mv -f ${quoteShellToken(stagingPath)} ${quoteShellToken(destination)}`,
+            ].join(" && "),
+            this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+            transferSignal,
+          );
+        } finally {
+          await sandbox.removeFile(stagingPath, "root").catch(() => undefined);
+        }
+        return {
+          file_id: item.file.fileId,
+          status: "available",
+          ref_id: candidate.id,
+          size: bytes.length,
+          sha256,
+        };
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        lastError = error;
+      }
+    }
+    return {
+      file_id: item.file.fileId,
+      status: "error",
+      ref_id: lastRefId,
+      error_code: candidates.length ? "file_unavailable" : "missing_telegram_reference",
+      error_detail: sanitizeRestoreDetail(lastError),
+    };
+  }
+
+  private async recordRestoreStatus(input: {
+    threadId: number;
+    sandbox: E2BSandbox;
+    file: SandboxThreadFile;
+    sandboxName: string;
+    telegramFileRefId?: number | null;
+    status: "available" | "error";
+    restoredSize?: number | null;
+    restoredSha256?: string | null;
+    errorCode?: string | null;
+    errorDetail?: string | null;
+    attemptedAt: number;
+    completedAt?: number | null;
+  }): Promise<void> {
+    await this.input.repos.sandboxFileRestores.upsert({
+      deploymentId: this.input.config.E2B_DEPLOYMENT_ID,
+      threadId: input.threadId,
+      sandboxId: input.sandbox.id,
+      fileId: input.file.fileId,
+      telegramFileRefId: input.telegramFileRefId,
+      sandboxName: input.sandboxName,
+      status: input.status,
+      restoredSize: input.restoredSize,
+      restoredSha256: input.restoredSha256,
+      errorCode: input.errorCode,
+      errorDetail: input.errorDetail,
+      attemptedAt: input.attemptedAt,
+      completedAt: input.completedAt,
+    }).catch((error) => {
+      this.input.logger?.warn("failed to persist E2B Telegram restore status", {
+        sandboxId: input.sandbox.id,
+        fileId: input.file.fileId,
+        error: String(error),
+      });
+    });
+  }
+
+  private async executeLocked(
+    sandbox: E2BSandbox,
+    request: SandboxCommandRequest,
+    timeoutMs: number,
+    threadFiles: SandboxThreadFileSyncResult,
+  ): Promise<SandboxCommandResult> {
+    throwIfAborted(request.signal);
+    const runRoot = path.posix.join(E2B_RUNTIME_TMP, randomUUID());
+    const stdinPath = path.posix.join(runRoot, "stdin");
+    const stdoutPath = path.posix.join(runRoot, "stdout");
+    const stderrPath = path.posix.join(runRoot, "stderr");
+    await runControl(
+      sandbox,
+      `mkdir -p ${quoteShellToken(runRoot)} && chown user ${quoteShellToken(runRoot)} && chmod 700 ${quoteShellToken(runRoot)}`,
+      this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      request.signal,
+    );
+    await sandbox.writeFile(stdinPath, request.stdin, "user", request.signal);
+    const command = buildBoundedCommandCapture({
+      command: request.command,
+      args: request.args,
+      stdinPath,
+      stdoutPath,
+      stderrPath,
+      maxOutputChars: request.maxOutputChars,
+    });
+    let exitCode: number | null = null;
+    let timedOut = false;
+    let errorText: string | undefined;
+    try {
+      const handle = await sandbox.runBackground(command, {
+        cwd: request.workingDir,
+        envs: {
+          ...request.env,
+          AGENT_WORKSPACE: E2B_WORKSPACE,
+          TELEGRAM_FILES_DIR: E2B_TELEGRAM_FILES,
+        },
+        user: "user",
+        timeoutMs,
+        signal: request.signal,
+      });
+      try {
+        const result = await waitForCommand(handle, request.signal);
+        exitCode = result.exitCode;
+        if (result.error) errorText = result.error;
+      } catch (error) {
+        if (request.signal?.aborted) {
+          await handle.kill().catch(() => undefined);
+          throw request.signal.reason ?? error;
+        }
+        const commandError = commandErrorResult(error);
+        exitCode = commandError.exitCode;
+        timedOut = commandError.timedOut;
+        errorText = commandError.error;
+      }
+      const stdoutBytes = await readIfExists(sandbox, stdoutPath, request.signal);
+      const stderrBytes = await readIfExists(sandbox, stderrPath, request.signal);
+      const stdout = truncateUtf8(stdoutBytes, request.maxOutputChars);
+      const stderr = truncateUtf8(stderrBytes, request.maxOutputChars);
+      const readLimit = commandOutputReadLimit(request.maxOutputChars);
+      return {
+        stdout: stdout.text,
+        stderr: stderr.text,
+        exitCode,
+        timedOut,
+        stdoutTruncated: stdout.truncated || stdoutBytes.length >= readLimit,
+        stderrTruncated: stderr.truncated || stderrBytes.length >= readLimit,
+        threadFiles,
+        ...(errorText ? { error: errorText } : {}),
+      };
+    } finally {
+      await runControl(
+        sandbox,
+        `rm -rf -- ${quoteShellToken(runRoot)}`,
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      ).catch((error) => {
+        this.input.logger?.warn("failed to clean E2B command files", {
+          sandboxId: sandbox.id,
+          runRoot,
+          error: String(error),
+        });
+      });
+    }
+  }
+
+  private async readCanonicalFile(
+    sandbox: E2BSandbox,
+    candidate: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<{ canonicalPath: string; bytes: Buffer }> {
+    const canonicalResult = await runCommandResult(
+      sandbox,
+      shellJoin(["realpath", "--", candidate]),
+      this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      signal,
+      "user",
+    );
+    const canonicalPath = canonicalResult.stdout.trim();
+    if (!canonicalPath || !isSameOrDescendant(canonicalPath, E2B_WORKSPACE)) {
+      throw new Error("file path escapes /home/user/workspace");
+    }
+    const info = await sandbox.fileInfo(canonicalPath, signal);
+    if (info.type !== FileType.FILE || info.symlinkTarget) throw new Error("path is not a regular file");
+    if (info.size > maxBytes) throw new Error("file is larger than the allowed limit");
+    const bytes = Buffer.from(await sandbox.readFile(canonicalPath, signal));
+    if (bytes.length > maxBytes) throw new Error("file is larger than the allowed limit");
+    const after = await sandbox.fileInfo(canonicalPath, signal);
+    if (after.type !== FileType.FILE || after.symlinkTarget || after.size !== bytes.length) {
+      throw new Error("file changed while it was being read");
+    }
+    return { canonicalPath, bytes };
+  }
+
+  private scheduleRenewal(scope: SandboxScope, state: RuntimeState): void {
+    if (state.renewTimer || state.leases === 0 || this.shuttingDown) return;
+    state.renewTimer = setTimeout(() => {
+      state.renewTimer = undefined;
+      if (state.leases === 0 || this.shuttingDown) return;
+      void this.enqueue(scope, undefined, async () => {
+        if (!state.connection) return;
+        let sandbox = await this.rotateIfNeeded(
+          state,
+          scope,
+          state.connection,
+          ROTATION_GUARD_MS,
+        );
+        await sandbox.setTimeout(E2B_IDLE_PAUSE_MS);
+        state.connection = sandbox;
+      }).catch((error) => {
+        this.input.logger?.warn("E2B activity renewal failed", {
+          ...scope,
+          sandboxId: state.sandboxId,
+          error: String(error),
+        });
+      }).finally(() => this.scheduleRenewal(scope, state));
+    }, RENEW_INTERVAL_MS);
+    state.renewTimer.unref?.();
+  }
+
+  private clearRenewal(state: RuntimeState): void {
+    if (state.renewTimer) clearTimeout(state.renewTimer);
+    state.renewTimer = undefined;
+  }
+
+  private stateFor(scope: SandboxScope): RuntimeState {
+    const key = scopeKey(scope);
+    let state = this.states.get(key);
+    if (!state) {
+      state = { tail: Promise.resolve(), leases: 0, websitePublished: false };
+      this.states.set(key, state);
+    }
+    return state;
+  }
+
+  private enqueue<T>(
+    scope: SandboxScope,
+    signal: AbortSignal | undefined,
+    operation: (state: RuntimeState) => Promise<T>,
+  ): Promise<T> {
+    if (this.shuttingDown) return Promise.reject(new Error("E2B runtime is shutting down"));
+    const state = this.stateFor(scope);
+    const result = state.tail.then(async () => {
+      throwIfAborted(signal);
+      return operation(state);
+    });
+    state.tail = result.then(() => undefined, () => undefined);
+    return abortable(result, signal);
+  }
+}
+
+function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string, string> {
+  return {
+    app: "ai-tg-bot",
+    deployment: config.E2B_DEPLOYMENT_ID,
+    template_ref: config.E2B_TEMPLATE,
+    telegram_user_id: String(scope.userId),
+    thread_id: String(scope.threadId),
+  };
+}
+
+function scopeKey(scope: SandboxScope): string {
+  return `${scope.userId}:${scope.threadId}`;
+}
+
+async function readThreadFileIndex(
+  sandbox: E2BSandbox,
+  path: string,
+  signal?: AbortSignal,
+): Promise<ThreadFileIndex> {
+  if (!await sandbox.fileExists(path, signal).catch(() => false)) {
+    return { version: 2, generated_at: new Date(0).toISOString(), files: [] };
+  }
+  try {
+    const parsed = JSON.parse(await sandbox.readText(path, signal)) as {
+      version?: number;
+      generated_at?: string;
+      files?: Array<ThreadFileIndexEntry & { error?: string }>;
+    };
+    if ((parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.files)) {
+      throw new Error("unsupported index");
+    }
+    return {
+      version: 2,
+      generated_at: typeof parsed.generated_at === "string"
+        ? parsed.generated_at
+        : new Date(0).toISOString(),
+      files: parsed.files.map((entry) => ({
+        file_id: entry.file_id,
+        message_id: entry.message_id,
+        original_name: entry.original_name,
+        sandbox_name: entry.sandbox_name,
+        mime_type: entry.mime_type,
+        size: entry.size,
+        sha256: entry.sha256,
+        status: entry.status,
+        ...(entry.status === "error"
+          ? {
+            error_code: entry.error_code ?? "legacy_restore_error",
+            error_detail: entry.error_detail ?? entry.error ?? "legacy file restoration failed",
+          }
+          : {}),
+      })),
+    };
+  } catch {
+    return { version: 2, generated_at: new Date(0).toISOString(), files: [] };
+  }
+}
+
+function sanitizeFileName(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[\/\\\u0000-\u001f\u007f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\.+$/, "file");
+  return (normalized || "file").slice(0, 180);
+}
+
+function sanitizeRestoreCode(value: unknown): string {
+  const normalized = typeof value === "string"
+    ? value.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").slice(0, 80)
+    : "";
+  return normalized || "download_failed";
+}
+
+function sanitizeRestoreDetail(value: unknown): string {
+  const normalized = String(value ?? "file restoration failed")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[redacted]")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  return (normalized || "file restoration failed").slice(0, 500);
+}
+
+async function runControl(
+  sandbox: E2BSandbox,
+  command: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  await runCommandResult(sandbox, command, timeoutMs, signal, "root");
+}
+
+async function runCommandResult(
+  sandbox: E2BSandbox,
+  command: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  user = "root",
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  try {
+    const result = await sandbox.run(command, { timeoutMs, signal, user });
+    return result;
+  } catch (error) {
+    const result = commandErrorResult(error);
+    throw new Error(result.error || `sandbox command failed with exit code ${String(result.exitCode)}`);
+  }
+}
+
+async function readIfExists(sandbox: E2BSandbox, filePath: string, signal?: AbortSignal): Promise<Buffer> {
+  if (!await sandbox.fileExists(filePath, signal).catch(() => false)) return Buffer.alloc(0);
+  return Buffer.from(await sandbox.readFile(filePath, signal));
+}
+
+async function waitForCommand(
+  handle: { wait(): Promise<{ stdout: string; stderr: string; exitCode: number; error?: string }> },
+  signal?: AbortSignal,
+) {
+  if (!signal) return handle.wait();
+  throwIfAborted(signal);
+  return new Promise<Awaited<ReturnType<typeof handle.wait>>>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    handle.wait().then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function commandErrorResult(error: unknown): { exitCode: number | null; timedOut: boolean; error: string } {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const exitCode = typeof record.exitCode === "number" ? record.exitCode : null;
+  const message = String(record.error ?? record.message ?? error);
+  return {
+    exitCode,
+    timedOut: /timed? ?out|timeout/i.test(`${record.name ?? ""} ${message}`),
+    error: message,
+  };
+}
+
+function truncateUtf8(bytes: Buffer, maxChars: number): { text: string; truncated: boolean } {
+  const text = bytes.toString("utf8");
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars), truncated: true };
+}
+
+function isSandboxMissing(error: unknown): boolean {
+  return /not.?found|404|does not exist|no such sandbox/i.test(String(error));
+}
+
+function validateWebsitePort(port: number): void {
+  if (!Number.isInteger(port) || port < WEBSITE_MIN_PORT || port > WEBSITE_MAX_PORT || RESERVED_PORTS.has(port)) {
+    throw new Error(`website port must be an unreserved integer from ${WEBSITE_MIN_PORT} to ${WEBSITE_MAX_PORT}`);
+  }
+}
+
+function normalizeWebsitePath(value: string | undefined): string {
+  const raw = value?.trim() || "/";
+  if (!raw.startsWith("/") || raw.startsWith("//")) throw new Error("website path must start with one slash");
+  const url = new URL(raw, "https://example.invalid");
+  if (url.origin !== "https://example.invalid") throw new Error("website path must be relative to the published host");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+async function verifyWebsite(url: string, requestTimeoutMs: number, signal?: AbortSignal): Promise<void> {
+  let lastError: unknown;
+  const deadline = Date.now() + Math.max(5_000, requestTimeoutMs);
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    const timeoutSignal = AbortSignal.timeout(Math.min(5_000, Math.max(1, deadline - Date.now())));
+    const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    try {
+      const response = await fetch(url, { signal: combined, redirect: "manual" });
+      await response.body?.cancel().catch(() => undefined);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw new Error(`website did not become reachable at ${url}: ${String(lastError)}`);
+}

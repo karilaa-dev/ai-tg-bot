@@ -34,7 +34,6 @@ describe("Pi retrieval tools backend", () => {
       messageId: message.id,
       type: "txt",
       name: "notes.txt",
-      path: "/tmp/notes.txt",
       size: 10,
       isInline: false,
     });
@@ -98,7 +97,6 @@ describe("Pi retrieval tools backend", () => {
       messageId: message.id,
       type: "txt",
       name: "notes.txt",
-      path: "/tmp/notes.txt",
       size: 10,
       isInline: false,
     });
@@ -131,7 +129,6 @@ describe("Pi retrieval tools backend", () => {
       threadId: thread.id,
       type: "txt",
       name: "old.txt",
-      path: "/tmp/old.txt",
       size: 10,
       isInline: false,
     });
@@ -169,7 +166,6 @@ describe("Pi retrieval tools backend", () => {
       messageId: message.id,
       type: "txt",
       name: "fallback.txt",
-      path: "/tmp/fallback.txt",
       size: 10,
       isInline: false,
     });
@@ -208,7 +204,6 @@ describe("Pi retrieval tools backend", () => {
       messageId: before.id,
       type: "txt",
       name: "visible.txt",
-      path: "/tmp/visible.txt",
       size: 1,
       isInline: true,
     });
@@ -231,7 +226,6 @@ describe("Pi retrieval tools backend", () => {
       messageId: after.id,
       type: "txt",
       name: "hidden.txt",
-      path: "/tmp/hidden.txt",
       size: 1,
       isInline: true,
     });

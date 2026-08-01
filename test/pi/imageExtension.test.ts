@@ -11,20 +11,20 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/im
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
 
-let managedRoot: string;
+let tempRoot: string;
 
 describe("Pi generate_image extension", () => {
   let db: AppDatabase | undefined;
 
   beforeEach(async () => {
-    managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
+    tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
   });
 
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db?.destroy();
     db = undefined;
-    await fs.rm(managedRoot, { recursive: true, force: true });
+    await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
   it("uses Telegram-backed references and persists the generated original without putting bytes in Pi results", async () => {
@@ -39,7 +39,6 @@ describe("Pi generate_image extension", () => {
       threadId: thread.id,
       type: "image",
       name: "telegram-reference.png",
-      path: null,
       size: 8,
       mimeType: "image/png",
       summary: "a Telegram reference",
@@ -85,7 +84,6 @@ describe("Pi generate_image extension", () => {
       } satisfies PiProviderRouter,
       resolveImage: async (file) => {
         expect(file.id).toBe(reference.id);
-        expect(file.path).toBeNull();
         return { bytes: Buffer.from("reference-bytes"), mimeType: "image/png" };
       },
     };
@@ -114,8 +112,6 @@ describe("Pi generate_image extension", () => {
     expect(result.terminate).toBe(true);
     expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
     const generated = await repos.files.get(bridge.attachments[0]!.fileId);
-    expect(generated?.path).toBe(path.join(managedRoot, String(generated?.id), "content"));
-    await expect(fs.readFile(generated!.path!)).resolves.toEqual(outputBytes);
     await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
     const persisted = JSON.stringify({ generated, result });
     expect(persisted).not.toContain(outputBytes.toString("base64"));
@@ -357,7 +353,7 @@ describe("Pi generate_image extension", () => {
 });
 
 function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig({ MANAGED_FILE_ROOT: managedRoot, ...overrides });
+  return loadTestConfig(overrides);
 }
 
 function backendModel(): Model<Api> {

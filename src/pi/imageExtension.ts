@@ -12,7 +12,6 @@ import { chatFileMarker } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
-import { persistManagedFile } from "../files/storage.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -108,29 +107,17 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
         threadId: bridge.thread.id,
         type: "image",
         name,
-        path: null,
         size: generated.bytes.length,
         contentSha256: createHash("sha256").update(generated.bytes).digest("hex"),
         mimeType: generated.mimeType,
         summary: generated.revisedPrompt ?? prompt,
         isInline: false,
       });
-      let persistedPath: string | undefined;
-      try {
-        persistedPath = await persistManagedFile(bridge.config, bridge.repos.files, file.id, generated.bytes);
-      } catch (error) {
-        bridge.logger?.warn("generated image snapshot persistence failed; Telegram recovery will be recorded after delivery", {
-          fileId: file.id,
-          name,
-          error: String(error),
-        });
-      }
       bridge.attachments.push({
         fileId: file.id,
         type: "image",
         name,
         mimeType: generated.mimeType,
-        path: persistedPath,
         data: generated.bytes,
         size: generated.bytes.length,
         caption: params.caption?.trim() || null,

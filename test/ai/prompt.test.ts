@@ -1,7 +1,7 @@
-import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { renderSystemPrompt } from "../../src/ai/prompt.js";
 import type { ThreadRow, UserRow } from "../../src/db/types.js";
+import { loadTestConfig } from "../../src/config.js";
 
 const baseUser: UserRow = {
   tg_id: 123,
@@ -33,26 +33,21 @@ describe("renderSystemPrompt", () => {
   it("archives only when requested and otherwise preserves natural file delivery", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser, thread });
 
-    expect(prompt).toContain("deliver those files individually in their natural format");
-    expect(prompt).toContain("Create an archive only when the user explicitly asks");
-    expect(prompt).toContain("Never create an archive merely to work around attachment count or size limits");
-    expect(prompt).toContain("do not substitute an archive");
-    expect(prompt).toContain("default to ZIP");
-    expect(prompt).toContain("zip -r archive.zip folder");
-    expect(prompt).toContain("do not use Python or JavaScript to build an archive");
+    expect(prompt).toContain("Deliver ordinary files individually in their natural format");
+    expect(prompt).toContain("Create an archive only when explicitly requested");
+    expect(prompt).toContain("Default to ZIP");
+    expect(prompt).toContain("Do not use an archive merely to evade this limit");
   });
 
-  it("lists every contracted runner command and recommends the modern ImageMagick CLI", async () => {
+  it("describes the custom toolbox without allowing automatic dependency installs", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser, thread });
-    const contract = await fs.readFile("docker/ai-agent-box/tool-contract.sh", "utf8");
-    const requiredBlock = contract.match(/required_commands=\(\n([\s\S]*?)\n\)/)?.[1];
 
-    expect(requiredBlock).toBeDefined();
-    const commands = requiredBlock!.trim().split(/\s+/);
-    for (const command of commands) expect(prompt).toContain(`\`${command}\``);
-    expect(prompt).toContain("ImageMagick 7 through `magick`");
-    expect(prompt).toContain("Use `magick identify`");
-    expect(prompt).toContain("do not use the legacy `convert` command");
+    expect(prompt).toContain("Never automatically run package-manager installs");
+    expect(prompt).toContain("Check uncertain dependencies with `command -v`");
+    expect(prompt).toContain("/home/user/telegram-files");
+    expect(prompt).toContain("There is no shared filesystem");
+    expect(prompt).toContain("ImageMagick");
+    expect(prompt).toContain("Chromium and browser automation bundles are intentionally absent");
   });
 
   it("uses UTC time and timezone when the user has no stored timezone", async () => {
@@ -83,14 +78,42 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain("unknown (suggest /timezone)");
   });
 
-  it("routes Office work through the installed OfficeCLI skills and visual QA tool", async () => {
+  it("routes Office authoring through Bash without promising installed preview tooling", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser, thread });
 
-    expect(prompt).toContain("/usr/local/share/officecli/skills/officecli-pptx/SKILL.md");
-    expect(prompt).toContain("/usr/local/share/officecli/skills/officecli-docx/SKILL.md");
-    expect(prompt).toContain("officecli validate output.pptx");
-    expect(prompt).toContain("render_office_preview");
-    expect(prompt).toContain("visually inspect every PPTX slide");
-    expect(prompt).toContain("Do not download OfficeCLI");
+    expect(prompt).toContain("through `bash` to create");
+    expect(prompt).toContain("never install or update it");
+    expect(prompt).not.toContain("render_office_preview");
+    expect(prompt).not.toContain("Browserless");
+  });
+
+  it("adds per-thread browser and model-only Office QA guidance when Camofox is configured", async () => {
+    const prompt = await renderSystemPrompt({
+      user: baseUser,
+      thread,
+      config: loadTestConfig({
+        WEB_EXTRACT_PROVIDER: "camofox",
+        CAMOFOX_URL: "https://browser.example",
+        CAMOFOX_ACCESS_KEY: "secret",
+      }),
+    });
+
+    expect(prompt).toContain("`web_extract` loads known URLs through Camofox");
+    expect(prompt).toContain("`camofox_create_tab`");
+    expect(prompt).toContain("For every real-browser action");
+    expect(prompt).toContain("`camofox_navigate`");
+    expect(prompt).toContain("`camofox_click`");
+    expect(prompt).toContain("`camofox_send_file`");
+    expect(prompt).toContain("Never use `bash`, E2B, Chrome/Chromium");
+    expect(prompt).toContain("Do not use `create_file`");
+    expect(prompt).toContain("isolated to this Telegram thread");
+    expect(prompt).toContain("`camofox_screenshot`");
+    expect(prompt).toContain("Keep full_page=false");
+    expect(prompt).toContain("set delivery=document");
+    expect(prompt).toContain("never use `bash`");
+    expect(prompt).toContain("`camofox_send_file`");
+    expect(prompt).toContain("does not use E2B");
+    expect(prompt).toContain("`render_office_preview`");
+    expect(prompt).toContain("not sent to Telegram");
   });
 });

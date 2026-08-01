@@ -235,8 +235,10 @@ describe("StreamShaper", () => {
     s.onToolCall("read_file_section", { file_id: 7 }, { fileName: "book.pdf" });
     s.onToolCall("generate_image", { prompt: "small red square", reference_file_ids: [9] });
     s.onToolCall("create_file", { path: "/report.txt", name: "report.txt" });
-    s.onToolCall("render_office_preview", { path: "/slide-1.html" });
     s.onToolCall("bash", { script: "printf hello" });
+    s.onToolCall("camofox_create_tab", { url: "https://example.com" });
+    s.onToolCall("camofox_snapshot", { tab_id: "tab-1" });
+    s.onToolCall("render_office_preview", { path: "/deck.pptx", page: 1 });
     const status = s.toolStatusMd();
 
     expect(status).toContain("🔎 Searching web <code>current info</code>");
@@ -247,8 +249,10 @@ describe("StreamShaper", () => {
     expect(status).toContain("📖 Reading file <code>book.pdf</code>");
     expect(status).toContain("🖼️ Generating image <code>small red square +1 ref</code>");
     expect(status).toContain("📎 Attaching file <code>report.txt</code>");
-    expect(status).toContain("🖥️ Rendering Office preview <code>/slide-1.html</code>");
     expect(status).toContain("🐚 Running bash <code>printf hello</code>");
+    expect(status).toContain("🌍 Browsing web <code>https://example.com</code>");
+    expect(status).toContain("🧭 Reading browser <code>tab-1</code>");
+    expect(status).toContain("🖼️ Previewing Office file <code>/deck.pptx</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
     expect(status).not.toContain("search_thread");
@@ -257,25 +261,6 @@ describe("StreamShaper", () => {
     expect(status).not.toContain("read_file_section");
     expect(status).not.toContain("generate_image");
     expect(status).not.toContain("create_file");
-    expect(status).not.toContain("render_office_preview");
-  });
-
-  it("summarizes rendered Office previews", () => {
-    const s = new StreamShaper();
-    expect(handleStreamPart(s, {
-      type: "tool-call",
-      toolName: "render_office_preview",
-      input: { path: "/slide-1.html" },
-    })).toBe("tool-call");
-    expect(handleStreamPart(s, {
-      type: "tool-result",
-      toolName: "render_office_preview",
-      output: {
-        content: [{ type: "text", text: "Rendered Office preview /slide-1.html" }],
-        details: { rendered: true, path: "/slide-1.html", size: 123 },
-      },
-    })).toBe("tool-result");
-    expect(s.thinkingMd()).toContain("🖥️ Rendering Office preview <code>/slide-1.html</code> (1 preview)");
   });
 
   it("summarizes created file outputs as files", () => {

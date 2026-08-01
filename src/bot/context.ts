@@ -12,6 +12,7 @@ import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
+import type { CommandRuntime } from "../sandbox/types.js";
 
 export interface ActiveFileJob {
   controller: AbortController;
@@ -64,6 +65,7 @@ export interface BotServices {
   logger: Logger;
   turnRunner: TurnRunner;
   fileResolver: FileResolver;
+  commandRuntime?: CommandRuntime;
   embedder?: TextEmbedder;
   pi: PiRuntimeService;
   threadTitles: ThreadTitleCoordinator;

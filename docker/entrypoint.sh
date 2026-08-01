@@ -19,21 +19,11 @@ configure_postgres_url() {
 }
 
 prepare_directories() {
-    mkdir -p "${APP_DATA_ROOT}" "${AGENT_SHARED_ROOT}"
-    ownership_marker="${AGENT_SHARED_ROOT}/.ai-tg-bot-owner"
-    expected_owner="${APP_UID}:${APP_GID}"
-    current_owner=$(command cat "${ownership_marker}" 2>/dev/null || true)
-
+    mkdir -p "${APP_DATA_ROOT}"
     if [ "$(id -u)" = "0" ]; then
         chown -R "${APP_UID}:${APP_GID}" "${APP_DATA_ROOT}"
-        if [ "${current_owner}" != "${expected_owner}" ]; then
-            log "Updating ${AGENT_SHARED_ROOT} ownership for application identity ${expected_owner}."
-            chown -R "${APP_UID}:${APP_GID}" "${AGENT_SHARED_ROOT}"
-            printf '%s\n' "${expected_owner}" >"${ownership_marker}"
-            chown "${APP_UID}:${APP_GID}" "${ownership_marker}"
-        fi
     else
-        probe="${AGENT_SHARED_ROOT}/.write-test.$$"
+        probe="${APP_DATA_ROOT}/.write-test.$$"
         : >"${probe}"
         rm -f "${probe}"
     fi
@@ -59,9 +49,8 @@ run_as_application_user() {
 
 : "${APP_UID:=1000}"
 : "${APP_GID:=1000}"
-: "${AGENT_SHARED_ROOT:=/data}"
 : "${APP_DATA_ROOT:=/app/data}"
-export APP_UID APP_GID AGENT_SHARED_ROOT APP_DATA_ROOT
+export APP_UID APP_GID APP_DATA_ROOT
 
 valid_id "${APP_UID}" || { log "ERROR: APP_UID must be a non-negative numeric UID."; exit 1; }
 valid_id "${APP_GID}" || { log "ERROR: APP_GID must be a non-negative numeric GID."; exit 1; }

@@ -5,17 +5,34 @@ import { buildToolRegistry } from "../ai/tools/index.js";
 import type { ToolBuildInput } from "../ai/tools/types.js";
 import { raceWithAbort } from "../files/cancel.js";
 import { asRecord, safeJson } from "../util/records.js";
+import type { AppConfig } from "../config.js";
 
-const BOT_TOOL_NAMES = [
+const BASE_BOT_TOOL_NAMES = [
   "search_thread",
   "load_message",
   "search_in_file",
   "read_file_section",
   "create_file",
-  "render_office_preview",
+  "publish_website",
   "bash",
   "web_search",
   "web_extract",
+] as const;
+
+const CAMOFOX_TOOL_NAMES = [
+  "render_office_preview",
+  "camofox_create_tab",
+  "camofox_list_tabs",
+  "camofox_navigate",
+  "camofox_snapshot",
+  "camofox_click",
+  "camofox_type",
+  "camofox_press",
+  "camofox_scroll",
+  "camofox_screenshot",
+  "camofox_list_downloads",
+  "camofox_send_file",
+  "camofox_close_tab",
 ] as const;
 
 export interface PiToolBridge {
@@ -24,17 +41,26 @@ export interface PiToolBridge {
 }
 
 export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
-  const initial = buildToolRegistry(bridge.buildInput());
-  return BOT_TOOL_NAMES.map((name) => {
+  const initialInput = bridge.buildInput();
+  const initial = buildToolRegistry(initialInput);
+  const names = [
+    ...BASE_BOT_TOOL_NAMES,
+    ...CAMOFOX_TOOL_NAMES.filter((name) => Boolean(initial[name])),
+  ];
+  return names.map((name) => {
     const definition = initial[name];
     if (!definition) throw new Error(`Missing bot tool ${name}`);
     return {
       name,
       label: toolLabel(name),
       description: definition.description,
-      promptSnippet: toolSnippet(name),
+      promptSnippet: toolSnippet(name, initialInput.config),
       parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
-      executionMode: name === "bash" || name === "create_file" || name === "render_office_preview"
+      executionMode: name === "bash"
+        || name === "create_file"
+        || name === "publish_website"
+        || name === "render_office_preview"
+        || name.startsWith("camofox_")
         ? "sequential"
         : undefined,
       async execute(toolCallId, rawInput, signal) {
@@ -110,17 +136,32 @@ function toolLabel(name: string): string {
   return name.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ");
 }
 
-function toolSnippet(name: string): string {
+function toolSnippet(name: string, config: AppConfig): string {
   switch (name) {
-    case "bash": return "Run real Bash in the current user-and-thread OpenSandbox environment. Omit cwd and use relative paths: logical / is the current thread workspace, not filesystem root. Only the current workspace, read-only staged attachments, and /data/shared are mounted; sibling threads are inaccessible. Never pass the bot host cwd or probe /home/agent or /workspace. Use /data/shared only for intentional cross-thread files and pass exact attachment ids in input_file_ids.";
+    case "bash": return "Run Bash in the current thread's persistent custom E2B Base toolbox. Logical / is /home/user/workspace. Telegram attachments are automatically synchronized read-only at /home/user/telegram-files; copy them into the workspace before editing. OfficeCLI, ImageMagick, archive tools, compilers, and common CLI utilities are preinstalled. Chromium is intentionally absent because browser work uses Camofox. Nothing is shared with other sandboxes, and missing tools are not installed automatically.";
     case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
     case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";
     case "read_file_section": return "Read exact indexed sections from an uploaded file.";
     case "create_file": return "Attach an existing sandbox file through the active chat.";
-    case "render_office_preview": return "Render an OfficeCLI-generated HTML page through the bot's Browserless service and return the image for visual QA. Browserless is not accessible from bash.";
+    case "publish_website": return "Publish an already-running E2B HTTP port as a public HTTPS URL for 15 minutes after the final response.";
     case "web_search": return "Search the web through Tavily.";
-    case "web_extract": return "Extract content from web pages through Tavily.";
+    case "web_extract": return config.WEB_EXTRACT_PROVIDER === "camofox"
+      ? "Load known web page URLs through isolated, disposable Camofox sessions. Accessibility text is returned; Tavily-specific query, depth, and format options are accepted only for compatibility."
+      : "Extract content from web pages through Tavily.";
+    case "render_office_preview": return "Render an OfficeCLI-generated document page through the bot-side Camofox service for model-only visual QA. The Camofox credential is never available inside bash.";
+    case "camofox_create_tab": return "Open a per-thread Camoufox browser tab. Keep its tab_id for later calls and close it when the browsing task is complete.";
+    case "camofox_snapshot": return "Read the current page through accessibility refs and an optional screenshot. Re-snapshot after navigation before reusing refs.";
+    case "camofox_navigate": return "Navigate an existing per-thread Camoufox tab.";
+    case "camofox_click": return "Click a Camoufox element by a ref from the latest snapshot or by CSS selector.";
+    case "camofox_type": return "Type into a Camoufox element by ref or CSS selector.";
+    case "camofox_press": return "Press a key in a Camoufox tab.";
+    case "camofox_scroll": return "Scroll a Camoufox tab.";
+    case "camofox_screenshot": return "Capture Camofox's regular 1920-pixel desktop surface with an adaptive, content-aware height and attach it directly to Telegram. Full-page and document delivery require explicit user wording; never route browser screenshots through E2B.";
+    case "camofox_list_downloads": return "List downloads recorded by a Camoufox tab without exposing their source URLs.";
+    case "camofox_send_file": return "Attach a public HTTP(S) file selected from a browser download, page-link ref, or URL directly to Telegram without routing it through E2B.";
+    case "camofox_list_tabs": return "List Camoufox tabs owned by this Telegram thread.";
+    case "camofox_close_tab": return "Close a Camoufox tab owned by this Telegram thread.";
     default: return name;
   }
 }

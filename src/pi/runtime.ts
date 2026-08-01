@@ -26,7 +26,7 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtensio
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
-import type { CommandRuntime, SandboxActivityLease } from "../sandbox/types.js";
+import type { CommandRuntime, PublishedWebsite, SandboxActivityLease } from "../sandbox/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
@@ -115,7 +115,12 @@ export class PiRuntimeManager implements PiRuntimeService {
       cached.lastUsedAt = Date.now();
       return cached;
     }
-    const systemPrompt = await renderThreadSystemPrompt({ repos: this.input.repos, user, thread });
+    const systemPrompt = await renderThreadSystemPrompt({
+      repos: this.input.repos,
+      user,
+      thread,
+      config: this.input.config,
+    });
     const bridge = new ThreadBridge({
       ...this.input,
       user,
@@ -328,6 +333,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   readonly providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[] = [];
   pendingCreatedFiles: PendingCreatedFile[] = [];
+  publishedWebsites: PublishedWebsite[] = [];
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
@@ -364,6 +370,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
+    this.publishedWebsites = [];
     this.turnFileCache.clear();
     this.contextFileIds.clear();
     this.durableContextFileIds.clear();
@@ -396,6 +403,12 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),
       createdFiles: this.attachments,
       pendingCreatedFiles: this.pendingCreatedFiles,
+      publishedWebsites: this.publishedWebsites,
+      registerPublishedWebsite: (website) => {
+        if (!this.publishedWebsites.some((existing) => existing.url === website.url)) {
+          this.publishedWebsites.push(website);
+        }
+      },
     };
   }
 

@@ -23,7 +23,6 @@ beforeEach(async () => {
     APP_UID: String(currentUid === 0 ? 1000 : currentUid),
     APP_GID: String(currentGid === 0 ? 1000 : currentGid),
     APP_DATA_ROOT: path.join(tempDir, "app-data"),
-    AGENT_SHARED_ROOT: path.join(tempDir, "shared"),
   };
 });
 
@@ -37,7 +36,6 @@ describe("container entrypoint", () => {
 
     expect(JSON.parse(result.stdout)).toEqual({ uid: process.getuid?.() });
     await expect(fs.stat(env.APP_DATA_ROOT!)).resolves.toMatchObject({});
-    await expect(fs.stat(env.AGENT_SHARED_ROOT!)).resolves.toMatchObject({});
   });
 
   it("URL-encodes the PostgreSQL password when constructing DB_URL", async () => {

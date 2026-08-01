@@ -13,7 +13,6 @@ import { chatFileMarker } from "./contextMarker.js";
 import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
 import { extractPdfText } from "./pdfText.js";
-import { persistManagedFile } from "./storage.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
 const MIN_NATIVE_PDF_TEXT_CHARS = 500;
@@ -91,7 +90,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
   if (type === "image") {
     throwIfAborted(input.signal);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
-    let file = await input.repo.insertFile({
+    const file = await input.repo.insertFile({
       userId: input.userId,
       threadId: input.threadId,
       messageId: input.messageId ?? null,
@@ -99,17 +98,14 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       mimeType: input.mime ?? null,
       type,
       name: input.name,
-      path: null,
       size: bytes.length,
       summary: input.imageSummary ?? null,
       isInline: true,
     });
-    file = await persistSnapshot(input, file, bytes);
     input.logger?.info("image ingest complete", {
       fileId: file.id,
       name: input.name,
       bytes: bytes.length,
-      persisted: Boolean(file.path),
       ms: Date.now() - startedAt,
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
@@ -125,18 +121,16 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     if (input.embeddings && chunkIds.length) await input.embeddings.deleteRefs("chunk", chunkIds);
   };
   const finish = async (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): Promise<FileIngestResult> => {
-    const stored = await persistSnapshot(input, file, input.bytes);
     completed = true;
     input.logger?.info("file ingest complete", {
-      fileId: stored.id,
+      fileId: file.id,
       name: input.name,
       type,
       inline,
-      persisted: Boolean(stored.path),
       ...logDetail,
       ms: Date.now() - startedAt,
     });
-    return { fileId: stored.id, card, inline, type };
+    return { fileId: file.id, card, inline, type };
   };
   try {
     throwIfAborted(input.signal);
@@ -196,20 +190,6 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       await cleanup();
     }
     throw err;
-  }
-}
-
-async function persistSnapshot(input: FileIngestInput, file: FileRow, bytes: Buffer | Uint8Array): Promise<FileRow> {
-  try {
-    const filePath = await persistManagedFile(input.config, input.repo, file.id, bytes);
-    return { ...file, path: filePath };
-  } catch (error) {
-    input.logger?.warn("chat file snapshot persistence failed; remote recovery remains available", {
-      fileId: file.id,
-      name: file.name,
-      error: String(error),
-    });
-    return file;
   }
 }
 
@@ -297,7 +277,6 @@ function baseFileFields(
     mimeType: input.mime ?? null,
     type,
     name: input.name,
-    path: null,
     size: bytes.length,
   };
 }

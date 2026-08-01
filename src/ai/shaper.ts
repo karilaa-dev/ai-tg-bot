@@ -221,6 +221,28 @@ function toolLabel(name: string): string {
       return "🔎 Searching web";
     case "web_extract":
       return "🌐 Reading page";
+    case "camofox_create_tab":
+    case "camofox_navigate":
+      return "🌍 Browsing web";
+    case "camofox_snapshot":
+      return "🧭 Reading browser";
+    case "camofox_click":
+    case "camofox_type":
+    case "camofox_press":
+    case "camofox_scroll":
+      return "🖱️ Using browser";
+    case "camofox_screenshot":
+      return "📸 Capturing page";
+    case "camofox_list_downloads":
+      return "📥 Listing browser downloads";
+    case "camofox_send_file":
+      return "📎 Attaching browser download";
+    case "camofox_list_tabs":
+      return "🗂️ Listing browser tabs";
+    case "camofox_close_tab":
+      return "🧹 Closing browser tab";
+    case "render_office_preview":
+      return "🖼️ Previewing Office file";
     case "search_thread":
       return "💬 Searching chat";
     case "load_message":
@@ -233,8 +255,6 @@ function toolLabel(name: string): string {
       return "🖼️ Generating image";
     case "create_file":
       return "📎 Attaching file";
-    case "render_office_preview":
-      return "🖥️ Rendering Office preview";
     case "bash":
       return "🐚 Running bash";
     default:
@@ -261,6 +281,26 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return truncateSubject(stringField(record, "query"), 64);
     case "web_extract":
       return urlsSubject(record);
+    case "camofox_create_tab":
+      return truncateSubject(stringField(record, "url"), 64);
+    case "camofox_navigate":
+      return truncateSubject(
+        stringField(record, "url")
+          ?? [stringField(record, "macro"), stringField(record, "query")].filter(Boolean).join(": "),
+        64,
+      );
+    case "camofox_snapshot":
+    case "camofox_click":
+    case "camofox_type":
+    case "camofox_press":
+    case "camofox_scroll":
+    case "camofox_screenshot":
+    case "camofox_list_downloads":
+    case "camofox_send_file":
+    case "camofox_close_tab":
+      return truncateSubject(stringField(record, "tab_id"), 64);
+    case "render_office_preview":
+      return truncateSubject(stringField(record, "path"), 64);
     case "search_in_file":
     case "read_file_section":
       return metadata.fileName ?? fileIdSubject(record);
@@ -268,8 +308,6 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return generateImageSubject(record);
     case "create_file":
       return truncateSubject(stringField(record, "name") ?? stringField(record, "path"), 64);
-    case "render_office_preview":
-      return truncateSubject(stringField(record, "path"), 64);
     case "load_message": {
       const messageId = numberField(record, "message_id");
       return messageId === undefined ? undefined : `#${messageId}`;

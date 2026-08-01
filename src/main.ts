@@ -1,22 +1,21 @@
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { createOpenSandboxClientProvider } from "./opensandbox/client.js";
-import { ThreadOpenSandboxRuntimeManager } from "./opensandbox/threadRuntimeManager.js";
-import { loadConfig, type AppConfig } from "./config.js";
+import { isCamofoxConfigured, loadConfig, type AppConfig } from "./config.js";
+import { checkCamofox } from "./camofox/client.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { checkDocling } from "./files/docling.js";
-import { checkBrowserless } from "./browserless/client.js";
 import { createLogger, type Logger } from "./logger.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
+import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let sandboxRuntime: ThreadOpenSandboxRuntimeManager | undefined;
+let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
@@ -32,12 +31,12 @@ try {
   logger.debug("initializing database");
   await db.initialize();
   await checkConfiguredDocling(config, logger);
-  await checkConfiguredBrowserless(config, logger);
+  await checkConfiguredCamofox(config, logger);
   const repos = createRepos(db.db, db.search);
   const embedder = createOpenRouterTextEmbedder(config, logger);
-  sandboxRuntime = new ThreadOpenSandboxRuntimeManager({
+  sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
-    clientProvider: createOpenSandboxClientProvider(config),
+    repos,
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, embedder, commandRuntime: sandboxRuntime });
@@ -48,6 +47,7 @@ try {
     logger,
     repos,
     embedder,
+    commandRuntime: sandboxRuntime,
     pi,
   });
   logger.debug("registering bot commands");
@@ -72,30 +72,28 @@ try {
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;
-    logger.warn("OpenSandbox runtime disposal failed", { err: String(err) });
+    logger.warn("E2B runtime disposal failed", { err: String(err) });
   });
   logger.debug("destroying database connection");
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
 }
 
-async function checkConfiguredBrowserless(
-  config: Pick<
-    AppConfig,
-    "BROWSERLESS_URL" | "BROWSERLESS_ALLOWED_ORIGINS" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
-  >,
+async function checkConfiguredCamofox(
+  config: Pick<AppConfig, "CAMOFOX_URL" | "CAMOFOX_ACCESS_KEY" | "CAMOFOX_TIMEOUT_MS">,
   logger: Logger,
 ): Promise<void> {
-  if (!config.BROWSERLESS_URL) {
-    logger.info("browserless disabled; Office visual previews are unavailable");
+  if (!isCamofoxConfigured(config)) {
+    logger.info("Camofox disabled; interactive browser and Office visual previews are unavailable");
     return;
   }
-
-  logger.debug("checking browserless health");
+  logger.debug("checking Camofox health");
   try {
-    await checkBrowserless(config);
-    logger.info("browserless healthcheck passed");
+    const health = await checkCamofox(config);
+    logger.info("Camofox healthcheck passed", {
+      engine: typeof health.engine === "string" ? health.engine : undefined,
+    });
   } catch (err) {
-    logger.warn("browserless healthcheck failed; Office visual previews will be unavailable", {
+    logger.warn("Camofox healthcheck failed; browser-backed tools may be unavailable", {
       err: String(err),
     });
   }

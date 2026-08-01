@@ -1,3 +1,19 @@
+export interface SandboxThreadFile {
+  fileId: number;
+  messageId: number | null;
+  name: string;
+  mimeType: string | null;
+  expectedSize: number | null;
+  expectedSha256: string | null;
+  telegramRefs: Array<{
+    id: number;
+    telegramFileId: string;
+    telegramSize: number | null;
+    isPrimary: boolean;
+    lastSeenAt: number;
+  }>;
+}
+
 export interface SandboxCommandRequest {
   userId: number;
   threadId: number;
@@ -8,6 +24,7 @@ export interface SandboxCommandRequest {
   workingDir: string;
   timeoutMs: number;
   maxOutputChars: number;
+  threadFiles?: SandboxThreadFile[];
   signal?: AbortSignal;
 }
 
@@ -18,25 +35,54 @@ export interface SandboxCommandResult {
   timedOut: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
+  threadFiles: SandboxThreadFileSyncResult;
   error?: string;
 }
 
-export interface SandboxFileExportRequest {
+export interface SandboxThreadFileSyncResult {
+  directory: string;
+  available: number;
+}
+
+export interface SandboxFileReadRequest {
   userId: number;
   threadId: number;
-  guestPath: string;
-  hostDestination: string;
+  virtualPath: string;
+  maxBytes: number;
+  threadFiles?: SandboxThreadFile[];
+  signal?: AbortSignal;
+}
+
+export interface SandboxFileReadResult {
+  sandboxId: string;
+  canonicalPath: string;
+  bytes: Buffer;
+}
+
+export interface SandboxSourceFileReadRequest {
+  sandboxId: string;
+  userId: number;
+  threadId: number;
+  canonicalPath: string;
   maxBytes: number;
   signal?: AbortSignal;
 }
 
-export type SandboxCommandPreparation = Partial<
-  Omit<SandboxCommandRequest, "userId" | "threadId" | "signal">
->;
+export interface PublishWebsiteRequest {
+  userId: number;
+  threadId: number;
+  port: number;
+  path?: string;
+  threadFiles?: SandboxThreadFile[];
+  signal?: AbortSignal;
+}
 
-export interface SandboxCommandLifecycle {
-  beforeExecute?(): Promise<SandboxCommandPreparation | void>;
-  afterExecute?(): Promise<void>;
+export interface PublishedWebsite {
+  sandboxId: string;
+  port: number;
+  path: string;
+  url: string;
+  pausesAfterMinutes: number;
 }
 
 export interface SandboxActivityLease {
@@ -45,10 +91,9 @@ export interface SandboxActivityLease {
 
 export interface CommandRuntime {
   acquireActivityLease?(userId: number, threadId: number): SandboxActivityLease;
-  execute(
-    request: SandboxCommandRequest,
-    lifecycle?: SandboxCommandLifecycle,
-  ): Promise<SandboxCommandResult>;
-  exportFile(request: SandboxFileExportRequest): Promise<void>;
+  execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
+  readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult>;
+  readSourceFile(request: SandboxSourceFileReadRequest): Promise<Buffer>;
+  publishWebsite(request: PublishWebsiteRequest): Promise<PublishedWebsite>;
   dispose(): Promise<void>;
 }

@@ -105,8 +105,6 @@ export const runTurn: TurnRunner = async (input) => {
     try {
       await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS);
     } finally {
-      runtime.bridge.endTurn();
-      activeBridge = undefined;
       unsubscribe();
       piEntries.push(...runtime.session.sessionManager.getEntries().flatMap((entry) => {
         if (existingEntryIds.has(entry.id) || entry.type !== "message") return [];
@@ -156,6 +154,11 @@ export const runTurn: TurnRunner = async (input) => {
       });
       finalAnswer = input.t("empty-answer");
     }
+    finalAnswer = appendPublishedWebsiteNotice(
+      finalAnswer,
+      runtime.bridge.publishedWebsites.map((website) => website.url),
+      input.user.lang,
+    );
     const finalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
@@ -210,6 +213,28 @@ export const runTurn: TurnRunner = async (input) => {
     stop();
   }
 };
+
+export function appendPublishedWebsiteNotice(
+  answer: string,
+  urls: string[],
+  locale: UserRow["lang"],
+): string {
+  const unique = [...new Set(urls.map((url) => url.trim()).filter(Boolean))];
+  if (!unique.length) return answer;
+  const links = unique.map((url) => `- ${url}`).join("\n");
+  const notice = locale === "ru"
+    ? [
+        "Сайт опубликован по публичной ссылке:",
+        links,
+        "Любой, у кого есть ссылка, сможет открыть сайт. Песочница останется активной 15 минут после этого ответа, затем будет приостановлена и ссылка перестанет отвечать. Попросите меня в этой ветке возобновить и снова опубликовать сайт; если сервер всё ещё исправен, адрес останется тем же.",
+      ].join("\n\n")
+    : [
+        "The website is available at this public link:",
+        links,
+        "Anyone with the link can access it. The sandbox will remain active for 15 minutes after this response, then pause and the link will stop responding. Ask me in this thread to resume and publish it again; if the server is still healthy, the URL will stay the same.",
+      ].join("\n\n");
+  return answer.trim() ? `${answer.trimEnd()}\n\n${notice}` : notice;
+}
 
 async function runPiPromptWithTimeout(
   session: Awaited<ReturnType<PiRuntimeService["runtime"]>>["session"],
@@ -903,12 +928,17 @@ async function editFinalThinkingVisible(
   return false;
 }
 
-async function sendCreatedFileAttachments(
+export async function sendCreatedFileAttachments(
   input: TurnInput,
   assistantMessage: MessageRow,
   attachments: CreatedFileAttachment[],
 ): Promise<void> {
   if (!attachments.length) return;
+  for (const attachment of attachments) {
+    if (attachment.delivery === "photo" && attachment.size > 10 * 1024 * 1024) {
+      attachment.delivery = "document";
+    }
+  }
   const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") === "document");
   const photos = attachments.filter((attachment) => attachment.delivery === "photo");
   await sendAttachmentBatch(input, assistantMessage, documents, documentSendStrategy);
@@ -987,27 +1017,7 @@ async function sendAttachmentBatch(
   if (!pending.length) return;
   for (const batch of attachmentBatches(pending)) {
     if (batch.length === 1) {
-      const attachment = batch[0]!;
-      try {
-        const sent = await strategy.sendOne(input, attachment);
-        await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
-        input.logger.info(`${strategy.label} sent`, {
-          threadId: input.thread.id,
-          messageId: assistantMessage.id,
-          fileId: attachment.fileId,
-          telegramMessageId: sent.message_id,
-          name: attachment.name,
-        });
-      } catch (err) {
-        input.logger.warn(`failed to send ${strategy.label}`, {
-          threadId: input.thread.id,
-          messageId: assistantMessage.id,
-          fileId: attachment.fileId,
-          name: attachment.name,
-          err: String(err),
-        });
-        await removeUnresolvableUndeliveredAttachment(input, attachment);
-      }
+      await sendOneBufferedAttachment(input, assistantMessage, batch[0]!, strategy);
       continue;
     }
 
@@ -1024,16 +1034,66 @@ async function sendAttachmentBatch(
         telegramMessages: sent.map((message) => message.message_id),
       });
     } catch (err) {
-      input.logger.warn(`failed to send ${strategy.label} media group`, {
+      input.logger.warn(`failed to send ${strategy.label} media group; retrying files individually`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
         files: batch.length,
         fileIds: batch.map((attachment) => attachment.fileId),
         err: String(err),
       });
-      for (const attachment of batch) await removeUnresolvableUndeliveredAttachment(input, attachment);
+      for (const attachment of batch) {
+        await sendOneBufferedAttachment(input, assistantMessage, attachment, strategy);
+      }
     }
   }
+}
+
+async function sendOneBufferedAttachment(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachment: CreatedFileAttachment,
+  strategy: AttachmentSendStrategy,
+): Promise<void> {
+  let failure: unknown;
+  try {
+    const sent = await strategy.sendOne(input, attachment);
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+    input.logger.info(`${strategy.label} sent`, {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      fileId: attachment.fileId,
+      telegramMessageId: sent.message_id,
+      name: attachment.name,
+    });
+    return;
+  } catch (error) {
+    failure = error;
+  }
+  if (strategy === photoSendStrategy) {
+    try {
+      const sent = await documentSendStrategy.sendOne(input, attachment);
+      attachment.delivery = "document";
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+      input.logger.info("generated image sent as a document after photo rejection", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        telegramMessageId: sent.message_id,
+        name: attachment.name,
+      });
+      return;
+    } catch (error) {
+      failure = error;
+    }
+  }
+  input.logger.warn(`failed to send ${strategy.label}`, {
+    threadId: input.thread.id,
+    messageId: assistantMessage.id,
+    fileId: attachment.fileId,
+    name: attachment.name,
+    err: String(failure),
+  });
+  await removeUnresolvableUndeliveredAttachment(input, attachment);
 }
 
 function attachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
@@ -1054,10 +1114,10 @@ async function removeUnresolvableUndeliveredAttachment(
   input: TurnInput,
   attachment: CreatedFileAttachment,
 ): Promise<void> {
-  if (attachment.path || attachment.telegramDelivery?.fileId) return;
+  if (attachment.telegramDelivery?.fileId) return;
   try {
     const stored = await input.repos.files.get(attachment.fileId);
-    if (!stored || stored.path) return;
+    if (!stored) return;
     const sources = await input.repos.files.listSources(attachment.fileId);
     if (sources.length) return;
     const chunkIds = await input.repos.files.deleteFile(attachment.fileId);
@@ -1095,29 +1155,60 @@ async function rememberSentCreatedFileAttachment(
 async function rememberTelegramDeliverySource(input: TurnInput, attachment: CreatedFileAttachment): Promise<void> {
   const delivery = attachment.telegramDelivery;
   if (!delivery?.fileId) return;
-  await input.repos.files.rememberSource(attachment.fileId, telegramFileSource({
+  await input.repos.files.rememberTelegramObservation(attachment.fileId, telegramFileSource({
     fileId: delivery.fileId,
     fileUniqueId: delivery.fileUniqueId,
     mimeType: attachment.type === "image"
       ? attachment.delivery === "photo" ? "image/jpeg" : attachment.mimeType ?? null
       : null,
-  }));
+  }), {
+    direction: "outbound",
+    mediaKind: attachment.delivery === "photo" ? "photo" : "document",
+    telegramMessageId: delivery.messageId,
+    refs: delivery.refs?.length
+      ? delivery.refs
+      : [{
+        fileId: delivery.fileId,
+        fileUniqueId: delivery.fileUniqueId,
+        primary: true,
+      }],
+  });
 }
 
 type SentTelegramPhotoSize = { file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number };
 
 type SentTelegramFileMessage = {
   message_id: number;
-  document?: { file_id?: string; file_unique_id?: string };
+  document?: { file_id?: string; file_unique_id?: string; file_size?: number };
   photo?: SentTelegramPhotoSize[];
 };
 
 function telegramDeliveryFromSent(sent: SentTelegramFileMessage): NonNullable<CreatedFileAttachment["telegramDelivery"]> {
   const fileRecord = sent.document ?? largestTelegramPhoto(sent.photo);
+  const refs = sent.document
+    ? sent.document.file_id
+      ? [{
+        fileId: sent.document.file_id,
+        fileUniqueId: sent.document.file_unique_id?.trim() || null,
+        width: null,
+        height: null,
+        size: sent.document.file_size ?? null,
+        primary: true,
+      }]
+      : []
+    : (sent.photo ?? []).flatMap((photo) => photo.file_id ? [{
+      fileId: photo.file_id,
+      fileUniqueId: photo.file_unique_id?.trim() || null,
+      width: photo.width ?? null,
+      height: photo.height ?? null,
+      size: photo.file_size ?? null,
+      primary: photo.file_id === fileRecord?.file_id,
+    }] : []);
   return {
     messageId: sent.message_id,
     fileId: fileRecord?.file_id?.trim() || null,
     fileUniqueId: fileRecord?.file_unique_id?.trim() || null,
+    refs,
   };
 }
 
@@ -1282,8 +1373,7 @@ function truncateCaption(caption: string): string {
 
 function attachmentInput(attachment: CreatedFileAttachment): InputFile {
   if (attachment.data) return new InputFile(attachment.data, attachment.name);
-  if (attachment.path) return new InputFile(attachment.path, attachment.name);
-  throw new Error(`Attachment ${attachment.name} has neither data nor path`);
+  throw new Error(`Attachment ${attachment.name} has no in-memory data`);
 }
 
 function documentFallbackCaption(title: string, attachment: CreatedFileAttachment): string {
@@ -1515,6 +1605,18 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   if (toolName === "render_office_preview" && record) {
     return record.rendered === true ? formatCount(1, "preview") : "done";
+  }
+
+  if (toolName === "camofox_list_tabs" && record && Array.isArray(record.tabs)) {
+    return formatCount(record.tabs.length, "tab");
+  }
+
+  if (toolName === "camofox_list_downloads" && record && Array.isArray(record.downloads)) {
+    return formatCount(record.downloads.length, "file");
+  }
+
+  if ((toolName === "camofox_screenshot" || toolName === "camofox_send_file") && record?.attached === true) {
+    return formatCount(1, "file");
   }
 
   const results = Array.isArray(record?.results) ? record.results : undefined;
