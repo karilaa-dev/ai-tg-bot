@@ -16,6 +16,7 @@ COPY tsconfig.json system_prompt.md ./
 COPY src ./src
 COPY scripts ./scripts
 COPY locales ./locales
+COPY skills ./skills
 
 RUN npm run build
 RUN npm prune --omit=dev
@@ -50,6 +51,7 @@ COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/locales ./locales
+COPY --from=build --chown=node:node /app/skills ./skills
 COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
 COPY docker/entrypoint.sh /usr/local/bin/ai-tg-bot-entrypoint
 

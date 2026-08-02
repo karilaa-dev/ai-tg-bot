@@ -50,13 +50,7 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
     name: "generate_image",
     label: "Generate image",
     description:
-      "Generate or edit exactly one image. References are current-thread chat image file ids. After success, give one concise past-tense final sentence and do not call more tools.",
-    promptSnippet: "Generate or edit one chat-delivered raster image.",
-    promptGuidelines: [
-      "Use generate_image for image generation or editing requests.",
-      "Pass the user's image wording faithfully and use reference_file_ids for referenced chat images.",
-      "After generate_image succeeds, do not call another tool and do not claim the image is still being generated.",
-    ],
+      "Generate or edit exactly one chat-delivered image using current-thread image file ids as references. A successful call ends tool use for the turn; the bot supplies the localized confirmation automatically.",
     parameters: Type.Object({
       prompt: Type.String({ minLength: 1, maxLength: 4000 }),
       mode: Type.Optional(Type.Union([

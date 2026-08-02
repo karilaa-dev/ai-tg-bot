@@ -37,6 +37,12 @@ import {
 } from "./threadTitle.js";
 import { isBrowserUseConfigured } from "../config.js";
 import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
+import {
+  OFFICECLI_SKILLS,
+  createOfficeSkillReadTool,
+  officeSkillPaths,
+  validateOfficeSkills,
+} from "./officeSkills.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -98,6 +104,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   private async initializeModelRuntime(): Promise<void> {
+    await validateOfficeSkills();
     this.modelRuntime = await ModelRuntime.create({
       authPath: path.join(this.agentDir, "auth.json"),
       modelsPath: path.join(this.agentDir, "models.json"),
@@ -150,6 +157,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       agentDir: this.agentDir,
       settingsManager,
       extensionFactories: [createChatFileContextExtension(bridge)],
+      additionalSkillPaths: officeSkillPaths(),
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -157,8 +165,18 @@ export class PiRuntimeManager implements PiRuntimeService {
       systemPrompt,
     });
     await resourceLoader.reload();
+    const loadedSkills = resourceLoader.getSkills();
+    if (loadedSkills.diagnostics.length) {
+      throw new Error(`OfficeCLI skill loading failed: ${JSON.stringify(loadedSkills.diagnostics)}`);
+    }
+    const expectedSkillNames = OFFICECLI_SKILLS.map((skill) => skill.name).sort();
+    const loadedSkillNames = loadedSkills.skills.map((skill) => skill.name).sort();
+    if (JSON.stringify(loadedSkillNames) !== JSON.stringify(expectedSkillNames)) {
+      throw new Error(`Unexpected Pi skills: expected ${expectedSkillNames.join(", ")}; loaded ${loadedSkillNames.join(", ") || "none"}.`);
+    }
     const sessionManager = await this.openSessionManager(thread);
     const customTools = [
+      createOfficeSkillReadTool(),
       ...createPiToolAdapters(bridge),
       createGenerateImagePiTool(bridge),
     ];
@@ -184,6 +202,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       threadId: thread.id,
       sessionId: session.sessionId,
       resumed: Boolean(thread.pi_session_file),
+      skills: loadedSkillNames,
     });
     return runtime;
   }

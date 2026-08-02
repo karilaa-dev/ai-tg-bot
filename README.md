@@ -39,7 +39,9 @@ Shared Telegram files are downloaded with the Bot API and written into the
 thread sandbox through E2B's SDK. Files created in the sandbox are read through
 the SDK and sent to Telegram by the bot.
 
-OfficeCLI is pinned in the toolbox and available through `bash`. When Browser Use Cloud is configured, OfficeCLI still generates static HTML inside E2B, but the bot sanitizes that HTML and renders it in a cookie-isolated Browser Use context. The resulting PNG is model-only visual QA; it is not sent to Telegram, and the bot does not install missing tools.
+OfficeCLI is pinned in the toolbox and available through `bash`. The reviewed DOCX and PPTX instruction skills are also vendored under [`skills`](skills/README.md), checksum-verified at startup, and advertised through Pi on every normal turn. Pi's host-side `read` tool is restricted to those two skill directories; it cannot read bot source, credentials, Telegram files, or the E2B workspace. Skill setup/update commands are intentionally overridden by the bot's preinstalled-tool policy.
+
+When Browser Use Cloud is configured, OfficeCLI generates static HTML inside E2B, then the bot sanitizes it and renders it in a cookie-isolated Browser Use context. The resulting PNG is model-only visual QA; it is not sent to Telegram, and the bot does not install missing tools.
 
 ## Files and retrieval
 
@@ -120,7 +122,7 @@ The bot stores one opaque Browser Use profile mapping per Telegram user. Cookies
 
 Normal screenshots use an adaptive regular-desktop viewport and are sent as Telegram photos. Full-page capture is reserved for explicit full/whole-page requests; document delivery is reserved for explicit “as a file/document” requests. Screenshots and browser files are attached directly without E2B. Browser files are size-bounded, checked against executable-file restrictions, and refused when their URL or any redirect resolves to a local/private address.
 
-Cloud sessions default to five minutes. `browser_open` can request 5–240 minutes for a new session. `browser_extend_session` explicitly stops and recreates the browser with the same profile, restoring owned URLs, scroll positions, and tab IDs while warning that transient page state is lost. The bot automatically stops an unused browser five minutes after the latest reply or shortly before provider expiry. The agent can call `browser_close_tab` for one thread-owned tab or `browser_close_session` after all browser work is complete; explicit session closure stops billing promptly and saves profile state without deleting the profile.
+Cloud sessions use `BROWSER_USE_DEFAULT_TIMEOUT_MINUTES` (5 in the example above). `browser_open` can request 5–240 minutes for a new session. `browser_extend_session` explicitly stops and recreates the browser with the same profile, restoring owned URLs, scroll positions, and tab IDs while warning that transient page state is lost. Idle cleanup uses `BROWSER_USE_IDLE_TIMEOUT_MS` or stops shortly before provider expiry. The agent can call `browser_close_tab` for one thread-owned tab or `browser_close_session` after all browser work is complete; explicit session closure stops billing promptly and saves profile state without deleting the profile.
 
 Keep the access key only in `.env`. It is redacted from client errors and never injected into E2B commands. Browser Use agent tasks, arbitrary page evaluation, cookie import, proxies, and recordings are not exposed.
 

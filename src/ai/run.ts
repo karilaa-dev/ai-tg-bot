@@ -28,6 +28,7 @@ import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import type { ResolvedChatFile } from "../files/source.js";
 import { telegramFileSource } from "../files/telegramSource.js";
+import { appendOfficeSkillIndex } from "../pi/officeSkills.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
@@ -87,12 +88,16 @@ export const runTurn: TurnRunner = async (input) => {
       },
       currentFileIds: currentFiles.map((file) => file.id),
     });
-    runtime.session.agent.state.systemPrompt = await renderThreadSystemPrompt({
+    const coreSystemPrompt = await renderThreadSystemPrompt({
       repos: input.repos,
       user: input.user,
       thread: input.thread,
       config: input.config,
     });
+    runtime.session.agent.state.systemPrompt = appendOfficeSkillIndex(
+      coreSystemPrompt,
+      runtime.session.resourceLoader.getSkills().skills,
+    );
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("Pi turn starting", {
       threadId: input.thread.id,

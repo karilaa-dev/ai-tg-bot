@@ -1,0 +1,111 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadSkills } from "@earendil-works/pi-coding-agent";
+import {
+  OFFICECLI_DOCX_SKILL_SHA256,
+  OFFICECLI_PPTX_SKILL_SHA256,
+} from "../../e2b-template/template.js";
+import {
+  OFFICECLI_SKILLS,
+  OFFICECLI_SKILLS_REVISION,
+  appendOfficeSkillIndex,
+  createOfficeSkillReadTool,
+  officeSkillPaths,
+  validateOfficeSkills,
+} from "../../src/pi/officeSkills.js";
+
+const tempRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe("pinned OfficeCLI Pi skills", () => {
+  it("loads exactly the two reviewed, checksum-verified skills", async () => {
+    await expect(validateOfficeSkills()).resolves.toBeUndefined();
+    expect(OFFICECLI_SKILLS_REVISION).toMatch(/^[a-f0-9]{40}$/u);
+    expect(OFFICECLI_SKILLS.map((skill) => skill.sha256)).toEqual([
+      OFFICECLI_DOCX_SKILL_SHA256,
+      OFFICECLI_PPTX_SKILL_SHA256,
+    ]);
+
+    const loaded = loadSkills({
+      cwd: process.cwd(),
+      agentDir: path.resolve("data/pi"),
+      skillPaths: officeSkillPaths(),
+      includeDefaults: false,
+    });
+
+    expect(loaded.diagnostics).toEqual([]);
+    expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
+      "officecli-docx",
+      "officecli-pptx",
+    ]);
+    expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
+
+    const prompt = appendOfficeSkillIndex("core prompt", loaded.skills);
+    expect(prompt).toContain("<available_skills>");
+    expect(prompt).toContain("Use the read tool to load a skill's file");
+    expect(prompt).toContain("<name>officecli-docx</name>");
+    expect(prompt).toContain("<name>officecli-pptx</name>");
+    for (const skillPath of officeSkillPaths()) expect(prompt).toContain(skillPath);
+  });
+
+  it("reads a complete advertised skill but rejects all other host files", async () => {
+    const tool = createOfficeSkillReadTool();
+    const result = await tool.execute(
+      "read-skill",
+      { path: officeSkillPaths()[0]! },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+    expect(text).toContain("# OfficeCLI DOCX Skill");
+    expect(text).toContain("## Setup");
+    expect(text).toContain("### Delivery Gate");
+    expect(result.details).toMatchObject({ truncated: false, start_line: 1 });
+    await expect(tool.execute(
+      "read-source",
+      { path: path.resolve("package.json") },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow("restricted to approved installed skill files");
+    await expect(tool.execute(
+      "read-license",
+      { path: path.resolve("skills/officecli/LICENSE") },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow("restricted to approved installed skill files");
+  });
+
+  it("blocks symlinks that escape an approved skill directory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-office-skills-"));
+    tempRoots.push(root);
+    const docxRoot = path.join(root, "skills/officecli-docx");
+    const pptxRoot = path.join(root, "skills/officecli-pptx");
+    await fs.mkdir(docxRoot, { recursive: true });
+    await fs.mkdir(pptxRoot, { recursive: true });
+    await fs.symlink(path.resolve("package.json"), path.join(docxRoot, "SKILL.md"));
+
+    const tool = createOfficeSkillReadTool(root);
+    await expect(tool.execute(
+      "read-escape",
+      { path: path.join(docxRoot, "SKILL.md") },
+      undefined,
+      undefined,
+      {} as never,
+    )).rejects.toThrow("restricted to approved installed skill files");
+  });
+
+  it("includes vendored skills in the production container", async () => {
+    const dockerfile = await fs.readFile("Dockerfile", "utf8");
+    expect(dockerfile).toContain("COPY skills ./skills");
+    expect(dockerfile).toContain("/app/skills ./skills");
+  });
+});

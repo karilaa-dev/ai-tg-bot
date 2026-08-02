@@ -40,6 +40,9 @@ describe("Browser Use Pi tools", () => {
     expect(BROWSER_TOOLS.every((name) => enabled.find((tool) => tool.name === name)?.executionMode === "sequential"))
       .toBe(true);
     expect(enabled.find((tool) => tool.name === "render_office_preview")?.executionMode).toBe("sequential");
+    const openDescription = enabled.find((tool) => tool.name === "browser_open")?.description ?? "";
+    expect(openDescription).toContain("configured default session duration");
+    expect(openDescription).not.toContain("five-minute");
   });
 
   it("closes the whole session through the model-facing tool", async () => {

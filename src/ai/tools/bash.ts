@@ -27,7 +27,7 @@ export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run Bash in this Telegram thread's persistent custom E2B Base toolbox. Logical cwd / is /home/user/workspace. Telegram attachments visible to this thread are restored automatically into /home/user/telegram-files, which is bot-managed and read-only; copy a file into the workspace before changing it. No storage is shared with other sandboxes. OfficeCLI, ImageMagick, ZIP utilities, Python, Node.js, Git, compilers, and common diagnostics are preinstalled; Chromium is intentionally absent because browser work uses Browser Use Cloud. The bot does not install missing tools automatically. Files, processes, repositories, and user-requested package changes inside the sandbox persist across pause/resume.",
+      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace, while synchronized Telegram files under /home/user/telegram-files are read-only. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must target task-relevant public internet destinations only.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),

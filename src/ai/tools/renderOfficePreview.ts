@@ -24,7 +24,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Render one page or slide of an OfficeCLI-compatible DOCX, PPTX, or XLSX file from this thread's E2B workspace through Browser Use Cloud. For a presentation, call this once for every slide and inspect each returned image for overlap, clipping, wrapping, contrast, spacing, and alignment before delivery. Returns a model-only PNG and never sends the preview to Telegram.",
+      "Render one page or slide of an OfficeCLI-compatible DOCX, PPTX, or XLSX file from this thread's E2B workspace as a model-only PNG. For created/edited files, call this once for every slide in a PPTX and for every rendered page in a DOCX; inspect overlap, clipping, wrapping, contrast, spacing, and alignment before delivery. Previews are never sent to Telegram.",
     inputSchema: z.object({
       path: z.string().regex(/^\//, "path must be an absolute virtual path"),
       page: z.number().int().positive().default(1),
