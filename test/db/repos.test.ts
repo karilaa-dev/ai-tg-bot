@@ -31,4 +31,28 @@ describe("repository round-trip on sqlite", () => {
     expect(message.id).toBeGreaterThan(0);
     expect(hits[0]?.id).toBe(message.id);
   });
+
+  it("persists one opaque Browser Use profile key per deployment user", async () => {
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
+    db = createDatabase(config, createLogger(config));
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    await repos.users.ensure({ tgId: 7711, firstName: "Private Name", lang: "en" });
+
+    const first = await repos.browserUseProfiles.ensure("deployment", 7711);
+    const second = await repos.browserUseProfiles.ensure("deployment", 7711);
+    await repos.browserUseProfiles.setProfileId(
+      "deployment",
+      7711,
+      "123e4567-e89b-12d3-a456-426614174001",
+    );
+
+    expect(first.provider_user_key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second.provider_user_key).toBe(first.provider_user_key);
+    expect(first.provider_user_key).not.toContain("Private Name");
+    await expect(repos.browserUseProfiles.get("deployment", 7711)).resolves.toMatchObject({
+      provider_user_key: first.provider_user_key,
+      profile_id: "123e4567-e89b-12d3-a456-426614174001",
+    });
+  });
 });

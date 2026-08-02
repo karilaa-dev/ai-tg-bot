@@ -5,6 +5,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 
 const CURRENT_TABLES = [
+  "browser_use_profiles",
   "chunks_fts",
   "embeddings",
   "file_chunks",
@@ -71,6 +72,9 @@ describe("SQLite schema initialization", () => {
     ]);
     await expect(columns(database, "thread_sandboxes")).resolves.toEqual([
       "deployment_id", "user_id", "thread_id", "sandbox_id", "created_at", "updated_at",
+    ]);
+    await expect(columns(database, "browser_use_profiles")).resolves.toEqual([
+      "deployment_id", "user_id", "provider_user_key", "profile_id", "created_at", "updated_at",
     ]);
     await expect(columns(database, "telegram_file_refs")).resolves.toEqual([
       "id", "file_id", "telegram_file_id", "telegram_file_unique_id", "direction",

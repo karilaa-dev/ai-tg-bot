@@ -105,6 +105,18 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`
+    create table if not exists browser_use_profiles (
+      deployment_id text not null,
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      provider_user_key text not null unique,
+      profile_id text,
+      created_at ${intType} not null,
+      updated_at ${intType} not null,
+      primary key(deployment_id, user_id)
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists browser_use_profiles_profile_idx on browser_use_profiles(profile_id) where profile_id is not null`));
+  await db.execute(sql.raw(`
     create table if not exists messages (
       id ${idType},
       thread_id ${intType} not null references threads(id),

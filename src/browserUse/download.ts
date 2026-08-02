@@ -75,10 +75,10 @@ function parseDownloadUrl(value: string): URL {
   try {
     url = new URL(value);
   } catch {
-    throw new Error("Camofox download URL is invalid.");
+    throw new Error("Browser download URL is invalid.");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Camofox can only deliver downloads exposed through public HTTP(S) URLs.");
+    throw new Error("Browser downloads require public HTTP(S) URLs.");
   }
   if (url.username || url.password) throw new Error("Browser download URLs cannot contain credentials.");
   return url;

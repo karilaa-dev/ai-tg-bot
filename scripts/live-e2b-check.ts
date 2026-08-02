@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { Sandbox } from "e2b";
-import { loadConfig } from "../src/config.js";
+import { isBrowserUseConfigured, loadConfig } from "../src/config.js";
 import { createDatabase } from "../src/db/index.js";
-import { createRepos } from "../src/db/repos/index.js";
+import { createRepos, type Repos } from "../src/db/repos/index.js";
 import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
+import { createRenderOfficePreviewTool } from "../src/ai/tools/renderOfficePreview.js";
+import { BrowserUseClient } from "../src/browserUse/client.js";
+import { BrowserUseRuntimeManager } from "../src/browserUse/runtime.js";
 import { createLogger } from "../src/logger.js";
 import type { SandboxThreadFile } from "../src/sandbox/types.js";
 
@@ -13,15 +16,20 @@ const config = {
   ...baseConfig,
   DB_URL: "sqlite::memory:",
   E2B_DEPLOYMENT_ID: `${baseConfig.E2B_DEPLOYMENT_ID}-smoke-${deploymentSuffix}`,
+  BROWSER_USE_DEPLOYMENT_ID: `${baseConfig.BROWSER_USE_DEPLOYMENT_ID}-e2b-smoke-${deploymentSuffix}`,
 };
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let runtime: ThreadE2BSandboxRuntimeManager | undefined;
+let browserRuntime: BrowserUseRuntimeManager | undefined;
+let repos: Repos | undefined;
+let browserUserId: number | undefined;
+let disposableBrowserProfileId: string | null = null;
 let sandboxId: string | undefined;
 
 try {
   await db.initialize();
-  const repos = createRepos(db.db, db.search);
+  repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9_999_101, firstName: "E2B smoke", lang: "en" });
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "E2B smoke" });
   runtime = new ThreadE2BSandboxRuntimeManager({ config, repos, logger });
@@ -79,6 +87,49 @@ try {
   ));
   if (contract.exitCode !== 0) {
     throw new Error(contract.error || contract.stderr || contract.stdout || "custom E2B toolbox contract failed");
+  }
+
+  const officeFixture = await runtime.execute(commandRequest(user.tg_id, thread.id, [
+    "pptx_skill=/usr/local/share/officecli/skills/officecli-pptx/SKILL.md",
+    "test -r \"$pptx_skill\"",
+    "grep -Fq 'name: officecli-pptx' \"$pptx_skill\"",
+    "grep -Fq '## QA (Required)' \"$pptx_skill\"",
+    "officecli create office-preview-smoke.pptx",
+    "officecli add office-preview-smoke.pptx / --type slide --prop layout=blank --prop background=FFFFFF",
+    "officecli add office-preview-smoke.pptx '/slide[1]' --type shape --prop name=Title --prop text='Office preview smoke check' --prop x=2cm --prop y=2cm --prop width=29cm --prop height=3cm --prop font=Calibri --prop size=36 --prop bold=true --prop color=111111",
+    "officecli save office-preview-smoke.pptx",
+    "officecli validate office-preview-smoke.pptx",
+  ].join("\n"), [], threadFiles, 60_000));
+  if (officeFixture.exitCode !== 0) {
+    throw new Error(officeFixture.error || officeFixture.stderr || "OfficeCLI PPTX skill/fixture check failed");
+  }
+  let officePreview: { size: number; media_type: string } | undefined;
+  if (isBrowserUseConfigured(config)) {
+    browserUserId = user.tg_id;
+    browserRuntime = new BrowserUseRuntimeManager({ config, repos, logger });
+    await browserRuntime.beginTurn(user.tg_id, thread.id);
+    const browser = browserRuntime.forThread(user.tg_id, thread.id);
+    const officePreviewTool = createRenderOfficePreviewTool({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      logger,
+      commandRuntime: runtime,
+      browserRuntime: browser,
+    });
+    const renderedPreview = await officePreviewTool.execute({ path: "/office-preview-smoke.pptx", page: 1 });
+    if ("error" in renderedPreview) {
+      throw new Error(`Office preview integration failed: ${renderedPreview.error}`);
+    }
+    officePreview = renderedPreview;
+    await browser.closeSession();
+    await browserRuntime.endTurn(user.tg_id, thread.id);
+    disposableBrowserProfileId = (await repos.browserUseProfiles.get(
+      config.BROWSER_USE_DEPLOYMENT_ID,
+      user.tg_id,
+    ))?.profile_id ?? null;
   }
 
   const first = await runtime.execute(commandRequest(user.tg_id, thread.id, [
@@ -241,6 +292,10 @@ try {
     recreatedAfterLoss,
     zipToolTested: true,
     toolContractPassed: true,
+    officeCliPptxSkillReadable: true,
+    officePreviewRendered: Boolean(officePreview),
+    officePreviewBytes: officePreview?.size,
+    officePreviewMediaType: officePreview?.media_type,
     chromiumIntentionallyAbsent: true,
     cpuCount: sandboxInfo.cpuCount,
     memoryMB: sandboxInfo.memoryMB,
@@ -250,6 +305,16 @@ try {
     websiteIdlePauseMinutes: 15,
   }, null, 2)}\n`);
 } finally {
+  await browserRuntime?.dispose().catch(() => undefined);
+  if (!disposableBrowserProfileId && repos && browserUserId !== undefined) {
+    disposableBrowserProfileId = (await repos.browserUseProfiles.get(
+      config.BROWSER_USE_DEPLOYMENT_ID,
+      browserUserId,
+    ).catch(() => undefined))?.profile_id ?? null;
+  }
+  if (disposableBrowserProfileId && isBrowserUseConfigured(config)) {
+    await new BrowserUseClient(config).deleteProfile(disposableBrowserProfileId).catch(() => undefined);
+  }
   await runtime?.dispose();
   if (sandboxId) {
     await Sandbox.kill(sandboxId, {

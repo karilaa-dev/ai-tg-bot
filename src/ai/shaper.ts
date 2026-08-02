@@ -221,26 +221,30 @@ function toolLabel(name: string): string {
       return "🔎 Searching web";
     case "web_extract":
       return "🌐 Reading page";
-    case "camofox_create_tab":
-    case "camofox_navigate":
+    case "browser_open":
+    case "browser_navigate":
       return "🌍 Browsing web";
-    case "camofox_snapshot":
+    case "browser_snapshot":
       return "🧭 Reading browser";
-    case "camofox_click":
-    case "camofox_type":
-    case "camofox_press":
-    case "camofox_scroll":
+    case "browser_click":
+    case "browser_type":
+    case "browser_press":
+    case "browser_scroll":
       return "🖱️ Using browser";
-    case "camofox_screenshot":
+    case "browser_screenshot":
       return "📸 Capturing page";
-    case "camofox_list_downloads":
+    case "browser_list_downloads":
       return "📥 Listing browser downloads";
-    case "camofox_send_file":
+    case "browser_send_file":
       return "📎 Attaching browser download";
-    case "camofox_list_tabs":
+    case "browser_list_tabs":
       return "🗂️ Listing browser tabs";
-    case "camofox_close_tab":
+    case "browser_close_tab":
       return "🧹 Closing browser tab";
+    case "browser_extend_session":
+      return "⏱️ Extending browser session";
+    case "browser_close_session":
+      return "🧹 Closing browser session";
     case "render_office_preview":
       return "🖼️ Previewing Office file";
     case "search_thread":
@@ -281,24 +285,24 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return truncateSubject(stringField(record, "query"), 64);
     case "web_extract":
       return urlsSubject(record);
-    case "camofox_create_tab":
+    case "browser_open":
       return truncateSubject(stringField(record, "url"), 64);
-    case "camofox_navigate":
-      return truncateSubject(
-        stringField(record, "url")
-          ?? [stringField(record, "macro"), stringField(record, "query")].filter(Boolean).join(": "),
-        64,
-      );
-    case "camofox_snapshot":
-    case "camofox_click":
-    case "camofox_type":
-    case "camofox_press":
-    case "camofox_scroll":
-    case "camofox_screenshot":
-    case "camofox_list_downloads":
-    case "camofox_send_file":
-    case "camofox_close_tab":
+    case "browser_navigate":
+      return truncateSubject(stringField(record, "url"), 64);
+    case "browser_snapshot":
+    case "browser_click":
+    case "browser_type":
+    case "browser_press":
+    case "browser_scroll":
+    case "browser_screenshot":
+    case "browser_list_downloads":
+    case "browser_send_file":
+    case "browser_close_tab":
       return truncateSubject(stringField(record, "tab_id"), 64);
+    case "browser_extend_session": {
+      const minutes = numberField(record, "timeout_minutes");
+      return minutes === undefined ? undefined : `${minutes}m`;
+    }
     case "render_office_preview":
       return truncateSubject(stringField(record, "path"), 64);
     case "search_in_file":

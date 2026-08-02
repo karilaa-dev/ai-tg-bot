@@ -31,6 +31,17 @@ python3 -m venv "${tmp_dir}/venv"
 node --version >/dev/null
 npm --version >/dev/null
 officecli --version
+officecli help pptx >/dev/null
+
+pptx_skill=/usr/local/share/officecli/skills/officecli-pptx/SKILL.md
+docx_skill=/usr/local/share/officecli/skills/officecli-docx/SKILL.md
+[[ -r "${pptx_skill}" ]]
+[[ -r "${docx_skill}" ]]
+grep -Fq 'name: officecli-pptx' "${pptx_skill}"
+grep -Fq '## QA (Required)' "${pptx_skill}"
+grep -Fq 'Gate 3 — Visual audit (MANDATORY)' "${pptx_skill}"
+grep -Fq 'name: officecli-docx' "${docx_skill}"
+grep -Fq '## QA (Required)' "${docx_skill}"
 
 magick -size 2x2 xc:red "${tmp_dir}/image.png"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]

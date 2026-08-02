@@ -76,6 +76,15 @@ export interface ThreadSandboxesTable {
   updated_at: number;
 }
 
+export interface BrowserUseProfilesTable {
+  deployment_id: string;
+  user_id: number;
+  provider_user_key: string;
+  profile_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface FileSourcesTable {
   id: number;
   file_id: number;
@@ -152,6 +161,7 @@ export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
 export type ThreadSandboxRow = ThreadSandboxesTable;
+export type BrowserUseProfileRow = BrowserUseProfilesTable;
 export type FileSourceRow = FileSourcesTable;
 export type TelegramFileRefRow = TelegramFileRefsTable;
 export type SandboxFileRestoreStatusRow = SandboxFileRestoreStatusTable;

@@ -83,37 +83,52 @@ describe("renderSystemPrompt", () => {
 
     expect(prompt).toContain("through `bash` to create");
     expect(prompt).toContain("never install or update it");
+    expect(prompt).toContain("/usr/local/share/officecli/skills/officecli-pptx/SKILL.md");
+    expect(prompt).toContain("read");
+    expect(prompt).toContain("completely");
+    expect(prompt).toContain("delivery gates as required");
+    expect(prompt).toContain("make `view issues` clean");
+    expect(prompt).toContain("Overlap, clipping, off-slide elements");
     expect(prompt).not.toContain("render_office_preview");
     expect(prompt).not.toContain("Browserless");
   });
 
-  it("adds per-thread browser and model-only Office QA guidance when Camofox is configured", async () => {
+  it("adds profile-backed Browser Use and model-only Office QA guidance when configured", async () => {
     const prompt = await renderSystemPrompt({
       user: baseUser,
       thread,
       config: loadTestConfig({
-        WEB_EXTRACT_PROVIDER: "camofox",
-        CAMOFOX_URL: "https://browser.example",
-        CAMOFOX_ACCESS_KEY: "secret",
+        BROWSER_USE_API_KEY: "secret",
       }),
     });
 
-    expect(prompt).toContain("`web_extract` loads known URLs through Camofox");
-    expect(prompt).toContain("`camofox_create_tab`");
-    expect(prompt).toContain("For every real-browser action");
-    expect(prompt).toContain("`camofox_navigate`");
-    expect(prompt).toContain("`camofox_click`");
-    expect(prompt).toContain("`camofox_send_file`");
+    expect(prompt).toContain("`web_search` and `web_extract` use Tavily");
+    expect(prompt).toContain("`browser_open`");
+    expect(prompt).toContain("`browser_navigate`");
+    expect(prompt).toContain("`browser_click`");
+    expect(prompt).toContain("`browser_send_file`");
     expect(prompt).toContain("Never use `bash`, E2B, Chrome/Chromium");
-    expect(prompt).toContain("Do not use `create_file`");
-    expect(prompt).toContain("isolated to this Telegram thread");
-    expect(prompt).toContain("`camofox_screenshot`");
-    expect(prompt).toContain("Keep full_page=false");
-    expect(prompt).toContain("set delivery=document");
-    expect(prompt).toContain("never use `bash`");
-    expect(prompt).toContain("`camofox_send_file`");
-    expect(prompt).toContain("does not use E2B");
+    expect(prompt).toContain("shared across all Telegram threads");
+    expect(prompt).toContain("Tabs remain private");
+    expect(prompt).toContain("`browser_screenshot`");
+    expect(prompt).toContain("full_page=false");
+    expect(prompt).toContain("delivery=document");
+    expect(prompt).toContain("`browser_extend_session`");
+    expect(prompt).toContain("`browser_close_tab`");
+    expect(prompt).toContain("`browser_close_session`");
+    expect(prompt).toContain("Before giving the final answer");
+    expect(prompt).toContain("you MUST call `browser_close_session`");
+    expect(prompt).toContain("default after delivering screenshots or files");
+    expect(prompt).toContain("possible future user request is not a reason");
+    expect(prompt).toContain("final browser tool call");
+    expect(prompt).toContain("session_busy");
+    expect(prompt).toContain("delivered directly without E2B");
     expect(prompt).toContain("`render_office_preview`");
     expect(prompt).toContain("not sent to Telegram");
+    expect(prompt).toContain("once for every slide");
+    expect(prompt).toContain("overlap, clipping, off-slide objects");
+    expect(prompt).toContain("at most three fix-and-preview cycles");
+    expect(prompt).toContain("Do not call `create_file`");
+    expect(prompt).toContain("not visually verified");
   });
 });

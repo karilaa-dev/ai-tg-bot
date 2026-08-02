@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeOfficeHtml } from "../../src/camofox/html.js";
+import { sanitizeOfficeHtml } from "../../src/browserUse/html.js";
 
-describe("Office HTML sanitization", () => {
+describe("Browser Use Office HTML sanitization", () => {
   it("removes active and remote content while retaining inline images", () => {
     const sanitized = sanitizeOfficeHtml([
       "<!doctype html><html><head>",

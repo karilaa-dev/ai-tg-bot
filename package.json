@@ -12,7 +12,7 @@
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
     "live:e2b-check": "tsx scripts/live-e2b-check.ts",
-    "live:camofox-check": "tsx scripts/live-camofox-check.ts",
+    "live:browser-use-check": "tsx scripts/live-browser-use-check.ts",
     "e2b:template:build": "tsx e2b-template/build.ts",
     "e2b:template:check": "tsx e2b-template/check.ts",
     "e2b:sandboxes:prune-desktop": "tsx scripts/prune-e2b-desktop-sandboxes.ts"
@@ -38,6 +38,7 @@
     "grammy": "^1.45.1",
     "parse5": "8.0.1",
     "pg": "^8.22.0",
+    "playwright-core": "1.62.1",
     "undici": "^8.9.0",
     "unpdf": "^1.8.0",
     "zod": "^4.4.3"

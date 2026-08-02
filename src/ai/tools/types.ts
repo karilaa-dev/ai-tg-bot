@@ -9,6 +9,7 @@ import type { ResolvedChatFile } from "../../files/source.js";
 import type { CommandRuntime } from "../../sandbox/types.js";
 import type { PublishedWebsite } from "../../sandbox/types.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
+import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -19,6 +20,7 @@ export interface ToolBuildInput {
   logger?: Logger;
   embedder?: TextEmbedder;
   commandRuntime?: CommandRuntime;
+  browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   selectContextFiles?: (fileIds: number[]) => void;
   selectDurableContextFiles?: (fileIds: number[]) => void;

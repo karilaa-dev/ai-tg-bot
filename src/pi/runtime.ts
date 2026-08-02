@@ -35,6 +35,8 @@ import {
   THREAD_TITLE_SYSTEM_PROMPT,
   type ThreadTitlePromptInput,
 } from "./threadTitle.js";
+import { isBrowserUseConfigured } from "../config.js";
+import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -68,6 +70,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
   private readonly runtimes = new Map<number, PiThreadRuntime>();
+  private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
 
   constructor(private readonly input: {
@@ -80,6 +83,13 @@ export class PiRuntimeManager implements PiRuntimeService {
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
+    if (isBrowserUseConfigured(input.config)) {
+      this.browserRuntime = new BrowserUseRuntimeManager({
+        config: input.config,
+        repos: input.repos,
+        logger: input.logger,
+      });
+    }
   }
 
   async initialize(): Promise<void> {
@@ -123,6 +133,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     });
     const bridge = new ThreadBridge({
       ...this.input,
+      browserRuntime: this.browserRuntime,
       user,
       thread,
       modelRegistry: this.modelRegistry,
@@ -231,10 +242,11 @@ export class PiRuntimeManager implements PiRuntimeService {
 
   async dispose(): Promise<void> {
     for (const runtime of this.runtimes.values()) {
-      runtime.bridge.endTurn();
+      await runtime.bridge.endTurn();
       runtime.session.dispose();
     }
     this.runtimes.clear();
+    await this.browserRuntime?.dispose();
   }
 
   private async runIsolatedHelper(input: {
@@ -313,7 +325,7 @@ export class PiRuntimeManager implements PiRuntimeService {
         .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt);
       const victim = candidates[0];
       if (!victim) return;
-      victim[1].bridge.endTurn();
+      await victim[1].bridge.endTurn();
       victim[1].session.dispose();
       this.runtimes.delete(victim[0]);
     }
@@ -339,6 +351,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   private readonly contextFileIds = new Set<number>();
   private readonly durableContextFileIds = new Set<number>();
   private commandActivityLease?: SandboxActivityLease;
+  private turnActive = false;
+  private readonly browserRuntime?: BrowserUseRuntimeManager;
 
   constructor(input: {
     config: AppConfig;
@@ -351,6 +365,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     thread: ThreadRow;
     modelRegistry: ModelRegistry;
     providerRouter: PiProviderRouter;
+    browserRuntime?: BrowserUseRuntimeManager;
   }) {
     Object.assign(this, input);
     this.user = input.user;
@@ -363,10 +378,13 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.commandRuntime = input.commandRuntime;
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
+    this.browserRuntime = input.browserRuntime;
   }
 
-  beginTurn(input: PiTurnTransport): void {
-    this.endTurn();
+  async beginTurn(input: PiTurnTransport): Promise<void> {
+    if (this.turnActive) await this.endTurn();
+    await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
+    this.turnActive = true;
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
@@ -382,10 +400,13 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
   }
 
-  endTurn(): void {
+  async endTurn(): Promise<void> {
     const lease = this.commandActivityLease;
     this.commandActivityLease = undefined;
     lease?.release();
+    if (!this.turnActive) return;
+    this.turnActive = false;
+    await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
   }
 
   buildInput(): ToolBuildInput {
@@ -398,6 +419,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       logger: this.logger,
       embedder: this.embedder,
       commandRuntime: this.commandRuntime,
+      browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),

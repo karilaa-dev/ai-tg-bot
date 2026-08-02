@@ -1,14 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { downloadPublicBrowserFile } from "../../src/camofox/download.js";
+import { describe, expect, it, vi } from "vitest";
+import { downloadPublicBrowserFile } from "../../src/browserUse/download.js";
 
-describe("Camofox browser downloads", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("blocks private network download targets before fetching", async () => {
+describe("Browser Use direct downloads", () => {
+  it("blocks private network targets before fetching", async () => {
     const fetchMock = vi.fn();
-    await expect(downloadPublicBrowserFile("http://127.0.0.1/private", 1_000, undefined, fetchMock)).rejects.toThrow(
-      "local or private hosts",
-    );
+    await expect(downloadPublicBrowserFile("http://127.0.0.1/private", 1_000, undefined, fetchMock))
+      .rejects.toThrow("local or private hosts");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -22,9 +19,7 @@ describe("Camofox browser downloads", () => {
       1_000,
       undefined,
       fetchMock,
-    )).rejects.toThrow(
-      "local or private hosts",
-    );
+    )).rejects.toThrow("local or private hosts");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -32,7 +27,6 @@ describe("Camofox browser downloads", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(Buffer.from("file-data"), {
       headers: { "content-type": "application/octet-stream", "content-length": "9" },
     }));
-
     await expect(downloadPublicBrowserFile(
       "https://93.184.216.34/file.bin",
       1_000,

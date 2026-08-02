@@ -19,20 +19,22 @@ const BASE_BOT_TOOL_NAMES = [
   "web_extract",
 ] as const;
 
-const CAMOFOX_TOOL_NAMES = [
+const BROWSER_TOOL_NAMES = [
   "render_office_preview",
-  "camofox_create_tab",
-  "camofox_list_tabs",
-  "camofox_navigate",
-  "camofox_snapshot",
-  "camofox_click",
-  "camofox_type",
-  "camofox_press",
-  "camofox_scroll",
-  "camofox_screenshot",
-  "camofox_list_downloads",
-  "camofox_send_file",
-  "camofox_close_tab",
+  "browser_open",
+  "browser_list_tabs",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_press",
+  "browser_scroll",
+  "browser_screenshot",
+  "browser_list_downloads",
+  "browser_send_file",
+  "browser_close_tab",
+  "browser_extend_session",
+  "browser_close_session",
 ] as const;
 
 export interface PiToolBridge {
@@ -45,7 +47,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
   const initial = buildToolRegistry(initialInput);
   const names = [
     ...BASE_BOT_TOOL_NAMES,
-    ...CAMOFOX_TOOL_NAMES.filter((name) => Boolean(initial[name])),
+    ...BROWSER_TOOL_NAMES.filter((name) => Boolean(initial[name])),
   ];
   return names.map((name) => {
     const definition = initial[name];
@@ -60,7 +62,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
         || name === "create_file"
         || name === "publish_website"
         || name === "render_office_preview"
-        || name.startsWith("camofox_")
+        || name.startsWith("browser_")
         ? "sequential"
         : undefined,
       async execute(toolCallId, rawInput, signal) {
@@ -138,7 +140,7 @@ function toolLabel(name: string): string {
 
 function toolSnippet(name: string, config: AppConfig): string {
   switch (name) {
-    case "bash": return "Run Bash in the current thread's persistent custom E2B Base toolbox. Logical / is /home/user/workspace. Telegram attachments are automatically synchronized read-only at /home/user/telegram-files; copy them into the workspace before editing. OfficeCLI, ImageMagick, archive tools, compilers, and common CLI utilities are preinstalled. Chromium is intentionally absent because browser work uses Camofox. Nothing is shared with other sandboxes, and missing tools are not installed automatically.";
+    case "bash": return "Run Bash in the current thread's persistent custom E2B Base toolbox. Logical / is /home/user/workspace. Telegram attachments are automatically synchronized read-only at /home/user/telegram-files; copy them into the workspace before editing. OfficeCLI, ImageMagick, archive tools, compilers, and common CLI utilities are preinstalled. Chromium is intentionally absent because browser work uses Browser Use Cloud. Nothing is shared with other sandboxes, and missing tools are not installed automatically.";
     case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
     case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
     case "search_in_file": return "Search indexed file chunks semantically and lexically.";
@@ -146,22 +148,22 @@ function toolSnippet(name: string, config: AppConfig): string {
     case "create_file": return "Attach an existing sandbox file through the active chat.";
     case "publish_website": return "Publish an already-running E2B HTTP port as a public HTTPS URL for 15 minutes after the final response.";
     case "web_search": return "Search the web through Tavily.";
-    case "web_extract": return config.WEB_EXTRACT_PROVIDER === "camofox"
-      ? "Load known web page URLs through isolated, disposable Camofox sessions. Accessibility text is returned; Tavily-specific query, depth, and format options are accepted only for compatibility."
-      : "Extract content from web pages through Tavily.";
-    case "render_office_preview": return "Render an OfficeCLI-generated document page through the bot-side Camofox service for model-only visual QA. The Camofox credential is never available inside bash.";
-    case "camofox_create_tab": return "Open a per-thread Camoufox browser tab. Keep its tab_id for later calls and close it when the browsing task is complete.";
-    case "camofox_snapshot": return "Read the current page through accessibility refs and an optional screenshot. Re-snapshot after navigation before reusing refs.";
-    case "camofox_navigate": return "Navigate an existing per-thread Camoufox tab.";
-    case "camofox_click": return "Click a Camoufox element by a ref from the latest snapshot or by CSS selector.";
-    case "camofox_type": return "Type into a Camoufox element by ref or CSS selector.";
-    case "camofox_press": return "Press a key in a Camoufox tab.";
-    case "camofox_scroll": return "Scroll a Camoufox tab.";
-    case "camofox_screenshot": return "Capture Camofox's regular 1920-pixel desktop surface with an adaptive, content-aware height and attach it directly to Telegram. Full-page and document delivery require explicit user wording; never route browser screenshots through E2B.";
-    case "camofox_list_downloads": return "List downloads recorded by a Camoufox tab without exposing their source URLs.";
-    case "camofox_send_file": return "Attach a public HTTP(S) file selected from a browser download, page-link ref, or URL directly to Telegram without routing it through E2B.";
-    case "camofox_list_tabs": return "List Camoufox tabs owned by this Telegram thread.";
-    case "camofox_close_tab": return "Close a Camoufox tab owned by this Telegram thread.";
+    case "web_extract": return "Perform one stateless readable-page extraction through Tavily. Use browser tools when continued or visual interaction is needed.";
+    case "render_office_preview": return "Render one OfficeCLI-generated page or slide through Browser Use Cloud for model-only visual QA. Preview and inspect every slide before delivery; re-preview changed slides after fixes. Browser credentials are never available inside bash.";
+    case "browser_open": return "Open a thread-owned tab in the user's profile-backed Browser Use Cloud session. Request longer than five minutes only for clearly long tasks.";
+    case "browser_snapshot": return "Read the current page through semantic text, fresh element refs, and an optional model-only screenshot. Re-snapshot after navigation.";
+    case "browser_navigate": return "Navigate an existing thread-owned Browser Use tab.";
+    case "browser_click": return "Click a Browser Use element by latest-snapshot ref or CSS selector.";
+    case "browser_type": return "Type into a Browser Use element by ref or CSS selector.";
+    case "browser_press": return "Press a key in a Browser Use tab.";
+    case "browser_scroll": return "Scroll a Browser Use tab.";
+    case "browser_screenshot": return "Capture a regular desktop screenshot and attach it directly to Telegram. Full-page and document delivery require explicit user wording; never route it through E2B. If this completes the browser task, call browser_close_session before the final answer.";
+    case "browser_list_downloads": return "List completed downloads recorded for a Browser Use tab without exposing private URLs.";
+    case "browser_send_file": return "Attach a browser download, latest-snapshot link, or public HTTP(S) URL directly to Telegram without E2B. If this completes the browser task, call browser_close_session before the final answer.";
+    case "browser_list_tabs": return "List tabs owned by this thread; cookies remain shared across the user's threads.";
+    case "browser_close_tab": return "Close one tab only when the current task still needs other browser tabs; otherwise close the whole session.";
+    case "browser_extend_session": return "Gracefully roll the user browser into a longer session with the same profile, URLs, tab IDs, and scroll positions.";
+    case "browser_close_session": return "Default final browser action: stop the entire user browser before answering once the current browser task is complete, preserving profile cookies while closing every tab and ending billing.";
     default: return name;
   }
 }

@@ -7,10 +7,6 @@ export const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", 
 
 const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.url().optional());
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
-const CamofoxUrlSchema = z.preprocess(
-  normalizeOptionalUrl,
-  z.url().optional().superRefine(validateCamofoxUrl),
-);
 
 const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
@@ -31,11 +27,12 @@ const ConfigSchema = z.object({
     .string()
     .default(DEFAULT_OPENROUTER_EMBEDDING_MODEL),
   TAVILY_API_KEY: z.string().min(1),
-  WEB_EXTRACT_PROVIDER: z.enum(["tavily", "camofox"]).default("tavily"),
-  CAMOFOX_URL: CamofoxUrlSchema,
-  CAMOFOX_ACCESS_KEY: OptionalStringSchema,
-  CAMOFOX_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  CAMOFOX_DEPLOYMENT_ID: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/).default("ai-tg-bot"),
+  BROWSER_USE_API_KEY: OptionalStringSchema,
+  BROWSER_USE_DEPLOYMENT_ID: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/).default("ai-tg-bot"),
+  BROWSER_USE_DEFAULT_TIMEOUT_MINUTES: z.coerce.number().int().min(5).max(240).default(5),
+  BROWSER_USE_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  BROWSER_USE_API_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  BROWSER_USE_NAVIGATION_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
   DOCLING_URL: OptionalUrlSchema,
   DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
@@ -50,7 +47,7 @@ const ConfigSchema = z.object({
   DRAFT_UPDATE_MS: z.coerce.number().int().min(0).default(0),
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
-}).superRefine(validateCamofoxConfig);
+});
 
 function normalizeOptionalUrl(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -64,59 +61,14 @@ function normalizeOptionalString(value: unknown): unknown {
   return normalized === "" ? undefined : normalized;
 }
 
-function validateCamofoxUrl(value: string | undefined, context: z.RefinementCtx): void {
-  if (!value) return;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    context.addIssue({ code: "custom", message: "must be a valid URL" });
-    return;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    context.addIssue({ code: "custom", message: "must use http or https" });
-  }
-  if (url.username || url.password) {
-    context.addIssue({ code: "custom", message: "must not contain embedded credentials" });
-  }
-  if (url.search || url.hash) {
-    context.addIssue({ code: "custom", message: "must not contain a query or fragment" });
-  }
-  if (url.pathname !== "/") {
-    context.addIssue({ code: "custom", message: "must contain only the server origin" });
-  }
-}
-
-function validateCamofoxConfig(value: {
-  WEB_EXTRACT_PROVIDER: "tavily" | "camofox";
-  CAMOFOX_URL?: string;
-  CAMOFOX_ACCESS_KEY?: string;
-}, context: z.RefinementCtx): void {
-  if (Boolean(value.CAMOFOX_URL) !== Boolean(value.CAMOFOX_ACCESS_KEY)) {
-    context.addIssue({
-      code: "custom",
-      message: "CAMOFOX_URL and CAMOFOX_ACCESS_KEY must be configured together",
-      path: [value.CAMOFOX_URL ? "CAMOFOX_ACCESS_KEY" : "CAMOFOX_URL"],
-    });
-  }
-  if (value.WEB_EXTRACT_PROVIDER === "camofox" && (!value.CAMOFOX_URL || !value.CAMOFOX_ACCESS_KEY)) {
-    context.addIssue({
-      code: "custom",
-      message: "WEB_EXTRACT_PROVIDER=camofox requires CAMOFOX_URL and CAMOFOX_ACCESS_KEY",
-      path: ["WEB_EXTRACT_PROVIDER"],
-    });
-  }
-}
-
 export type AppConfig = z.infer<typeof ConfigSchema>;
 
-export function isCamofoxConfigured(
-  config: Pick<AppConfig, "CAMOFOX_URL" | "CAMOFOX_ACCESS_KEY">,
-): config is Pick<AppConfig, "CAMOFOX_URL" | "CAMOFOX_ACCESS_KEY"> & {
-  CAMOFOX_URL: string;
-  CAMOFOX_ACCESS_KEY: string;
+export function isBrowserUseConfigured(
+  config: Pick<AppConfig, "BROWSER_USE_API_KEY">,
+): config is Pick<AppConfig, "BROWSER_USE_API_KEY"> & {
+  BROWSER_USE_API_KEY: string;
 } {
-  return Boolean(config.CAMOFOX_URL && config.CAMOFOX_ACCESS_KEY);
+  return Boolean(config.BROWSER_USE_API_KEY);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {

@@ -1,13 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 
-const camofox = vi.hoisted(() => ({
-  render: vi.fn(),
-}));
-
-vi.mock("../../src/camofox/renderHtml.js", () => ({
-  renderHtmlWithCamofox: camofox.render,
-}));
-
 import { createRenderOfficePreviewTool } from "../../src/ai/tools/renderOfficePreview.js";
 import { loadTestConfig } from "../../src/config.js";
 import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from "../../src/sandbox/types.js";
@@ -15,22 +7,24 @@ import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
 
 describe("render_office_preview", () => {
+  it("instructs the model to visually inspect every presentation slide", () => {
+    const tool = createRenderOfficePreviewTool(buildInput(fakeRuntime("not used")));
+
+    expect(tool.description).toContain("once for every slide");
+    expect(tool.description).toContain("overlap, clipping, wrapping, contrast, spacing, and alignment");
+  });
+
   it("renders sanitized OfficeCLI HTML as a model-only image and cleans up", async () => {
     const runtime = fakeRuntime("<!doctype html><html><body onload='steal()'><script>steal()</script><h1>Slide</h1></body></html>");
-    camofox.render.mockResolvedValue({ bytes: PNG, mediaType: "image/png" });
-    const tool = createRenderOfficePreviewTool(buildInput(runtime));
+    const browserRuntime = fakeBrowserRuntime();
+    const tool = createRenderOfficePreviewTool(buildInput(runtime, browserRuntime));
 
     const output = await tool.execute({ path: "/deck.pptx", page: 2 });
     const model = await tool.toModelOutput!({ toolCallId: "preview", input: { path: "/deck.pptx", page: 2 }, output });
     const details = await tool.toToolDetails!({ toolCallId: "preview", input: { path: "/deck.pptx", page: 2 }, output });
 
     expect(output).toMatchObject({ rendered: true, path: "/deck.pptx", page: 2, size: PNG.length });
-    expect(camofox.render).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.stringMatching(/^ai-tg-bot-[a-f0-9]{40}$/),
-      expect.not.stringContaining("steal"),
-      undefined,
-    );
+    expect(browserRuntime.renderOfficeHtml).toHaveBeenCalledWith(expect.not.stringContaining("steal"), undefined);
     expect(model).toMatchObject({ type: "content" });
     expect(details).not.toHaveProperty("image_base64");
     expect(runtime.execute).toHaveBeenCalledTimes(2);
@@ -47,11 +41,10 @@ describe("render_office_preview", () => {
   });
 });
 
-function buildInput(runtime: ReturnType<typeof fakeRuntime>) {
+function buildInput(runtime: ReturnType<typeof fakeRuntime>, browserRuntime = fakeBrowserRuntime()) {
   return {
     config: loadTestConfig({
-      CAMOFOX_URL: "https://browser.example",
-      CAMOFOX_ACCESS_KEY: "secret",
+      BROWSER_USE_API_KEY: "secret",
     }),
     repos: {
       threads: { chain: async (thread: unknown) => [thread] },
@@ -66,7 +59,18 @@ function buildInput(runtime: ReturnType<typeof fakeRuntime>) {
     user: { tg_id: 9 },
     thread: { id: 10 },
     commandRuntime: runtime,
+    browserRuntime,
   } as never;
+}
+
+function fakeBrowserRuntime() {
+  return {
+    renderOfficeHtml: vi.fn(async () => ({
+      bytes: PNG,
+      mediaType: "image/png",
+      session_remaining_seconds: 240,
+    })),
+  };
 }
 
 function fakeRuntime(html: string) {

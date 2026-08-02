@@ -77,7 +77,7 @@ export const runTurn: TurnRunner = async (input) => {
     const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
     const runtime = await input.pi.runtime(input.thread, input.user);
     activeBridge = runtime.bridge;
-    runtime.bridge.beginTurn({
+    await runtime.bridge.beginTurn({
       api: input.api,
       chatId: input.chatId,
       messageThreadId: input.messageThreadId,
@@ -91,6 +91,7 @@ export const runTurn: TurnRunner = async (input) => {
       repos: input.repos,
       user: input.user,
       thread: input.thread,
+      config: input.config,
     });
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("Pi turn starting", {
@@ -209,8 +210,16 @@ export const runTurn: TurnRunner = async (input) => {
     await streamer?.finish();
     await sendFinal(input, "", `${input.t("error-generic")}\n\n<details><summary>Error</summary>\n\n${String(err)}\n\n</details>`);
   } finally {
-    activeBridge?.endTurn();
-    stop();
+    try {
+      await activeBridge?.endTurn();
+    } catch (err) {
+      input.logger.error("Pi bridge cleanup failed", {
+        threadId: input.thread.id,
+        err: String(err),
+      });
+    } finally {
+      stop();
+    }
   }
 };
 
@@ -1607,16 +1616,23 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
     return record.rendered === true ? formatCount(1, "preview") : "done";
   }
 
-  if (toolName === "camofox_list_tabs" && record && Array.isArray(record.tabs)) {
+  if (toolName === "browser_list_tabs" && record && Array.isArray(record.tabs)) {
     return formatCount(record.tabs.length, "tab");
   }
 
-  if (toolName === "camofox_list_downloads" && record && Array.isArray(record.downloads)) {
+  if (toolName === "browser_list_downloads" && record && Array.isArray(record.downloads)) {
     return formatCount(record.downloads.length, "file");
   }
 
-  if ((toolName === "camofox_screenshot" || toolName === "camofox_send_file") && record?.attached === true) {
+  if ((toolName === "browser_screenshot" || toolName === "browser_send_file") && record?.attached === true) {
     return formatCount(1, "file");
+  }
+
+  if (toolName === "browser_close_session" && record) {
+    if (record.already_closed === true) return "already closed";
+    if (record.closed === true && typeof record.tabs_closed === "number") {
+      return formatCount(record.tabs_closed, "tab");
+    }
   }
 
   const results = Array.isArray(record?.results) ? record.results : undefined;

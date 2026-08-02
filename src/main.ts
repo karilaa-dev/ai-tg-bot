@@ -1,8 +1,8 @@
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { isCamofoxConfigured, loadConfig, type AppConfig } from "./config.js";
-import { checkCamofox } from "./camofox/client.js";
+import { isBrowserUseConfigured, loadConfig, type AppConfig } from "./config.js";
+import { createBrowserUseClient } from "./browserUse/client.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { checkDocling } from "./files/docling.js";
@@ -31,7 +31,7 @@ try {
   logger.debug("initializing database");
   await db.initialize();
   await checkConfiguredDocling(config, logger);
-  await checkConfiguredCamofox(config, logger);
+  await checkConfiguredBrowserUse(config, logger);
   const repos = createRepos(db.db, db.search);
   const embedder = createOpenRouterTextEmbedder(config, logger);
   sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
@@ -78,22 +78,20 @@ try {
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
 }
 
-async function checkConfiguredCamofox(
-  config: Pick<AppConfig, "CAMOFOX_URL" | "CAMOFOX_ACCESS_KEY" | "CAMOFOX_TIMEOUT_MS">,
+async function checkConfiguredBrowserUse(
+  config: Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_API_TIMEOUT_MS">,
   logger: Logger,
 ): Promise<void> {
-  if (!isCamofoxConfigured(config)) {
-    logger.info("Camofox disabled; interactive browser and Office visual previews are unavailable");
+  if (!isBrowserUseConfigured(config)) {
+    logger.info("Browser Use Cloud disabled; interactive browser and Office visual previews are unavailable");
     return;
   }
-  logger.debug("checking Camofox health");
+  logger.debug("checking Browser Use Cloud authentication");
   try {
-    const health = await checkCamofox(config);
-    logger.info("Camofox healthcheck passed", {
-      engine: typeof health.engine === "string" ? health.engine : undefined,
-    });
+    const active = await createBrowserUseClient(config).listActiveBrowsers();
+    logger.info("Browser Use Cloud authentication passed", { activeBrowsers: active.totalItems });
   } catch (err) {
-    logger.warn("Camofox healthcheck failed; browser-backed tools may be unavailable", {
+    logger.warn("Browser Use Cloud authentication failed; browser-backed tools may be unavailable", {
       err: String(err),
     });
   }

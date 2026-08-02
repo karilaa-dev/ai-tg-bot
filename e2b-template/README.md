@@ -1,6 +1,6 @@
 # ai-tg-bot E2B toolbox
 
-This directory defines the reusable, private `ai-tg-bot-tools` E2B template. It is based on E2B Base, uses 2 vCPU and 2 GiB RAM, and contains the command-line toolbox used by sandbox-backed agent work. Browser work remains in Camofox; this template intentionally has no Chromium or browser automation bundle.
+This directory defines the reusable, private `ai-tg-bot-tools` E2B template. It is based on E2B Base, uses 2 vCPU and 2 GiB RAM, and contains the command-line toolbox used by sandbox-backed agent work. Browser work remains in Browser Use Cloud; this template intentionally has no Chromium or browser automation bundle.
 
 ## Build and promote
 

@@ -8,8 +8,8 @@ import { createBashTool } from "./bash.js";
 import { createWebSearchTool } from "./webSearch.js";
 import { createWebExtractTool } from "./webExtract.js";
 import { createPublishWebsiteTool } from "./publishWebsite.js";
-import { createCamofoxTools } from "./camofox.js";
-import { isCamofoxConfigured } from "../../config.js";
+import { createBrowserTools } from "./browser.js";
+import { isBrowserUseConfigured } from "../../config.js";
 import { createRenderOfficePreviewTool } from "./renderOfficePreview.js";
 import type { BotToolRegistry, ToolBuildInput } from "./types.js";
 
@@ -33,9 +33,9 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     bash: createBashTool(input),
     web_search: createWebSearchTool(input),
     web_extract: createWebExtractTool(input),
-    ...(isCamofoxConfigured(input.config) ? {
+    ...(isBrowserUseConfigured(input.config) && input.browserRuntime ? {
       render_office_preview: createRenderOfficePreviewTool(input),
-      ...createCamofoxTools(input),
+      ...createBrowserTools(input),
     } : {}),
   };
 }

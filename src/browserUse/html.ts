@@ -5,33 +5,11 @@ type HtmlParentNode = DefaultTreeAdapterMap["parentNode"];
 type HtmlElement = DefaultTreeAdapterMap["element"];
 
 const ACTIVE_HTML_ELEMENTS = new Set([
-  "applet",
-  "base",
-  "embed",
-  "frame",
-  "frameset",
-  "iframe",
-  "object",
-  "script",
+  "applet", "base", "embed", "frame", "frameset", "iframe", "object", "script",
 ]);
 const RESOURCE_URL_ATTRIBUTES = new Set([
-  "action",
-  "archive",
-  "background",
-  "cite",
-  "codebase",
-  "data",
-  "formaction",
-  "href",
-  "longdesc",
-  "lowsrc",
-  "manifest",
-  "ping",
-  "poster",
-  "profile",
-  "src",
-  "usemap",
-  "xlink:href",
+  "action", "archive", "background", "cite", "codebase", "data", "formaction", "href",
+  "longdesc", "lowsrc", "manifest", "ping", "poster", "profile", "src", "usemap", "xlink:href",
 ]);
 const SAFE_INLINE_RESOURCE_PATTERN = /^(?:#[^\s]*|data:image\/(?:avif|gif|jpeg|png|webp)(?:;[^,]*)?,)/i;
 
@@ -66,9 +44,7 @@ function isHtmlElement(node: HtmlNode): node is HtmlElement {
 function isActiveElement(element: HtmlElement): boolean {
   if (ACTIVE_HTML_ELEMENTS.has(element.tagName)) return true;
   if (element.tagName === "style") {
-    return element.childNodes.some((child) =>
-      "value" in child && containsCssResourceLoad(child.value)
-    );
+    return element.childNodes.some((child) => "value" in child && containsCssResourceLoad(child.value));
   }
   if (element.tagName !== "meta") return false;
   return element.attrs.some((attribute) =>

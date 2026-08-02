@@ -236,8 +236,9 @@ describe("StreamShaper", () => {
     s.onToolCall("generate_image", { prompt: "small red square", reference_file_ids: [9] });
     s.onToolCall("create_file", { path: "/report.txt", name: "report.txt" });
     s.onToolCall("bash", { script: "printf hello" });
-    s.onToolCall("camofox_create_tab", { url: "https://example.com" });
-    s.onToolCall("camofox_snapshot", { tab_id: "tab-1" });
+    s.onToolCall("browser_open", { url: "https://example.com" });
+    s.onToolCall("browser_snapshot", { tab_id: "tab-1" });
+    s.onToolCall("browser_close_session", {});
     s.onToolCall("render_office_preview", { path: "/deck.pptx", page: 1 });
     const status = s.toolStatusMd();
 
@@ -252,6 +253,7 @@ describe("StreamShaper", () => {
     expect(status).toContain("🐚 Running bash <code>printf hello</code>");
     expect(status).toContain("🌍 Browsing web <code>https://example.com</code>");
     expect(status).toContain("🧭 Reading browser <code>tab-1</code>");
+    expect(status).toContain("🧹 Closing browser session");
     expect(status).toContain("🖼️ Previewing Office file <code>/deck.pptx</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
@@ -280,6 +282,19 @@ describe("StreamShaper", () => {
       toolCallCount: 1,
       toolCounts: [{ label: "🖼️ Generating image", count: 1 }],
     });
+  });
+
+  it("summarizes browser session closure without exposing tab URLs", () => {
+    const s = new StreamShaper();
+    handleStreamPart(s, { type: "tool-call", toolName: "browser_close_session", input: {} });
+    handleStreamPart(s, {
+      type: "tool-result",
+      toolName: "browser_close_session",
+      output: { closed: true, tabs_closed: 4, profile_preserved: true },
+    });
+
+    expect(s.thinkingMd()).toContain("🧹 Closing browser session (4 tabs)");
+    expect(s.thinkingMd()).not.toContain("http");
   });
 
   it("summarizes bash results with exit status and timeout", () => {

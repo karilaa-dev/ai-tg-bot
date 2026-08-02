@@ -9,6 +9,9 @@ import {
   IMAGEMAGICK_SOURCE_SHA256,
   OFFICECLI_AMD64_SHA256,
   OFFICECLI_ARM64_SHA256,
+  OFFICECLI_DOCX_SKILL_SHA256,
+  OFFICECLI_PPTX_SKILL_SHA256,
+  OFFICECLI_SOURCE_REVISION,
   OFFICECLI_VERSION,
   createE2BToolboxTemplate,
 } from "../../e2b-template/template.js";
@@ -31,8 +34,11 @@ describe("E2B toolbox template definition", () => {
 
   it("pins OfficeCLI and ImageMagick supply-chain inputs", () => {
     expect(OFFICECLI_VERSION).toBe("1.0.142");
+    expect(OFFICECLI_SOURCE_REVISION).toMatch(/^[a-f0-9]{40}$/);
     expect(OFFICECLI_AMD64_SHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(OFFICECLI_ARM64_SHA256).toMatch(/^[a-f0-9]{64}$/);
+    expect(OFFICECLI_DOCX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
+    expect(OFFICECLI_PPTX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(IMAGEMAGICK_COMMIT).toMatch(/^[a-f0-9]{40}$/);
     expect(IMAGEMAGICK_SOURCE_SHA256).toMatch(/^[a-f0-9]{64}$/);
   });

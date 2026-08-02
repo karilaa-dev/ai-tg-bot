@@ -17,7 +17,7 @@ E2B documents the relevant behavior in [Sandbox lifecycle](https://e2b.dev/docs/
 
 ## Custom template and tools
 
-`E2B_TEMPLATE=ai-tg-bot-tools:production` selects the reusable private template defined in [`e2b-template`](e2b-template/README.md). It is based on E2B Base and built explicitly with 2 vCPU and 2 GiB RAM; bot startup and sandbox creation never install or rebuild it. The toolbox includes OfficeCLI, ImageMagick 7, ZIP and other archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common shell/search/network diagnostics. Chromium and browser automation bundles are intentionally absent because browser work is provided by Camofox.
+`E2B_TEMPLATE=ai-tg-bot-tools:production` selects the reusable private template defined in [`e2b-template`](e2b-template/README.md). It is based on E2B Base and built explicitly with 2 vCPU and 2 GiB RAM; bot startup and sandbox creation never install or rebuild it. The toolbox includes OfficeCLI, ImageMagick 7, ZIP and other archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common shell/search/network diagnostics. Chromium and browser automation bundles are intentionally absent because browser work is provided by Browser Use Cloud.
 
 Build and validate a version, then atomically promote it to `production`:
 
@@ -39,7 +39,7 @@ Shared Telegram files are downloaded with the Bot API and written into the
 thread sandbox through E2B's SDK. Files created in the sandbox are read through
 the SDK and sent to Telegram by the bot.
 
-OfficeCLI is pinned in the toolbox and available through `bash`. When Camofox is configured, the bot renders OfficeCLI's static HTML in an isolated disposable browser session and returns a model-only PNG for visual QA. The preview is not sent to Telegram, and the bot does not install missing tools.
+OfficeCLI is pinned in the toolbox and available through `bash`. When Browser Use Cloud is configured, OfficeCLI still generates static HTML inside E2B, but the bot sanitizes that HTML and renders it in a cookie-isolated Browser Use context. The resulting PNG is model-only visual QA; it is not sent to Telegram, and the bot does not install missing tools.
 
 ## Files and retrieval
 
@@ -55,7 +55,7 @@ OfficeCLI is pinned in the toolbox and available through `bash`. When Camofox is
 - E2B API key
 - OpenRouter API key
 - Tavily API key
-- Optional authenticated Camofox server for interactive browsing and Office visual QA
+- Optional Browser Use Cloud API key for interactive browsing and Office visual QA
 - Optional Codex OAuth login through Pi
 - Optional external Docling service
 
@@ -103,23 +103,26 @@ Use a distinct `E2B_DEPLOYMENT_ID` for each deployment sharing an E2B account. D
 
 The bot creates secured sandboxes with public port traffic and internet access enabled, timeout action `pause`, memory preservation enabled, and automatic resume disabled.
 
-## Camofox configuration
+## Browser Use Cloud configuration
 
 ```dotenv
-WEB_EXTRACT_PROVIDER=camofox
-CAMOFOX_URL=http://camofox.example:9377
-CAMOFOX_ACCESS_KEY=<secret>
-CAMOFOX_TIMEOUT_MS=30000
-CAMOFOX_DEPLOYMENT_ID=ai-tg-bot
+BROWSER_USE_API_KEY=<secret>
+BROWSER_USE_DEPLOYMENT_ID=ai-tg-bot
+BROWSER_USE_DEFAULT_TIMEOUT_MINUTES=5
+BROWSER_USE_IDLE_TIMEOUT_MS=300000
+BROWSER_USE_API_TIMEOUT_MS=30000
+BROWSER_USE_NAVIGATION_TIMEOUT_MS=45000
 ```
 
-`WEB_EXTRACT_PROVIDER` accepts `tavily` (the application default) or `camofox`. It switches only `web_extract`, which loads already-known URLs; `web_search` always remains on Tavily. Camofox selection is strict and does not silently fall back to Tavily.
+`web_search` and the one-shot, stateless `web_extract` tool always use Tavily. Screenshots, clicks, forms, login, downloads, scrolling, visual verification, and continued page work use the sequential `browser_*` tools.
 
-Configuring the URL and access key also enables interactive `camofox_*` tools and model-only Office previews. Browser cookies and tabs are isolated per Telegram thread through opaque hashed owner IDs. Interactive tabs remain available while the Camofox server retains the session; disposable extraction and Office-preview sessions are destroyed after each call.
+The bot stores one opaque Browser Use profile mapping per Telegram user. Cookies and persistent browser storage follow that user across their Telegram threads, while tabs and element refs stay private to the thread that created them. Browser creation requires `proxyCountryCode: null`, never supplies a custom proxy, and disables recordings. If Browser Use nevertheless reports non-zero proxy usage or cost, the runtime fails closed and blocks further sessions until restart. Telegram identifiers, usernames, and names are never used as provider profile identifiers.
 
-`camofox_snapshot` keeps its screenshot internal for model inspection. An explicit `camofox_screenshot` call uses Camofox's actual 1920-pixel desktop surface and selects a content-aware height between 720 and 1440 pixels, keeping the primary visible section intact without the crop/padding caused by forcing a mismatched width. It stores the PNG in the bot and normally sends it as a Telegram photo. Full-page capture is reserved for explicit full/whole-page requests; document delivery is reserved for explicit “as a file/document” requests. Neither screenshot mode uses E2B. `camofox_send_file` can similarly attach a completed Camofox download, a page-link ref, or a known public HTTP(S) file URL. Browser files are size-bounded, checked against executable-file restrictions, and refused when their URL or any redirect resolves to a local/private address.
+Normal screenshots use an adaptive regular-desktop viewport and are sent as Telegram photos. Full-page capture is reserved for explicit full/whole-page requests; document delivery is reserved for explicit “as a file/document” requests. Screenshots and browser files are attached directly without E2B. Browser files are size-bounded, checked against executable-file restrictions, and refused when their URL or any redirect resolves to a local/private address.
 
-The URL must be an exact HTTP(S) origin reachable from the bot process or container. Keep the access key only in `.env`; it is sent as a bearer header, redacted from client errors, and never injected into E2B commands. Arbitrary page evaluation and cookie import are not exposed as agent tools.
+Cloud sessions default to five minutes. `browser_open` can request 5–240 minutes for a new session. `browser_extend_session` explicitly stops and recreates the browser with the same profile, restoring owned URLs, scroll positions, and tab IDs while warning that transient page state is lost. The bot automatically stops an unused browser five minutes after the latest reply or shortly before provider expiry. The agent can call `browser_close_tab` for one thread-owned tab or `browser_close_session` after all browser work is complete; explicit session closure stops billing promptly and saves profile state without deleting the profile.
+
+Keep the access key only in `.env`. It is redacted from client errors and never injected into E2B commands. Browser Use agent tasks, arbitrary page evaluation, cookie import, proxies, and recordings are not exposed.
 
 ## Public websites
 
@@ -162,13 +165,13 @@ With E2B configured:
 npm run live:e2b-check
 ```
 
-With Camofox configured:
+With Browser Use Cloud configured:
 
 ```bash
-npm run live:camofox-check
+npm run live:browser-use-check
 ```
 
-The live check opens `https://example.com` in a randomized disposable session, verifies a snapshot and PNG screenshot, and destroys the session before exiting.
+The live check creates a randomized disposable profile, verifies a snapshot and PNG screenshot, explicitly closes the session, reopens with the same profile to verify cookie persistence, explicitly closes again, and deletes only that disposable profile before exiting.
 
 Set `LIVE_TELEGRAM_FILE_ID` to exercise bot-mediated restoration, read-only
 permissions, the custom toolbox contract, and ZIP creation during the live check.

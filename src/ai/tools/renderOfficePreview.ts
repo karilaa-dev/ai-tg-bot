@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
-import { sanitizeOfficeHtml } from "../../camofox/html.js";
-import { renderHtmlWithCamofox } from "../../camofox/renderHtml.js";
-import { disposableCamofoxUserId } from "../../camofox/session.js";
+import { sanitizeOfficeHtml } from "../../browserUse/html.js";
 import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../../e2b/paths.js";
 import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
@@ -19,13 +17,14 @@ type RenderOfficePreviewResult =
       media_type: string;
       size: number;
       image_base64: string;
+      session_remaining_seconds: number;
     };
 
 export function createRenderOfficePreviewTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Render one page or slide of an OfficeCLI-compatible DOCX, PPTX, or XLSX file from this thread's E2B workspace through the configured Camofox server. Returns a model-only PNG for visual QA and never sends the preview to Telegram.",
+      "Render one page or slide of an OfficeCLI-compatible DOCX, PPTX, or XLSX file from this thread's E2B workspace through Browser Use Cloud. For a presentation, call this once for every slide and inspect each returned image for overlap, clipping, wrapping, contrast, spacing, and alignment before delivery. Returns a model-only PNG and never sends the preview to Telegram.",
     inputSchema: z.object({
       path: z.string().regex(/^\//, "path must be an absolute virtual path"),
       page: z.number().int().positive().default(1),
@@ -37,6 +36,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
         return { error: "Office preview path must end in .docx, .pptx, or .xlsx." };
       }
       if (!input.commandRuntime) return { error: "E2B command runtime is unavailable." };
+      if (!input.browserRuntime) return { error: "Browser Use Cloud runtime is unavailable." };
       const sourcePath = sandboxWorkspaceFile(normalizedPath);
       const outputName = `.office-preview-${randomUUID()}.html`;
       const outputPath = path.posix.join(E2B_WORKSPACE, outputName);
@@ -94,18 +94,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
         if (!/(?:<!doctype\s+html\b|<html(?:\s|>))/i.test(html)) {
           return { error: "OfficeCLI did not produce an HTML document." };
         }
-        const userId = disposableCamofoxUserId(
-          input.config,
-          input.user.tg_id,
-          input.thread.id,
-          "office-preview",
-        );
-        const screenshot = await renderHtmlWithCamofox(
-          input.config,
-          userId,
-          sanitizeOfficeHtml(html),
-          signal,
-        );
+        const screenshot = await input.browserRuntime.renderOfficeHtml(sanitizeOfficeHtml(html), signal);
         input.logger?.info("tool render_office_preview complete", {
           threadId: input.thread.id,
           path: normalizedPath,
@@ -119,6 +108,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
           media_type: screenshot.mediaType,
           size: screenshot.bytes.length,
           image_base64: screenshot.bytes.toString("base64"),
+          session_remaining_seconds: screenshot.session_remaining_seconds,
         };
       } catch (error) {
         input.logger?.warn("tool render_office_preview failed", {
@@ -169,6 +159,7 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
         page: output.page,
         media_type: output.media_type,
         size: output.size,
+        session_remaining_seconds: output.session_remaining_seconds,
       };
     },
   });
