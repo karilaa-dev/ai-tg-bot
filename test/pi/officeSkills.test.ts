@@ -10,7 +10,6 @@ import {
 import {
   OFFICECLI_SKILLS,
   OFFICECLI_SKILLS_REVISION,
-  appendOfficeSkillIndex,
   createOfficeSkillReadTool,
   officeSkillPaths,
   validateOfficeSkills,
@@ -45,12 +44,6 @@ describe("pinned OfficeCLI Pi skills", () => {
     ]);
     expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
 
-    const prompt = appendOfficeSkillIndex("core prompt", loaded.skills);
-    expect(prompt).toContain("<available_skills>");
-    expect(prompt).toContain("Use the read tool to load a skill's file");
-    expect(prompt).toContain("<name>officecli-docx</name>");
-    expect(prompt).toContain("<name>officecli-pptx</name>");
-    for (const skillPath of officeSkillPaths()) expect(prompt).toContain(skillPath);
   });
 
   it("reads a complete advertised skill but rejects all other host files", async () => {

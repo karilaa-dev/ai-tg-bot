@@ -22,11 +22,10 @@ export interface PromptFileContext {
   summary?: string | null;
 }
 
-export async function renderThreadSystemPrompt(input: {
+export async function renderThreadSessionContext(input: {
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
-  config?: Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_DEFAULT_TIMEOUT_MINUTES">;
   now?: Date;
 }): Promise<string> {
   const scope = await threadChainScope(input.repos, input.thread);
@@ -42,32 +41,37 @@ export async function renderThreadSystemPrompt(input: {
         : file.is_inline ? "inline" : "searchable",
     summary: file.summary,
   }));
-  return renderSystemPrompt({ ...input, files: promptFiles });
+  return renderSessionContext({ ...input, files: promptFiles });
 }
 
 export async function renderSystemPrompt(input: {
   user: UserRow;
-  thread: ThreadRow;
   config?: Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_DEFAULT_TIMEOUT_MINUTES">;
-  files?: PromptFileContext[];
-  now?: Date;
 }): Promise<string> {
-  const now = input.now ?? new Date();
-  const offset = input.user.tz_offset_min ?? 0;
-  const local = new Date(now.getTime() + offset * 60_000);
   const values: Record<string, string> = {
     language: input.user.lang === "ru" ? "Russian" : "English",
     browser_guidance: browserGuidance(input.config),
     office_preview_guidance: officePreviewGuidance(input.config),
-    session_context: sessionContext({
-      userName: input.user.first_name ?? String(input.user.tg_id),
-      timedate: local.toISOString().slice(0, 16).replace("T", " "),
-      timezone: formatUtcOffset(offset),
-      threadTitle: input.thread.title,
-      files: input.files ?? [],
-    }),
   };
   return renderPromptTemplate(await loadTemplate(), values);
+}
+
+export function renderSessionContext(input: {
+  user: UserRow;
+  thread: ThreadRow;
+  files: PromptFileContext[];
+  now?: Date;
+}): string {
+  const now = input.now ?? new Date();
+  const offset = input.user.tz_offset_min ?? 0;
+  const local = new Date(now.getTime() + offset * 60_000);
+  return formatSessionContext({
+    userName: input.user.first_name ?? String(input.user.tg_id),
+    timedate: local.toISOString().slice(0, 16).replace("T", " "),
+    timezone: formatUtcOffset(offset),
+    threadTitle: input.thread.title,
+    files: input.files,
+  });
 }
 
 function loadTemplate(): Promise<string> {
@@ -94,7 +98,7 @@ export function renderPromptTemplate(template: string, values: Record<string, st
   return rendered;
 }
 
-function sessionContext(input: {
+function formatSessionContext(input: {
   userName: string;
   timedate: string;
   timezone: string;

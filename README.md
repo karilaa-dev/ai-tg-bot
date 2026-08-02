@@ -43,6 +43,14 @@ OfficeCLI is pinned in the toolbox and available through `bash`. The reviewed DO
 
 When Browser Use Cloud is configured, OfficeCLI generates static HTML inside E2B, then the bot sanitizes it and renders it in a cookie-isolated Browser Use context. The resulting PNG is model-only visual QA; it is not sent to Telegram, and the bot does not install missing tools.
 
+## Prompt and inference caching
+
+Normal turns keep the core system prompt, Office skill index, tool schemas, and prior Pi conversation stable as a reusable inference prefix. Fresh time, timezone, user, thread-title, and inherited-file metadata is rendered once at turn start into a bounded `<session_context>` block. Pi prepends that untrusted metadata ephemerally to the latest user message for each provider call; it is not written into persistent conversation history or compaction summaries. Attachment materialization remains closer to the current request, and a turn reuses one fixed metadata snapshot throughout its tool loop.
+
+OpenRouter receives Pi's opaque session UUID as its sticky-routing affinity value. No Telegram identifier or descriptive metadata is used for affinity, and cache retention remains at the provider default. Long-lived prompt retention, explicit model cache-control blocks, and response caching are intentionally disabled.
+
+Existing completion, cancellation, and failure logs include the final inference provider/model plus per-turn input, output, cache-read, cache-write, total-token, and cache-read-ratio fields when usage is available. A zero cache-read ratio can be normal for a first request, a short prefix, an expired cache, or an unsupported route.
+
 ## Files and retrieval
 
 - Telegram remains the durable source for inbound and successfully delivered outbound file bytes. Intake downloads accepted files, records every Telegram file identifier, captions images, and extracts/indexes supported documents.

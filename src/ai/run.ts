@@ -23,12 +23,14 @@ import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
 import type { CreatedFileAttachment, PendingCreatedFile } from "./tools/index.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
-import { renderThreadSystemPrompt } from "./prompt.js";
 import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import type { ResolvedChatFile } from "../files/source.js";
 import { telegramFileSource } from "../files/telegramSource.js";
-import { appendOfficeSkillIndex } from "../pi/officeSkills.js";
+import {
+  inferenceUsageDelta,
+  type InferenceUsageDelta,
+} from "../pi/usage.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
@@ -70,6 +72,8 @@ export const runTurn: TurnRunner = async (input) => {
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
   let generatedImageDelivered = false;
   let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
+  let inferenceUsage: InferenceUsageDelta | undefined;
+  let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
 
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
@@ -88,16 +92,6 @@ export const runTurn: TurnRunner = async (input) => {
       },
       currentFileIds: currentFiles.map((file) => file.id),
     });
-    const coreSystemPrompt = await renderThreadSystemPrompt({
-      repos: input.repos,
-      user: input.user,
-      thread: input.thread,
-      config: input.config,
-    });
-    runtime.session.agent.state.systemPrompt = appendOfficeSkillIndex(
-      coreSystemPrompt,
-      runtime.session.resourceLoader.getSkills().skills,
-    );
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("Pi turn starting", {
       threadId: input.thread.id,
@@ -107,16 +101,33 @@ export const runTurn: TurnRunner = async (input) => {
     streamer?.update({ thinkingMd: "", answerMd: "" });
     const stats = createPiStreamLoop(input, shaper, streamer, status, () => runtime.bridge.attachments);
     const existingEntryIds = new Set(runtime.session.sessionManager.getEntries().map((entry) => entry.id));
+    const usageBefore = runtime.session.getSessionStats().tokens;
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
     try {
       await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS);
     } finally {
       unsubscribe();
-      piEntries.push(...runtime.session.sessionManager.getEntries().flatMap((entry) => {
-        if (existingEntryIds.has(entry.id) || entry.type !== "message") return [];
+      const newEntries = runtime.session.sessionManager.getEntries().filter(
+        (entry) => !existingEntryIds.has(entry.id),
+      );
+      piEntries.push(...newEntries.flatMap((entry) => {
+        if (entry.type !== "message") return [];
         const role = entry.message.role;
         return role === "user" || role === "assistant" ? [{ id: entry.id, role }] : [];
       }));
+      inferenceUsage = inferenceUsageDelta(
+        usageBefore,
+        runtime.session.getSessionStats().tokens,
+      );
+      const finalAssistant = [...newEntries].reverse().find(
+        (entry) => entry.type === "message" && entry.message.role === "assistant",
+      );
+      if (finalAssistant?.type === "message" && finalAssistant.message.role === "assistant") {
+        inferenceBackend = {
+          inferenceProvider: finalAssistant.message.provider,
+          inferenceModel: finalAssistant.message.model,
+        };
+      }
       const userEntry = piEntries.find((entry) => entry.role === "user");
       if (userMessage && userEntry) {
         await input.repos.messages.setPiEntryId(userMessage.id, userEntry.id).catch((err) => {
@@ -140,7 +151,11 @@ export const runTurn: TurnRunner = async (input) => {
     if (lastAssistantStopReason(runtime.session.messages) === "aborted") {
       await status?.finish(shaper.toolStatusMd());
       await streamer?.finish();
-      input.logger.info("Pi turn cancelled", { threadId: input.thread.id });
+      input.logger.info("Pi turn cancelled", {
+        threadId: input.thread.id,
+        ...inferenceBackend,
+        ...inferenceUsage,
+      });
       return;
     }
     const assistantError = lastAssistantError(runtime.session.messages);
@@ -199,9 +214,17 @@ export const runTurn: TurnRunner = async (input) => {
       answerChars: finalAnswer.length,
       thinkingChars: finalThinking.length,
       ms: Date.now() - startedAt,
+      ...inferenceBackend,
+      ...inferenceUsage,
     });
   } catch (err) {
-    input.logger.error("turn failed", { threadId: input.thread.id, err: String(err), ms: Date.now() - startedAt });
+    input.logger.error("turn failed", {
+      threadId: input.thread.id,
+      err: String(err),
+      ms: Date.now() - startedAt,
+      ...inferenceBackend,
+      ...inferenceUsage,
+    });
     if (generatedImageDelivered) {
       streamer?.stop();
       await status?.finish(shaper.toolStatusMd());

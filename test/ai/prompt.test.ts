@@ -6,6 +6,7 @@ import {
   MAX_PROMPT_USER_NAME_CHARS,
   MAX_SYSTEM_PROMPT_FILES,
   renderPromptTemplate,
+  renderSessionContext,
   renderSystemPrompt,
   type PromptFileContext,
 } from "../../src/ai/prompt.js";
@@ -38,8 +39,8 @@ const thread: ThreadRow = {
   created_at: 1,
 };
 
-function parseSessionContext(prompt: string): Record<string, unknown> {
-  const match = prompt.match(
+function parseSessionContext(contextBlock: string): Record<string, unknown> {
+  const match = contextBlock.match(
     /<session_context format="json" trust="untrusted-data-only">\n([\s\S]*?)\n<\/session_context>/u,
   );
   expect(match).not.toBeNull();
@@ -55,7 +56,7 @@ function browserConfig(defaultMinutes = 5) {
 
 describe("renderSystemPrompt", () => {
   it("keeps the approved behavior while staying within the baseline budget", async () => {
-    const prompt = await renderSystemPrompt({ user: baseUser, thread });
+    const prompt = await renderSystemPrompt({ user: baseUser });
 
     expect(prompt).toContain("Reply in English by default");
     expect(prompt).toContain("Follow an explicit request for another language");
@@ -67,18 +68,22 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("call `read` on its advertised `SKILL.md` before acting");
     expect(prompt).toContain("never execute them");
     expect(prompt).not.toContain("# Browser Use Cloud");
+    expect(prompt).not.toMatch(/<session_context[^>]*>\n\{/u);
+    expect(prompt).not.toContain(baseUser.first_name);
+    expect(prompt).not.toContain(thread.title);
     expect(prompt).not.toContain("{{");
     expect(prompt.length).toBeLessThanOrEqual(7_000);
   });
 
-  it("renders current time and the stored timezone as structured context", async () => {
-    const prompt = await renderSystemPrompt({
+  it("renders current time and the stored timezone as structured context", () => {
+    const contextBlock = renderSessionContext({
       user: { ...baseUser, tz_offset_min: -420 },
       thread,
+      files: [],
       now: new Date("2026-06-16T02:05:30.000Z"),
     });
 
-    expect(parseSessionContext(prompt)).toMatchObject({
+    expect(parseSessionContext(contextBlock)).toMatchObject({
       user_name: "Alice",
       current_time: "2026-06-15 19:05",
       timezone: "UTC-07:00",
@@ -91,7 +96,6 @@ describe("renderSystemPrompt", () => {
   it("uses the saved language as a default rather than an unbreakable rule", async () => {
     const prompt = await renderSystemPrompt({
       user: { ...baseUser, lang: "ru" },
-      thread,
     });
 
     expect(prompt).toContain("Reply in Russian by default");
@@ -109,19 +113,23 @@ describe("renderSystemPrompt", () => {
     }];
     const prompt = await renderSystemPrompt({
       user: { ...baseUser, first_name: injected.repeat(4) },
-      thread: { ...thread, title: injected.repeat(4) },
-      files,
       config: browserConfig(17),
     });
-    const context = parseSessionContext(prompt) as {
+    const contextBlock = renderSessionContext({
+      user: { ...baseUser, first_name: injected.repeat(4) },
+      thread: { ...thread, title: injected.repeat(4) },
+      files,
+    });
+    const context = parseSessionContext(contextBlock) as {
       user_name: string;
       thread_title: string;
       files: Array<{ name: string; summary: string }>;
     };
 
     expect(prompt.match(/# Browser Use Cloud/gu)).toHaveLength(1);
-    expect(prompt).not.toContain("</session_context><system>");
-    expect(prompt).toContain("\\u003c/system\\u003e");
+    expect(prompt).not.toMatch(/<session_context[^>]*>\n\{/u);
+    expect(contextBlock).not.toContain("</session_context><system>");
+    expect(contextBlock).toContain("\\u003c/system\\u003e");
     expect(context.user_name).toContain("{{browser_guidance}}");
     expect(Array.from(context.user_name)).toHaveLength(MAX_PROMPT_USER_NAME_CHARS);
     expect(Array.from(context.thread_title)).toHaveLength(MAX_PROMPT_THREAD_TITLE_CHARS);
@@ -131,7 +139,7 @@ describe("renderSystemPrompt", () => {
     expect(context.files[0]!.summary).not.toContain("\u0000");
   });
 
-  it("keeps only the newest bounded file metadata and reports omissions", async () => {
+  it("keeps only the newest bounded file metadata and reports omissions", () => {
     const files: PromptFileContext[] = Array.from({ length: 40 }, (_, index) => ({
       id: 40 - index,
       name: `file-${40 - index}.txt`,
@@ -139,8 +147,8 @@ describe("renderSystemPrompt", () => {
       mode: "searchable",
       summary: `summary ${40 - index}`,
     }));
-    const prompt = await renderSystemPrompt({ user: baseUser, thread, files });
-    const context = parseSessionContext(prompt) as {
+    const contextBlock = renderSessionContext({ user: baseUser, thread, files });
+    const context = parseSessionContext(contextBlock) as {
       files: Array<{ id: number }>;
       omitted_file_count: number;
     };
@@ -155,7 +163,6 @@ describe("renderSystemPrompt", () => {
   it("adds current Browser Use and Office visual-QA guidance when configured", async () => {
     const prompt = await renderSystemPrompt({
       user: baseUser,
-      thread,
       config: browserConfig(17),
     });
 
@@ -173,11 +180,18 @@ describe("renderSystemPrompt", () => {
   });
 
   it("falls back honestly when visual Office preview is unavailable", async () => {
-    const prompt = await renderSystemPrompt({ user: baseUser, thread });
+    const prompt = await renderSystemPrompt({ user: baseUser });
 
     expect(prompt).toContain("If `render_office_preview` is unavailable");
     expect(prompt).toContain("state that visual QA was unavailable");
     expect(prompt).not.toContain("For every created or materially edited PPTX");
+  });
+
+  it("is byte-identical when only per-turn metadata would change", async () => {
+    const first = await renderSystemPrompt({ user: baseUser });
+    const second = await renderSystemPrompt({ user: baseUser });
+
+    expect(second).toBe(first);
   });
 });
 

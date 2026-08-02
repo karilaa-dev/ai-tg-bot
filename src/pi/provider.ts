@@ -311,7 +311,17 @@ function backendOpenRouterModel(
 ): Model<"openai-completions"> {
   const id = configuredId.replace(/^openrouter\//, "");
   const found = registry.find("openrouter", id);
-  if (found?.api === "openai-completions") return { ...found, contextWindow } as Model<"openai-completions">;
+  if (found?.api === "openai-completions") {
+    return {
+      ...found,
+      contextWindow,
+      compat: {
+        ...found.compat,
+        sendSessionAffinityHeaders: true,
+        sessionAffinityFormat: "openrouter",
+      },
+    } as Model<"openai-completions">;
+  }
   return {
     id,
     name: id,
@@ -328,6 +338,8 @@ function backendOpenRouterModel(
       supportsReasoningEffort: true,
       supportsUsageInStreaming: true,
       thinkingFormat: "openrouter",
+      sendSessionAffinityHeaders: true,
+      sessionAffinityFormat: "openrouter",
     },
   };
 }

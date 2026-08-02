@@ -17,7 +17,7 @@ import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
-import { renderThreadSystemPrompt } from "../ai/prompt.js";
+import { renderSystemPrompt, renderThreadSessionContext } from "../ai/prompt.js";
 import type { CreatedFileAttachment, PendingCreatedFile, ToolBuildInput } from "../ai/tools/types.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
 import type { Logger } from "../logger.js";
@@ -43,6 +43,7 @@ import {
   officeSkillPaths,
   validateOfficeSkills,
 } from "./officeSkills.js";
+import { createTurnPromptContextExtension, type TurnPromptContextSource } from "./turnContext.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -132,10 +133,8 @@ export class PiRuntimeManager implements PiRuntimeService {
       cached.lastUsedAt = Date.now();
       return cached;
     }
-    const systemPrompt = await renderThreadSystemPrompt({
-      repos: this.input.repos,
+    const systemPrompt = await renderSystemPrompt({
       user,
-      thread,
       config: this.input.config,
     });
     const bridge = new ThreadBridge({
@@ -156,7 +155,10 @@ export class PiRuntimeManager implements PiRuntimeService {
       cwd: process.cwd(),
       agentDir: this.agentDir,
       settingsManager,
-      extensionFactories: [createChatFileContextExtension(bridge)],
+      extensionFactories: [
+        createTurnPromptContextExtension(bridge),
+        createChatFileContextExtension(bridge),
+      ],
       additionalSkillPaths: officeSkillPaths(),
       noSkills: true,
       noPromptTemplates: true,
@@ -351,7 +353,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 }
 
-export class ThreadBridge implements PiToolBridge, ChatImageBridge {
+export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptContextSource {
   user: UserRow;
   thread: ThreadRow;
   readonly config: AppConfig;
@@ -371,6 +373,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   private readonly durableContextFileIds = new Set<number>();
   private commandActivityLease?: SandboxActivityLease;
   private turnActive = false;
+  private turnSystemPrompt?: string;
+  private turnSessionContext?: string;
   private readonly browserRuntime?: BrowserUseRuntimeManager;
 
   constructor(input: {
@@ -402,8 +406,14 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
     if (this.turnActive) await this.endTurn();
+    const [turnSystemPrompt, turnSessionContext] = await Promise.all([
+      renderSystemPrompt({ user: this.user, config: this.config }),
+      renderThreadSessionContext({ repos: this.repos, user: this.user, thread: this.thread }),
+    ]);
     await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
     this.turnActive = true;
+    this.turnSystemPrompt = turnSystemPrompt;
+    this.turnSessionContext = turnSessionContext;
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
@@ -423,9 +433,20 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     const lease = this.commandActivityLease;
     this.commandActivityLease = undefined;
     lease?.release();
-    if (!this.turnActive) return;
+    const wasActive = this.turnActive;
     this.turnActive = false;
-    await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
+    this.turnSystemPrompt = undefined;
+    this.turnSessionContext = undefined;
+    this.transport = undefined;
+    if (wasActive) await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
+  }
+
+  currentTurnSystemPrompt(): string | undefined {
+    return this.turnSystemPrompt;
+  }
+
+  currentTurnSessionContext(): string | undefined {
+    return this.turnSessionContext;
   }
 
   buildInput(): ToolBuildInput {
@@ -493,7 +514,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   }
 }
 
-function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
+export function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
   return {
     name: "chat-file-context",
     factory: (pi) => {

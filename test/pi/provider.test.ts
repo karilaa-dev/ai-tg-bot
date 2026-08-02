@@ -4,6 +4,7 @@ import {
   type AssistantMessage,
   type AssistantMessageEvent,
   type Model,
+  type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
@@ -22,6 +23,10 @@ describe("Pi automatic provider", () => {
     expect(harness.calls).toEqual(["codex", "codex"]);
     expect(textDeltas(mainEvents)).toBe("codex answer");
     expect(textDeltas(helperEvents)).toBe("codex answer");
+    expect(harness.streamOptions).toEqual([
+      { provider: "codex", sessionId: "opaque-pi-session" },
+      { provider: "codex", sessionId: "opaque-pi-session" },
+    ]);
     expect(harness.router.circuit.state().open).toBe(false);
   });
 
@@ -32,12 +37,23 @@ describe("Pi automatic provider", () => {
     expect(harness.calls).toEqual(["openrouter"]);
     expect(textDeltas(events)).toBe("openrouter answer");
     expect(harness.router.mainModel.contextWindow).toBe(128_000);
+    expect(harness.router.openRouterModel("main").compat).toMatchObject({
+      sendSessionAffinityHeaders: true,
+      sessionAffinityFormat: "openrouter",
+    });
+    expect(harness.streamOptions).toEqual([
+      { provider: "openrouter", sessionId: "opaque-pi-session" },
+    ]);
   });
 
   it("falls back before output for quota and OAuth refresh failures", async () => {
     const quota = providerHarness({ codexError: "quota exhausted" });
     expect(textDeltas(await quota.run())).toBe("openrouter answer");
     expect(quota.calls).toEqual(["codex", "openrouter"]);
+    expect(quota.streamOptions).toEqual([
+      { provider: "codex", sessionId: "opaque-pi-session" },
+      { provider: "openrouter", sessionId: "opaque-pi-session" },
+    ]);
     expect(quota.router.circuit.state().open).toBe(true);
 
     const auth = providerHarness({ authError: "OAuth refresh token failed" });
@@ -76,6 +92,22 @@ describe("Pi automatic provider", () => {
     expect(harness.calls).toEqual(["codex"]);
     expect(circuit.state().open).toBe(false);
   });
+
+  it("preserves discovered OpenRouter compatibility while enabling opaque affinity", () => {
+    const harness = providerHarness({
+      discoveredOpenRouterCompat: {
+        supportsDeveloperRole: false,
+        supportsUsageInStreaming: true,
+      },
+    });
+
+    expect(harness.router.openRouterModel("main").compat).toMatchObject({
+      supportsDeveloperRole: false,
+      supportsUsageInStreaming: true,
+      sendSessionAffinityHeaders: true,
+      sessionAffinityFormat: "openrouter",
+    });
+  });
 });
 
 function providerHarness(input: {
@@ -84,11 +116,33 @@ function providerHarness(input: {
   codexPartial?: string;
   authError?: string;
   circuit?: CodexCircuitBreaker;
+  discoveredOpenRouterCompat?: Model<"openai-completions">["compat"];
 }) {
   const calls: string[] = [];
-  let registered: { streamSimple: (model: Model<Api>, context: { systemPrompt: string; messages: [] }) => AsyncIterable<AssistantMessageEvent> } | undefined;
+  const streamOptions: Array<{ provider: string; sessionId: string | undefined }> = [];
+  let registered: {
+    streamSimple: (
+      model: Model<Api>,
+      context: { systemPrompt: string; messages: [] },
+      options?: SimpleStreamOptions,
+    ) => AsyncIterable<AssistantMessageEvent>;
+  } | undefined;
   const registry = {
-    find: () => undefined,
+    find: (provider: string, id: string) => provider === "openrouter" && input.discoveredOpenRouterCompat
+      ? {
+          id,
+          name: id,
+          api: "openai-completions",
+          provider: "openrouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          reasoning: true,
+          input: ["text", "image"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 64_000,
+          maxTokens: 8_000,
+          compat: input.discoveredOpenRouterCompat,
+        }
+      : undefined,
     registerProvider: (_name: string, provider: typeof registered) => { registered = provider; },
     hasConfiguredAuth: () => input.codexConfigured ?? true,
     getApiKeyAndHeaders: async () => input.authError
@@ -96,15 +150,17 @@ function providerHarness(input: {
       : { ok: true as const, apiKey: "codex-token", headers: {} },
   };
   const streams: PiProviderStreamOverrides = {
-    codex: ((model) => {
+    codex: ((model, _context, options) => {
       calls.push("codex");
+      streamOptions.push({ provider: "codex", sessionId: options?.sessionId });
       if (input.codexPartial) {
         return eventStream(model, input.codexPartial, input.codexError);
       }
       return input.codexError ? errorStream(model, input.codexError) : eventStream(model, "codex answer");
     }) as PiProviderStreamOverrides["codex"],
-    openRouter: ((model) => {
+    openRouter: ((model, _context, options) => {
       calls.push("openrouter");
+      streamOptions.push({ provider: "openrouter", sessionId: options?.sessionId });
       return eventStream(model, "openrouter answer");
     }) as PiProviderStreamOverrides["openRouter"],
   };
@@ -116,12 +172,17 @@ function providerHarness(input: {
   });
   return {
     calls,
+    streamOptions,
     router,
     run: async (kind: "main" | "helper" = "main") => {
       if (!registered) throw new Error("provider was not registered");
       const events: AssistantMessageEvent[] = [];
       const model = kind === "helper" ? router.helperModel : router.mainModel;
-      for await (const event of registered.streamSimple(model, { systemPrompt: "", messages: [] })) events.push(event);
+      for await (const event of registered.streamSimple(
+        model,
+        { systemPrompt: "", messages: [] },
+        { sessionId: "opaque-pi-session" },
+      )) events.push(event);
       return events;
     },
   };

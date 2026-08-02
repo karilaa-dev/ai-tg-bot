@@ -2,11 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import {
-  formatSkillsForPrompt,
-  type Skill,
-  type ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 export const OFFICECLI_SKILLS_REVISION = "b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412";
 
@@ -41,10 +37,6 @@ export function validateOfficeSkills(cwd = process.cwd()): Promise<void> {
     validationPromises.set(root, pending);
   }
   return pending;
-}
-
-export function appendOfficeSkillIndex(systemPrompt: string, skills: Skill[]): string {
-  return `${systemPrompt}${formatSkillsForPrompt(skills)}`;
 }
 
 export function createOfficeSkillReadTool(cwd = process.cwd()): ToolDefinition {
