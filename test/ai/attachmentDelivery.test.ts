@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   normalizeTelegramAttachmentDeliveries,
   sendCreatedFileAttachments,
+  sendFinal,
   type TurnInput,
 } from "../../src/ai/run.js";
 import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
@@ -125,7 +126,28 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.sendMediaGroup.mock.calls[0]?.[1]).toHaveLength(2);
     expect(first.telegramDelivery).toBeDefined();
     expect(missing.telegramDelivery).toBeUndefined();
+    expect(missing.telegramDeliveryFailure).toBe("source_unavailable");
     expect(third.telegramDelivery).toBeDefined();
+  });
+
+  it("records a source-load failure without persisting the file as delivered", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const missing = imageAttachment(2, "missing.jpg", 100);
+    missing.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: missing.fileId } as never);
+    input.resolveFile = vi.fn(async () => { throw new Error("source unavailable"); });
+
+    await sendFinal(input, "", "", 0, [missing]);
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 99,
+      content: {
+        text: "",
+        attachment_failures: [{ file_id: 2, status: "source_unavailable" }],
+      },
+    }));
+    expect(api.sendPhoto).not.toHaveBeenCalled();
   });
 
   it("continues pending delivery when bookkeeping for an earlier photo fails", async () => {
@@ -210,6 +232,10 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
     config: {} as never,
     db: {} as never,
     repos: {
+      messages: {
+        insert: vi.fn(async () => ({ id: 99 })),
+        setDeliveryContent: vi.fn(async () => undefined),
+      },
       files: {
         setMessageId: vi.fn(async () => undefined),
         rememberTelegramObservation: vi.fn(async () => undefined),

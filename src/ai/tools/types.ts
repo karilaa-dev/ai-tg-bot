@@ -43,6 +43,7 @@ export interface CreatedFileAttachment {
   delivery?: "document" | "photo";
   origin?: "created_file" | "generated_image";
   telegramDeliveryUnknown?: boolean;
+  telegramDeliveryFailure?: "source_unavailable" | "telegram_rejected";
   telegramDelivery?: {
     messageId: number;
     fileId: string | null;

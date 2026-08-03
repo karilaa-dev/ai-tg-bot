@@ -45,6 +45,24 @@ export class MessagesRepo {
     await this.db.execute(sql`update messages set pi_entry_id = ${entryId} where id = ${messageId}`);
   }
 
+  async setDeliveryContent(input: {
+    messageId: number;
+    content: unknown;
+    textPlain: string;
+    tgMessageId: number | null;
+  }): Promise<void> {
+    const message = await this.get(input.messageId);
+    if (!message) throw new Error(`Message #${input.messageId} no longer exists.`);
+    await this.db.execute(sql`
+      update messages
+      set content_json = ${JSON.stringify(input.content)},
+          text_plain = ${input.textPlain},
+          tg_message_id = ${input.tgMessageId}
+      where id = ${input.messageId}
+    `);
+    await this.search.indexMessage(message.id, message.thread_id, input.textPlain);
+  }
+
   listThread(threadId: number): Promise<MessageRow[]> {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }

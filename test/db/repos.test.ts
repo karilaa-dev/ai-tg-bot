@@ -30,6 +30,27 @@ describe("repository round-trip on sqlite", () => {
 
     expect(message.id).toBeGreaterThan(0);
     expect(hits[0]?.id).toBe(message.id);
+
+    await repos.messages.setDeliveryContent({
+      messageId: message.id,
+      content: {
+        text: `delivered-${tgId}`,
+        attachment_failures: [{ file_id: 7, status: "source_unavailable" }],
+      },
+      textPlain: `delivered-${tgId}`,
+      tgMessageId: 1234,
+    });
+    const updated = await repos.messages.get(message.id);
+    expect(updated).toMatchObject({
+      text_plain: `delivered-${tgId}`,
+      tg_message_id: 1234,
+    });
+    expect(JSON.parse(updated!.content_json)).toEqual({
+      text: `delivered-${tgId}`,
+      attachment_failures: [{ file_id: 7, status: "source_unavailable" }],
+    });
+    await expect(db.search.searchMessages([thread.id], `delivered-${tgId}`, 5))
+      .resolves.toEqual([expect.objectContaining({ id: message.id })]);
   });
 
   it("persists one opaque Browser Use profile key per deployment user", async () => {

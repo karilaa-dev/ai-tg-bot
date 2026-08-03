@@ -182,12 +182,6 @@ export const runTurn: TurnRunner = async (input) => {
       runtime.bridge.publishedWebsites.map((website) => website.url),
       input.user.lang,
     );
-    const finalThinking = buildFinalThinkingSummary({
-      t: input.t,
-      shaper,
-      attachments: createdFiles,
-      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
-    });
     if (hasGeneratedImage) {
       const delivered = await sendGeneratedImageAttachmentsEarly(input, createdFiles);
       generatedImageDelivered = delivered > 0;
@@ -199,6 +193,15 @@ export const runTurn: TurnRunner = async (input) => {
           : undefined,
       });
     }
+    const finalThinking = buildFinalThinkingSummary({
+      t: input.t,
+      shaper,
+      // Normal create_file attachments are delivered after the final text is ready.
+      // List only confirmed early deliveries so the visible summary never promises a
+      // pending source that may fail its lazy reload.
+      attachments: createdFiles.filter((file) => file.telegramDelivery),
+      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
+    });
     const thinkingDelivery = await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
     const assistantEntry = [...piEntries].reverse().find((entry) => entry.role === "assistant");
     await sendFinalVisible(
@@ -845,13 +848,13 @@ async function sendFinalVisible(
   const answerMessages = renderFinalAnswer({
     answerMd: visibleAnswer,
   });
-  const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(outboundAttachments);
+  const initialPersistedText = visibleAnswer.trim() ? visibleAnswer : "";
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
     thinkingParts: thinkingMessages.length,
     answerParts: answerMessages.length,
     answerChars: visibleAnswer.length,
-    persistedChars: persistedText.length,
+    persistedChars: initialPersistedText.length,
     thinkingChars: visibleThinking.length,
   });
   const thinkingIds = [...(thinkingDelivery?.messageIds ?? [])];
@@ -867,19 +870,10 @@ async function sendFinalVisible(
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
     role: "assistant",
-    content: outboundAttachments.length
-      ? {
-          text: persistedText,
-          files: outboundAttachments.map((file) => ({
-            id: file.fileId,
-            type: file.type,
-            name: file.name,
-            inline: file.inline,
-            delivery: file.delivery ?? "document",
-          })),
-        }
-      : { text: persistedText },
-    textPlain: persistedText,
+    // Attachment availability is finalized after lazy source loading and Telegram
+    // delivery. Do not persist pending files as delivered before that outcome is known.
+    content: { text: initialPersistedText },
+    textPlain: initialPersistedText,
     thinking: visibleThinking,
     tgMessageId: answerIds.find((id) => id > 0)
       ?? thinkingIds.find((id) => id > 0)
@@ -888,11 +882,53 @@ async function sendFinalVisible(
     piEntryId: piEntryId ?? null,
   });
   await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
+  const retainedAttachments = outboundAttachments.filter((attachment) => !attachment.telegramDeliveryFailure);
+  const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
+  const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(retainedAttachments);
+  const persistedContent: Record<string, unknown> = { text: persistedText };
+  if (retainedAttachments.length) {
+    persistedContent.files = retainedAttachments.map((file) => ({
+      id: file.fileId,
+      type: file.type,
+      name: file.name,
+      inline: file.inline,
+      delivery: file.delivery ?? "document",
+    }));
+  }
+  if (attachmentFailures.length) {
+    // This operational record is intentionally not rendered to Telegram. The product
+    // policy keeps partial source-recovery failures silent while retaining diagnostics.
+    persistedContent.attachment_failures = attachmentFailures.map((file) => ({
+      file_id: file.fileId,
+      status: file.telegramDeliveryFailure,
+    }));
+  }
+  const attachmentMessageId = retainedAttachments
+    .map((attachment) => attachment.telegramDelivery?.messageId)
+    .find((id) => typeof id === "number" && id > 0);
+  await input.repos.messages.setDeliveryContent({
+    messageId: assistantMessage.id,
+    content: persistedContent,
+    textPlain: persistedText,
+    tgMessageId: answerIds.find((id) => id > 0)
+      ?? thinkingIds.find((id) => id > 0)
+      ?? attachmentMessageId
+      ?? null,
+  }).catch((error) => {
+    input.logger.warn("failed to persist finalized attachment delivery content", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      retainedFiles: retainedAttachments.length,
+      failedFiles: attachmentFailures.length,
+      err: String(error),
+    });
+  });
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
     telegramMessages: thinkingIds.length + answerIds.length,
-    files: outboundAttachments.length,
+    files: retainedAttachments.length,
+    failedFiles: attachmentFailures.length,
   });
 }
 
@@ -1094,6 +1130,7 @@ async function sendAttachmentBatch(
         await ensureAttachmentData(input, attachment);
         ready.push(attachment);
       } catch (error) {
+        attachment.telegramDeliveryFailure = "source_unavailable";
         input.logger.warn(`failed to load ${strategy.label} bytes`, {
           threadId: input.thread.id,
           messageId: assistantMessage.id,
@@ -1174,6 +1211,7 @@ async function sendOneBufferedAttachment(
   try {
     await ensureAttachmentData(input, attachment);
   } catch (error) {
+    attachment.telegramDeliveryFailure = "source_unavailable";
     input.logger.warn(`failed to load ${strategy.label} bytes`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
@@ -1269,6 +1307,7 @@ async function sendOneBufferedAttachment(
     name: attachment.name,
     err: String(failure),
   });
+  attachment.telegramDeliveryFailure = "telegram_rejected";
   releaseAttachmentData(attachment);
   await removeUnresolvableUndeliveredAttachment(input, attachment);
 }

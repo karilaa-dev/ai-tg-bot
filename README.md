@@ -157,7 +157,7 @@ It then calls:
 {"port": 3000, "site_dir": "/site", "path": "/"}
 ```
 
-through `publish_website`. The bot rejects workspace-root or Telegram-file publication, verifies that the listening process is running from the declared site directory, and verifies the E2B HTTPS URL before returning it. The URL is public and unauthenticated, so the site directory must not contain private files or credentials. A public URL is unavailable while its sandbox is paused; a later shell-backed bot request resumes the sandbox and its preserved process state.
+through `publish_website`. The bot rejects workspace-root or Telegram-file publication, verifies that the listening process is running from the declared site directory, and verifies the E2B HTTPS URL before returning it. The URL is public and unauthenticated. A request to create, start, host, or publish a website authorizes only its intended site contents; private attachments, unrelated workspace data, and credentials must not be added unless the user explicitly requested that material on the public site. A public URL is unavailable while its sandbox is paused; a later shell-backed bot request resumes the sandbox and its preserved process state.
 
 ## Telegram commands
 

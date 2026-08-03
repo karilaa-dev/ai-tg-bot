@@ -35,6 +35,7 @@ describe("E2B-backed agent tools", () => {
     expect(tool.description).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(tool.description).toContain("dedicated workspace subdirectory");
     expect(tool.description).toContain("public and unauthenticated");
+    expect(tool.description).toContain("never add private attachments");
 
     const result = await tool.execute({ port: 3000, site_dir: "/site", path: "/" });
 
