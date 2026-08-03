@@ -266,6 +266,23 @@ describe("thread E2B runtime manager", () => {
       size: updated.length,
       sha256: refreshed.expectedSha256,
     }));
+
+    client.telegramFiles.delete("tg-changing");
+    const unavailable: SandboxThreadFile = {
+      ...refreshed,
+      expectedSize: 6,
+      expectedSha256: createHash("sha256").update("latest").digest("hex"),
+      telegramRefs: [{ ...refreshed.telegramRefs[0]!, telegramSize: 6 }],
+    };
+    await runtime.execute(commandRequest(userId, threadId, [unavailable]));
+
+    expect(client.onlySandbox().files.has(sandboxPath)).toBe(false);
+    const failedIndex = JSON.parse(await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(failedIndex.files).toContainEqual(expect.objectContaining({
+      file_id: base.fileId,
+      descriptor_sha256: unavailable.expectedSha256,
+      status: "error",
+    }));
   });
 
   it("scales the sandbox operation window by projected restore batches", async () => {

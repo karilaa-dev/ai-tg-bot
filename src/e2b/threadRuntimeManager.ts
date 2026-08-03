@@ -650,6 +650,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         } else {
           const errorCode = sanitizeRestoreCode(result.error_code);
           const errorDetail = sanitizeRestoreDetail(result.error_detail);
+          await runControl(
+            sandbox,
+            `rm -f ${quoteShellToken(path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName))}`,
+            this.input.config.E2B_REQUEST_TIMEOUT_MS,
+            signal,
+          );
           next.push({
             file_id: item.file.fileId,
             message_id: item.file.messageId,
