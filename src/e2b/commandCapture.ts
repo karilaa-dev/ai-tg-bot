@@ -40,5 +40,7 @@ export function buildBoundedCommandCapture(input: {
     "if [ \"$stderr_capture_status\" -ne 0 ]; then exit \"$stderr_capture_status\"; fi",
     "exit \"$command_status\"",
   ].join("; ");
+  // Process substitution is Bash syntax. Invoke Bash explicitly so correctness
+  // does not depend on whichever outer shell the E2B command API uses.
   return shellJoin(["bash", "-c", script]);
 }

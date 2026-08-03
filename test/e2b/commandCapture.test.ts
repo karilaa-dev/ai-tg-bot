@@ -29,6 +29,7 @@ describe("E2B command capture", () => {
       stderrPath: path.join(tempDir, "stderr"),
       maxOutputChars: 100,
     });
+    expect(command).toMatch(/^'bash' '-c' /);
 
     await execFileAsync("bash", ["-c", command], {
       cwd: tempDir,
