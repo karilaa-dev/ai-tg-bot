@@ -15,13 +15,19 @@
   <ReadMe>https://raw.githubusercontent.com/karilaa-dev/ai-tg-bot/main/README.md</ReadMe>
   <Icon>https://telegram.org/img/t_logo.png</Icon>
   <ExtraParams>--stop-timeout=60</ExtraParams>
-  <Requires>Telegram, E2B, OpenRouter, and Tavily API keys. Codex OAuth and Docling are optional.</Requires>
+  <Requires>Telegram, E2B, OpenRouter, and Tavily API keys. Browser Use Cloud, Codex OAuth, and Docling are optional.</Requires>
 
   <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent database, Pi sessions, and OAuth configuration." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="E2B API Key" Target="E2B_API_KEY" Default="" Description="E2B API key used to create and resume per-thread sandboxes." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter key for fallback inference, image generation, and embeddings." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily key for web search and extraction." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Browser Use API Key" Target="BROWSER_USE_API_KEY" Default="" Description="Optional Browser Use Cloud key for interactive browsing and Office visual QA." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Browser Use Deployment ID" Target="BROWSER_USE_DEPLOYMENT_ID" Default="ai-tg-bot" Description="Stable Browser Use profile namespace. Use a different value for each deployment sharing an account." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Browser Use Default Session" Target="BROWSER_USE_DEFAULT_TIMEOUT_MINUTES" Default="5" Description="Default Browser Use Cloud session duration in minutes (5-240)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Browser Use Idle Timeout" Target="BROWSER_USE_IDLE_TIMEOUT_MS" Default="300000" Description="Idle time in milliseconds before Browser Use Cloud sessions are stopped." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Browser Use API Timeout" Target="BROWSER_USE_API_TIMEOUT_MS" Default="30000" Description="Browser Use Cloud API request timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Browser Use Navigation Timeout" Target="BROWSER_USE_NAVIGATION_TIMEOUT_MS" Default="45000" Description="Browser navigation timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="E2B Template" Target="E2B_TEMPLATE" Default="ai-tg-bot-tools:production" Description="Reusable custom E2B template reference. Build it explicitly before starting the bot; runtime never installs it." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="E2B Deployment ID" Target="E2B_DEPLOYMENT_ID" Default="ai-tg-bot" Description="Stable ownership namespace for sandbox recovery. Use a different value for each deployment sharing an E2B account." Type="Variable" Display="advanced" Required="true" Mask="false"/>

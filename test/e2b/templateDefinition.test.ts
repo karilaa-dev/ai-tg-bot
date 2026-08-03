@@ -62,4 +62,18 @@ describe("E2B toolbox template definition", () => {
     ]);
     expect(deploymentFiles.join("\n")).not.toContain("TELEGRAM_FILE_GATEWAY");
   });
+
+  it("exposes every optional Browser Use setting in the Unraid template", async () => {
+    const template = await fs.readFile("templates/ai-tg-bot.xml", "utf8");
+    for (const name of [
+      "BROWSER_USE_API_KEY",
+      "BROWSER_USE_DEPLOYMENT_ID",
+      "BROWSER_USE_DEFAULT_TIMEOUT_MINUTES",
+      "BROWSER_USE_IDLE_TIMEOUT_MS",
+      "BROWSER_USE_API_TIMEOUT_MS",
+      "BROWSER_USE_NAVIGATION_TIMEOUT_MS",
+    ]) {
+      expect(template).toContain(`Target="${name}"`);
+    }
+  });
 });
