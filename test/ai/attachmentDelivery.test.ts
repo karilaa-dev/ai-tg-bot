@@ -93,6 +93,21 @@ describe("buffered Telegram attachment delivery", () => {
     expect(second.telegramDelivery).toMatchObject({ messageId: 501, fileId: "photo-2" });
     expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(2);
   });
+
+  it("loads a sandbox attachment only for its send and releases the buffer afterward", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const attachment = imageAttachment(1, "picture.jpg", 100);
+    attachment.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: attachment.fileId } as never);
+    input.resolveFile = vi.fn(async () => ({ bytes: Buffer.from("restored image") } as never));
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
+
+    expect(input.resolveFile).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(attachment.data).toBeUndefined();
+  });
 });
 
 function imageAttachment(fileId: number, name: string, size: number): CreatedFileAttachment {

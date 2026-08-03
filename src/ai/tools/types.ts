@@ -42,6 +42,7 @@ export interface CreatedFileAttachment {
   card: string;
   delivery?: "document" | "photo";
   origin?: "created_file" | "generated_image";
+  telegramDeliveryUnknown?: boolean;
   telegramDelivery?: {
     messageId: number;
     fileId: string | null;

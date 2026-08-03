@@ -57,7 +57,7 @@ describe("create_file", () => {
     vi.spyOn(repos.files, "insertFile")
       .mockRejectedValueOnce(new Error("image indexing unavailable"))
       .mockImplementation(originalInsert);
-    const createdFiles: Array<{ type: string; delivery: string }> = [];
+    const createdFiles: Array<{ type: string; delivery: string; data?: Buffer }> = [];
     const tool = createCreateFileTool({
       config,
       db,
@@ -72,6 +72,7 @@ describe("create_file", () => {
       .resolves.toMatchObject({ type: "image" });
 
     expect(createdFiles).toMatchObject([{ type: "image", delivery: "photo" }]);
+    expect(createdFiles[0]?.data).toBeUndefined();
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
   });
 });
