@@ -76,8 +76,8 @@ describe("transport-neutral file resolver", () => {
     });
   });
 
-  it("prefers Telegram without touching an available E2B source", async () => {
-    const file = await insertFile(repos, 905, "telegram-first.txt");
+  it("prefers the byte-exact E2B source without touching Telegram", async () => {
+    const file = await insertFile(repos, 905, "e2b-first.txt");
     await repos.files.rememberSource(file.id, {
       transport: "e2b",
       connectionKey: "deployment",
@@ -93,14 +93,17 @@ describe("transport-neutral file resolver", () => {
       mimeType: "text/plain",
     });
     const e2bFetch = vi.fn(async () => Buffer.from("remote content"));
-    const telegramFetch = vi.fn(async () => Buffer.from("remote content"));
+    const telegramFetch = vi.fn(async () => Buffer.from("telegram re-encoded content"));
     const resolver = createResolver(repos);
     resolver.registry.register({ transport: "e2b", connectionKey: "deployment", fetch: e2bFetch });
     resolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: telegramFetch });
 
-    await expect(resolver.resolveFile(file)).resolves.toMatchObject({ source: { transport: "telegram" } });
-    expect(telegramFetch).toHaveBeenCalledOnce();
-    expect(e2bFetch).not.toHaveBeenCalled();
+    await expect(resolver.resolveFile(file)).resolves.toMatchObject({
+      bytes: Buffer.from("remote content"),
+      source: { transport: "e2b" },
+    });
+    expect(e2bFetch).toHaveBeenCalledOnce();
+    expect(telegramFetch).not.toHaveBeenCalled();
   });
 
   it("rejects stale E2B bytes and falls through to another durable source", async () => {

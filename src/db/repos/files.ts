@@ -346,7 +346,7 @@ export class FilesRepo {
       select * from file_sources
       where file_id = ${fileId}
       order by
-        case transport when 'telegram' then 0 when 'e2b' then 1 else 2 end,
+        case transport when 'e2b' then 0 when 'telegram' then 1 else 2 end,
         case when last_verified_at is null then 1 else 0 end,
         last_verified_at desc,
         id desc
