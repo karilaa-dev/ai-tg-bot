@@ -18,7 +18,7 @@ export interface PromptFileContext {
   id: number;
   name: string;
   type: string;
-  mode: "sandbox file" | "chat reference" | "inline" | "searchable";
+  mode: "chat reference" | "inline" | "searchable";
   summary?: string | null;
 }
 
@@ -34,11 +34,9 @@ export async function renderThreadSessionContext(input: {
     id: file.id,
     name: file.name,
     type: file.type,
-    mode: !file.content_sha256
-      ? "sandbox file"
-      : file.type === "image"
-        ? "chat reference"
-        : file.is_inline ? "inline" : "searchable",
+    mode: file.type === "image"
+      ? "chat reference"
+      : file.is_inline ? "inline" : "searchable",
     summary: file.summary,
   }));
   return renderSessionContext({ ...input, files: promptFiles });

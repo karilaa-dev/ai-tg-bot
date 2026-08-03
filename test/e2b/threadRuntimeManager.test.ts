@@ -219,6 +219,28 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().inventoryCalls).toBe(2);
   });
 
+  it("preserves the primary synchronization error when directory sealing also fails", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.failIndexWrite = true;
+    sandbox.failSeal = true;
+    const file: SandboxThreadFile = {
+      fileId: 991,
+      messageId: null,
+      name: "broken.txt",
+      mimeType: "text/plain",
+      expectedSize: 1,
+      expectedSha256: null,
+      telegramRefs: [],
+    };
+
+    await expect(runtime.execute(commandRequest(userId, threadId, [file])))
+      .rejects.toMatchObject({
+        name: "AggregateError",
+        message: expect.stringContaining("index write failed"),
+      });
+  });
+
   it("preserves the publication window without resetting it after later turns", async () => {
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -823,6 +845,7 @@ class FakeSandbox implements E2BSandbox {
   backgroundCalls = 0;
   inventoryCalls = 0;
   failSeal = false;
+  failIndexWrite = false;
   failWebsiteScope = false;
   nextWaitError?: unknown;
   readonly readFilePaths: string[] = [];
@@ -941,6 +964,9 @@ class FakeSandbox implements E2BSandbox {
   }
 
   async writeFile(filePath: string, data: string | Buffer | Uint8Array): Promise<void> {
+    if (this.failIndexWrite && filePath.includes("/index-")) {
+      throw new Error("index write failed");
+    }
     this.files.set(filePath, Buffer.from(data));
   }
 

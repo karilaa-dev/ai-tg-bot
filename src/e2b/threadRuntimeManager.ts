@@ -525,6 +525,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       this.input.config.E2B_REQUEST_TIMEOUT_MS,
       signal,
     );
+    let syncFailed = false;
+    let syncFailure: unknown;
     try {
       for (const file of files) {
         throwIfAborted(signal);
@@ -649,6 +651,10 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         this.input.config.E2B_REQUEST_TIMEOUT_MS,
         signal,
       );
+    } catch (error) {
+      syncFailed = true;
+      syncFailure = error;
+      throw error;
     } finally {
       try {
         await runControl(
@@ -659,8 +665,15 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       } catch (error) {
         this.input.logger?.warn("failed to seal E2B Telegram files directory", {
           sandboxId: sandbox.id,
+          syncFailed,
           error: String(error),
         });
+        if (syncFailed) {
+          throw new AggregateError(
+            [syncFailure, error],
+            `Telegram file synchronization failed (${String(syncFailure)}); sealing also failed (${String(error)})`,
+          );
+        }
         throw error;
       }
     }

@@ -75,6 +75,30 @@ describe("create_file", () => {
     expect(createdFiles[0]?.data).toBeUndefined();
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
   });
+
+  it("blocks an executable extension before a long file name is truncated", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 803, firstName: "Blocked", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Files" });
+    const bytes = Buffer.from("zip container without executable magic");
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const tool = createCreateFileTool({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles: [],
+      commandRuntime: fileRuntime(bytes, contentSha256),
+    });
+
+    await expect(tool.execute({
+      path: "/photo.jpg",
+      name: `${"a".repeat(200)}.jar`,
+      delivery: "document",
+    })).resolves.toMatchObject({ error: expect.stringContaining("blocked executable file type: .jar") });
+    expect(await repos.files.listForThreads([thread.id])).toHaveLength(0);
+  });
 });
 
 function fileRuntime(bytes: Buffer, contentSha256: string): CommandRuntime {

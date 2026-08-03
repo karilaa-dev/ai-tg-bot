@@ -58,7 +58,9 @@ export async function prepareCreatedFile(
   const virtualPath = normalizeBashCwd(file.virtualPath);
   const exported = await exportSandboxFile(input, virtualPath, signal);
   const bytes = exported.bytes;
-  const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
+  const requestedName = file.name ?? path.posix.basename(virtualPath);
+  assertAllowedOutboundFile(requestedName, file.mime, bytes);
+  const displayName = normalizeCreatedFileName(requestedName);
   assertAllowedOutboundFile(displayName, file.mime, bytes);
 
   const classified = classifyFile(displayName, file.mime ?? "");
@@ -148,6 +150,7 @@ export async function prepareDirectCreatedFile(
   },
   signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
+  assertAllowedOutboundFile(file.name, file.mime, file.bytes);
   const displayName = normalizeCreatedFileName(file.name);
   assertAllowedOutboundFile(displayName, file.mime, file.bytes);
   const classified = classifyFile(displayName, file.mime ?? "");

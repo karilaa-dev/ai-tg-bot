@@ -220,32 +220,36 @@ export const runTurn: TurnRunner = async (input) => {
       extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
     });
     if (deliveredFinalThinking !== finalThinking) {
-      try {
-        const thinkingMessageIds = await refreshFinalThinkingVisible(
-          input,
-          finalDelivery.thinkingMessageIds,
-          deliveredFinalThinking,
-          Date.now() - startedAt,
-        );
-        finalThinking = deliveredFinalThinking;
-        await input.repos.messages.setThinking(
-          finalDelivery.assistantMessageId,
-          finalThinking,
-          thinkingMessageIds.find((id) => id > 0),
-        ).catch((error) => {
-          input.logger.warn("failed to persist finalized attachment thinking summary", {
+      finalThinking = deliveredFinalThinking;
+      let thinkingMessageId = finalDelivery.thinkingMessageIds.find((id) => id > 0);
+      if (thinkingMessageId !== undefined) {
+        try {
+          const thinkingMessageIds = await refreshFinalThinkingVisible(
+            input,
+            finalDelivery.thinkingMessageIds,
+            finalThinking,
+            Date.now() - startedAt,
+          );
+          thinkingMessageId = thinkingMessageIds.find((id) => id > 0);
+        } catch (error) {
+          input.logger.warn("failed to refresh finalized attachment thinking summary", {
             threadId: input.thread.id,
             messageId: finalDelivery.assistantMessageId,
             err: String(error),
           });
-        });
-      } catch (error) {
-        input.logger.warn("failed to refresh finalized attachment thinking summary", {
+        }
+      }
+      await input.repos.messages.setThinking(
+        finalDelivery.assistantMessageId,
+        finalThinking,
+        thinkingMessageId,
+      ).catch((error) => {
+        input.logger.warn("failed to persist finalized attachment thinking summary", {
           threadId: input.thread.id,
           messageId: finalDelivery.assistantMessageId,
           err: String(error),
         });
-      }
+      });
     }
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
