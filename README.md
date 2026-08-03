@@ -8,7 +8,7 @@ A private Telegram agent built on persistent Pi sessions and persistent custom E
 - Each Telegram thread owns exactly one E2B sandbox. Sandbox IDs are stored in the database and recovered by deployment/thread metadata after a restart.
 - `/home/user/workspace` is the thread's writable, persistent working directory.
 - Every Telegram-backed file visible through the thread/fork chain can be downloaded by the bot and copied through the E2B SDK into `/home/user/telegram-files`. That directory and its files are root-owned and read-only to agent commands. Files must be copied into the workspace before editing.
-- On upgrade, an existing host `files.path` column is retained as inert rollback metadata; current runtime code never reads it, and new databases omit it. Legacy rows, extracted text, search chunks, and diagnostics remain available, while host-only bytes with no durable Telegram/E2B source remain unavailable rather than being silently deleted.
+- On upgrade, the obsolete host `files.path` column is dropped. Legacy rows, extracted text, search chunks, and diagnostics remain available, while host-only rows with no text, chunks, or durable Telegram/E2B source are retained for diagnostics but excluded from model and sandbox file scope.
 - There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Generated files remain in the sandbox. Telegram file bodies pass through the bot process during ingestion, sandbox restoration, and outbound delivery.
 - Sandboxes auto-pause after 3 minutes once a shell-backed turn is finished. An explicit successful `publish_website` call changes that turn's delay to 15 minutes, and the final Telegram answer states the public URL and pause timing.
 - E2B Base sandboxes have a one-hour continuous runtime window. The runtime manager proactively pauses and reconnects before that limit during long work, preserving filesystem and memory state while resetting the window.
@@ -93,7 +93,7 @@ To configure Codex OAuth in the same Pi directory:
 PI_CODING_AGENT_DIR=./data/pi npx pi
 ```
 
-The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source are retained; records whose only byte source was a legacy host snapshot are removed transactionally. Physical files in the old host-storage directory are not deleted automatically.
+The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source, extracted text, or search chunks remain in active thread scope. Host-only records without a recoverable source are retained as diagnostic rows but excluded from agent-visible thread scope. Physical files in the old host-storage directory are not deleted automatically.
 
 For an OpenSandbox-era deployment, stop the old bot before upgrading and move its former managed-file root out of the deployment mounts as a rollback quarantine. The E2B release never reads that directory, so every physical file below it is unreferenced after the database migration. Keep the quarantined directory for a bounded 30-day rollback window, confirm Telegram-backed files and new E2B file delivery work, then delete the whole quarantined directory manually. Back it up first if legacy generated files must be retained; they cannot be imported automatically because they have no Telegram or E2B source.
 

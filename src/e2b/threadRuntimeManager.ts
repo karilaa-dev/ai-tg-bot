@@ -415,6 +415,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         });
         if (winner.sandbox_id === info.sandboxId) {
           acquired = { mapping: winner, info };
+        } else {
+          await this.removeRedundantSandbox(scope, info.sandboxId, winner.sandbox_id);
         }
         continue;
       }
@@ -433,14 +435,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         throw error;
       }
       if (winner.sandbox_id !== created.id) {
-        await this.client.kill(created.id).catch((error) => {
-          this.input.logger?.warn("failed to remove redundant E2B sandbox after creation race", {
-            ...scope,
-            sandboxId: created.id,
-            winnerSandboxId: winner.sandbox_id,
-            error: String(error),
-          });
-        });
+        await this.removeRedundantSandbox(scope, created.id, winner.sandbox_id);
         continue;
       }
       const now = Date.now();
@@ -475,6 +470,28 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       sandboxId: sandbox.id,
     });
     return sandbox;
+  }
+
+  private async removeRedundantSandbox(
+    scope: SandboxScope,
+    sandboxId: string,
+    winnerSandboxId: string,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.client.kill(sandboxId);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    this.input.logger?.warn("failed to remove redundant E2B sandbox after mapping race", {
+      ...scope,
+      sandboxId,
+      winnerSandboxId,
+      error: String(lastError),
+    });
   }
 
   private async rotateIfNeeded(

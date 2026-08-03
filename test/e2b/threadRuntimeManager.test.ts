@@ -915,6 +915,36 @@ describe("thread E2B runtime manager", () => {
     }
   });
 
+  it("removes a discovered sandbox that loses the mapping race", async () => {
+    const metadata = {
+      app: "ai-tg-bot",
+      deployment: config.E2B_DEPLOYMENT_ID,
+      template_ref: config.E2B_TEMPLATE,
+      telegram_user_id: String(userId),
+      thread_id: String(threadId),
+    };
+    const discovered = await client.create(metadata);
+    let winnerId = "";
+    client.afterNextList = async () => {
+      const winner = await client.create(metadata);
+      winnerId = winner.id;
+      await repos.threadSandboxes.insertIfAbsent({
+        deploymentId: config.E2B_DEPLOYMENT_ID,
+        userId,
+        threadId,
+        sandboxId: winner.id,
+      });
+    };
+
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(client.sandboxes.has(discovered.id)).toBe(false);
+    expect(client.sandboxes.has(winnerId)).toBe(true);
+    expect(client.killCalls).toBe(1);
+    await expect(repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId))
+      .resolves.toMatchObject({ sandbox_id: winnerId });
+  });
+
   it("keeps the sandbox mapping when a transient error merely mentions 404", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandboxId = client.onlySandbox().id;
@@ -974,6 +1004,7 @@ class FakeClient implements E2BClient {
   connectCalls = 0;
   killCalls = 0;
   nextGetInfoError?: unknown;
+  afterNextList?: () => Promise<void>;
   nextCreateGate?: {
     started: ReturnType<typeof deferred<void>>;
     release: ReturnType<typeof deferred<void>>;
@@ -985,9 +1016,13 @@ class FakeClient implements E2BClient {
   };
 
   async list(metadata: Record<string, string>) {
-    return [...this.sandboxes.values()]
+    const matches = [...this.sandboxes.values()]
       .filter((sandbox) => Object.entries(metadata).every(([key, value]) => sandbox.metadata[key] === value))
       .map((sandbox) => sandbox.info());
+    const afterList = this.afterNextList;
+    this.afterNextList = undefined;
+    await afterList?.();
+    return matches;
   }
 
   async getInfo(sandboxId: string) {
