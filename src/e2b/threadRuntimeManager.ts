@@ -675,6 +675,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   ): Promise<TelegramRestoreResult> {
     const local = await this.restoreLocalFileSource(sandbox, item, signal);
     if (local) return local;
+    // Smaller Telegram photo variants remain durable observation history, but are
+    // deliberately not silent substitutes for the primary image's bytes/dimensions.
     const candidates = item.file.telegramRefs
       .filter((ref) => ref.isPrimary)
       .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
@@ -933,12 +935,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     if (!canonicalPath || !allowedRoots.some((root) => isSameOrDescendant(canonicalPath, root))) {
       throw new Error("file path escapes its allowed E2B roots");
     }
-    const info = await sandbox.fileInfo(canonicalPath, signal);
+    const info = await sandbox.fileInfo(canonicalPath, realpathUser, signal);
     if (info.type !== FileType.FILE || info.symlinkTarget) throw new Error("path is not a regular file");
     if (info.size > maxBytes) throw new Error("file is larger than the allowed limit");
-    const bytes = Buffer.from(await sandbox.readFile(canonicalPath, signal));
+    const bytes = Buffer.from(await sandbox.readFile(canonicalPath, realpathUser, signal));
     if (bytes.length > maxBytes) throw new Error("file is larger than the allowed limit");
-    const after = await sandbox.fileInfo(canonicalPath, signal);
+    const after = await sandbox.fileInfo(canonicalPath, realpathUser, signal);
     if (after.type !== FileType.FILE || after.symlinkTarget || after.size !== bytes.length) {
       throw new Error("file changed while it was being read");
     }
@@ -953,9 +955,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   ): Promise<string> {
     const destination = path.posix.join(E2B_FILE_SOURCES, contentSha256);
     try {
-      const info = await sandbox.fileInfo(destination, signal);
+      const info = await sandbox.fileInfo(destination, "root", signal);
       if (info.type === FileType.FILE && !info.symlinkTarget && info.size === bytes.length) {
-        const existing = Buffer.from(await sandbox.readFile(destination, signal));
+        const existing = Buffer.from(await sandbox.readFile(destination, "root", signal));
         if (sha256Hex(existing) === contentSha256) return destination;
       }
     } catch {
@@ -1180,11 +1182,11 @@ async function readThreadFileIndex(
   path: string,
   signal?: AbortSignal,
 ): Promise<ThreadFileIndex> {
-  if (!await sandbox.fileExists(path, signal).catch(() => false)) {
+  if (!await sandbox.fileExists(path, "user", signal).catch(() => false)) {
     return { version: 2, generated_at: new Date(0).toISOString(), files: [] };
   }
   try {
-    const parsed = JSON.parse(await sandbox.readText(path, signal)) as {
+    const parsed = JSON.parse(await sandbox.readText(path, "user", signal)) as {
       version?: number;
       generated_at?: string;
       files?: Array<ThreadFileIndexEntry & { error?: string }>;
@@ -1274,8 +1276,8 @@ async function runCommandResult(
 }
 
 async function readIfExists(sandbox: E2BSandbox, filePath: string, signal?: AbortSignal): Promise<Buffer> {
-  if (!await sandbox.fileExists(filePath, signal).catch(() => false)) return Buffer.alloc(0);
-  return Buffer.from(await sandbox.readFile(filePath, signal));
+  if (!await sandbox.fileExists(filePath, "user", signal).catch(() => false)) return Buffer.alloc(0);
+  return Buffer.from(await sandbox.readFile(filePath, "user", signal));
 }
 
 async function waitForCommand(

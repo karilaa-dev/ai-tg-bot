@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { appendPublishedWebsiteNotice } from "../../src/ai/run.js";
 import { createBashTool } from "../../src/ai/tools/bash.js";
+import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
 import { loadTestConfig } from "../../src/config.js";
 import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
@@ -11,6 +12,10 @@ describe("E2B-backed agent tools", () => {
 
     expect(description).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(description).toContain("inherited output pipes");
+  });
+
+  it("holds sandbox activity while exporting a created file", () => {
+    expect(createCreateFileTool(buildInput(fakeRuntime())).holdsCommandActivity).toBe(true);
   });
 
   it("publishes through the explicit tool and registers the final-answer notice", async () => {

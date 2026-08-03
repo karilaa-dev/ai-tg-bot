@@ -65,6 +65,10 @@ export async function prepareCreatedFile(
   const requestedDelivery = file.delivery ?? "auto";
   if (requestedDelivery === "photo") assertPhotoDeliverable(classified, displayName);
   if (classified && classified !== "legacy-doc") {
+    let ingestedFile: {
+      result: Awaited<ReturnType<typeof ingestFileBytes>>;
+      stored: FileRow;
+    } | undefined;
     try {
       const ingested = await ingestFileBytes({
         config: input.config,
@@ -81,6 +85,20 @@ export async function prepareCreatedFile(
       });
       const stored = await input.repos.files.get(ingested.fileId);
       if (!stored) throw new Error(`created file was not stored: ${ingested.fileId}`);
+      ingestedFile = { result: ingested, stored };
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason ?? err;
+      input.logger?.warn("created file ingest failed; storing as generic attachment", {
+        threadId: input.thread.id,
+        name: displayName,
+        type: classified,
+        err: String(err),
+      });
+    }
+    if (ingestedFile) {
+      const { result: ingested, stored } = ingestedFile;
+      // Source registration is intentionally outside the ingest fallback: a source
+      // write failure must not insert a second generic row for already-ingested bytes.
       await rememberE2BFileSource(input, stored.id, exported, file.mime);
       return {
         fileId: stored.id,
@@ -95,14 +113,6 @@ export async function prepareCreatedFile(
         delivery: createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name),
         origin: "created_file",
       };
-    } catch (err) {
-      if (signal?.aborted) throw signal.reason ?? err;
-      input.logger?.warn("created file ingest failed; storing as generic attachment", {
-        threadId: input.thread.id,
-        name: displayName,
-        type: classified,
-        err: String(err),
-      });
     }
   }
 

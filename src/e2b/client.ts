@@ -42,10 +42,10 @@ export interface E2BSandbox {
     },
   ): Promise<E2BCommandHandle>;
   writeFile(path: string, data: string | Buffer | Uint8Array, user?: string, signal?: AbortSignal): Promise<void>;
-  readFile(path: string, signal?: AbortSignal): Promise<Uint8Array>;
-  readText(path: string, signal?: AbortSignal): Promise<string>;
-  fileInfo(path: string, signal?: AbortSignal): Promise<EntryInfo>;
-  fileExists(path: string, signal?: AbortSignal): Promise<boolean>;
+  readFile(path: string, user?: string, signal?: AbortSignal): Promise<Uint8Array>;
+  readText(path: string, user?: string, signal?: AbortSignal): Promise<string>;
+  fileInfo(path: string, user?: string, signal?: AbortSignal): Promise<EntryInfo>;
+  fileExists(path: string, user?: string, signal?: AbortSignal): Promise<boolean>;
   removeFile(path: string, user?: string, signal?: AbortSignal): Promise<void>;
   getHost(port: number): string;
   isRunning(signal?: AbortSignal): Promise<boolean>;
@@ -166,31 +166,35 @@ class SdkE2BSandbox implements E2BSandbox {
     });
   }
 
-  readFile(path: string, signal?: AbortSignal): Promise<Uint8Array> {
+  readFile(path: string, user = "user", signal?: AbortSignal): Promise<Uint8Array> {
     return this.sandbox.files.read(path, {
       format: "bytes",
+      user,
       signal,
       requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
     });
   }
 
-  readText(path: string, signal?: AbortSignal): Promise<string> {
+  readText(path: string, user = "user", signal?: AbortSignal): Promise<string> {
     return this.sandbox.files.read(path, {
       format: "text",
+      user,
       signal,
       requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
     });
   }
 
-  fileInfo(path: string, signal?: AbortSignal): Promise<EntryInfo> {
+  fileInfo(path: string, user = "user", signal?: AbortSignal): Promise<EntryInfo> {
     return this.sandbox.files.getInfo(path, {
+      user,
       signal,
       requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
     });
   }
 
-  fileExists(path: string, signal?: AbortSignal): Promise<boolean> {
+  fileExists(path: string, user = "user", signal?: AbortSignal): Promise<boolean> {
     return this.sandbox.files.exists(path, {
+      user,
       signal,
       requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
     });

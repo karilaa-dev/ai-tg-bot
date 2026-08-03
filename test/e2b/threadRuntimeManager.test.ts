@@ -244,6 +244,8 @@ describe("thread E2B runtime manager", () => {
       canonicalPath: first.sourceCanonicalPath!,
       maxBytes: 100,
     })).resolves.toEqual(Buffer.from("version one"));
+    expect(sandbox.fileInfoCalls).toContainEqual({ path: first.sourceCanonicalPath, user: "root" });
+    expect(sandbox.readFileCalls).toContainEqual({ path: first.sourceCanonicalPath, user: "root" });
   });
 
   it("reuses an outbound artifact locally and falls back to Telegram after sandbox loss", async () => {
@@ -346,6 +348,55 @@ describe("thread E2B runtime manager", () => {
       status: "available",
       size: recovered.length,
       sha256: recoveredHash,
+    });
+  });
+
+  it("does not substitute a smaller non-primary Telegram photo variant", async () => {
+    const original = Buffer.from("largest photo representation");
+    const smaller = Buffer.from("small photo");
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "image",
+      contentSha256: createHash("sha256").update(original).digest("hex"),
+      mimeType: "image/jpeg",
+      name: "largest.jpg",
+      size: original.length,
+      isInline: false,
+    });
+    const refs = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "inbound",
+      mediaKind: "photo",
+      refs: [
+        { fileId: "tg-primary-missing", size: original.length, primary: true },
+        { fileId: "tg-smaller", size: smaller.length, primary: false },
+      ],
+    });
+    client.telegramFiles.set("tg-smaller", smaller);
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: refs.map((ref) => ({
+        id: ref.id,
+        telegramFileId: ref.telegram_file_id,
+        telegramSize: ref.telegram_size,
+        direction: "inbound" as const,
+        mediaKind: "photo" as const,
+        isPrimary: Boolean(ref.is_primary),
+        lastSeenAt: ref.last_seen_at,
+      })),
+    }]));
+
+    expect(client.telegramDownloadCalls).toBe(1);
+    const index = JSON.parse(await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(index.files[0]).toMatchObject({
+      file_id: stored.id,
+      status: "error",
+      error_code: "file_unavailable",
     });
   });
 
@@ -590,6 +641,8 @@ class FakeSandbox implements E2BSandbox {
   failSeal = false;
   nextWaitError?: unknown;
   readonly readFilePaths: string[] = [];
+  readonly readFileCalls: Array<{ path: string; user: string }> = [];
+  readonly fileInfoCalls: Array<{ path: string; user: string }> = [];
   nextCommandGate?: {
     started: ReturnType<typeof deferred<void>>;
     release: ReturnType<typeof deferred<void>>;
@@ -702,18 +755,20 @@ class FakeSandbox implements E2BSandbox {
     this.files.set(filePath, Buffer.from(data));
   }
 
-  async readFile(filePath: string): Promise<Uint8Array> {
+  async readFile(filePath: string, user = "user"): Promise<Uint8Array> {
     this.readFilePaths.push(filePath);
+    this.readFileCalls.push({ path: filePath, user });
     const bytes = this.files.get(filePath);
     if (!bytes) throw new Error("not found");
     return bytes;
   }
 
-  async readText(filePath: string): Promise<string> {
-    return Buffer.from(await this.readFile(filePath)).toString("utf8");
+  async readText(filePath: string, user = "user"): Promise<string> {
+    return Buffer.from(await this.readFile(filePath, user)).toString("utf8");
   }
 
-  async fileInfo(filePath: string) {
+  async fileInfo(filePath: string, user = "user") {
+    this.fileInfoCalls.push({ path: filePath, user });
     const bytes = this.files.get(filePath);
     if (!bytes) throw new Error("not found");
     return { type: "file", size: bytes.length } as never;

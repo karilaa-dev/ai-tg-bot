@@ -6,6 +6,7 @@ import { MAX_FILE_MB, defineBotTool, type ToolBuildInput } from "./types.js";
 
 export function createCreateFileTool(input: ToolBuildInput) {
   return defineBotTool({
+    holdsCommandActivity: true,
     description:
       `Queue a file from this thread's E2B workspace for direct sandbox-to-Telegram delivery. Create files with relative Bash paths under /home/user/workspace, then pass the logical path (for example /report.txt). The read-only /home/user/telegram-files directory cannot be exported as a created file; copy an attachment to the workspace first if needed. Attach at most ${MAX_CREATED_FILES_PER_ANSWER} files per answer. Files up to ${MAX_FILE_MB} MB are allowed unless they are compiled/native executables. Images are sent as photos when Telegram accepts them; oversized or incompatible photos are sent as documents. Select document delivery when exact bytes or lossless metadata matter.`,
     inputSchema: z.object({
