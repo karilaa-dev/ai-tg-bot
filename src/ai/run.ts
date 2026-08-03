@@ -1,4 +1,4 @@
-import { InputFile, type Api } from "grammy";
+import { GrammyError, InputFile, type Api } from "grammy";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
@@ -1066,19 +1066,20 @@ async function sendAttachmentBatch(
       continue;
     }
 
+    let sent: SentTelegramFileMessage[];
     try {
-      const sent = await strategy.sendGroup(input, batch);
-      for (let index = 0; index < batch.length; index += 1) {
-        const attachment = batch[index]!;
-        await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent[index]);
-      }
-      input.logger.info(`${strategy.label} media group sent`, {
-        threadId: input.thread.id,
-        messageId: assistantMessage.id,
-        files: batch.length,
-        telegramMessages: sent.map((message) => message.message_id),
-      });
+      sent = await strategy.sendGroup(input, batch);
     } catch (err) {
+      if (!isDefinitiveTelegramRejection(err)) {
+        input.logger.warn(`${strategy.label} media group delivery outcome is unknown; not retrying`, {
+          threadId: input.thread.id,
+          messageId: assistantMessage.id,
+          files: batch.length,
+          fileIds: batch.map((attachment) => attachment.fileId),
+          err: String(err),
+        });
+        continue;
+      }
       input.logger.warn(`failed to send ${strategy.label} media group; retrying files individually`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
@@ -1089,7 +1090,28 @@ async function sendAttachmentBatch(
       for (const attachment of batch) {
         await sendOneBufferedAttachment(input, assistantMessage, attachment, strategy);
       }
+      continue;
     }
+    for (let index = 0; index < batch.length; index += 1) {
+      batch[index]!.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
+    }
+    for (const attachment of batch) {
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined).catch((error) => {
+        input.logger.warn(`failed to persist delivered ${strategy.label}`, {
+          threadId: input.thread.id,
+          messageId: assistantMessage.id,
+          fileId: attachment.fileId,
+          telegramMessageId: attachment.telegramDelivery?.messageId,
+          err: String(error),
+        });
+      });
+    }
+    input.logger.info(`${strategy.label} media group sent`, {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      files: batch.length,
+      telegramMessages: sent.map((message) => message.message_id),
+    });
   }
 }
 
@@ -1102,7 +1124,8 @@ async function sendOneBufferedAttachment(
   let failure: unknown;
   try {
     const sent = await strategy.sendOne(input, attachment);
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+    attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
     input.logger.info(`${strategy.label} sent`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
@@ -1114,11 +1137,32 @@ async function sendOneBufferedAttachment(
   } catch (error) {
     failure = error;
   }
+  if (attachment.telegramDelivery) {
+    input.logger.warn(`failed to persist delivered ${strategy.label}`, {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      fileId: attachment.fileId,
+      telegramMessageId: attachment.telegramDelivery.messageId,
+      err: String(failure),
+    });
+    return;
+  }
+  if (!isDefinitiveTelegramRejection(failure)) {
+    input.logger.warn(`${strategy.label} delivery outcome is unknown; not retrying`, {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      fileId: attachment.fileId,
+      name: attachment.name,
+      err: String(failure),
+    });
+    return;
+  }
   if (strategy === photoSendStrategy) {
     try {
       const sent = await documentSendStrategy.sendOne(input, attachment);
       attachment.delivery = "document";
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, sent);
+      attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
       input.logger.info("generated image sent as a document after photo rejection", {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
@@ -1131,6 +1175,26 @@ async function sendOneBufferedAttachment(
       failure = error;
     }
   }
+  if (attachment.telegramDelivery) {
+    input.logger.warn("failed to persist delivered created file attachment", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      fileId: attachment.fileId,
+      telegramMessageId: attachment.telegramDelivery.messageId,
+      err: String(failure),
+    });
+    return;
+  }
+  if (!isDefinitiveTelegramRejection(failure)) {
+    input.logger.warn("created file attachment delivery outcome is unknown; not retrying", {
+      threadId: input.thread.id,
+      messageId: assistantMessage.id,
+      fileId: attachment.fileId,
+      name: attachment.name,
+      err: String(failure),
+    });
+    return;
+  }
   input.logger.warn(`failed to send ${strategy.label}`, {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -1139,6 +1203,13 @@ async function sendOneBufferedAttachment(
     err: String(failure),
   });
   await removeUnresolvableUndeliveredAttachment(input, attachment);
+}
+
+function isDefinitiveTelegramRejection(error: unknown): boolean {
+  return error instanceof GrammyError
+    && error.error_code >= 400
+    && error.error_code < 500
+    && error.error_code !== 429;
 }
 
 function attachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
@@ -1188,12 +1259,12 @@ async function rememberSentCreatedFileAttachment(
   attachment: CreatedFileAttachment,
   sent: SentTelegramFileMessage | undefined,
 ): Promise<void> {
+  const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
+  if (delivery) attachment.telegramDelivery = delivery;
   await input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
     displayName: attachment.name,
     caption: attachment.caption ?? null,
   });
-  const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
-  if (delivery) attachment.telegramDelivery = delivery;
   await rememberTelegramDeliverySource(input, attachment);
 }
 

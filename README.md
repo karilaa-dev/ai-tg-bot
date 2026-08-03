@@ -20,6 +20,8 @@ E2B documents the relevant behavior in [Sandbox lifecycle](https://e2b.dev/docs/
 
 `E2B_TEMPLATE=ai-tg-bot-tools:production` selects the reusable private template defined in [`e2b-template`](e2b-template/README.md). It is based on E2B Base and built explicitly with 2 vCPU and 2 GiB RAM; bot startup and sandbox creation never install or rebuild it. The toolbox includes OfficeCLI, ImageMagick 7, ZIP and other archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common shell/search/network diagnostics. Chromium and browser automation bundles are intentionally absent because browser work is provided by Browser Use Cloud.
 
+`sandbox_file_restore_status` is an intentionally retained operational audit keyed by sandbox generation and file. Deleting or replacing a sandbox removes its active `thread_sandboxes` mapping but keeps these historical restore results for diagnostics, as it does for messages, files, and Telegram references. Operators who need finite retention should archive and prune this audit table under their own data-retention policy rather than coupling history deletion to sandbox cleanup.
+
 Build and validate a version, then atomically promote it to `production`:
 
 ```bash

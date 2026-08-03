@@ -1,3 +1,4 @@
+import { GrammyError } from "grammy";
 import { describe, expect, it, vi } from "vitest";
 import {
   normalizeTelegramAttachmentDeliveries,
@@ -31,10 +32,10 @@ describe("buffered Telegram attachment delivery", () => {
 
   it("retries failed photo groups individually and falls back to a document per rejected photo", async () => {
     const api = fakeApi();
-    api.sendMediaGroup.mockRejectedValue(new Error("one photo is too large"));
+    api.sendMediaGroup.mockRejectedValue(telegramError("Bad Request: one photo is too large", "sendMediaGroup"));
     api.sendPhoto
       .mockResolvedValueOnce(photoMessage(501, "photo-1"))
-      .mockRejectedValueOnce(new Error("photo rejected"));
+      .mockRejectedValueOnce(telegramError("Bad Request: photo rejected", "sendPhoto"));
     const input = turnInput(api);
     const first = imageAttachment(1, "first.jpg", 100);
     const second = imageAttachment(2, "second.jpg", 200);
@@ -46,6 +47,50 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.sendDocument).toHaveBeenCalledTimes(1);
     expect(first.delivery).toBe("photo");
     expect(second.delivery).toBe("document");
+    expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a media group after an ambiguous transport failure", async () => {
+    const api = fakeApi();
+    api.sendMediaGroup.mockRejectedValue(new Error("request timed out after upload"));
+    const input = turnInput(api);
+    const first = imageAttachment(1, "first.jpg", 100);
+    const second = imageAttachment(2, "second.jpg", 200);
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
+
+    expect(api.sendMediaGroup).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(api.sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("does not resend a photo when post-delivery bookkeeping fails", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
+    const attachment = imageAttachment(1, "picture.jpg", 100);
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.sendDocument).not.toHaveBeenCalled();
+    expect(attachment.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
+  });
+
+  it("does not resend a media group when one delivery record fails", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
+    const first = imageAttachment(1, "first.jpg", 100);
+    const second = imageAttachment(2, "second.jpg", 200);
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
+
+    expect(api.sendMediaGroup).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(api.sendDocument).not.toHaveBeenCalled();
+    expect(first.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-1" });
+    expect(second.telegramDelivery).toMatchObject({ messageId: 501, fileId: "photo-2" });
     expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(2);
   });
 });
@@ -92,6 +137,15 @@ function photoMessage(messageId: number, fileId: string) {
       file_size: 100,
     }],
   };
+}
+
+function telegramError(description: string, method: string): GrammyError {
+  return new GrammyError(
+    `Call to '${method}' failed`,
+    { ok: false, error_code: 400, description },
+    method,
+    {},
+  );
 }
 
 function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
