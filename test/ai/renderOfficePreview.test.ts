@@ -79,7 +79,10 @@ function fakeRuntime(html: string) {
     readWorkspaceFile: vi.fn(async () => ({
       sandboxId: "sandbox-1",
       canonicalPath: "/home/user/workspace/preview.html",
+      sourceCanonicalPath: null,
       bytes: Buffer.from(html),
+      size: Buffer.byteLength(html),
+      contentSha256: "0".repeat(64),
     })),
     readSourceFile: vi.fn(async () => Buffer.alloc(0)),
     publishWebsite: vi.fn(async () => { throw new Error("not used"); }),

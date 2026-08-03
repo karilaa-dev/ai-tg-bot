@@ -64,7 +64,8 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("treat downloading or saving publicly accessible images");
     expect(prompt).toContain("This does not cover bypassing paywalls or access controls");
     expect(prompt).toContain("Create an archive only when explicitly requested");
-    expect(prompt).toContain("With Bash or curl, access only public internet destinations");
+    expect(prompt).toContain("E2B may reach private or local addresses");
+    expect(prompt).toContain("Published E2B URLs are public");
     expect(prompt).toContain("call `read` on its advertised `SKILL.md` before acting");
     expect(prompt).toContain("never execute them");
     expect(prompt).not.toContain("# Browser Use Cloud");

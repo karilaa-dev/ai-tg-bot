@@ -2,6 +2,7 @@ import path from "node:path";
 
 export const E2B_WORKSPACE = "/home/user/workspace";
 export const E2B_TELEGRAM_FILES = "/home/user/telegram-files";
+export const E2B_FILE_SOURCES = "/home/user/.ai-tg-bot/file-sources";
 export const E2B_RUNTIME_TMP = "/tmp/ai-tg-bot";
 export const E2B_CONTROL_TMP = "/tmp/ai-tg-bot-control";
 

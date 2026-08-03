@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { TimeoutError } from "e2b";
 import { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { Repos } from "../db/repos/index.js";
@@ -33,6 +34,7 @@ import {
 } from "./client.js";
 import {
   E2B_CONTROL_TMP,
+  E2B_FILE_SOURCES,
   E2B_RUNTIME_TMP,
   E2B_TELEGRAM_FILES,
   E2B_WORKSPACE,
@@ -45,7 +47,12 @@ type SandboxScope = { userId: number; threadId: number };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
-  websitePublished: boolean;
+  websiteSandboxId?: string;
+  threadFilesSync?: {
+    sandboxId: string;
+    revision: string;
+    result: SandboxThreadFileSyncResult;
+  };
   connection?: E2BSandbox;
   sandboxId?: string;
   continuousStartedAt?: number;
@@ -79,6 +86,13 @@ type TelegramRestoreResult = {
   sha256?: string;
   error_code?: string;
   error_detail?: string;
+};
+
+type ThreadFileInventoryEntry = {
+  sandbox_name: string;
+  regular: boolean;
+  size: number | null;
+  sha256: string | null;
 };
 
 const RENEW_INTERVAL_MS = 60_000;
@@ -121,7 +135,6 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
     const scope = { userId, threadId };
     const state = this.stateFor(scope);
-    if (state.leases === 0) state.websitePublished = false;
     state.leases += 1;
     this.scheduleRenewal(scope, state);
     let released = false;
@@ -132,7 +145,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         state.leases = Math.max(0, state.leases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
-        const timeoutMs = state.websitePublished ? E2B_WEBSITE_IDLE_PAUSE_MS : E2B_IDLE_PAUSE_MS;
+        const websitePublished = state.websiteSandboxId !== undefined
+          && state.websiteSandboxId === state.sandboxId;
+        const timeoutMs = websitePublished ? E2B_WEBSITE_IDLE_PAUSE_MS : E2B_IDLE_PAUSE_MS;
         void this.enqueue(scope, undefined, async () => {
           if (!state.connection) return;
           await state.connection.setTimeout(timeoutMs);
@@ -140,7 +155,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
             ...scope,
             sandboxId: state.sandboxId,
             timeoutMs,
-            website: state.websitePublished,
+            website: websitePublished,
           });
         }).catch((error) => {
           this.input.logger?.warn("failed to arm E2B sandbox idle timeout", {
@@ -174,10 +189,17 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       );
       const candidate = sandboxWorkspaceFile(request.virtualPath);
       const result = await this.readCanonicalFile(prepared.sandbox, candidate, request.maxBytes, request.signal);
+      const contentSha256 = sha256Hex(result.bytes);
+      const sourceCanonicalPath = request.preserveSource
+        ? await this.preserveFileSource(prepared.sandbox, result.bytes, contentSha256, request.signal)
+        : null;
       return {
         sandboxId: prepared.sandbox.id,
         canonicalPath: result.canonicalPath,
+        sourceCanonicalPath,
         bytes: result.bytes,
+        size: result.bytes.length,
+        contentSha256,
       };
     });
   }
@@ -185,8 +207,11 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   readSourceFile(request: SandboxSourceFileReadRequest): Promise<Buffer> {
     const scope = { userId: request.userId, threadId: request.threadId };
     return this.enqueue(scope, request.signal, async (state) => {
-      if (!isSameOrDescendant(request.canonicalPath, E2B_WORKSPACE)) {
-        throw new Error("E2B file source path is outside this thread's workspace");
+      if (
+        !isSameOrDescendant(request.canonicalPath, E2B_WORKSPACE)
+        && !isSameOrDescendant(request.canonicalPath, E2B_FILE_SOURCES)
+      ) {
+        throw new Error("E2B file source path is outside this thread's durable file roots");
       }
       const mapping = await this.input.repos.threadSandboxes.get(
         this.input.config.E2B_DEPLOYMENT_ID,
@@ -211,14 +236,15 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           ? Date.now()
           : info.startedAt.getTime();
       }
-      state.sandboxId = request.sandboxId;
-      state.connection = sandbox;
+      this.rememberConnection(state, sandbox);
       try {
         return (await this.readCanonicalFile(
           sandbox,
           request.canonicalPath,
           request.maxBytes,
           request.signal,
+          [E2B_WORKSPACE, E2B_FILE_SOURCES],
+          "root",
         )).bytes;
       } finally {
         await sandbox.setTimeout(E2B_IDLE_PAUSE_MS, request.signal).catch(() => undefined);
@@ -240,7 +266,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       );
       const url = new URL(sitePath, `https://${prepared.sandbox.getHost(request.port)}`).toString();
       await verifyWebsite(url, this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal);
-      state.websitePublished = true;
+      state.websiteSandboxId = prepared.sandbox.id;
       this.input.logger?.info("E2B website published", {
         ...scope,
         sandboxId: prepared.sandbox.id,
@@ -285,7 +311,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     sandbox = await this.rotateIfNeeded(state, scope, sandbox, operationWindowMs, signal);
     await sandbox.setTimeout(operationWindowMs, signal);
     await this.ensureLayout(sandbox, signal);
-    const threadFiles = await this.syncThreadFiles(scope, sandbox, files, signal);
+    const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
     return { sandbox, threadFiles };
   }
 
@@ -364,9 +390,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       );
     }
     const continuousStartedAt = resumed ? Date.now() : acquired.info.startedAt.getTime();
-    state.connection = sandbox;
-    state.sandboxId = sandbox.id;
-    state.continuousStartedAt = continuousStartedAt;
+    this.rememberConnection(state, sandbox, continuousStartedAt);
     await sandbox.setTimeout(timeoutMs, signal);
     this.input.logger?.info(acquired.created ? "E2B sandbox created" : resumed ? "E2B sandbox resumed" : "E2B sandbox connected", {
       ...scope,
@@ -398,18 +422,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       signal,
     );
     const now = Date.now();
-    state.connection = resumed;
-    state.continuousStartedAt = now;
+    this.rememberConnection(state, resumed, now);
     return resumed;
   }
 
   private async ensureLayout(sandbox: E2BSandbox, signal?: AbortSignal): Promise<void> {
     const command = [
-      `mkdir -p ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_TELEGRAM_FILES)} ${quoteShellToken(E2B_RUNTIME_TMP)} ${quoteShellToken(E2B_CONTROL_TMP)}`,
+      `mkdir -p ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_TELEGRAM_FILES)} ${quoteShellToken(E2B_FILE_SOURCES)} ${quoteShellToken(E2B_RUNTIME_TMP)} ${quoteShellToken(E2B_CONTROL_TMP)}`,
       `chown user ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_RUNTIME_TMP)}`,
       `chmod 700 ${quoteShellToken(E2B_WORKSPACE)} ${quoteShellToken(E2B_RUNTIME_TMP)}`,
       `chown root ${quoteShellToken(E2B_CONTROL_TMP)}`,
       `chmod 700 ${quoteShellToken(E2B_CONTROL_TMP)}`,
+      `chown root ${quoteShellToken(path.posix.dirname(E2B_FILE_SOURCES))} ${quoteShellToken(E2B_FILE_SOURCES)}`,
+      `chmod 700 ${quoteShellToken(path.posix.dirname(E2B_FILE_SOURCES))} ${quoteShellToken(E2B_FILE_SOURCES)}`,
       `chown root ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
       `chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
     ].join(" && ");
@@ -417,14 +442,25 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   }
 
   private async syncThreadFiles(
+    state: RuntimeState,
     scope: SandboxScope,
     sandbox: E2BSandbox,
     files: SandboxThreadFile[],
     signal?: AbortSignal,
   ): Promise<SandboxThreadFileSyncResult> {
+    const revision = threadFilesRevision(files);
+    if (
+      state.threadFilesSync?.sandboxId === sandbox.id
+      && state.threadFilesSync.revision === revision
+    ) {
+      return state.threadFilesSync.result;
+    }
+    state.threadFilesSync = undefined;
     const indexPath = path.posix.join(E2B_TELEGRAM_FILES, "INDEX.json");
     const previous = await readThreadFileIndex(sandbox, indexPath, signal);
     const previousById = new Map(previous.files.map((entry) => [entry.file_id, entry]));
+    const inventory = await inspectThreadFileIndex(sandbox, indexPath, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+    const inventoryByName = new Map(inventory.map((entry) => [entry.sandbox_name, entry]));
     const next: ThreadFileIndexEntry[] = [];
     const desiredNames = new Set<string>();
     const pending: Array<{
@@ -443,16 +479,16 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         throwIfAborted(signal);
         const sandboxName = `${file.fileId}--${sanitizeFileName(file.name)}`;
         desiredNames.add(sandboxName);
-        const destination = path.posix.join(E2B_TELEGRAM_FILES, sandboxName);
         const old = previousById.get(file.fileId);
         const existingInfo = old?.status === "available"
-          ? await sandbox.fileInfo(destination, signal).catch(() => undefined)
+          ? inventoryByName.get(sandboxName)
           : undefined;
         const expectedUnchanged = old?.status === "available"
           && old.sandbox_name === sandboxName
-          && existingInfo?.type === FileType.FILE
-          && !existingInfo.symlinkTarget
-          && (old.size === null || existingInfo.size === old.size);
+          && existingInfo?.regular === true
+          && (old.size === null || existingInfo.size === old.size)
+          && old.sha256 !== null
+          && existingInfo.sha256 === old.sha256;
         if (expectedUnchanged) {
           next.push(old);
           await this.recordRestoreStatus({
@@ -577,10 +613,14 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         throw error;
       }
     }
-    return {
+    const result = {
       directory: E2B_TELEGRAM_FILES,
       available: next.filter((entry) => entry.status === "available").length,
     };
+    if (next.every((entry) => entry.status === "available")) {
+      state.threadFilesSync = { sandboxId: sandbox.id, revision, result };
+    }
+    return result;
   }
 
   private async restoreTelegramFiles(
@@ -614,6 +654,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     item: { file: SandboxThreadFile; sandboxName: string },
     signal?: AbortSignal,
   ): Promise<TelegramRestoreResult> {
+    const local = await this.restoreLocalFileSource(sandbox, item, signal);
+    if (local) return local;
     const candidates = item.file.telegramRefs
       .filter((ref) => ref.isPrimary)
       .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
@@ -673,6 +715,59 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       error_code: candidates.length ? "file_unavailable" : "missing_telegram_reference",
       error_detail: sanitizeRestoreDetail(lastError),
     };
+  }
+
+  private async restoreLocalFileSource(
+    sandbox: E2BSandbox,
+    item: { file: SandboxThreadFile; sandboxName: string },
+    signal?: AbortSignal,
+  ): Promise<TelegramRestoreResult | undefined> {
+    if (!item.file.expectedSha256) return undefined;
+    if (!item.file.telegramRefs.some((ref) => ref.isPrimary && ref.direction === "outbound")) {
+      return undefined;
+    }
+    const source = path.posix.join(E2B_FILE_SOURCES, item.file.expectedSha256);
+    try {
+      const inspected = await inspectSandboxFile(
+        sandbox,
+        source,
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+        signal,
+      );
+      if (
+        inspected.sha256 !== item.file.expectedSha256
+        || (item.file.expectedSize !== null && inspected.size !== item.file.expectedSize)
+      ) {
+        return undefined;
+      }
+      const stagingPath = path.posix.join(E2B_TELEGRAM_FILES, `.restore-${randomUUID()}`);
+      const destination = path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName);
+      try {
+        await runControl(
+          sandbox,
+          [
+            `cp -- ${quoteShellToken(source)} ${quoteShellToken(stagingPath)}`,
+            `chown root ${quoteShellToken(stagingPath)}`,
+            `chmod 444 ${quoteShellToken(stagingPath)}`,
+            `mv -f ${quoteShellToken(stagingPath)} ${quoteShellToken(destination)}`,
+          ].join(" && "),
+          this.input.config.E2B_REQUEST_TIMEOUT_MS,
+          signal,
+        );
+      } finally {
+        await sandbox.removeFile(stagingPath, "root").catch(() => undefined);
+      }
+      return {
+        file_id: item.file.fileId,
+        status: "available",
+        ref_id: null,
+        size: inspected.size,
+        sha256: inspected.sha256,
+      };
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      return undefined;
+    }
   }
 
   private async recordRestoreStatus(input: {
@@ -802,17 +897,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     candidate: string,
     maxBytes: number,
     signal?: AbortSignal,
+    allowedRoots: string[] = [E2B_WORKSPACE],
+    realpathUser = "user",
   ): Promise<{ canonicalPath: string; bytes: Buffer }> {
     const canonicalResult = await runCommandResult(
       sandbox,
       shellJoin(["realpath", "--", candidate]),
       this.input.config.E2B_REQUEST_TIMEOUT_MS,
       signal,
-      "user",
+      realpathUser,
     );
     const canonicalPath = canonicalResult.stdout.trim();
-    if (!canonicalPath || !isSameOrDescendant(canonicalPath, E2B_WORKSPACE)) {
-      throw new Error("file path escapes /home/user/workspace");
+    if (!canonicalPath || !allowedRoots.some((root) => isSameOrDescendant(canonicalPath, root))) {
+      throw new Error("file path escapes its allowed E2B roots");
     }
     const info = await sandbox.fileInfo(canonicalPath, signal);
     if (info.type !== FileType.FILE || info.symlinkTarget) throw new Error("path is not a regular file");
@@ -824,6 +921,56 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       throw new Error("file changed while it was being read");
     }
     return { canonicalPath, bytes };
+  }
+
+  private async preserveFileSource(
+    sandbox: E2BSandbox,
+    bytes: Buffer,
+    contentSha256: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const destination = path.posix.join(E2B_FILE_SOURCES, contentSha256);
+    try {
+      const info = await sandbox.fileInfo(destination, signal);
+      if (info.type === FileType.FILE && !info.symlinkTarget && info.size === bytes.length) {
+        const existing = Buffer.from(await sandbox.readFile(destination, signal));
+        if (sha256Hex(existing) === contentSha256) return destination;
+      }
+    } catch {
+      // Missing or invalid snapshots are replaced atomically below.
+    }
+
+    const stagingPath = path.posix.join(E2B_CONTROL_TMP, `source-${randomUUID()}`);
+    await sandbox.writeFile(stagingPath, bytes, "root", signal);
+    try {
+      await runControl(
+        sandbox,
+        [
+          `chown root ${quoteShellToken(stagingPath)}`,
+          `chmod 444 ${quoteShellToken(stagingPath)}`,
+          `mv -f ${quoteShellToken(stagingPath)} ${quoteShellToken(destination)}`,
+        ].join(" && "),
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+        signal,
+      );
+    } finally {
+      await sandbox.removeFile(stagingPath, "root").catch(() => undefined);
+    }
+    return destination;
+  }
+
+  private rememberConnection(
+    state: RuntimeState,
+    sandbox: E2BSandbox,
+    continuousStartedAt?: number,
+  ): void {
+    if (state.sandboxId !== sandbox.id) {
+      state.websiteSandboxId = undefined;
+      state.threadFilesSync = undefined;
+    }
+    state.connection = sandbox;
+    state.sandboxId = sandbox.id;
+    if (continuousStartedAt !== undefined) state.continuousStartedAt = continuousStartedAt;
   }
 
   private scheduleRenewal(scope: SandboxScope, state: RuntimeState): void {
@@ -840,7 +987,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           ROTATION_GUARD_MS,
         );
         await sandbox.setTimeout(E2B_IDLE_PAUSE_MS);
-        state.connection = sandbox;
+        this.rememberConnection(state, sandbox);
       }).catch((error) => {
         this.input.logger?.warn("E2B activity renewal failed", {
           ...scope,
@@ -861,7 +1008,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const key = scopeKey(scope);
     let state = this.states.get(key);
     if (!state) {
-      state = { tail: Promise.resolve(), leases: 0, websitePublished: false };
+      state = { tail: Promise.resolve(), leases: 0 };
       this.states.set(key, state);
     }
     return state;
@@ -895,6 +1042,113 @@ function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string,
 
 function scopeKey(scope: SandboxScope): string {
   return `${scope.userId}:${scope.threadId}`;
+}
+
+function threadFilesRevision(files: SandboxThreadFile[]): string {
+  const normalized = files.map((file) => ({
+    fileId: file.fileId,
+    messageId: file.messageId,
+    sandboxName: `${file.fileId}--${sanitizeFileName(file.name)}`,
+    expectedSize: file.expectedSize,
+    expectedSha256: file.expectedSha256,
+    telegramRefs: file.telegramRefs
+      .filter((ref) => ref.isPrimary)
+      .map((ref) => ({
+        id: ref.id,
+        telegramFileId: ref.telegramFileId,
+        telegramSize: ref.telegramSize,
+        direction: ref.direction,
+        mediaKind: ref.mediaKind,
+      }))
+      .sort((left, right) => left.id - right.id),
+  }));
+  return sha256Hex(Buffer.from(JSON.stringify(normalized)));
+}
+
+async function inspectThreadFileIndex(
+  sandbox: E2BSandbox,
+  indexPath: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<ThreadFileInventoryEntry[]> {
+  const script = [
+    "import hashlib,json,os,stat,sys",
+    "index_path=sys.argv[1]",
+    "root=os.path.dirname(index_path)",
+    "out=[]",
+    "try:",
+    " data=json.load(open(index_path,encoding='utf-8'))",
+    "except Exception:",
+    " data={'files':[]}",
+    "for entry in data.get('files',[]):",
+    " name=entry.get('sandbox_name')",
+    " item={'sandbox_name':name if isinstance(name,str) else '', 'regular':False, 'size':None, 'sha256':None}",
+    " if not isinstance(name,str) or os.path.basename(name)!=name or name in ('.','..'):",
+    "  out.append(item); continue",
+    " candidate=os.path.join(root,name)",
+    " try:",
+    "  info=os.lstat(candidate)",
+    "  if not stat.S_ISREG(info.st_mode):",
+    "   out.append(item); continue",
+    "  digest=hashlib.sha256()",
+    "  with open(candidate,'rb') as handle:",
+    "   for chunk in iter(lambda:handle.read(1024*1024),b''): digest.update(chunk)",
+    "  item.update(regular=True,size=info.st_size,sha256=digest.hexdigest())",
+    " except Exception:",
+    "  pass",
+    " out.append(item)",
+    "print(json.dumps(out,separators=(',',':')))",
+  ].join("\n");
+  const result = await runCommandResult(
+    sandbox,
+    shellJoin(["python3", "-c", script, indexPath]),
+    timeoutMs,
+    signal,
+    "root",
+  );
+  const parsed = JSON.parse(result.stdout) as unknown;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((value): ThreadFileInventoryEntry[] => {
+    if (!value || typeof value !== "object") return [];
+    const record = value as Record<string, unknown>;
+    if (typeof record.sandbox_name !== "string") return [];
+    return [{
+      sandbox_name: record.sandbox_name,
+      regular: record.regular === true,
+      size: typeof record.size === "number" ? record.size : null,
+      sha256: typeof record.sha256 === "string" ? record.sha256 : null,
+    }];
+  });
+}
+
+async function inspectSandboxFile(
+  sandbox: E2BSandbox,
+  filePath: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ size: number; sha256: string }> {
+  const script = [
+    "import hashlib,json,os,stat,sys",
+    "path=sys.argv[1]",
+    "info=os.lstat(path)",
+    "assert stat.S_ISREG(info.st_mode)",
+    "digest=hashlib.sha256()",
+    "with open(path,'rb') as handle:",
+    " for chunk in iter(lambda:handle.read(1024*1024),b''): digest.update(chunk)",
+    "print(json.dumps({'size':info.st_size,'sha256':digest.hexdigest()},separators=(',',':')))",
+  ].join("\n");
+  const result = await runCommandResult(
+    sandbox,
+    shellJoin(["python3", "-c", script, filePath]),
+    timeoutMs,
+    signal,
+    "root",
+  );
+  const parsed = JSON.parse(result.stdout) as { size?: unknown; sha256?: unknown };
+  if (typeof parsed.size !== "number" || typeof parsed.sha256 !== "string") {
+    throw new Error("sandbox file inspection returned invalid metadata");
+  }
+  return { size: parsed.size, sha256: parsed.sha256 };
 }
 
 async function readThreadFileIndex(
@@ -943,12 +1197,15 @@ async function readThreadFileIndex(
 
 function sanitizeFileName(value: string): string {
   const normalized = value
-    .normalize("NFKC")
-    .replace(/[\/\\\u0000-\u001f\u007f]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^\.+$/, "file");
-  return (normalized || "file").slice(0, 180);
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/\.{2,}/g, ".")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 120)
+    .replace(/[._-]+$/g, "");
+  return normalized || "file";
 }
 
 function sanitizeRestoreCode(value: unknown): string {
@@ -1030,7 +1287,7 @@ function commandErrorResult(error: unknown): { exitCode: number | null; timedOut
   const message = String(record.error ?? record.message ?? error);
   return {
     exitCode,
-    timedOut: /timed? ?out|timeout/i.test(`${record.name ?? ""} ${message}`),
+    timedOut: error instanceof TimeoutError,
     error: message,
   };
 }

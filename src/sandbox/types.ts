@@ -9,6 +9,8 @@ export interface SandboxThreadFile {
     id: number;
     telegramFileId: string;
     telegramSize: number | null;
+    direction: "inbound" | "outbound";
+    mediaKind: "document" | "photo";
     isPrimary: boolean;
     lastSeenAt: number;
   }>;
@@ -49,6 +51,7 @@ export interface SandboxFileReadRequest {
   threadId: number;
   virtualPath: string;
   maxBytes: number;
+  preserveSource?: boolean;
   threadFiles?: SandboxThreadFile[];
   signal?: AbortSignal;
 }
@@ -56,7 +59,10 @@ export interface SandboxFileReadRequest {
 export interface SandboxFileReadResult {
   sandboxId: string;
   canonicalPath: string;
+  sourceCanonicalPath: string | null;
   bytes: Buffer;
+  size: number;
+  contentSha256: string;
 }
 
 export interface SandboxSourceFileReadRequest {

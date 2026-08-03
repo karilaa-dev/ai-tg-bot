@@ -33,6 +33,7 @@ export class FileResolver {
     for (const source of sources) {
       try {
         const resolved = await this.resolveSource(rowToSource(source), signal);
+        if (source.transport === "e2b") assertE2BSourceIntegrity(file, resolved);
         await this.files.markSourceVerified(source.id).catch(() => undefined);
         return resolved;
       } catch (error) {
@@ -60,6 +61,15 @@ export class FileResolver {
       contentSha256: createHash("sha256").update(bytes).digest("hex"),
       source,
     };
+  }
+}
+
+function assertE2BSourceIntegrity(file: FileRow, resolved: ResolvedChatFile): void {
+  if (resolved.size !== file.size) {
+    throw new Error(`E2B source size mismatch for file #${file.id}.`);
+  }
+  if (file.content_sha256 && resolved.contentSha256 !== file.content_sha256) {
+    throw new Error(`E2B source hash mismatch for file #${file.id}.`);
   }
 }
 

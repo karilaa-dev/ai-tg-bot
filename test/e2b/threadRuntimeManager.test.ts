@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../src/config.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -10,7 +11,7 @@ import {
   type E2BCommandHandle,
   type E2BSandbox,
 } from "../../src/e2b/client.js";
-import { E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
+import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { deferred } from "../helpers/async.js";
@@ -77,6 +78,8 @@ describe("thread E2B runtime manager", () => {
         id: telegramRef!.id,
         telegramFileId: "tg-hello",
         telegramSize: 5,
+        direction: "inbound",
+        mediaKind: "document",
         isPrimary: true,
         lastSeenAt: Date.now(),
       }],
@@ -85,8 +88,10 @@ describe("thread E2B runtime manager", () => {
     const first = await runtime.execute(commandRequest(userId, threadId, [file]));
     const second = await runtime.execute(commandRequest(userId, threadId, [file]));
     const sandbox = client.onlySandbox();
-    const restoredPath = `${E2B_TELEGRAM_FILES}/${stored.id}--.._draft?.txt`;
+    const restoredPath = `${E2B_TELEGRAM_FILES}/${stored.id}--draft_.txt`;
     sandbox.files.set(restoredPath, Buffer.from("x"));
+    await runtime.dispose();
+    runtime = createRuntime();
     const repaired = await runtime.execute(commandRequest(userId, threadId, [file]));
 
     expect(first.threadFiles).toMatchObject({ directory: E2B_TELEGRAM_FILES, available: 1 });
@@ -95,6 +100,7 @@ describe("thread E2B runtime manager", () => {
     expect(client.createCalls).toBe(1);
     expect(sandbox.metadata.template_ref).toBe(config.E2B_TEMPLATE);
     expect(client.telegramDownloadCalls).toBe(2);
+    expect(sandbox.inventoryCalls).toBe(2);
     expect(sandbox.files.get(restoredPath)?.toString()).toBe("hello");
     expect(sandbox.controlCommands.some((command) =>
       command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")))
@@ -139,6 +145,8 @@ describe("thread E2B runtime manager", () => {
         id: telegramRef!.id,
         telegramFileId: telegramRef!.telegram_file_id,
         telegramSize: telegramRef!.telegram_size,
+        direction: "inbound",
+        mediaKind: "document",
         isPrimary: true,
         lastSeenAt: telegramRef!.last_seen_at,
       }],
@@ -180,6 +188,160 @@ describe("thread E2B runtime manager", () => {
       url: "https://3000-sandbox-1.e2b.test/demo",
       pausesAfterMinutes: 15,
     });
+
+    const followUpLease = runtime.acquireActivityLease(userId, threadId);
+    await runtime.execute(commandRequest(userId, threadId));
+    followUpLease.release();
+    await vi.waitFor(() => {
+      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
+    });
+  });
+
+  it("preserves immutable versions when the same workspace path is overwritten", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const workspacePath = `${E2B_WORKSPACE}/report.txt`;
+    sandbox.files.set(workspacePath, Buffer.from("version one"));
+    const first = await runtime.readWorkspaceFile({
+      userId,
+      threadId,
+      virtualPath: "/report.txt",
+      maxBytes: 100,
+      preserveSource: true,
+    });
+    sandbox.files.set(workspacePath, Buffer.from("version two"));
+    const second = await runtime.readWorkspaceFile({
+      userId,
+      threadId,
+      virtualPath: "/report.txt",
+      maxBytes: 100,
+      preserveSource: true,
+    });
+
+    expect(first.sourceCanonicalPath).toBe(`${E2B_FILE_SOURCES}/${first.contentSha256}`);
+    expect(second.sourceCanonicalPath).toBe(`${E2B_FILE_SOURCES}/${second.contentSha256}`);
+    expect(first.sourceCanonicalPath).not.toBe(second.sourceCanonicalPath);
+    expect(sandbox.files.get(first.sourceCanonicalPath!)?.toString()).toBe("version one");
+    expect(sandbox.files.get(second.sourceCanonicalPath!)?.toString()).toBe("version two");
+    expect(sandbox.files.get(workspacePath)?.toString()).toBe("version two");
+    await expect(runtime.readSourceFile({
+      sandboxId: sandbox.id,
+      userId,
+      threadId,
+      canonicalPath: first.sourceCanonicalPath!,
+      maxBytes: 100,
+    })).resolves.toEqual(Buffer.from("version one"));
+  });
+
+  it("reuses an outbound artifact locally and falls back to Telegram after sandbox loss", async () => {
+    const bytes = Buffer.from("outbound file");
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      contentSha256: hash,
+      mimeType: "text/plain",
+      name: "outbound.txt",
+      size: bytes.length,
+      isInline: true,
+    });
+    const [telegramRef] = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "outbound",
+      mediaKind: "document",
+      refs: [{ fileId: "tg-outbound", size: bytes.length, primary: true }],
+    });
+    client.telegramFiles.set("tg-outbound", bytes);
+    const descriptor: SandboxThreadFile = {
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "outbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    };
+
+    await runtime.execute(commandRequest(userId, threadId));
+    const original = client.onlySandbox();
+    original.files.set(`${E2B_FILE_SOURCES}/${hash}`, bytes);
+    await runtime.execute(commandRequest(userId, threadId, [descriptor]));
+
+    expect(client.telegramDownloadCalls).toBe(0);
+    expect(original.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+
+    await runtime.dispose();
+    client.sandboxes.clear();
+    runtime = createRuntime();
+    await runtime.execute(commandRequest(userId, threadId, [descriptor]));
+
+    expect(client.telegramDownloadCalls).toBe(1);
+    expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+  });
+
+  it("uses conservative attachment paths for hostile Telegram names", async () => {
+    const bytes = Buffer.from("safe");
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+      mimeType: "text/plain",
+      name: "../../$(touch PWN);&`x`\u202Ereport.txt",
+      size: bytes.length,
+      isInline: true,
+    });
+    const [telegramRef] = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "inbound",
+      mediaKind: "document",
+      refs: [{ fileId: "tg-hostile", size: bytes.length, primary: true }],
+    });
+    client.telegramFiles.set("tg-hostile", bytes);
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    }]));
+
+    const index = JSON.parse(await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(index.files[0].original_name).toBe(stored.name);
+    expect(index.files[0].sandbox_name).toMatch(new RegExp(`^${stored.id}--[A-Za-z0-9][A-Za-z0-9._-]*$`));
+    expect(index.files[0].sandbox_name).not.toMatch(/[$`;'"&\u202E]/u);
+  });
+
+  it("classifies only SDK timeout errors as sandbox timeouts", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.nextWaitError = Object.assign(new Error("curl: operation timed out"), {
+      name: "CommandExitError",
+      exitCode: 28,
+    });
+    const processFailure = await runtime.execute(commandRequest(userId, threadId));
+    expect(processFailure).toMatchObject({ exitCode: 28, timedOut: false });
+
+    sandbox.nextWaitError = new TimeoutError("sandbox command exceeded its limit");
+    const sandboxTimeout = await runtime.execute(commandRequest(userId, threadId));
+    expect(sandboxTimeout.timedOut).toBe(true);
   });
 
   it("does not publish a website until its endpoint returns a successful status", async () => {
@@ -209,7 +371,7 @@ describe("thread E2B runtime manager", () => {
       threadId,
       canonicalPath: "/etc/passwd",
       maxBytes: 100,
-    })).rejects.toThrow("outside this thread's workspace");
+    })).rejects.toThrow("outside this thread's durable file roots");
   });
 
   it("caches a source-file reconnection when it is the first operation after restart", async () => {
@@ -238,6 +400,8 @@ describe("thread E2B runtime manager", () => {
     const sandbox = client.onlySandbox();
     expect(sandbox.backgroundCalls).toBe(1);
     sandbox.failSeal = true;
+    await runtime.dispose();
+    runtime = createRuntime();
 
     await expect(runtime.execute(commandRequest(userId, threadId)))
       .rejects.toThrow("seal failed");
@@ -360,7 +524,9 @@ class FakeSandbox implements E2BSandbox {
   running = true;
   pauseCalls = 0;
   backgroundCalls = 0;
+  inventoryCalls = 0;
   failSeal = false;
+  nextWaitError?: unknown;
   readonly readFilePaths: string[] = [];
   nextCommandGate?: {
     started: ReturnType<typeof deferred<void>>;
@@ -396,6 +562,25 @@ class FakeSandbox implements E2BSandbox {
     }
     if (command.startsWith("'python3' '-c' ")) {
       const candidate = command.match(/ '([^']+)'$/)?.[1];
+      if (command.includes("index_path=sys.argv[1]")) {
+        this.inventoryCalls += 1;
+        const indexBytes = candidate ? this.files.get(candidate) : undefined;
+        const index = indexBytes
+          ? JSON.parse(indexBytes.toString()) as { files?: Array<{ sandbox_name?: string }> }
+          : { files: [] };
+        const inventory = (index.files ?? []).flatMap((entry) => {
+          if (!entry.sandbox_name) return [];
+          const filePath = `${E2B_TELEGRAM_FILES}/${entry.sandbox_name}`;
+          const bytes = this.files.get(filePath);
+          return [{
+            sandbox_name: entry.sandbox_name,
+            regular: Boolean(bytes),
+            size: bytes?.length ?? null,
+            sha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null,
+          }];
+        });
+        return { stdout: JSON.stringify(inventory), stderr: "", exitCode: 0 };
+      }
       const bytes = candidate ? this.files.get(candidate) : undefined;
       if (!bytes) throw new Error("not found");
       return {
@@ -407,6 +592,12 @@ class FakeSandbox implements E2BSandbox {
         stderr: "",
         exitCode: 0,
       };
+    }
+    for (const match of command.matchAll(/cp -- ('[^']*'|\S+) ('[^']*'|\S+)/g)) {
+      const source = unquote(match[1]!);
+      const destination = unquote(match[2]!);
+      const bytes = this.files.get(source);
+      if (bytes) this.files.set(destination, Buffer.from(bytes));
     }
     for (const match of command.matchAll(/mv -f ('[^']*'|\S+) ('[^']*'|\S+)/g)) {
       const source = unquote(match[1]!);
@@ -426,7 +617,9 @@ class FakeSandbox implements E2BSandbox {
   async runBackground(command: string): Promise<E2BCommandHandle> {
     this.backgroundCalls += 1;
     const gate = this.nextCommandGate;
+    const waitError = this.nextWaitError;
     this.nextCommandGate = undefined;
+    this.nextWaitError = undefined;
     gate?.started.resolve();
     const stdoutPath = command.match(/\/tmp\/ai-tg-bot\/[a-f0-9-]+\/stdout/)?.[0];
     const stderrPath = command.match(/\/tmp\/ai-tg-bot\/[a-f0-9-]+\/stderr/)?.[0];
@@ -436,6 +629,7 @@ class FakeSandbox implements E2BSandbox {
       pid: 123,
       wait: async () => {
         await gate?.release.promise;
+        if (waitError) throw waitError;
         return { stdout: "", stderr: "", exitCode: 0 };
       },
       kill: async () => true,

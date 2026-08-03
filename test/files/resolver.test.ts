@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
@@ -61,17 +62,84 @@ describe("transport-neutral file resolver", () => {
     resolver.registry.register({
       transport: "e2b",
       connectionKey: "deployment",
-      fetch: async () => { throw new Error("sandbox unavailable"); },
+      fetch: async () => Buffer.from("remote content"),
     });
     resolver.registry.register({
       transport: "telegram",
       connectionKey: "default",
-      fetch: async () => Buffer.from("telegram fallback"),
+      fetch: async () => { throw new Error("Telegram unavailable"); },
     });
 
     await expect(resolver.resolveFile(file)).resolves.toMatchObject({
-      bytes: Buffer.from("telegram fallback"),
-      source: { transport: "telegram" },
+      bytes: Buffer.from("remote content"),
+      source: { transport: "e2b" },
+    });
+  });
+
+  it("prefers Telegram without touching an available E2B source", async () => {
+    const file = await insertFile(repos, 905, "telegram-first.txt");
+    await repos.files.rememberSource(file.id, {
+      transport: "e2b",
+      connectionKey: "deployment",
+      remoteKey: "sandbox:file:1",
+      locator: {},
+      mimeType: "text/plain",
+    });
+    await repos.files.rememberSource(file.id, {
+      transport: "telegram",
+      connectionKey: "default",
+      remoteKey: "telegram-first",
+      locator: { file_id: "BQAC-first" },
+      mimeType: "text/plain",
+    });
+    const e2bFetch = vi.fn(async () => Buffer.from("remote content"));
+    const telegramFetch = vi.fn(async () => Buffer.from("remote content"));
+    const resolver = createResolver(repos);
+    resolver.registry.register({ transport: "e2b", connectionKey: "deployment", fetch: e2bFetch });
+    resolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: telegramFetch });
+
+    await expect(resolver.resolveFile(file)).resolves.toMatchObject({ source: { transport: "telegram" } });
+    expect(telegramFetch).toHaveBeenCalledOnce();
+    expect(e2bFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale E2B bytes and falls through to another durable source", async () => {
+    const expected = Buffer.from("remote content");
+    const file = await insertFile(
+      repos,
+      906,
+      "integrity.txt",
+      createHash("sha256").update(expected).digest("hex"),
+    );
+    await repos.files.rememberSource(file.id, {
+      transport: "e2b",
+      connectionKey: "deployment",
+      remoteKey: "sandbox:file:integrity",
+      locator: {},
+      mimeType: "text/plain",
+    });
+    await repos.files.rememberSource(file.id, {
+      transport: "matrix",
+      connectionKey: "homeserver",
+      remoteKey: "mxc://example/integrity",
+      locator: {},
+      mimeType: "text/plain",
+    });
+    const resolver = createResolver(repos);
+    resolver.registry.register({
+      transport: "e2b",
+      connectionKey: "deployment",
+      fetch: async () => Buffer.from("stale contents"),
+    });
+    resolver.registry.register({
+      transport: "matrix",
+      connectionKey: "homeserver",
+      fetch: async () => expected,
+    });
+
+    await expect(resolver.resolveFile(file)).resolves.toMatchObject({
+      bytes: expected,
+      source: { transport: "matrix" },
     });
   });
 
@@ -119,13 +187,14 @@ function createResolver(repos: Repos): FileResolver {
   return new FileResolver(repos.files);
 }
 
-async function insertFile(repos: Repos, tgId: number, name: string) {
+async function insertFile(repos: Repos, tgId: number, name: string, contentSha256?: string) {
   const user = await repos.users.ensure({ tgId, firstName: "Files", lang: "en" });
   const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
   return repos.files.insertFile({
     userId: user.tg_id,
     threadId: thread.id,
     type: "txt",
+    contentSha256,
     name,
     size: 14,
     contentMd: "remote content",

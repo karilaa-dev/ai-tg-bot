@@ -38,10 +38,13 @@ describe("E2B thread file descriptors", () => {
       ],
     });
     await repos.files.rememberSource(file.id, e2bFileSource(config, {
+      fileId: file.id,
       sandboxId: "old-sandbox",
       userId: user.tg_id,
       threadId: thread.id,
-      canonicalPath: "/home/user/workspace/photo.jpg",
+      sourceCanonicalPath: `/home/user/.ai-tg-bot/file-sources/${"a".repeat(64)}`,
+      size: 100,
+      contentSha256: "a".repeat(64),
       mimeType: "image/jpeg",
     }));
     const byteResolver = vi.fn(async () => {
@@ -63,9 +66,27 @@ describe("E2B thread file descriptors", () => {
       expectedSize: 100,
       expectedSha256: "a".repeat(64),
       telegramRefs: [
-        expect.objectContaining({ telegramFileId: "large", telegramSize: 100, isPrimary: true }),
-        expect.objectContaining({ telegramFileId: "small", telegramSize: 20, isPrimary: false }),
+        expect.objectContaining({ telegramFileId: "large", telegramSize: 100, direction: "inbound", mediaKind: "photo", isPrimary: true }),
+        expect.objectContaining({ telegramFileId: "small", telegramSize: 20, direction: "inbound", mediaKind: "photo", isPrimary: false }),
       ],
     }]);
+  });
+
+  it("keys immutable E2B sources by logical file as well as content", () => {
+    const config = loadTestConfig();
+    const base = {
+      sandboxId: "sandbox-1",
+      userId: 1,
+      threadId: 2,
+      sourceCanonicalPath: `/home/user/.ai-tg-bot/file-sources/${"b".repeat(64)}`,
+      size: 5,
+      contentSha256: "b".repeat(64),
+    };
+
+    const first = e2bFileSource(config, { ...base, fileId: 10 });
+    const second = e2bFileSource(config, { ...base, fileId: 11 });
+
+    expect(first.remoteKey).not.toBe(second.remoteKey);
+    expect(first.locator).toMatchObject({ path: base.sourceCanonicalPath, size: 5, sha256: "b".repeat(64) });
   });
 });

@@ -9,7 +9,9 @@ export function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): 
 
 export function e2bFileSource(
   config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">,
-  input: Pick<SandboxFileReadResult, "sandboxId" | "canonicalPath"> & {
+  input: Pick<SandboxFileReadResult, "sandboxId" | "size" | "contentSha256"> & {
+    fileId: number;
+    sourceCanonicalPath: string;
     userId: number;
     threadId: number;
     mimeType?: string | null;
@@ -18,12 +20,14 @@ export function e2bFileSource(
   return {
     transport: "e2b",
     connectionKey: e2bConnectionKey(config),
-    remoteKey: `${input.sandboxId}:${input.canonicalPath}`,
+    remoteKey: `${input.sandboxId}:file:${input.fileId}:sha256:${input.contentSha256}`,
     locator: {
       sandbox_id: input.sandboxId,
       user_id: input.userId,
       thread_id: input.threadId,
-      path: input.canonicalPath,
+      path: input.sourceCanonicalPath,
+      size: input.size,
+      sha256: input.contentSha256,
     },
     mimeType: input.mimeType ?? null,
   };

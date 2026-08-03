@@ -68,6 +68,8 @@ try {
         id: ref!.id,
         telegramFileId,
         telegramSize: null,
+        direction: "inbound",
+        mediaKind: "document",
         isPrimary: true,
         lastSeenAt: ref!.last_seen_at,
       }],
@@ -88,6 +90,9 @@ try {
   if (contract.exitCode !== 0) {
     throw new Error(contract.error || contract.stderr || contract.stdout || "custom E2B toolbox contract failed");
   }
+  const initialMapping = await repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, thread.id);
+  if (!initialMapping) throw new Error("sandbox mapping was not persisted after the toolbox contract");
+  sandboxId = initialMapping.sandbox_id;
 
   const officeFixture = await runtime.execute(commandRequest(user.tg_id, thread.id, [
     "pptx_skill=/usr/local/share/officecli/skills/officecli-pptx/SKILL.md",
@@ -156,6 +161,88 @@ try {
   const mapping = await repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, thread.id);
   if (!mapping) throw new Error("sandbox mapping was not persisted");
   sandboxId = mapping.sandbox_id;
+  const firstExport = await runtime.readWorkspaceFile({
+    userId: user.tg_id,
+    threadId: thread.id,
+    virtualPath: "/marker.txt",
+    maxBytes: 1024,
+    preserveSource: true,
+    threadFiles,
+  });
+  if (!firstExport.sourceCanonicalPath || firstExport.bytes.toString() !== marker) {
+    throw new Error("first immutable E2B export was not preserved");
+  }
+  const replacementMarker = `replacement-${randomUUID()}`;
+  const overwrite = await runtime.execute(commandRequest(
+    user.tg_id,
+    thread.id,
+    "printf '%s' \"$1\" > marker.txt",
+    [replacementMarker],
+    threadFiles,
+  ));
+  if (overwrite.exitCode !== 0) throw new Error(overwrite.error || overwrite.stderr || "marker overwrite failed");
+  const secondExport = await runtime.readWorkspaceFile({
+    userId: user.tg_id,
+    threadId: thread.id,
+    virtualPath: "/marker.txt",
+    maxBytes: 1024,
+    preserveSource: true,
+    threadFiles,
+  });
+  if (!secondExport.sourceCanonicalPath || secondExport.sourceCanonicalPath === firstExport.sourceCanonicalPath) {
+    throw new Error("overwritten workspace file reused the previous immutable source");
+  }
+  const historicalBytes = await runtime.readSourceFile({
+    sandboxId,
+    userId: user.tg_id,
+    threadId: thread.id,
+    canonicalPath: firstExport.sourceCanonicalPath,
+    maxBytes: 1024,
+  });
+  if (historicalBytes.toString() !== marker) throw new Error("historical E2B source changed after overwrite");
+
+  const outbound = await repos.files.insertFile({
+    userId: user.tg_id,
+    threadId: thread.id,
+    type: "txt",
+    contentSha256: firstExport.contentSha256,
+    mimeType: "text/plain",
+    name: "outbound-local.txt",
+    size: firstExport.size,
+    isInline: true,
+  });
+  const [outboundRef] = await repos.files.rememberTelegramFileRefs(outbound.id, {
+    direction: "outbound",
+    mediaKind: "document",
+    refs: [{ fileId: "must-not-download", size: firstExport.size, primary: true }],
+  });
+  const outboundDescriptor: SandboxThreadFile = {
+    fileId: outbound.id,
+    messageId: null,
+    name: outbound.name,
+    mimeType: outbound.mime_type,
+    expectedSize: outbound.size,
+    expectedSha256: outbound.content_sha256,
+    telegramRefs: [{
+      id: outboundRef!.id,
+      telegramFileId: outboundRef!.telegram_file_id,
+      telegramSize: outboundRef!.telegram_size,
+      direction: "outbound",
+      mediaKind: "document",
+      isPrimary: true,
+      lastSeenAt: outboundRef!.last_seen_at,
+    }],
+  };
+  const localOutbound = await runtime.execute(commandRequest(
+    user.tg_id,
+    thread.id,
+    `test \"$(cat \"$TELEGRAM_FILES_DIR/${outbound.id}--outbound-local.txt\")\" = \"$1\"`,
+    [marker],
+    [...threadFiles, outboundDescriptor],
+  ));
+  if (localOutbound.exitCode !== 0) {
+    throw new Error(localOutbound.error || localOutbound.stderr || "outbound local artifact reuse failed");
+  }
   const sandboxInfo = await Sandbox.getInfo(sandboxId, {
     apiKey: config.E2B_API_KEY,
     requestTimeoutMs: config.E2B_REQUEST_TIMEOUT_MS,
@@ -286,6 +373,8 @@ try {
     template: config.E2B_TEMPLATE,
     sameSandboxAfterResume: true,
     workspacePersisted: true,
+    immutableSourceVersions: true,
+    outboundLocalReuse: true,
     telegramFilesReadOnly: true,
     botMediatedTelegramRestoreTested: Boolean(threadFiles.length),
     restoredTelegramFiles: threadFiles.length,

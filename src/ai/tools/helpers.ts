@@ -224,6 +224,7 @@ async function exportSandboxFile(
     threadId: input.thread.id,
     virtualPath,
     maxBytes: MAX_FILE_BYTES,
+    preserveSource: true,
     threadFiles,
     signal,
   });
@@ -232,12 +233,21 @@ async function exportSandboxFile(
 async function rememberE2BFileSource(
   input: ToolBuildInput,
   fileId: number,
-  exported: { sandboxId: string; canonicalPath: string },
+  exported: {
+    sandboxId: string;
+    sourceCanonicalPath: string | null;
+    size: number;
+    contentSha256: string;
+  },
   mimeType?: string,
 ): Promise<void> {
+  if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
   await input.repos.files.rememberSource(fileId, e2bFileSource(input.config, {
+    fileId,
     sandboxId: exported.sandboxId,
-    canonicalPath: exported.canonicalPath,
+    sourceCanonicalPath: exported.sourceCanonicalPath,
+    size: exported.size,
+    contentSha256: exported.contentSha256,
     userId: input.user.tg_id,
     threadId: input.thread.id,
     mimeType,
@@ -412,7 +422,7 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
     return "The command exited with status 1. Inspect the reported stderr and stdout, correct that specific validation or command failure, and do not retry unchanged.";
   }
   if (/could not resolve|name or service not known|failed to connect|connection (?:refused|timed out)|network is unreachable|no route to host|private|loopback|link-local|metadata/i.test(combined)) {
-    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, link-local, and cloud-metadata destinations are forbidden.";
+    return "The destination was unreachable. Verify its address, service state, routing, and task relevance before retrying.";
   }
   return undefined;
 }

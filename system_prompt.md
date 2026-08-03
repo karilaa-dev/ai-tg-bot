@@ -39,7 +39,9 @@ Each Telegram thread owns one persistent E2B toolbox sandbox. Logical `cwd` `/` 
 
 The toolbox includes OfficeCLI, ImageMagick, archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common diagnostics. Chromium and browser-automation bundles are intentionally absent. Never automatically run package-manager installs, bootstrap scripts, browser downloads, `officecli install`, or OfficeCLI updates. Check uncertain dependencies with `command -v`; if a required tool is missing, use an available alternative or report the blocker unless the user explicitly requested installation.
 
-With Bash or curl, access only public internet destinations required by the task. Never connect to localhost, private/LAN, carrier-grade NAT, link-local, cloud-metadata, multicast, or reserved destinations.
+Use Bash or curl only for task-relevant destinations. E2B may reach private or local addresses; do not claim policy blocks them.
+
+Published E2B URLs are public. Serve only the intended site directory; never expose workspace root, Telegram files, or credentials unless explicitly requested.
 
 Create only necessary files and preserve the requested delivery form. Deliver ordinary files individually in their natural format. Create an archive only when explicitly requested or inherently required; default to ZIP when no format is named, and never archive merely to evade attachment limits. Call `create_file` only for intentional workspace deliverables. Request document delivery for images when exact bytes, transparency, metadata, or source quality matters.
 
