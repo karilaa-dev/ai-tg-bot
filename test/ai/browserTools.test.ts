@@ -89,6 +89,25 @@ describe("Browser Use Pi tools", () => {
     expect(serialized).toContain("redacted");
   });
 
+  it("propagates cancellation instead of returning a browser tool error", async () => {
+    const browserRuntime = fakeBrowserRuntime();
+    const reason = new DOMException("cancelled by user", "AbortError");
+    browserRuntime.closeSession.mockImplementationOnce(async (signal?: AbortSignal) => {
+      await new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return { closed: true, tabs_closed: 0, profile_preserved: true };
+    });
+    const close = createPiToolAdapters(bridge(browserConfig(), browserRuntime))
+      .find((tool) => tool.name === "browser_close_session")!;
+    const controller = new AbortController();
+    const pending = close.execute("close", {}, controller.signal, undefined, {} as never);
+
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
+  });
+
   it("attaches browser screenshots directly without an E2B runtime", async () => {
     const browserRuntime = fakeBrowserRuntime();
     browserRuntime.screenshot.mockResolvedValue({
@@ -227,7 +246,7 @@ function fakeBrowserRuntime() {
     resolveLink: vi.fn(),
     closeTab: vi.fn(),
     extendSession: vi.fn(),
-    closeSession: vi.fn(async () => ({ closed: true, tabs_closed: 3, profile_preserved: true })),
+    closeSession: vi.fn(async (_signal?: AbortSignal) => ({ closed: true, tabs_closed: 3, profile_preserved: true })),
     renderOfficeHtml: vi.fn(),
   };
 }

@@ -28,7 +28,7 @@ describe("E2B toolbox template definition", () => {
 
   it("contains the missing non-browser toolbox packages", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES).toEqual(expect.arrayContaining([
-      "dnsutils", "fd-find", "gnupg", "iproute2", "jq", "procps", "ripgrep",
+      "build-essential", "curl", "dnsutils", "fd-find", "git", "gnupg", "iproute2", "jq", "openssh-client", "procps", "ripgrep",
       "sqlite3", "tree", "unzip", "zip", "zstd",
     ]));
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);

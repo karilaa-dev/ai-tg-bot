@@ -116,7 +116,12 @@ export async function prepareCreatedFile(
     }
   }
 
-  const stored = await storeOtherCreatedFile(input, { bytes, name: displayName, mime: file.mime });
+  const stored = await storeOtherCreatedFile(input, {
+    bytes,
+    name: displayName,
+    mime: file.mime,
+    type: classified === "image" ? "image" : "other",
+  });
   await rememberE2BFileSource(input, stored.id, exported, file.mime);
   return {
     fileId: stored.id,

@@ -332,6 +332,8 @@ try {
       thread.id,
       [
         "command -v python3 >/dev/null",
+        "mkdir -p website-smoke",
+        "cd website-smoke",
         "printf '%s' \"$1\" > index.html",
         "nohup python3 -m http.server 3000 --bind 0.0.0.0 > website.log 2>&1 &",
         "for attempt in 1 2 3 4 5 6 7 8 9 10; do",
@@ -350,6 +352,7 @@ try {
       userId: user.tg_id,
       threadId: thread.id,
       port: 3000,
+      siteDirectory: "/website-smoke",
       path: "/",
       threadFiles,
     });

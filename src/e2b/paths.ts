@@ -25,6 +25,20 @@ export function sandboxWorkspaceFile(virtualPath: string): string {
   return candidate;
 }
 
+export function sandboxWebsiteDirectory(virtualPath: string): string {
+  const normalized = normalizeVirtualPath(virtualPath);
+  if (isSameOrDescendant(normalized, E2B_TELEGRAM_FILES)) {
+    throw new Error("published website directory cannot contain Telegram files");
+  }
+  const candidate = path.posix.normalize(isSameOrDescendant(normalized, E2B_WORKSPACE)
+    ? normalized
+    : path.posix.join(E2B_WORKSPACE, normalized)).replace(/\/+$/u, "") || "/";
+  if (candidate === E2B_WORKSPACE || !isSameOrDescendant(candidate, E2B_WORKSPACE)) {
+    throw new Error("published website directory must be a dedicated subdirectory of /home/user/workspace");
+  }
+  return candidate;
+}
+
 export function normalizeVirtualPath(value: string): string {
   const normalized = path.posix.normalize(value);
   if (!normalized.startsWith("/")) throw new Error("path must be absolute");

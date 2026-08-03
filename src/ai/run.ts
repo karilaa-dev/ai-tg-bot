@@ -36,6 +36,7 @@ const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
 const TG_MEDIA_GROUP_LIMIT = 10;
+const TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const MIN_SPLIT_RATIO = 0.5;
 
 export interface TurnInput {
@@ -161,6 +162,7 @@ export const runTurn: TurnRunner = async (input) => {
     const assistantError = lastAssistantError(runtime.session.messages);
     if (assistantError && !answer.trim()) throw new Error(assistantError);
     const createdFiles = runtime.bridge.attachments;
+    normalizeTelegramAttachmentDeliveries(createdFiles);
     const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
     if (stats.counts.generateImageToolCalls > 0 && !hasGeneratedImage) {
       throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
@@ -971,15 +973,21 @@ export async function sendCreatedFileAttachments(
   attachments: CreatedFileAttachment[],
 ): Promise<void> {
   if (!attachments.length) return;
-  for (const attachment of attachments) {
-    if (attachment.delivery === "photo" && attachment.size > 10 * 1024 * 1024) {
-      attachment.delivery = "document";
-    }
-  }
+  normalizeTelegramAttachmentDeliveries(attachments);
   const documents = attachments.filter((attachment) => (attachment.delivery ?? "document") === "document");
   const photos = attachments.filter((attachment) => attachment.delivery === "photo");
   await sendAttachmentBatch(input, assistantMessage, documents, documentSendStrategy);
   await sendAttachmentBatch(input, assistantMessage, photos, photoSendStrategy);
+}
+
+export function normalizeTelegramAttachmentDeliveries(
+  attachments: CreatedFileAttachment[],
+): void {
+  for (const attachment of attachments) {
+    if (attachment.delivery === "photo" && attachment.size > TG_PHOTO_MAX_BYTES) {
+      attachment.delivery = "document";
+    }
+  }
 }
 
 async function sendGeneratedImageAttachmentsEarly(

@@ -80,6 +80,7 @@ export interface PublishWebsiteRequest {
   userId: number;
   threadId: number;
   port: number;
+  siteDirectory: string;
   path?: string;
   threadFiles?: SandboxThreadFile[];
   signal?: AbortSignal;
@@ -88,6 +89,7 @@ export interface PublishWebsiteRequest {
 export interface PublishedWebsite {
   sandboxId: string;
   port: number;
+  siteDirectory: string;
   path: string;
   url: string;
   pausesAfterMinutes: number;

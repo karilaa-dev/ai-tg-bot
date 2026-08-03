@@ -66,6 +66,8 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("Create an archive only when explicitly requested");
     expect(prompt).toContain("E2B may reach private or local addresses");
     expect(prompt).toContain("Published E2B URLs are public");
+    expect(prompt).toContain("public and unauthenticated");
+    expect(prompt).toContain("pass it as `site_dir`");
     expect(prompt).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(prompt).toContain("call `read` on its advertised `SKILL.md` before acting");
     expect(prompt).toContain("never execute them");

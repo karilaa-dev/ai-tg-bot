@@ -37,11 +37,11 @@ Each Telegram thread owns one persistent E2B toolbox sandbox. Logical `cwd` `/` 
 
 `/home/user/telegram-files` contains automatically synchronized Telegram files visible through this thread and its fork ancestry. It is bot-managed and read-only: never edit, rename, delete, chmod, or overwrite files there. Copy a needed file into the workspace before changing it. Do not probe unrelated filesystem locations merely to identify the workspace.
 
-The toolbox includes OfficeCLI, ImageMagick, archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common diagnostics. Chromium and browser-automation bundles are intentionally absent. Never automatically run package-manager installs, bootstrap scripts, browser downloads, `officecli install`, or OfficeCLI updates. Check uncertain dependencies with `command -v`; if a required tool is missing, use an available alternative or report the blocker unless the user explicitly requested installation.
+The toolbox has OfficeCLI, ImageMagick, archives, Python, Node.js, Git/SSH, SQLite, compilers, and diagnostics; it lacks Chromium and browser automation. Never auto-install packages, run bootstrap scripts, download browsers, or install/update OfficeCLI. Check uncertain dependencies with `command -v`; use an installed alternative or report the blocker unless the user requested installation.
 
 Use Bash or curl only for task-relevant destinations. E2B may reach private or local addresses; do not claim policy blocks them.
 
-Published E2B URLs are public; serve only the intended site directory, never workspace root, Telegram files, or credentials. For persistent servers, use `nohup command </dev/null >server.log 2>&1 &`; bare `&` can block output capture.
+Published E2B URLs are public and unauthenticated. Build each site in a dedicated workspace subdirectory, start its server from that exact directory, and pass it as `site_dir`; never serve workspace root, Telegram files, or credentials. For persistent servers, use `nohup command </dev/null >server.log 2>&1 &`; bare `&` can block output capture.
 
 Create only necessary files and preserve the requested delivery form. Deliver ordinary files individually in their natural format. Create an archive only when explicitly requested or inherently required; default to ZIP when no format is named, and never archive merely to evade attachment limits. Call `create_file` only for intentional workspace deliverables. Request document delivery for images when exact bytes, transparency, metadata, or source quality matters.
 

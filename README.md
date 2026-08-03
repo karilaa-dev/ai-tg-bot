@@ -137,19 +137,21 @@ Keep the access key only in `.env`. It is redacted from client errors and never 
 
 ## Public websites
 
-The agent starts an HTTP server with `bash`, binds it to `0.0.0.0`, and detaches all inherited input/output so command capture can finish, for example:
+The agent creates a dedicated site subdirectory, starts an HTTP server from that exact directory with `bash`, binds it to `0.0.0.0`, and detaches all inherited input/output so command capture can finish, for example:
 
 ```bash
+mkdir -p /home/user/workspace/site
+cd /home/user/workspace/site
 nohup python3 -m http.server 3000 --bind 0.0.0.0 </dev/null >server.log 2>&1 &
 ```
 
 It then calls:
 
 ```json
-{"port": 3000, "path": "/"}
+{"port": 3000, "site_dir": "/site", "path": "/"}
 ```
 
-through `publish_website`. The bot verifies the E2B HTTPS URL before returning it. A public URL is unavailable while its sandbox is paused; a later shell-backed bot request resumes the sandbox and its preserved process state.
+through `publish_website`. The bot rejects workspace-root or Telegram-file publication, verifies that the listening process is running from the declared site directory, and verifies the E2B HTTPS URL before returning it. The URL is public and unauthenticated, so the site directory must not contain private files or credentials. A public URL is unavailable while its sandbox is paused; a later shell-backed bot request resumes the sandbox and its preserved process state.
 
 ## Telegram commands
 

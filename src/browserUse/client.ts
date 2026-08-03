@@ -4,7 +4,6 @@ import { raceWithAbort, throwIfAborted } from "../files/cancel.js";
 
 const API_BASE_URL = "https://api.browser-use.com/api/v3/";
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
-const MAX_ERROR_BYTES = 32 * 1024;
 
 type BrowserUseConfig = Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_API_TIMEOUT_MS">;
 
@@ -188,16 +187,15 @@ export class BrowserUseClient {
         signal: operationSignal,
       }), operationSignal);
       if (!response.ok) {
-        const detail = (await readLimitedResponse(response, MAX_ERROR_BYTES).catch(() => Buffer.alloc(0)))
-          .toString("utf8")
-          .trim();
+        await response.body?.cancel().catch(() => undefined);
         throw new BrowserUseHttpError(
           response.status,
-          `Browser Use Cloud HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+          `Browser Use Cloud HTTP ${response.status}.`,
         );
       }
       return response;
     } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       throw redactBrowserUseError(this.config, error);
     }
   }
@@ -209,7 +207,7 @@ export function createBrowserUseClient(config: BrowserUseConfig): BrowserUseClie
 
 export function redactBrowserUseError(config: BrowserUseConfig, error: unknown): Error {
   const original = error instanceof BrowserUseHttpError ? error : undefined;
-  let message = String(error);
+  let message = error instanceof Error ? error.message : String(error);
   const secrets = [
     config.BROWSER_USE_API_KEY,
     config.BROWSER_USE_API_KEY ? encodeURIComponent(config.BROWSER_USE_API_KEY) : undefined,
@@ -218,8 +216,11 @@ export function redactBrowserUseError(config: BrowserUseConfig, error: unknown):
     message = message.replaceAll(secret, "[redacted]");
   }
   message = message
+    .replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/gi, "[redacted-authorization]")
+    .replace(/\b(authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+/gi, "$1: [redacted]")
     .replace(/(?:https?|wss):\/\/[^\s"']*(?:cdp|live|connect)[^\s"']*/gi, "[redacted-browser-url]")
-    .replace(/([?&](?:apiKey|token|key)=)[^&\s]+/gi, "$1[redacted]");
+    .replace(/([?&][A-Za-z0-9_.-]*(?:apiKey|token|key|secret|signature|credential)[A-Za-z0-9_.-]*=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(?:https?|wss):\/\/[^\s"']+/gi, "[redacted-url]");
   return original
     ? new BrowserUseHttpError(original.status, message)
     : new Error(message);

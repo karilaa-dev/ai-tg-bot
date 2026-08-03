@@ -77,6 +77,37 @@ describe("BrowserUseClient", () => {
       return true;
     });
   });
+
+  it("does not expose provider-controlled error bodies", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      detail: "Bearer remote-token https://downloads.example/file?X-Amz-Signature=signed-secret",
+    }), { status: 502, headers: { "content-type": "application/json" } })));
+    const client = createBrowserUseClient(loadTestConfig({ BROWSER_USE_API_KEY: "secret" }));
+
+    await expect(client.listActiveBrowsers()).rejects.toSatisfy((error: Error) => {
+      expect(error.message).toBe("Browser Use Cloud HTTP 502.");
+      expect(error.message).not.toContain("remote-token");
+      expect(error.message).not.toContain("signed-secret");
+      return true;
+    });
+  });
+
+  it("preserves caller cancellation instead of redacting it", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      await new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+      return jsonResponse(SESSION);
+    }));
+    const client = createBrowserUseClient(loadTestConfig({ BROWSER_USE_API_KEY: "secret" }));
+    const pending = client.listActiveBrowsers(controller.signal);
+    const reason = new DOMException("cancelled by user", "AbortError");
+
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
+  });
 });
 
 function jsonResponse(value: unknown, status = 200): Response {

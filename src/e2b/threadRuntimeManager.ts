@@ -39,6 +39,7 @@ import {
   E2B_TELEGRAM_FILES,
   E2B_WORKSPACE,
   isSameOrDescendant,
+  sandboxWebsiteDirectory,
   sandboxWorkspaceFile,
 } from "./paths.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
@@ -256,6 +257,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   publishWebsite(request: PublishWebsiteRequest): Promise<PublishedWebsite> {
     validateWebsitePort(request.port);
     const sitePath = normalizeWebsitePath(request.path);
+    const siteDirectory = sandboxWebsiteDirectory(request.siteDirectory);
     const scope = { userId: request.userId, threadId: request.threadId };
     return this.enqueue(scope, request.signal, async (state) => {
       const prepared = await this.prepareSandbox(
@@ -263,6 +265,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         scope,
         request.threadFiles ?? [],
         ROTATION_GUARD_MS,
+        request.signal,
+      );
+      const canonicalSiteDirectory = await verifyWebsiteListenerScope(
+        prepared.sandbox,
+        request.port,
+        siteDirectory,
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
         request.signal,
       );
       const url = new URL(sitePath, `https://${prepared.sandbox.getHost(request.port)}`).toString();
@@ -273,11 +282,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         ...scope,
         sandboxId: prepared.sandbox.id,
         port: request.port,
+        siteDirectory: canonicalSiteDirectory,
         url,
       });
       return {
         sandboxId: prepared.sandbox.id,
         port: request.port,
+        siteDirectory: canonicalSiteDirectory,
         path: sitePath,
         url,
         pausesAfterMinutes: E2B_WEBSITE_IDLE_PAUSE_MINUTES,
@@ -1420,6 +1431,52 @@ function normalizeWebsitePath(value: string | undefined): string {
   const url = new URL(raw, "https://example.invalid");
   if (url.origin !== "https://example.invalid") throw new Error("website path must be relative to the published host");
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+async function verifyWebsiteListenerScope(
+  sandbox: E2BSandbox,
+  port: number,
+  siteDirectory: string,
+  requestTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const script = [
+    "import os,re,subprocess,sys",
+    "server_site=os.path.realpath(sys.argv[1])",
+    "workspace=os.path.realpath(sys.argv[2])",
+    "port=int(sys.argv[3])",
+    "if server_site==workspace or os.path.commonpath([server_site,workspace])!=workspace:",
+    " raise SystemExit('website directory must be a dedicated workspace subdirectory')",
+    "if not os.path.isdir(server_site):",
+    " raise SystemExit('website directory does not exist')",
+    "probe=subprocess.run(['ss','-H','-ltnp',f'sport = :{port}'],capture_output=True,text=True,check=False)",
+    "pids=sorted(set(re.findall(r'pid=(\\d+)',probe.stdout)))",
+    "if not pids:",
+    " raise SystemExit('website port has no identifiable listening process')",
+    "allowed=False",
+    "for pid in pids:",
+    " try:",
+    "  cwd=os.path.realpath(f'/proc/{pid}/cwd')",
+    "  if cwd==server_site or os.path.commonpath([cwd,server_site])==server_site:",
+    "   allowed=True; break",
+    " except (FileNotFoundError,PermissionError,ValueError):",
+    "  pass",
+    "if not allowed:",
+    " raise SystemExit('website listener is not running from the declared site directory')",
+    "print(server_site)",
+  ].join("\n");
+  const result = await runCommandResult(
+    sandbox,
+    shellJoin(["python3", "-c", script, siteDirectory, E2B_WORKSPACE, String(port)]),
+    requestTimeoutMs,
+    signal,
+    "root",
+  );
+  const canonical = result.stdout.trim();
+  if (canonical === E2B_WORKSPACE || !isSameOrDescendant(canonical, E2B_WORKSPACE)) {
+    throw new Error("website listener validation returned an unsafe site directory");
+  }
+  return canonical;
 }
 
 async function verifyWebsite(url: string, requestTimeoutMs: number, signal?: AbortSignal): Promise<void> {

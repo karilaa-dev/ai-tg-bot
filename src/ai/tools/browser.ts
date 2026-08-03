@@ -3,6 +3,7 @@ import { z } from "zod";
 import { BrowserUseRuntimeError } from "../../browserUse/runtime.js";
 import { redactBrowserUseError } from "../../browserUse/client.js";
 import { downloadPublicBrowserFile } from "../../browserUse/download.js";
+import { isAbortError } from "../../files/cancel.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
 import { safeJson } from "../../util/records.js";
 import { assertCreatedFileCapacity, prepareDirectCreatedFile, toToolError } from "./helpers.js";
@@ -32,7 +33,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().open(url, timeout_minutes, signal);
         } catch (error) {
-          return browserToolError(input, "browser_open", error);
+          return browserToolError(input, "browser_open", error, {}, signal);
         }
       },
     }),
@@ -43,7 +44,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().listTabs(signal);
         } catch (error) {
-          return browserToolError(input, "browser_list_tabs", error);
+          return browserToolError(input, "browser_list_tabs", error, {}, signal);
         }
       },
     }),
@@ -54,7 +55,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().navigate(tab_id, url, signal);
         } catch (error) {
-          return browserToolError(input, "browser_navigate", error, { tabId: tab_id });
+          return browserToolError(input, "browser_navigate", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -70,7 +71,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().snapshot(tab_id, offset, include_screenshot, signal);
         } catch (error) {
-          return browserToolError(input, "browser_snapshot", error, { tabId: tab_id });
+          return browserToolError(input, "browser_snapshot", error, { tabId: tab_id }, signal);
         }
       },
       toModelOutput: ({ output }) => browserImageOutput(output, "Browser snapshot"),
@@ -87,7 +88,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().click(tab_id, { ...target, doubleClick: double_click }, signal);
         } catch (error) {
-          return browserToolError(input, "browser_click", error, { tabId: tab_id });
+          return browserToolError(input, "browser_click", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -104,7 +105,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().type(tab_id, target, signal);
         } catch (error) {
-          return browserToolError(input, "browser_type", error, { tabId: tab_id });
+          return browserToolError(input, "browser_type", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -115,7 +116,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().press(tab_id, key, signal);
         } catch (error) {
-          return browserToolError(input, "browser_press", error, { tabId: tab_id });
+          return browserToolError(input, "browser_press", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -130,7 +131,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().scroll(tab_id, direction, amount, signal);
         } catch (error) {
-          return browserToolError(input, "browser_scroll", error, { tabId: tab_id });
+          return browserToolError(input, "browser_scroll", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -175,7 +176,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             screenshot_size: screenshot.bytes.length,
           };
         } catch (error) {
-          return browserToolError(input, "browser_screenshot", error, { tabId: tab_id });
+          return browserToolError(input, "browser_screenshot", error, { tabId: tab_id }, signal);
         }
       },
       toModelOutput: ({ output }) => browserImageOutput(output, "Browser screenshot"),
@@ -188,7 +189,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().listDownloads(tab_id, signal);
         } catch (error) {
-          return browserToolError(input, "browser_list_downloads", error, { tabId: tab_id });
+          return browserToolError(input, "browser_list_downloads", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -257,7 +258,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             session_remaining_seconds: sessionRemainingSeconds,
           };
         } catch (error) {
-          return browserToolError(input, "browser_send_file", error, { tabId: tab_id });
+          return browserToolError(input, "browser_send_file", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -268,7 +269,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().closeTab(tab_id, signal);
         } catch (error) {
-          return browserToolError(input, "browser_close_tab", error, { tabId: tab_id });
+          return browserToolError(input, "browser_close_tab", error, { tabId: tab_id }, signal);
         }
       },
     }),
@@ -280,7 +281,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().extendSession(timeout_minutes, signal);
         } catch (error) {
-          return browserToolError(input, "browser_extend_session", error);
+          return browserToolError(input, "browser_extend_session", error, {}, signal);
         }
       },
     }),
@@ -292,7 +293,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         try {
           return await runtime().closeSession(signal);
         } catch (error) {
-          return browserToolError(input, "browser_close_session", error);
+          return browserToolError(input, "browser_close_session", error, {}, signal);
         }
       },
     }),
@@ -314,7 +315,10 @@ function browserToolError(
   toolName: string,
   error: unknown,
   details: Record<string, unknown> = {},
+  signal?: AbortSignal,
 ): Record<string, unknown> {
+  if (signal?.aborted) throw signal.reason ?? error;
+  if (isAbortError(error)) throw error;
   if (error instanceof BrowserUseRuntimeError) return { error: error.code, message: error.message };
   return toToolError(input, toolName, redactBrowserUseError(input.config, error), {
     threadId: input.thread.id,

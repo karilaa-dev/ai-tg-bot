@@ -1,8 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { sendCreatedFileAttachments, type TurnInput } from "../../src/ai/run.js";
+import {
+  normalizeTelegramAttachmentDeliveries,
+  sendCreatedFileAttachments,
+  type TurnInput,
+} from "../../src/ai/run.js";
 import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
 
 describe("buffered Telegram attachment delivery", () => {
+  it("downgrades oversized generated images before the early photo path selects them", () => {
+    const oversized = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
+    oversized.origin = "generated_image";
+
+    normalizeTelegramAttachmentDeliveries([oversized]);
+
+    expect(oversized.delivery).toBe("document");
+  });
+
   it("sends images over Telegram's photo limit as documents", async () => {
     const api = fakeApi();
     const input = turnInput(api);

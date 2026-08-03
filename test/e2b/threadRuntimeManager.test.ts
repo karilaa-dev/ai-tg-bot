@@ -182,7 +182,13 @@ describe("thread E2B runtime manager", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
     const lease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
-    const published = await runtime.publishWebsite({ userId, threadId, port: 3000, path: "/demo" });
+    const published = await runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: "/site",
+      path: "/demo",
+    });
     lease.release();
 
     await vi.waitFor(() => {
@@ -190,6 +196,7 @@ describe("thread E2B runtime manager", () => {
     });
     expect(published).toMatchObject({
       url: "https://3000-sandbox-1.e2b.test/demo",
+      siteDirectory: `${E2B_WORKSPACE}/site`,
       pausesAfterMinutes: 15,
     });
 
@@ -485,9 +492,38 @@ describe("thread E2B runtime manager", () => {
     vi.stubGlobal("fetch", fetchMock);
     await runtime.execute(commandRequest(userId, threadId));
 
-    await expect(runtime.publishWebsite({ userId, threadId, port: 3000 }))
+    await expect(runtime.publishWebsite({ userId, threadId, port: 3000, siteDirectory: "/site" }))
       .resolves.toMatchObject({ url: "https://3000-sandbox-1.e2b.test/" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects publication outside a dedicated workspace site directory", async () => {
+    expect(() => runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: "/",
+    })).toThrow("dedicated subdirectory");
+    expect(() => runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: E2B_TELEGRAM_FILES,
+    })).toThrow("cannot contain Telegram files");
+
+    expect(client.createCalls).toBe(0);
+  });
+
+  it("rejects a listener that is not running from its declared site directory", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    client.onlySandbox().failWebsiteScope = true;
+
+    await expect(runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: "/site",
+    })).rejects.toThrow("listener is outside the declared site directory");
   });
 
   it("rejects an E2B file source from another sandbox or outside the workspace", async () => {
@@ -733,6 +769,7 @@ class FakeSandbox implements E2BSandbox {
   backgroundCalls = 0;
   inventoryCalls = 0;
   failSeal = false;
+  failWebsiteScope = false;
   nextWaitError?: unknown;
   readonly readFilePaths: string[] = [];
   readonly readFileCalls: Array<{ path: string; user: string }> = [];
@@ -768,6 +805,10 @@ class FakeSandbox implements E2BSandbox {
     if (realpath) {
       const candidate = realpath;
       return { stdout: `${candidate}\n`, stderr: "", exitCode: 0 };
+    }
+    if (command.startsWith("'python3' '-c' ") && command.includes("server_site=os.path.realpath")) {
+      if (this.failWebsiteScope) throw new Error("listener is outside the declared site directory");
+      return { stdout: `${E2B_WORKSPACE}/site\n`, stderr: "", exitCode: 0 };
     }
     if (command.startsWith("'python3' '-c' ")) {
       const candidate = command.match(/ '([^']+)'$/)?.[1];

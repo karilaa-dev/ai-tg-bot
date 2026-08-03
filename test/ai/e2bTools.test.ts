@@ -22,6 +22,7 @@ describe("E2B-backed agent tools", () => {
     const published = {
       sandboxId: "sandbox-1",
       port: 3000,
+      siteDirectory: "/home/user/workspace/site",
       path: "/",
       url: "https://3000-sandbox-1.e2b.app/",
       pausesAfterMinutes: 15,
@@ -32,18 +33,24 @@ describe("E2B-backed agent tools", () => {
     const tool = createPublishWebsiteTool(buildInput(runtime, register));
 
     expect(tool.description).toContain("nohup command </dev/null >server.log 2>&1 &");
-    expect(tool.description).toContain("dedicated site directory");
+    expect(tool.description).toContain("dedicated workspace subdirectory");
+    expect(tool.description).toContain("public and unauthenticated");
 
-    const result = await tool.execute({ port: 3000, path: "/" });
+    const result = await tool.execute({ port: 3000, site_dir: "/site", path: "/" });
 
     expect(result).toEqual({
       published: true,
       url: published.url,
       port: 3000,
+      site_directory: "/home/user/workspace/site",
       path: "/",
       public: true,
+      authentication: "none",
       pauses_after_minutes: 15,
     });
+    expect(runtime.publishWebsite).toHaveBeenCalledWith(expect.objectContaining({
+      siteDirectory: "/site",
+    }));
     expect(register).toHaveBeenCalledWith(published);
     expect(appendPublishedWebsiteNotice("Done.", [published.url], "en"))
       .toContain("remain active for 15 minutes after this response");

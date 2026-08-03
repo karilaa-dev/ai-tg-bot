@@ -46,6 +46,34 @@ describe("create_file", () => {
     expect(rememberSource).toHaveBeenCalledTimes(1);
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
   });
+
+  it("preserves image delivery when image indexing falls back to a basic file row", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 802, firstName: "Images", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Images" });
+    const bytes = Buffer.from("image bytes");
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const originalInsert = repos.files.insertFile.bind(repos.files);
+    vi.spyOn(repos.files, "insertFile")
+      .mockRejectedValueOnce(new Error("image indexing unavailable"))
+      .mockImplementation(originalInsert);
+    const createdFiles: Array<{ type: string; delivery: string }> = [];
+    const tool = createCreateFileTool({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles,
+      commandRuntime: fileRuntime(bytes, contentSha256),
+    } as never);
+
+    await expect(tool.execute({ path: "/photo.jpg", delivery: "photo" }))
+      .resolves.toMatchObject({ type: "image" });
+
+    expect(createdFiles).toMatchObject([{ type: "image", delivery: "photo" }]);
+    expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
+  });
 });
 
 function fileRuntime(bytes: Buffer, contentSha256: string): CommandRuntime {

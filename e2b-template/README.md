@@ -18,7 +18,9 @@ Validate the current production tag without rebuilding it:
 npm run e2b:template:check
 ```
 
-To roll back, use E2B's tag API to assign `production` to a previously validated build tag. Existing thread sandboxes keep their original filesystem and build until they are deleted; tag changes affect newly created sandboxes only.
+To roll back, use E2B's tag API to assign `production` to a previously validated build tag. Existing thread sandboxes keep their original filesystem and build until they are deleted; tag changes affect newly created sandboxes only. Keep the `thread_sandboxes` mappings intact during a tag change: metadata-only recovery includes the configured `template_ref`, so a missing mapping plus a changed `E2B_TEMPLATE` cannot rediscover an older sandbox and will create a new one.
+
+The template installs the distro packages for Git, OpenSSH, curl, and the C/C++ build toolchain explicitly. E2B Base intentionally supplies the supported Python, Node.js, and npm versions; the build contract checks them before a build can be promoted, so an incompatible upstream Base change fails validation while the existing `production` tag remains untouched.
 
 ## Legacy Desktop cleanup
 
