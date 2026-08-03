@@ -56,6 +56,33 @@ describe("BrowserUseRuntimeManager", () => {
     expect(Object.keys(fixture.api.createProfile.mock.calls[0]![0])).toEqual(["userId", "name"]);
   });
 
+  it("waits for profile persistence when the initial storage snapshot is unavailable", async () => {
+    const fixture = await runtimeFixture({}, true);
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    await browser.open("https://example.com/login");
+
+    await browser.closeSession();
+
+    expect(fixture.api.getProfile.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports when an existing session cannot apply a longer open timeout", async () => {
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    await browser.open("https://example.com/short", 5);
+
+    await expect(browser.open("https://example.com/long", 20)).resolves.toMatchObject({
+      requested_timeout_minutes: 20,
+      timeout_request_applied: false,
+      effective_session_timeout_minutes: 5,
+      extension_required: true,
+      extension_hint: expect.stringContaining("browser_extend_session"),
+    });
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(1);
+  });
+
   it("shares the user session while keeping tabs private to their threads", async () => {
     const fixture = await runtimeFixture();
     await fixture.manager.beginTurn(7, 10);
@@ -212,7 +239,10 @@ describe("BrowserUseRuntimeManager", () => {
     await expect(later).resolves.toMatchObject({ tabs: [expect.any(Object)] });
   });
 
-  async function runtimeFixture(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
+  async function runtimeFixture(
+    overrides: Parameters<typeof loadTestConfig>[0] = {},
+    storageStateUnavailable = false,
+  ) {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();
     const repos = createRepos(database.db, database.search);
@@ -229,6 +259,7 @@ describe("BrowserUseRuntimeManager", () => {
       api,
       connect: async () => {
         const browser = new FakeBrowser();
+        browser.context.storageStateUnavailable = storageStateUnavailable;
         browsers.push(browser);
         return browser as unknown as Browser;
       },
@@ -305,6 +336,7 @@ class FakeBrowser {
 class FakeContext {
   readonly pageList = [new FakePage()];
   closed = false;
+  storageStateUnavailable = false;
 
   pages(): Page[] {
     return this.pageList as unknown as Page[];
@@ -319,6 +351,11 @@ class FakeContext {
   async close(): Promise<void> {
     this.closed = true;
     await Promise.all(this.pageList.map((page) => page.close()));
+  }
+
+  async storageState(): Promise<{ cookies: []; origins: [] }> {
+    if (this.storageStateUnavailable) throw new Error("storage state unavailable");
+    return { cookies: [], origins: [] };
   }
 }
 

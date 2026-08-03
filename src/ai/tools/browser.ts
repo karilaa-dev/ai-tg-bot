@@ -24,7 +24,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
   return {
     browser_open: defineBotTool({
       description:
-        "Open a Browser Use Cloud tab for stateful or visual web work using the configured default session duration. Set timeout_minutes only when the task clearly needs longer.",
+        "Open a Browser Use Cloud tab for stateful or visual web work using the configured default session duration. Set timeout_minutes only when the task clearly needs longer. If a shorter session is already active, the result sets extension_required instead of silently replacing that session; call browser_extend_session to perform the rollover.",
       inputSchema: z.object({
         url: httpUrlSchema(),
         timeout_minutes: z.number().int().min(5).max(240).optional(),

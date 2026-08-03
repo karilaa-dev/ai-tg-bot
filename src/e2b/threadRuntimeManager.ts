@@ -317,12 +317,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     signal?: AbortSignal,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
+    const restoreBatches = Math.ceil(
+      files.length / this.input.config.TELEGRAM_FILE_RESTORE_CONCURRENCY,
+    );
+    const projectedRestoreMs = Math.min(
+      CONTINUOUS_ROTATE_MS,
+      restoreBatches * this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+    );
     const operationWindowMs = Math.min(
       CONTINUOUS_ROTATE_MS,
       Math.max(
         E2B_IDLE_PAUSE_MS,
         requestedDurationMs
-          + (files.length ? this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS : 0)
+          + projectedRestoreMs
           + ROTATION_GUARD_MS,
       ),
     );

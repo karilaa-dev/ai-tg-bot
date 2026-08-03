@@ -222,6 +222,26 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().inventoryCalls).toBe(2);
   });
 
+  it("scales the sandbox operation window by projected restore batches", async () => {
+    const files: SandboxThreadFile[] = Array.from({ length: 9 }, (_, index) => ({
+      fileId: 3_000 + index,
+      messageId: null,
+      name: `${index}.txt`,
+      mimeType: "text/plain",
+      expectedSize: 1,
+      expectedSha256: null,
+      telegramRefs: [],
+    }));
+
+    await runtime.execute(commandRequest(userId, threadId, files));
+
+    const projectedBatches = Math.ceil(files.length / config.TELEGRAM_FILE_RESTORE_CONCURRENCY);
+    const expectedWindowMs = 30_000
+      + projectedBatches * config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS
+      + 5 * 60_000;
+    expect(client.onlySandbox().timeoutCalls).toContain(expectedWindowMs);
+  });
+
   it("preserves the primary synchronization error when directory sealing also fails", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();

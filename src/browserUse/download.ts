@@ -34,7 +34,7 @@ export async function downloadPublicBrowserFile(
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     throwIfAborted(operationSignal);
     const addresses = await resolvePublicAddresses(url);
-    const dispatcher = pinnedDispatcher(addresses);
+    const dispatcher = pinnedDispatcher(addresses, timeoutMs);
     try {
       const response = await raceWithAbort(request(url, {
         method: "GET",
@@ -99,12 +99,19 @@ async function resolvePublicAddresses(url: URL): Promise<Array<{ address: string
   return addresses.map(({ address, family }) => ({ address, family: family as 4 | 6 }));
 }
 
-function pinnedDispatcher(addresses: Array<{ address: string; family: 4 | 6 }>): Dispatcher {
+function pinnedDispatcher(
+  addresses: Array<{ address: string; family: 4 | 6 }>,
+  operationTimeoutMs: number,
+): Dispatcher {
+  // The dispatcher is used for one manually redirected request and then closed.
+  // Cache only the already-validated addresses for its entire possible lifetime;
+  // the custom lookup never delegates back to system DNS.
+  const pinLifetimeMs = Math.max(1, operationTimeoutMs);
   return new Agent().compose(interceptors.dns({
-    maxTTL: 1,
+    maxTTL: pinLifetimeMs,
     lookup: (_origin, _options, callback) => callback(null, addresses.map((address) => ({
       ...address,
-      ttl: 1,
+      ttl: pinLifetimeMs,
     }))),
   }));
 }

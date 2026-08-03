@@ -233,6 +233,9 @@ export class BrowserUseRuntimeManager {
         url: page.url(),
         title: await safeTitle(page),
         session_remaining_seconds: remainingSeconds(session),
+        ...(timeoutMinutes !== undefined
+          ? browserTimeoutRequestResult(session, timeoutMinutes)
+          : {}),
       };
     }, signal);
   }
@@ -823,10 +826,12 @@ export class BrowserUseRuntimeManager {
     state.session = undefined;
     if (!session) return;
     const finalStorageSignature = await browserStorageSignature(session.context);
-    const storageChanged = Boolean(
-      session.storageSignature
-      && (!finalStorageSignature || finalStorageSignature !== session.storageSignature),
-    );
+    // An unavailable initial or final snapshot means the storage state is unknown,
+    // not unchanged. Wait for the provider's profile-save signal in that case so
+    // cookies acquired during the session are not discarded on disconnect.
+    const storageChanged = session.storageSignature === null
+      || finalStorageSignature === null
+      || finalStorageSignature !== session.storageSignature;
     for (const office of session.officeContexts.values()) await office.context.close().catch(() => undefined);
     session.officeContexts.clear();
     const pages = new Set([...session.tabs.values()].map((tab) => tab.page));
@@ -1020,6 +1025,25 @@ function profileSaveSignature(profile: BrowserUseProfile): string {
     lastUsedAt: profile.lastUsedAt ?? null,
     cookieDomains: profile.cookieDomains ?? null,
   });
+}
+
+function browserTimeoutRequestResult(
+  session: SessionState,
+  requestedTimeoutMinutes: number,
+): Record<string, unknown> {
+  const requested = clampTimeout(requestedTimeoutMinutes);
+  const applied = session.timeoutAt >= Date.now() + requested * 60_000 - DEADLINE_MARGIN_MS;
+  return {
+    requested_timeout_minutes: requested,
+    timeout_request_applied: applied,
+    effective_session_timeout_minutes: session.timeoutMinutes,
+    ...(!applied
+      ? {
+          extension_required: true,
+          extension_hint: "Call browser_extend_session to roll the existing session over to the requested duration.",
+        }
+      : {}),
+  };
 }
 
 async function browserStorageSignature(context: BrowserContext): Promise<string | null> {

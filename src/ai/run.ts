@@ -1128,7 +1128,6 @@ async function sendGeneratedImageAttachmentsEarly(
         for (const attachment of batch) {
           attachment.telegramDeliveryUnknown = true;
           releaseAttachmentData(attachment);
-          await removeUnresolvableUndeliveredAttachment(input, attachment);
         }
       }
       input.logger.warn(definitive
@@ -1221,7 +1220,6 @@ async function sendAttachmentBatch(
         for (const attachment of ready) {
           attachment.telegramDeliveryUnknown = true;
           releaseAttachmentData(attachment);
-          await removeUnresolvableUndeliveredAttachment(input, attachment);
         }
         input.logger.warn(`${strategy.label} media group delivery outcome is unknown; not retrying`, {
           threadId: input.thread.id,
@@ -1324,7 +1322,6 @@ async function sendOneBufferedAttachment(
       name: attachment.name,
       err: String(failure),
     });
-    await removeUnresolvableUndeliveredAttachment(input, attachment);
     return;
   }
   if (strategy === photoSendStrategy) {
@@ -1366,7 +1363,6 @@ async function sendOneBufferedAttachment(
       name: attachment.name,
       err: String(failure),
     });
-    await removeUnresolvableUndeliveredAttachment(input, attachment);
     return;
   }
   input.logger.warn(`failed to send ${strategy.label}`, {
