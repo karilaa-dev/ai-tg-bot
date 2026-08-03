@@ -147,7 +147,10 @@ async function loadReferences(
   signal?: AbortSignal,
 ): Promise<ImageContent[]> {
   if (!referenceIds.length) return [];
-  const allowedFiles = new Set((await threadChainScope(bridge.repos, bridge.thread)).fileIds);
+  const allowedFiles = new Set([
+    ...(await threadChainScope(bridge.repos, bridge.thread)).fileIds,
+    ...bridge.attachments.map((attachment) => attachment.fileId),
+  ]);
   const rows = await bridge.repos.files.listByIds(referenceIds);
   const byId = new Map(rows.map((row) => [row.id, row]));
   const images: ImageContent[] = [];

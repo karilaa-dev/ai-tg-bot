@@ -46,7 +46,8 @@ export function assertPhotoDeliverable(type: string | null, name: string): void 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
   const scope = await threadChainScope(input.repos, input.thread);
-  if (!file || !scope.fileIds.includes(file.id)) return undefined;
+  const isCurrentTurnAttachment = input.createdFiles?.some((attachment) => attachment.fileId === fileId) ?? false;
+  if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
   return file;
 }
 
@@ -175,6 +176,7 @@ export async function prepareDirectCreatedFile(
       });
       const stored = await input.repos.files.get(ingested.fileId);
       if (!stored) throw new Error(`created file was not stored: ${ingested.fileId}`);
+      input.selectContextFiles?.([stored.id]);
       return {
         fileId: stored.id,
         type: ingested.type,
@@ -205,6 +207,7 @@ export async function prepareDirectCreatedFile(
     mime: file.mime,
     type: classified === "image" ? "image" : "other",
   });
+  input.selectContextFiles?.([stored.id]);
   return {
     fileId: stored.id,
     type: stored.type,

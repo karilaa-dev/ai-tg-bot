@@ -218,6 +218,7 @@ export const runTurn: TurnRunner = async (input) => {
       t: input.t,
       shaper,
       attachments: createdFiles.filter((file) => file.telegramDelivery),
+      requestedAttachmentCount: createdFiles.length,
       extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
     });
     if (deliveredFinalThinking !== finalThinking) {
@@ -708,17 +709,20 @@ function buildThinkingStatus(heading: string, toolStatusMd: string): string {
   return tools ? `${heading}\n\n${tools}` : heading;
 }
 
-function buildFinalThinkingSummary(input: {
+export function buildFinalThinkingSummary(input: {
   t: TurnInput["t"];
   shaper: StreamShaper;
   attachments: CreatedFileAttachment[];
+  requestedAttachmentCount?: number;
   extraReasoning?: string[];
 }): string {
   const summary = input.shaper.runSummary();
-  const requestedFiles = input.attachments.length;
+  const deliveredFiles = Math.min(input.attachments.length, MAX_CREATED_FILES_PER_ANSWER);
+  const requestedFiles = input.requestedAttachmentCount ?? input.attachments.length;
+  const filesWereCapped = requestedFiles > MAX_CREATED_FILES_PER_ANSWER;
   const extraReasoning = (input.extraReasoning ?? []).map((item) => item.trim()).filter(Boolean);
   const reasoningSummaries = [...summary.reasoningSummaries, ...extraReasoning];
-  if (!reasoningSummaries.length && !summary.toolCallCount && !requestedFiles) return "";
+  if (!reasoningSummaries.length && !summary.toolCallCount && !deliveredFiles && !filesWereCapped) return "";
 
   const counters = [
     input.t("thinking-final-tool-calls", {
@@ -745,20 +749,19 @@ function buildFinalThinkingSummary(input: {
     ].join("\n\n"));
   }
 
-  if (requestedFiles) {
-    const sentFiles = Math.min(requestedFiles, MAX_CREATED_FILES_PER_ANSWER);
+  if (deliveredFiles || filesWereCapped) {
     const sentNames = input.attachments
-      .slice(0, sentFiles)
+      .slice(0, deliveredFiles)
       .map((file) => `<code>${escapeHtml(file.name)}</code>`)
       .join(", ");
     const filesLabel =
-      requestedFiles > sentFiles
+      filesWereCapped
         ? input.t("thinking-final-files-capped", {
-            sent: sentFiles,
+            sent: MAX_CREATED_FILES_PER_ANSWER,
             requested: requestedFiles,
             limit: MAX_CREATED_FILES_PER_ANSWER,
           })
-        : input.t("thinking-final-files", { count: sentFiles });
+        : input.t("thinking-final-files", { count: deliveredFiles });
     sections.push(sentNames ? `${filesLabel}\n\n${sentNames}` : filesLabel);
   }
 

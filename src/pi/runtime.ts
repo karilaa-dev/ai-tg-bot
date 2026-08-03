@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Api } from "grammy";
@@ -477,6 +478,26 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   async resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile> {
     const cached = this.turnFileCache.get(file.id);
     if (cached) return cached;
+    const currentAttachment = this.attachments.find((attachment) =>
+      attachment.fileId === file.id && attachment.data);
+    if (currentAttachment?.data) {
+      const bytes = Buffer.from(currentAttachment.data);
+      const resolved: ResolvedChatFile = {
+        bytes,
+        mimeType: currentAttachment.mimeType ?? file.mime_type,
+        size: bytes.length,
+        contentSha256: file.content_sha256 ?? createHash("sha256").update(bytes).digest("hex"),
+        source: {
+          transport: "memory",
+          connectionKey: "current-turn",
+          remoteKey: String(file.id),
+          locator: {},
+          mimeType: currentAttachment.mimeType ?? file.mime_type,
+        },
+      };
+      this.turnFileCache.set(file.id, resolved);
+      return resolved;
+    }
     if (!this.transport) throw new Error(`File #${file.id} has no active chat transport resolver.`);
     const loaded = await this.transport.resolveFile(file, signal);
     const resolved: ResolvedChatFile = {
@@ -521,7 +542,10 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
       pi.on("context", async (event) => {
         const messages = event.messages.map((message) => cloneMessage(message));
         const scope = await threadChainScope(bridge.repos, bridge.thread);
-        const allowedIds = new Set(scope.fileIds);
+        const allowedIds = new Set([
+          ...scope.fileIds,
+          ...bridge.attachments.map((attachment) => attachment.fileId),
+        ]);
         let changed = false;
         const injectedIds = new Set<number>();
         for (let index = messages.length - 1; index >= 0; index -= 1) {

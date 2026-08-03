@@ -117,6 +117,7 @@ describe("Browser Use Pi tools", () => {
       session_remaining_seconds: 245,
     });
     const createdFiles: unknown[] = [];
+    const selectContextFiles = vi.fn();
     const stored = {
       id: 71,
       type: "image",
@@ -127,6 +128,7 @@ describe("Browser Use Pi tools", () => {
     };
     const tools = createPiToolAdapters(bridge(browserConfig(), browserRuntime, {
       createdFiles,
+      selectContextFiles,
       repos: {
         files: {
           insertFile: vi.fn(async (value: Record<string, unknown>) => ({ ...stored, ...value, id: stored.id })),
@@ -154,6 +156,7 @@ describe("Browser Use Pi tools", () => {
     });
     expect(result.details).not.toHaveProperty("screenshot_base64");
     expect(createdFiles[0]).toMatchObject({ data: PNG, delivery: "photo", caption: "Page" });
+    expect(selectContextFiles).toHaveBeenCalledWith([71]);
   });
 
   it("attaches Browser Use downloads directly and reports session time", async () => {

@@ -263,6 +263,67 @@ describe("ThreadBridge turn prompt lifecycle", () => {
       await db.destroy();
     }
   });
+
+  it("materializes a sourceless attachment from current-turn memory", async () => {
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:", LOG_LEVEL: "error" });
+    const db = createDatabase(config, createLogger(config));
+    await db.initialize();
+    try {
+      const repos = createRepos(db.db, db.search);
+      const user = await repos.users.ensure({ tgId: 987_657, firstName: "Alice", lang: "en" });
+      const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      const bytes = Buffer.from("current-turn-image");
+      const file = await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: thread.id,
+        type: "image",
+        name: "browser-screenshot.png",
+        size: bytes.length,
+        mimeType: "image/png",
+        isInline: false,
+      });
+      const bridge = new ThreadBridge({
+        config,
+        db,
+        repos,
+        logger: createLogger(config),
+        user,
+        thread,
+        modelRegistry: {} as never,
+        providerRouter: {} as never,
+      });
+      await bridge.beginTurn(turnTransport());
+      bridge.attachments.push({
+        fileId: file.id,
+        type: "image",
+        name: file.name,
+        mimeType: "image/png",
+        data: bytes,
+        size: bytes.length,
+        inline: false,
+        card: `[[chat-file:${file.id}]]`,
+      });
+      bridge.selectContextFiles([file.id]);
+      const handlers = await inlineExtensionHandlers(createChatFileContextExtension(bridge));
+      const messages: AgentMessage[] = [{
+        role: "user",
+        content: [{ type: "text", text: `Inspect [[chat-file:${file.id}]]` }],
+        timestamp: 1,
+      }];
+
+      const result = await handlers.context({ messages });
+      const latest = result.messages[0] as AgentMessage;
+      if (latest.role !== "user" || typeof latest.content === "string") throw new Error("unexpected content");
+      expect(latest.content.at(-1)).toEqual({
+        type: "image",
+        data: bytes.toString("base64"),
+        mimeType: "image/png",
+      });
+      await expect(repos.files.listSources(file.id)).resolves.toEqual([]);
+    } finally {
+      await db.destroy();
+    }
+  });
 });
 
 function mutableSource(

@@ -1,14 +1,31 @@
 import { GrammyError } from "grammy";
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildFinalThinkingSummary,
   normalizeTelegramAttachmentDeliveries,
   sendCreatedFileAttachments,
   sendFinal,
   type TurnInput,
 } from "../../src/ai/run.js";
 import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
+import { StreamShaper } from "../../src/ai/shaper.js";
 
 describe("buffered Telegram attachment delivery", () => {
+  it("keeps the original requested count when only delivered files are summarized", () => {
+    const delivered = Array.from({ length: 25 }, (_, index) =>
+      imageAttachment(index + 1, `${index + 1}.jpg`, 100));
+    const summary = buildFinalThinkingSummary({
+      t: (key, params) => `${key}:${JSON.stringify(params)}`,
+      shaper: new StreamShaper(),
+      attachments: delivered,
+      requestedAttachmentCount: 30,
+    });
+
+    expect(summary).toContain('thinking-final-files-capped:{"sent":25,"requested":30,"limit":25}');
+    expect(summary).toContain("<code>1.jpg</code>");
+    expect(summary).toContain("<code>25.jpg</code>");
+  });
+
   it("downgrades oversized generated images before the early photo path selects them", () => {
     const oversized = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
     oversized.origin = "generated_image";
