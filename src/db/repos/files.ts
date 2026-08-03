@@ -130,6 +130,22 @@ export class FilesRepo {
     return this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
   }
 
+  async listRecoverableIds(fileIds: number[]): Promise<number[]> {
+    if (!fileIds.length) return [];
+    const rows = await this.db.query<{ id: number }>(sql`
+      select f.id
+      from files f
+      where f.id in (${valueList(fileIds)})
+        and (
+          f.content_md is not null
+          or exists (select 1 from file_chunks fc where fc.file_id = f.id)
+          or exists (select 1 from file_sources fs where fs.file_id = f.id)
+        )
+      order by f.id asc
+    `);
+    return rows.map((row) => row.id);
+  }
+
   listByIdsWithSource(fileIds: number[], transport: string, connectionKey: string): Promise<FileRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileRow>(sql`

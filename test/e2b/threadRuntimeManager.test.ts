@@ -409,6 +409,7 @@ describe("thread E2B runtime manager", () => {
 
     const followUpLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
+    expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
     followUpLease.release();
     await vi.waitFor(() => {
       expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
@@ -420,6 +421,33 @@ describe("thread E2B runtime manager", () => {
     lateFollowUpLease.release();
     await vi.waitFor(() => {
       expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_IDLE_PAUSE_MS);
+    });
+  });
+
+  it("starts the website idle window only after E2B accepts the timeout", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    const lease = runtime.acquireActivityLease(userId, threadId);
+    await runtime.execute(commandRequest(userId, threadId));
+    await runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: "/site",
+      path: "/",
+    });
+    const sandbox = client.onlySandbox();
+    const attemptsBeforeRelease = sandbox.timeoutAttempts;
+    sandbox.nextSetTimeoutError = new Error("timeout arm failed");
+    lease.release();
+    await vi.waitFor(() => expect(sandbox.timeoutAttempts).toBeGreaterThan(attemptsBeforeRelease));
+
+    now += 5 * 60_000;
+    const retryLease = runtime.acquireActivityLease(userId, threadId);
+    retryLease.release();
+    await vi.waitFor(() => {
+      expect(sandbox.timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
     });
   });
 
@@ -992,6 +1020,7 @@ class FakeSandbox implements E2BSandbox {
   readonly files = new Map<string, Buffer>();
   readonly controlCommands: string[] = [];
   readonly timeoutCalls: number[] = [];
+  timeoutAttempts = 0;
   startedAt = new Date();
   running = true;
   pauseCalls = 0;
@@ -1001,6 +1030,7 @@ class FakeSandbox implements E2BSandbox {
   failIndexWrite = false;
   failWebsiteScope = false;
   nextWaitError?: unknown;
+  nextSetTimeoutError?: unknown;
   readonly readFilePaths: string[] = [];
   readonly readFileCalls: Array<{ path: string; user: string }> = [];
   readonly fileInfoCalls: Array<{ path: string; user: string }> = [];
@@ -1163,6 +1193,12 @@ class FakeSandbox implements E2BSandbox {
   }
 
   async setTimeout(timeoutMs: number): Promise<void> {
+    this.timeoutAttempts += 1;
+    if (this.nextSetTimeoutError) {
+      const error = this.nextSetTimeoutError;
+      this.nextSetTimeoutError = undefined;
+      throw error;
+    }
     this.timeoutCalls.push(timeoutMs);
   }
 

@@ -52,6 +52,7 @@ function buildInput(runtime: ReturnType<typeof fakeRuntime>, browserRuntime = fa
       files: {
         listForMessages: async () => [],
         listForThreads: async () => [],
+        listRecoverableIds: async (fileIds: number[]) => fileIds,
         listByIds: async () => [],
         listTelegramFileRefs: async () => [],
       },

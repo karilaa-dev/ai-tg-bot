@@ -205,6 +205,7 @@ describe("Pi retrieval tools backend", () => {
       type: "txt",
       name: "visible.txt",
       size: 1,
+      contentMd: "v",
       isInline: true,
     });
     const fork = await repos.threads.create({
@@ -227,6 +228,7 @@ describe("Pi retrieval tools backend", () => {
       type: "txt",
       name: "hidden.txt",
       size: 1,
+      contentMd: "h",
       isInline: true,
     });
     const local = await repos.messages.insert({

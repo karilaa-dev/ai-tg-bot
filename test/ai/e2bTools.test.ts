@@ -72,6 +72,7 @@ function buildInput(runtime: CommandRuntime, registerPublishedWebsite?: (website
       files: {
         listForMessages: async () => [],
         listForThreads: async () => [],
+        listRecoverableIds: async (fileIds: number[]) => fileIds,
         listByIds: async () => [],
         listTelegramFileRefs: async () => [],
       },

@@ -156,10 +156,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         state.leases = Math.max(0, state.leases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
-        const idle = this.idleTimeout(state, state.sandboxId, true);
         void this.enqueue(scope, undefined, async () => {
           if (!state.connection) return;
+          const sandboxId = state.sandboxId;
+          const idle = this.idleTimeout(state, sandboxId, true);
           await state.connection.setTimeout(idle.timeoutMs);
+          this.commitIdleTimeout(state, sandboxId, idle);
           this.input.logger?.info("E2B sandbox idle timeout armed", {
             ...scope,
             sandboxId: state.sandboxId,
@@ -335,9 +337,21 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           + ROTATION_GUARD_MS,
       ),
     );
-    let sandbox = await this.acquireConnection(state, scope, operationWindowMs, signal);
-    sandbox = await this.rotateIfNeeded(state, scope, sandbox, operationWindowMs, signal);
-    await sandbox.setTimeout(operationWindowMs, signal);
+    const connectionWindowMs = Math.max(
+      operationWindowMs,
+      this.idleTimeout(state, state.sandboxId, false).timeoutMs,
+    );
+    let sandbox = await this.acquireConnection(state, scope, connectionWindowMs, signal);
+    let effectiveWindowMs = Math.max(
+      operationWindowMs,
+      this.idleTimeout(state, sandbox.id, false).timeoutMs,
+    );
+    sandbox = await this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal);
+    effectiveWindowMs = Math.max(
+      operationWindowMs,
+      this.idleTimeout(state, sandbox.id, false).timeoutMs,
+    );
+    await sandbox.setTimeout(effectiveWindowMs, signal);
     await this.ensureLayout(sandbox, signal);
     const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
     return { sandbox, threadFiles };
@@ -541,7 +555,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     try {
       for (const file of files) {
         throwIfAborted(signal);
-        const sandboxName = `${file.fileId}--${sanitizeFileName(file.name)}`;
+        const sandboxName = sandboxThreadFileName(file.fileId, file.name);
         desiredNames.add(sandboxName);
         const old = previousById.get(file.fileId);
         const existingInfo = old?.status === "available"
@@ -1075,7 +1089,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     state: RuntimeState,
     sandboxId: string | undefined,
     startPendingWindow: boolean,
-  ): { timeoutMs: number; website: boolean } {
+  ): { timeoutMs: number; website: boolean; startPendingWindow?: boolean } {
     const matches = sandboxId !== undefined && state.websiteSandboxId === sandboxId;
     if (!matches) {
       state.websiteSandboxId = undefined;
@@ -1085,11 +1099,11 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
     const now = Date.now();
     if (state.websitePublishedPending) {
-      if (!startPendingWindow) {
-        return { timeoutMs: E2B_WEBSITE_IDLE_PAUSE_MS, website: true };
-      }
-      state.websiteIdleUntil = now + E2B_WEBSITE_IDLE_PAUSE_MS;
-      state.websitePublishedPending = false;
+      return {
+        timeoutMs: E2B_WEBSITE_IDLE_PAUSE_MS,
+        website: true,
+        ...(startPendingWindow ? { startPendingWindow: true } : {}),
+      };
     }
     const remainingMs = state.websiteIdleUntil === undefined
       ? 0
@@ -1102,6 +1116,21 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     return { timeoutMs: E2B_IDLE_PAUSE_MS, website: false };
   }
 
+  private commitIdleTimeout(
+    state: RuntimeState,
+    sandboxId: string | undefined,
+    idle: { startPendingWindow?: boolean },
+  ): void {
+    if (
+      !idle.startPendingWindow
+      || sandboxId === undefined
+      || state.websiteSandboxId !== sandboxId
+      || !state.websitePublishedPending
+    ) return;
+    state.websiteIdleUntil = Date.now() + E2B_WEBSITE_IDLE_PAUSE_MS;
+    state.websitePublishedPending = false;
+  }
+
   private scheduleRenewal(scope: SandboxScope, state: RuntimeState): void {
     if (state.renewTimer || state.leases === 0 || this.shuttingDown) return;
     state.renewTimer = setTimeout(() => {
@@ -1109,13 +1138,21 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       if (state.leases === 0 || this.shuttingDown) return;
       void this.enqueue(scope, undefined, async () => {
         if (!state.connection) return;
+        const requestedRenewalMs = Math.max(
+          E2B_IDLE_PAUSE_MS,
+          this.idleTimeout(state, state.connection.id, false).timeoutMs,
+        );
         let sandbox = await this.rotateIfNeeded(
           state,
           scope,
           state.connection,
-          ROTATION_GUARD_MS,
+          requestedRenewalMs,
         );
-        await sandbox.setTimeout(E2B_IDLE_PAUSE_MS);
+        const renewalWindowMs = Math.max(
+          E2B_IDLE_PAUSE_MS,
+          this.idleTimeout(state, sandbox.id, false).timeoutMs,
+        );
+        await sandbox.setTimeout(renewalWindowMs);
         this.rememberConnection(state, sandbox);
       }).catch((error) => {
         this.input.logger?.warn("E2B activity renewal failed", {
@@ -1378,6 +1415,16 @@ function sanitizeFileName(value: string): string {
     .slice(0, 120)
     .replace(/[._-]+$/g, "");
   return normalized || "file";
+}
+
+function sandboxThreadFileName(fileId: number, originalName: string): string {
+  if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error("invalid Telegram file id");
+  const sandboxName = `${fileId}--${sanitizeFileName(originalName)}`;
+  const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, sandboxName);
+  if (path.posix.dirname(candidate) !== E2B_TELEGRAM_FILES) {
+    throw new Error("unsafe Telegram file sandbox path");
+  }
+  return sandboxName;
 }
 
 function sanitizeRestoreCode(value: unknown): string {

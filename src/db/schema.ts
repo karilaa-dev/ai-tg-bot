@@ -14,7 +14,7 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName, lo
     else await initializePostgres(tx);
     await backfillTelegramFileRefs(tx, logger);
     await removeLegacyThreadSandboxColumns(tx, dialect);
-    await reportLegacyFilePaths(tx, dialect, logger);
+    await removeLegacyFilePathColumn(tx, dialect, logger);
   });
 }
 
@@ -305,7 +305,7 @@ async function backfillTelegramFileRefs(db: SqlExecutor, logger?: Logger): Promi
   }
 }
 
-async function reportLegacyFilePaths(
+async function removeLegacyFilePathColumn(
   db: SqlExecutor,
   dialect: DialectName,
   logger?: Logger,
@@ -325,12 +325,11 @@ async function reportLegacyFilePaths(
       and not exists (select 1 from file_sources s where s.file_id = f.id)
   `);
   if ((unavailable[0]?.count ?? 0) > 0) {
-    logger?.warn("legacy host-only file records retained without a durable byte source", {
+    logger?.warn("legacy host-only file records have no durable byte source", {
       files: unavailable[0]!.count,
     });
   }
-  // The column stays inert for rollback compatibility. Current runtime code never
-  // reads host paths, and new databases are created without this legacy column.
+  await db.execute(sql.raw("alter table files drop column path"));
 }
 
 async function removeLegacyThreadSandboxColumns(db: SqlExecutor, dialect: DialectName): Promise<void> {

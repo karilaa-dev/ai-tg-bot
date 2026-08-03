@@ -134,7 +134,7 @@ describe("SQLite schema initialization", () => {
       }]);
   });
 
-  it("retains legacy host paths as inert rollback metadata without deleting file records", async () => {
+  it("drops legacy host paths while retaining only recoverable files in thread scope", async () => {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();
     await database.db.execute(sql`alter table files add column path text`);
@@ -159,12 +159,11 @@ describe("SQLite schema initialization", () => {
 
     await database.initialize();
 
-    await expect(columns(database, "files")).resolves.toContain("path");
-    await expect(database.db.query<{ id: number; path: string }>(sql`select id, path from files order by id`))
-      .resolves.toEqual([
-        { id: 80, path: "/old/host-only.bin" },
-        { id: 81, path: "/old/telegram.txt" },
-      ]);
+    await expect(columns(database, "files")).resolves.not.toContain("path");
+    await expect(database.db.query<{ id: number }>(sql`select id from files order by id`))
+      .resolves.toEqual([{ id: 80 }, { id: 81 }]);
+    const repos = createRepos(database.db, database.search);
+    await expect(repos.files.listRecoverableIds([80, 81])).resolves.toEqual([81]);
   });
 
   it("drops obsolete E2B mapping metadata without losing sandbox ownership", async () => {
