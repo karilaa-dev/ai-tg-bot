@@ -134,7 +134,7 @@ describe("SQLite schema initialization", () => {
       }]);
   });
 
-  it("drops legacy host paths while preserving files with a durable source", async () => {
+  it("drops legacy host paths without deleting host-only file records", async () => {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();
     await database.db.execute(sql`alter table files add column path text`);
@@ -161,7 +161,7 @@ describe("SQLite schema initialization", () => {
 
     await expect(columns(database, "files")).resolves.not.toContain("path");
     await expect(database.db.query<{ id: number }>(sql`select id from files order by id`))
-      .resolves.toEqual([{ id: 81 }]);
+      .resolves.toEqual([{ id: 80 }, { id: 81 }]);
   });
 
   it("drops obsolete E2B mapping metadata without losing sandbox ownership", async () => {

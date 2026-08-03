@@ -14,7 +14,7 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName, lo
     else await initializePostgres(tx);
     await backfillTelegramFileRefs(tx, logger);
     await removeLegacyThreadSandboxColumns(tx, dialect);
-    await removeLegacyFilePathColumn(tx, dialect);
+    await removeLegacyFilePathColumn(tx, dialect, logger);
   });
 }
 
@@ -305,7 +305,11 @@ async function backfillTelegramFileRefs(db: SqlExecutor, logger?: Logger): Promi
   }
 }
 
-async function removeLegacyFilePathColumn(db: SqlExecutor, dialect: DialectName): Promise<void> {
+async function removeLegacyFilePathColumn(
+  db: SqlExecutor,
+  dialect: DialectName,
+  logger?: Logger,
+): Promise<void> {
   const columns = dialect === "sqlite"
     ? await db.query<{ name: string }>(sql.raw("pragma table_info(files)"))
     : await db.query<{ name: string }>(sql`
@@ -314,26 +318,19 @@ async function removeLegacyFilePathColumn(db: SqlExecutor, dialect: DialectName)
         where table_schema = current_schema() and table_name = 'files'
       `);
   if (!columns.some((column) => column.name === "path")) return;
-  const orphanedLegacyFiles = sql`
-    select f.id
+  const unavailable = await db.query<{ count: number }>(sql`
+    select count(*) as count
     from files f
     where f.path is not null
       and not exists (select 1 from file_sources s where s.file_id = f.id)
-  `;
-  if (dialect === "sqlite") {
-    await db.execute(sql`delete from chunks_fts where file_id in (${orphanedLegacyFiles})`);
-  } else {
-    await db.execute(sql`delete from chunk_search where file_id in (${orphanedLegacyFiles})`);
-  }
-  await db.execute(sql`
-    delete from embeddings
-    where kind = 'chunk'
-      and ref_id in (
-        select c.id from file_chunks c where c.file_id in (${orphanedLegacyFiles})
-      )
   `);
-  await db.execute(sql`delete from file_chunks where file_id in (${orphanedLegacyFiles})`);
-  await db.execute(sql`delete from files where id in (${orphanedLegacyFiles})`);
+  if ((unavailable[0]?.count ?? 0) > 0) {
+    logger?.warn("legacy host-only file records retained without a durable byte source", {
+      files: unavailable[0]!.count,
+    });
+  }
+  // Host paths are no longer resolvable, but retaining rows and extracted content
+  // preserves thread history and diagnostics for files without another source.
   await db.execute(sql.raw("alter table files drop column path"));
 }
 

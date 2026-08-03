@@ -9,6 +9,8 @@ export interface SandboxThreadFile {
     id: number;
     telegramFileId: string;
     telegramSize: number | null;
+    width?: number | null;
+    height?: number | null;
     direction: "inbound" | "outbound";
     mediaKind: "document" | "photo";
     isPrimary: boolean;

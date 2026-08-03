@@ -147,33 +147,15 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         state.leases = Math.max(0, state.leases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
-        const now = Date.now();
-        const websiteSandboxMatches = state.websiteSandboxId !== undefined
-          && state.websiteSandboxId === state.sandboxId;
-        if (websiteSandboxMatches && state.websitePublishedPending) {
-          state.websiteIdleUntil = now + E2B_WEBSITE_IDLE_PAUSE_MS;
-          state.websitePublishedPending = false;
-        }
-        const websiteRemainingMs = websiteSandboxMatches && state.websiteIdleUntil !== undefined
-          ? Math.max(0, state.websiteIdleUntil - now)
-          : 0;
-        const websitePublished = websiteRemainingMs > 0;
-        const timeoutMs = websitePublished
-          ? Math.max(E2B_IDLE_PAUSE_MS, websiteRemainingMs)
-          : E2B_IDLE_PAUSE_MS;
-        if (!websitePublished) {
-          state.websiteSandboxId = undefined;
-          state.websiteIdleUntil = undefined;
-          state.websitePublishedPending = false;
-        }
+        const idle = this.idleTimeout(state, state.sandboxId, true);
         void this.enqueue(scope, undefined, async () => {
           if (!state.connection) return;
-          await state.connection.setTimeout(timeoutMs);
+          await state.connection.setTimeout(idle.timeoutMs);
           this.input.logger?.info("E2B sandbox idle timeout armed", {
             ...scope,
             sandboxId: state.sandboxId,
-            timeoutMs,
-            website: websitePublished,
+            timeoutMs: idle.timeoutMs,
+            website: idle.website,
           });
         }).catch((error) => {
           this.input.logger?.warn("failed to arm E2B sandbox idle timeout", {
@@ -265,7 +247,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           "root",
         )).bytes;
       } finally {
-        await sandbox.setTimeout(E2B_IDLE_PAUSE_MS, request.signal).catch(() => undefined);
+        const idle = this.idleTimeout(state, sandbox.id, false);
+        await sandbox.setTimeout(idle.timeoutMs).catch(() => undefined);
       }
     });
   }
@@ -345,59 +328,88 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       return state.connection;
     }
 
-    const acquired = await this.input.repos.threadSandboxes.withCreationLock(
-      this.input.config.E2B_DEPLOYMENT_ID,
-      scope.threadId,
-      async (repo) => {
-        let mapping = await repo.get(this.input.config.E2B_DEPLOYMENT_ID, scope.threadId);
-        if (mapping) {
-          try {
-            const info = await this.client.getInfo(mapping.sandbox_id, signal);
-            return { mapping, info, created: undefined as E2BSandbox | undefined };
-          } catch (error) {
-            if (!isSandboxMissing(error)) throw error;
-            await repo.remove(this.input.config.E2B_DEPLOYMENT_ID, scope.threadId);
-            mapping = undefined;
-          }
+    const deploymentId = this.input.config.E2B_DEPLOYMENT_ID;
+    const repo = this.input.repos.threadSandboxes;
+    const metadata = sandboxMetadata(this.input.config, scope);
+    let acquired: {
+      mapping: Awaited<ReturnType<typeof repo.get>> & {};
+      info: Pick<Awaited<ReturnType<E2BClient["getInfo"]>>, "sandboxId" | "state" | "startedAt">;
+      created?: E2BSandbox;
+    } | undefined;
+    for (let attempt = 0; attempt < 3 && !acquired; attempt += 1) {
+      const mapping = await repo.get(deploymentId, scope.threadId);
+      if (mapping) {
+        try {
+          acquired = {
+            mapping,
+            info: await this.client.getInfo(mapping.sandbox_id, signal),
+          };
+          break;
+        } catch (error) {
+          if (!isSandboxMissing(error)) throw error;
+          await repo.removeIfMatches(deploymentId, scope.threadId, mapping.sandbox_id);
+          continue;
         }
+      }
 
-        const metadata = sandboxMetadata(this.input.config, scope);
-        const candidates = await this.client.list(metadata, signal);
-        if (candidates.length > 1) {
-          throw new Error(
-            `Multiple E2B sandboxes match thread ${scope.threadId}; refusing to delete or choose between them.`,
-          );
+      const candidates = await this.client.list(metadata, signal);
+      if (candidates.length > 1) {
+        throw new Error(
+          `Multiple E2B sandboxes match thread ${scope.threadId}; refusing to delete or choose between them.`,
+        );
+      }
+      if (candidates[0]) {
+        const info = candidates[0];
+        const winner = await repo.insertIfAbsent({
+          deploymentId,
+          userId: scope.userId,
+          threadId: scope.threadId,
+          sandboxId: info.sandboxId,
+        });
+        if (winner.sandbox_id === info.sandboxId) {
+          acquired = { mapping: winner, info };
         }
-        if (candidates[0]) {
-          const info = candidates[0];
-          const adopted = await repo.upsert({
-            deploymentId: this.input.config.E2B_DEPLOYMENT_ID,
-            userId: scope.userId,
-            threadId: scope.threadId,
-            sandboxId: info.sandboxId,
-          });
-          return { mapping: adopted, info, created: undefined as E2BSandbox | undefined };
-        }
+        continue;
+      }
 
-        const created = await this.client.create(metadata, signal);
-        const now = Date.now();
-        const inserted = await repo.upsert({
-          deploymentId: this.input.config.E2B_DEPLOYMENT_ID,
+      const created = await this.client.create(metadata, signal);
+      let winner: Awaited<ReturnType<typeof repo.insertIfAbsent>>;
+      try {
+        winner = await repo.insertIfAbsent({
+          deploymentId,
           userId: scope.userId,
           threadId: scope.threadId,
           sandboxId: created.id,
         });
-        return {
-          mapping: inserted,
-          info: {
+      } catch (error) {
+        await this.client.kill(created.id).catch(() => undefined);
+        throw error;
+      }
+      if (winner.sandbox_id !== created.id) {
+        await this.client.kill(created.id).catch((error) => {
+          this.input.logger?.warn("failed to remove redundant E2B sandbox after creation race", {
+            ...scope,
             sandboxId: created.id,
-            state: "running" as const,
-            startedAt: new Date(now),
-          },
-          created,
-        };
-      },
-    );
+            winnerSandboxId: winner.sandbox_id,
+            error: String(error),
+          });
+        });
+        continue;
+      }
+      const now = Date.now();
+      acquired = {
+        mapping: winner,
+        info: {
+          sandboxId: created.id,
+          state: "running" as const,
+          startedAt: new Date(now),
+        },
+        created,
+      };
+    }
+    if (!acquired) {
+      throw new Error(`E2B sandbox mapping for thread ${scope.threadId} did not stabilize`);
+    }
 
     let sandbox = acquired.created;
     const resumed = acquired.info.state === "paused";
@@ -675,11 +687,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   ): Promise<TelegramRestoreResult> {
     const local = await this.restoreLocalFileSource(sandbox, item, signal);
     if (local) return local;
-    // Smaller Telegram photo variants remain durable observation history, but are
-    // deliberately not silent substitutes for the primary image's bytes/dimensions.
-    const candidates = item.file.telegramRefs
-      .filter((ref) => ref.isPrimary)
-      .sort((left, right) => right.lastSeenAt - left.lastSeenAt);
+    const candidates = primaryTelegramRestoreCandidates(item.file);
     let lastRefId: number | null = null;
     let lastError: unknown = candidates.length ? undefined : new Error("no primary Telegram file reference");
     for (const candidate of candidates) {
@@ -999,6 +1007,37 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     if (continuousStartedAt !== undefined) state.continuousStartedAt = continuousStartedAt;
   }
 
+  private idleTimeout(
+    state: RuntimeState,
+    sandboxId: string | undefined,
+    startPendingWindow: boolean,
+  ): { timeoutMs: number; website: boolean } {
+    const matches = sandboxId !== undefined && state.websiteSandboxId === sandboxId;
+    if (!matches) {
+      state.websiteSandboxId = undefined;
+      state.websiteIdleUntil = undefined;
+      state.websitePublishedPending = false;
+      return { timeoutMs: E2B_IDLE_PAUSE_MS, website: false };
+    }
+    const now = Date.now();
+    if (state.websitePublishedPending) {
+      if (!startPendingWindow) {
+        return { timeoutMs: E2B_WEBSITE_IDLE_PAUSE_MS, website: true };
+      }
+      state.websiteIdleUntil = now + E2B_WEBSITE_IDLE_PAUSE_MS;
+      state.websitePublishedPending = false;
+    }
+    const remainingMs = state.websiteIdleUntil === undefined
+      ? 0
+      : Math.max(0, state.websiteIdleUntil - now);
+    if (remainingMs > 0) {
+      return { timeoutMs: Math.max(E2B_IDLE_PAUSE_MS, remainingMs), website: true };
+    }
+    state.websiteSandboxId = undefined;
+    state.websiteIdleUntil = undefined;
+    return { timeoutMs: E2B_IDLE_PAUSE_MS, website: false };
+  }
+
   private scheduleRenewal(scope: SandboxScope, state: RuntimeState): void {
     if (state.renewTimer || state.leases === 0 || this.shuttingDown) return;
     state.renewTimer = setTimeout(() => {
@@ -1083,12 +1122,53 @@ function threadFilesRevision(files: SandboxThreadFile[]): string {
         id: ref.id,
         telegramFileId: ref.telegramFileId,
         telegramSize: ref.telegramSize,
+        width: ref.width ?? null,
+        height: ref.height ?? null,
         direction: ref.direction,
         mediaKind: ref.mediaKind,
       }))
       .sort((left, right) => left.id - right.id),
   }));
   return sha256Hex(Buffer.from(JSON.stringify(normalized)));
+}
+
+function primaryTelegramRestoreCandidates(
+  file: SandboxThreadFile,
+): SandboxThreadFile["telegramRefs"] {
+  const newestFirst = (refs: SandboxThreadFile["telegramRefs"]) =>
+    refs.sort((left, right) => right.lastSeenAt - left.lastSeenAt || right.id - left.id);
+  const primary = file.telegramRefs.filter((ref) => ref.isPrimary);
+  if (primary.length < 2) return newestFirst(primary);
+
+  // Prefer representations known to be byte-sized like the canonical file. This
+  // prevents a later, smaller photo alias from displacing the original variant.
+  if (file.expectedSize !== null) {
+    const exactSize = primary.filter((ref) => ref.telegramSize === file.expectedSize);
+    if (exactSize.length) return newestFirst(exactSize);
+  }
+
+  // A document representation is preferable to Telegram's photo transcoding.
+  const documents = primary.filter((ref) => ref.mediaKind === "document");
+  if (documents.length) return newestFirst(documents);
+
+  const pixelAreas = primary.map((ref) =>
+    ref.width !== null && ref.width !== undefined && ref.height !== null && ref.height !== undefined
+      ? ref.width * ref.height
+      : null);
+  const knownAreas = pixelAreas.filter((area): area is number => area !== null);
+  if (knownAreas.length === primary.length) {
+    const largestArea = Math.max(...knownAreas);
+    return newestFirst(primary.filter((_ref, index) => pixelAreas[index] === largestArea));
+  }
+
+  const knownSizes = primary
+    .map((ref) => ref.telegramSize)
+    .filter((size): size is number => size !== null);
+  if (knownSizes.length === primary.length) {
+    const largestSize = Math.max(...knownSizes);
+    return newestFirst(primary.filter((ref) => ref.telegramSize === largestSize));
+  }
+  return newestFirst(primary);
 }
 
 async function inspectThreadFileIndex(

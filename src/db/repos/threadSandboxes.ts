@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { ThreadSandboxRow } from "../types.js";
-import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
+import { queryOne, type SqlExecutor } from "../sql.js";
 
 export class ThreadSandboxesRepo {
   constructor(private readonly db: SqlExecutor) {}
@@ -12,47 +12,44 @@ export class ThreadSandboxesRepo {
     `);
   }
 
-  async withCreationLock<T>(
-    deploymentId: string,
-    threadId: number,
-    callback: (repo: ThreadSandboxesRepo) => Promise<T>,
-  ): Promise<T> {
-    return this.db.transaction(async (tx) => {
-      if (tx.dialect === "postgres") {
-        await tx.execute(sql`
-          select pg_advisory_xact_lock(hashtextextended(${`${deploymentId}:${threadId}`}, 0))
-        `);
-      }
-      return callback(new ThreadSandboxesRepo(tx));
-    });
-  }
-
-  upsert(input: {
+  async insertIfAbsent(input: {
     deploymentId: string;
     userId: number;
     threadId: number;
     sandboxId: string;
   }): Promise<ThreadSandboxRow> {
     const now = Date.now();
-    return insertReturning<ThreadSandboxRow>(this.db, sql`
+    const inserted = await queryOne<ThreadSandboxRow>(this.db, sql`
       insert into thread_sandboxes(
         deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at
       ) values (
         ${input.deploymentId}, ${input.userId}, ${input.threadId}, ${input.sandboxId},
         ${now}, ${now}
       )
-      on conflict(deployment_id, thread_id) do update set
-        user_id = excluded.user_id,
-        sandbox_id = excluded.sandbox_id,
-        updated_at = excluded.updated_at
+      on conflict(deployment_id, thread_id) do nothing
       returning *
     `);
+    if (inserted) return inserted;
+    const winner = await this.get(input.deploymentId, input.threadId);
+    if (!winner) {
+      throw new Error("sandbox mapping conflicted but no winning thread mapping was found");
+    }
+    return winner;
   }
 
   async remove(deploymentId: string, threadId: number): Promise<void> {
     await this.db.execute(sql`
       delete from thread_sandboxes
       where deployment_id = ${deploymentId} and thread_id = ${threadId}
+    `);
+  }
+
+  async removeIfMatches(deploymentId: string, threadId: number, sandboxId: string): Promise<void> {
+    await this.db.execute(sql`
+      delete from thread_sandboxes
+      where deployment_id = ${deploymentId}
+        and thread_id = ${threadId}
+        and sandbox_id = ${sandboxId}
     `);
   }
 

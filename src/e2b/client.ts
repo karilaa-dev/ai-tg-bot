@@ -58,6 +58,7 @@ export interface E2BClient {
   getInfo(sandboxId: string, signal?: AbortSignal): Promise<SandboxInfo>;
   create(metadata: Record<string, string>, signal?: AbortSignal): Promise<E2BSandbox>;
   connect(sandboxId: string, timeoutMs: number, signal?: AbortSignal): Promise<E2BSandbox>;
+  kill(sandboxId: string, signal?: AbortSignal): Promise<boolean>;
 }
 
 export function createE2BClient(config: AppConfig): E2BClient {
@@ -120,6 +121,14 @@ class SdkE2BClient implements E2BClient {
       timeoutMs,
     });
     return new SdkE2BSandbox(sandbox, this.config);
+  }
+
+  kill(sandboxId: string, signal?: AbortSignal): Promise<boolean> {
+    return Sandbox.kill(sandboxId, {
+      apiKey: this.config.E2B_API_KEY,
+      requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
+      signal,
+    });
   }
 }
 

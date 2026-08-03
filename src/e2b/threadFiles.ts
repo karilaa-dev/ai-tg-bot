@@ -28,6 +28,8 @@ export async function resolveThreadFileDescriptors(
       id: ref.id,
       telegramFileId: ref.telegram_file_id,
       telegramSize: ref.telegram_size,
+      width: ref.width,
+      height: ref.height,
       direction: ref.direction,
       mediaKind: ref.media_kind,
       isPrimary: ref.is_primary === 1,

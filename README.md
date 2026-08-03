@@ -8,6 +8,7 @@ A private Telegram agent built on persistent Pi sessions and persistent custom E
 - Each Telegram thread owns exactly one E2B sandbox. Sandbox IDs are stored in the database and recovered by deployment/thread metadata after a restart.
 - `/home/user/workspace` is the thread's writable, persistent working directory.
 - Every Telegram-backed file visible through the thread/fork chain can be downloaded by the bot and copied through the E2B SDK into `/home/user/telegram-files`. That directory and its files are root-owned and read-only to agent commands. Files must be copied into the workspace before editing.
+- On upgrade, the obsolete host `files.path` column is dropped, but legacy file rows, extracted text, search chunks, and diagnostics are retained. Host-only bytes with no durable Telegram/E2B source remain unavailable rather than being silently deleted.
 - There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Generated files remain in the sandbox. Telegram file bodies pass through the bot process during ingestion, sandbox restoration, and outbound delivery.
 - Sandboxes auto-pause after 3 minutes once a shell-backed turn is finished. An explicit successful `publish_website` call changes that turn's delay to 15 minutes, and the final Telegram answer states the public URL and pause timing.
 - E2B Base sandboxes have a one-hour continuous runtime window. The runtime manager proactively pauses and reconnects before that limit during long work, preserving filesystem and memory state while resetting the window.

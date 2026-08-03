@@ -194,6 +194,17 @@ describe("thread E2B runtime manager", () => {
     });
 
     now += 5 * 60_000;
+    const sourcePath = `${E2B_FILE_SOURCES}/published-source`;
+    client.onlySandbox().files.set(sourcePath, Buffer.from("source"));
+    await expect(runtime.readSourceFile({
+      sandboxId: client.onlySandbox().id,
+      userId,
+      threadId,
+      canonicalPath: sourcePath,
+      maxBytes: 100,
+    })).resolves.toEqual(Buffer.from("source"));
+    expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
+
     const followUpLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
     followUpLease.release();
@@ -351,7 +362,7 @@ describe("thread E2B runtime manager", () => {
     });
   });
 
-  it("does not substitute a smaller non-primary Telegram photo variant", async () => {
+  it("does not let a newer smaller primary alias displace the canonical photo", async () => {
     const original = Buffer.from("largest photo representation");
     const smaller = Buffer.from("small photo");
     const stored = await repos.files.insertFile({
@@ -364,13 +375,21 @@ describe("thread E2B runtime manager", () => {
       size: original.length,
       isInline: false,
     });
-    const refs = await repos.files.rememberTelegramFileRefs(stored.id, {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    await repos.files.rememberTelegramFileRefs(stored.id, {
       direction: "inbound",
       mediaKind: "photo",
       refs: [
-        { fileId: "tg-primary-missing", size: original.length, primary: true },
-        { fileId: "tg-smaller", size: smaller.length, primary: false },
+        { fileId: "tg-primary-missing", width: 100, height: 100, size: original.length, primary: true },
+        { fileId: "tg-smaller", width: 20, height: 20, size: smaller.length, primary: false },
       ],
+    });
+    now += 1;
+    const refs = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "inbound",
+      mediaKind: "photo",
+      refs: [{ fileId: "tg-smaller", width: 20, height: 20, size: smaller.length, primary: true }],
     });
     client.telegramFiles.set("tg-smaller", smaller);
     await runtime.execute(commandRequest(userId, threadId, [{
@@ -384,6 +403,8 @@ describe("thread E2B runtime manager", () => {
         id: ref.id,
         telegramFileId: ref.telegram_file_id,
         telegramSize: ref.telegram_size,
+        width: ref.width,
+        height: ref.height,
         direction: "inbound" as const,
         mediaKind: "photo" as const,
         isPrimary: Boolean(ref.is_primary),
@@ -555,6 +576,55 @@ describe("thread E2B runtime manager", () => {
     await active;
   });
 
+  it("does not hold a database transaction open while E2B creation waits", async () => {
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      mimeType: "text/plain",
+      name: "concurrent.txt",
+      size: 1,
+      isInline: true,
+    });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    client.nextCreateGate = { started, release };
+    const creating = runtime.execute(commandRequest(userId, threadId));
+    await started.promise;
+
+    await expect(repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "inbound",
+      mediaKind: "document",
+      refs: [{ fileId: "concurrent-ref", size: 1, primary: true }],
+    })).resolves.toHaveLength(1);
+
+    release.resolve();
+    await expect(creating).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it("keeps one mapped sandbox when two runtime processes create concurrently", async () => {
+    const secondRuntime = createRuntime();
+    const bothCreating = deferred<void>();
+    const release = deferred<void>();
+    client.createBarrier = { count: 0, bothCreating, release };
+    try {
+      const first = runtime.execute(commandRequest(userId, threadId));
+      const second = secondRuntime.execute(commandRequest(userId, threadId));
+      await bothCreating.promise;
+      release.resolve();
+
+      await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+      expect(client.createCalls).toBe(2);
+      expect(client.killCalls).toBe(1);
+      expect(client.sandboxes.size).toBe(1);
+      const sandbox = client.onlySandbox();
+      await expect(repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId))
+        .resolves.toMatchObject({ sandbox_id: sandbox.id });
+    } finally {
+      await secondRuntime.dispose();
+    }
+  });
+
   function createRuntime(): ThreadE2BSandboxRuntimeManager {
     return new ThreadE2BSandboxRuntimeManager({
       config,
@@ -595,6 +665,16 @@ class FakeClient implements E2BClient {
   telegramDownloadCalls = 0;
   createCalls = 0;
   connectCalls = 0;
+  killCalls = 0;
+  nextCreateGate?: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
+  createBarrier?: {
+    count: number;
+    bothCreating: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
 
   async list(metadata: Record<string, string>) {
     return [...this.sandboxes.values()]
@@ -609,6 +689,15 @@ class FakeClient implements E2BClient {
   }
 
   async create(metadata: Record<string, string>): Promise<E2BSandbox> {
+    const gate = this.nextCreateGate;
+    this.nextCreateGate = undefined;
+    gate?.started.resolve();
+    await gate?.release.promise;
+    if (this.createBarrier) {
+      this.createBarrier.count += 1;
+      if (this.createBarrier.count === 2) this.createBarrier.bothCreating.resolve();
+      await this.createBarrier.release.promise;
+    }
     this.createCalls += 1;
     const sandbox = new FakeSandbox(`sandbox-${this.createCalls}`, metadata, this.telegramFiles);
     this.sandboxes.set(sandbox.id, sandbox);
@@ -621,6 +710,11 @@ class FakeClient implements E2BClient {
     if (!sandbox) throw new Error("404 not found");
     sandbox.running = true;
     return sandbox;
+  }
+
+  async kill(sandboxId: string): Promise<boolean> {
+    this.killCalls += 1;
+    return this.sandboxes.delete(sandboxId);
   }
 
   onlySandbox(): FakeSandbox {
