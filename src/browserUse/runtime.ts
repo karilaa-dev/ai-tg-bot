@@ -234,7 +234,7 @@ export class BrowserUseRuntimeManager {
         title: await safeTitle(page),
         session_remaining_seconds: remainingSeconds(session),
       };
-    });
+    }, signal);
   }
 
   private async listTabs(userId: number, threadId: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -247,7 +247,7 @@ export class BrowserUseRuntimeManager {
         .filter((tab) => tab.ownerThreadId === threadId && !tab.page.isClosed())
         .map(async (tab) => ({ tab_id: tab.id, url: tab.page.url(), title: await safeTitle(tab.page) })));
       return { tabs, session_remaining_seconds: remainingSeconds(session) };
-    });
+    }, signal);
   }
 
   private async navigate(
@@ -1051,8 +1051,8 @@ class AsyncLock {
     const previous = this.tail;
     this.tail = previous.then(() => current, () => current);
     await previous;
-    throwIfAborted(signal);
     try {
+      throwIfAborted(signal);
       return await operation();
     } finally {
       release();

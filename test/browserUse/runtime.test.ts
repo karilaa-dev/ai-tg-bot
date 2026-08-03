@@ -5,6 +5,7 @@ import { BrowserUseHttpError } from "../../src/browserUse/client.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
+import { deferred } from "../helpers/async.js";
 
 describe("BrowserUseRuntimeManager", () => {
   let database: AppDatabase | undefined;
@@ -188,6 +189,29 @@ describe("BrowserUseRuntimeManager", () => {
     expect(snapshot).not.toHaveProperty("screenshot_size");
   });
 
+  it("releases a queued browser lock when the queued action is cancelled", async () => {
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    const opened = await browser.open("https://example.com/start");
+    const page = fixture.browsers[0]!.context.pageList[0]!;
+    const started = deferred<void>();
+    const release = deferred<void>();
+    page.nextGotoGate = { started, release };
+    const active = browser.navigate(String(opened.tab_id), "https://example.com/blocked");
+    await started.promise;
+
+    const controller = new AbortController();
+    const cancelled = browser.snapshot(String(opened.tab_id), 0, false, controller.signal);
+    controller.abort(new Error("stopped"));
+    const later = browser.listTabs();
+    release.resolve();
+
+    await expect(active).resolves.toMatchObject({ url: "https://example.com/blocked" });
+    await expect(cancelled).rejects.toThrow("stopped");
+    await expect(later).resolves.toMatchObject({ tabs: [expect.any(Object)] });
+  });
+
   async function runtimeFixture(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();
@@ -304,6 +328,10 @@ class FakePage {
   scroll = { x: 0, y: 0 };
   closeListeners: Array<() => void> = [];
   screenshotBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+  nextGotoGate?: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
 
   async setViewportSize(): Promise<void> {}
 
@@ -312,6 +340,10 @@ class FakePage {
   }
 
   async goto(url: string): Promise<void> {
+    const gate = this.nextGotoGate;
+    this.nextGotoGate = undefined;
+    gate?.started.resolve();
+    await gate?.release.promise;
     this.currentUrl = url;
   }
 
