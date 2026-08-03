@@ -20,16 +20,12 @@
   <Config Name="Appdata" Target="/app/data" Default="/mnt/user/appdata/ai-tg-bot" Mode="rw" Description="Persistent database, Pi sessions, and OAuth configuration." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Telegram Bot Token" Target="BOT_TOKEN" Default="" Description="BotFather token." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="E2B API Key" Target="E2B_API_KEY" Default="" Description="E2B API key used to create and resume per-thread sandboxes." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="Telegram File Gateway URL" Target="TELEGRAM_FILE_GATEWAY_URL" Default="" Description="HTTPS URL of a deployed telegram-file-gateway Worker. E2B restores shared Telegram files through this gateway." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="Telegram File Gateway Signing Key" Target="TELEGRAM_FILE_GATEWAY_HMAC_KEY" Default="" Description="Base64url 32-byte key shared with the gateway for short-lived file grants." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Description="OpenRouter key for fallback inference, image generation, and embeddings." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Tavily API Key" Target="TAVILY_API_KEY" Default="" Description="Tavily key for web search and extraction." Type="Variable" Display="always" Required="true" Mask="true"/>
 
   <Config Name="E2B Template" Target="E2B_TEMPLATE" Default="ai-tg-bot-tools:production" Description="Reusable custom E2B template reference. Build it explicitly before starting the bot; runtime never installs it." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="E2B Deployment ID" Target="E2B_DEPLOYMENT_ID" Default="ai-tg-bot" Description="Stable ownership namespace for sandbox recovery. Use a different value for each deployment sharing an E2B account." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="E2B Request Timeout" Target="E2B_REQUEST_TIMEOUT_MS" Default="30000" Description="Control-plane request timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Telegram File Gateway Issuer" Target="TELEGRAM_FILE_GATEWAY_ISSUER" Default="ai-tg-bot" Description="JWT issuer configured on the gateway deployment." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Telegram File Gateway Audience" Target="TELEGRAM_FILE_GATEWAY_AUDIENCE" Default="telegram-file-gateway" Description="JWT audience configured on the gateway deployment." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Telegram Restore Timeout" Target="TELEGRAM_FILE_RESTORE_TIMEOUT_MS" Default="300000" Description="Maximum sandbox-side Telegram restoration time in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Telegram Restore Concurrency" Target="TELEGRAM_FILE_RESTORE_CONCURRENCY" Default="4" Description="Concurrent sandbox-side Telegram downloads." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 

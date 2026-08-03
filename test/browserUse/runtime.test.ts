@@ -173,6 +173,21 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(1);
   });
 
+  it("returns the semantic snapshot when its optional PNG is too large", async () => {
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    const opened = await browser.open("https://example.com/graphics");
+    fixture.browsers[0]!.context.pageList[0]!.screenshotBytes = Buffer.alloc(20 * 1024 * 1024 + 1);
+
+    const snapshot = await browser.snapshot(String(opened.tab_id), 0, true);
+
+    expect(snapshot).toMatchObject({ snapshot: "Page content", url: "https://example.com/graphics" });
+    expect(snapshot).not.toHaveProperty("screenshot_base64");
+    expect(snapshot).not.toHaveProperty("screenshot_media_type");
+    expect(snapshot).not.toHaveProperty("screenshot_size");
+  });
+
   async function runtimeFixture(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();
@@ -288,6 +303,7 @@ class FakePage {
   closed = false;
   scroll = { x: 0, y: 0 };
   closeListeners: Array<() => void> = [];
+  screenshotBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
 
   async setViewportSize(): Promise<void> {}
 
@@ -306,7 +322,14 @@ class FakePage {
   async waitForTimeout(): Promise<void> {}
 
   async screenshot(): Promise<Buffer> {
-    return Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+    return this.screenshotBytes;
+  }
+
+  locator() {
+    return {
+      ariaSnapshot: async () => "Page content",
+      innerText: async () => "Page content",
+    };
   }
 
   async title(): Promise<string> {
@@ -334,9 +357,10 @@ class FakePage {
 
   async evaluate<T>(expression: string): Promise<T> {
     if (expression.includes("window.scrollX")) return this.scroll as T;
+    if (expression.includes("data-ai-tg-browser-ref")) return [] as T;
     const match = expression.match(/window\.scrollTo\(([-\d]+), ([-\d]+)\)/);
     if (match) this.scroll = { x: Number(match[1]), y: Number(match[2]) };
-    return undefined as T;
+    return [] as T;
   }
 
   async opener(): Promise<Page | null> {

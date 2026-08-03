@@ -305,10 +305,11 @@ export class BrowserUseRuntimeManager {
       };
       if (includeScreenshot) {
         const screenshot = await page.screenshot({ type: "png", fullPage: false });
-        assertImageSize(screenshot);
-        output.screenshot_base64 = screenshot.toString("base64");
-        output.screenshot_media_type = "image/png";
-        output.screenshot_size = screenshot.length;
+        if (screenshot.length <= MAX_FILE_BYTES) {
+          output.screenshot_base64 = screenshot.toString("base64");
+          output.screenshot_media_type = "image/png";
+          output.screenshot_size = screenshot.length;
+        }
       }
       return output;
     });

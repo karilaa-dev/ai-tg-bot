@@ -182,6 +182,18 @@ describe("thread E2B runtime manager", () => {
     });
   });
 
+  it("does not publish a website until its endpoint returns a successful status", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("starting", { status: 503 }))
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await runtime.execute(commandRequest(userId, threadId));
+
+    await expect(runtime.publishWebsite({ userId, threadId, port: 3000 }))
+      .resolves.toMatchObject({ url: "https://3000-sandbox-1.e2b.test/" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects an E2B file source from another sandbox or outside the workspace", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     await expect(runtime.readSourceFile({
@@ -198,6 +210,38 @@ describe("thread E2B runtime manager", () => {
       canonicalPath: "/etc/passwd",
       maxBytes: 100,
     })).rejects.toThrow("outside this thread's workspace");
+  });
+
+  it("caches a source-file reconnection when it is the first operation after restart", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const sourcePath = `${E2B_WORKSPACE}/saved.txt`;
+    sandbox.files.set(sourcePath, Buffer.from("saved"));
+    await runtime.dispose();
+    runtime = createRuntime();
+
+    const request = {
+      sandboxId: sandbox.id,
+      userId,
+      threadId,
+      canonicalPath: sourcePath,
+      maxBytes: 100,
+    };
+    await expect(runtime.readSourceFile(request)).resolves.toEqual(Buffer.from("saved"));
+    await expect(runtime.readSourceFile(request)).resolves.toEqual(Buffer.from("saved"));
+
+    expect(client.connectCalls).toBe(1);
+  });
+
+  it("refuses to run an agent command when the Telegram directory cannot be sealed", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    expect(sandbox.backgroundCalls).toBe(1);
+    sandbox.failSeal = true;
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .rejects.toThrow("seal failed");
+    expect(sandbox.backgroundCalls).toBe(1);
   });
 
   it("pauses and reconnects before the one-hour continuous runtime limit", async () => {
@@ -315,6 +359,8 @@ class FakeSandbox implements E2BSandbox {
   startedAt = new Date();
   running = true;
   pauseCalls = 0;
+  backgroundCalls = 0;
+  failSeal = false;
   readonly readFilePaths: string[] = [];
   nextCommandGate?: {
     started: ReturnType<typeof deferred<void>>;
@@ -340,6 +386,9 @@ class FakeSandbox implements E2BSandbox {
 
   async run(command: string) {
     this.controlCommands.push(command);
+    if (this.failSeal && command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")) {
+      throw new Error("seal failed");
+    }
     const realpath = command.match(/^'realpath' '--' '([^']+)'$/)?.[1];
     if (realpath) {
       const candidate = realpath;
@@ -375,6 +424,7 @@ class FakeSandbox implements E2BSandbox {
   }
 
   async runBackground(command: string): Promise<E2BCommandHandle> {
+    this.backgroundCalls += 1;
     const gate = this.nextCommandGate;
     this.nextCommandGate = undefined;
     gate?.started.resolve();

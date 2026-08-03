@@ -7,6 +7,11 @@ export const E2B_TOOLBOX_PRODUCTION_REF = `${E2B_TOOLBOX_TEMPLATE_NAME}:${E2B_TO
 export const E2B_TOOLBOX_CPU_COUNT = 2;
 export const E2B_TOOLBOX_MEMORY_MB = 2048;
 
+export function e2bToolboxBuildRef(tag: string): string {
+  if (!tag.trim() || tag.includes(":")) throw new Error("E2B toolbox build tag must be non-empty and contain no colon");
+  return `${E2B_TOOLBOX_TEMPLATE_NAME}:${tag}`;
+}
+
 export const OFFICECLI_VERSION = "1.0.142";
 export const OFFICECLI_SOURCE_REVISION = "e56ee7f3595cb81ff2c87cf83a32a44bd71ed07d";
 export const OFFICECLI_AMD64_SHA256 = "f78563abc13cf70dcd420644019d2f11dc36ea2957ac738613a6911d652b5541";

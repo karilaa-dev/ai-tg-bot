@@ -201,13 +201,18 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       }
       let sandbox = state.connection?.id === request.sandboxId ? state.connection : undefined;
       if (!sandbox || !await sandbox.isRunning(request.signal).catch(() => false)) {
+        const info = await this.client.getInfo(request.sandboxId, request.signal);
         sandbox = await this.client.connect(
           request.sandboxId,
           E2B_IDLE_PAUSE_MS,
           request.signal,
         );
+        state.continuousStartedAt = info.state === "paused"
+          ? Date.now()
+          : info.startedAt.getTime();
       }
-      if (state.sandboxId === request.sandboxId) state.connection = sandbox;
+      state.sandboxId = request.sandboxId;
+      state.connection = sandbox;
       try {
         return (await this.readCanonicalFile(
           sandbox,
@@ -558,16 +563,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         signal,
       );
     } finally {
-      await runControl(
-        sandbox,
-        `chown -R root ${quoteShellToken(E2B_TELEGRAM_FILES)} && find ${quoteShellToken(E2B_TELEGRAM_FILES)} -type f -exec chmod 444 {} + && chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
-        this.input.config.E2B_REQUEST_TIMEOUT_MS,
-      ).catch((error) => {
+      try {
+        await runControl(
+          sandbox,
+          `chown -R root ${quoteShellToken(E2B_TELEGRAM_FILES)} && find ${quoteShellToken(E2B_TELEGRAM_FILES)} -type f -exec chmod 444 {} + && chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
+          this.input.config.E2B_REQUEST_TIMEOUT_MS,
+        );
+      } catch (error) {
         this.input.logger?.warn("failed to seal E2B Telegram files directory", {
           sandboxId: sandbox.id,
           error: String(error),
         });
-      });
+        throw error;
+      }
     }
     return {
       directory: E2B_TELEGRAM_FILES,
@@ -1061,11 +1069,12 @@ async function verifyWebsite(url: string, requestTimeoutMs: number, signal?: Abo
     try {
       const response = await fetch(url, { signal: combined, redirect: "manual" });
       await response.body?.cancel().catch(() => undefined);
-      return;
+      if (response.ok) return;
+      lastError = new Error(`HTTP ${response.status}`);
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(`website did not become reachable at ${url}: ${String(lastError)}`);
 }

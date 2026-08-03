@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSkills } from "@earendil-works/pi-coding-agent";
+import {
+  DefaultResourceLoader,
+  loadSkills,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import {
   OFFICECLI_DOCX_SKILL_SHA256,
   OFFICECLI_PPTX_SKILL_SHA256,
@@ -44,6 +48,27 @@ describe("pinned OfficeCLI Pi skills", () => {
     ]);
     expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
 
+  });
+
+  it("keeps explicit OfficeCLI skills when default skill discovery is disabled", async () => {
+    const loader = new DefaultResourceLoader({
+      cwd: process.cwd(),
+      agentDir: path.resolve("data/pi"),
+      settingsManager: SettingsManager.inMemory(),
+      additionalSkillPaths: officeSkillPaths(),
+      noSkills: true,
+      noExtensions: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+
+    await loader.reload();
+    expect(loader.getSkills().diagnostics).toEqual([]);
+    expect(loader.getSkills().skills.map((skill) => skill.name).sort()).toEqual([
+      "officecli-docx",
+      "officecli-pptx",
+    ]);
   });
 
   it("reads a complete advertised skill but rejects all other host files", async () => {

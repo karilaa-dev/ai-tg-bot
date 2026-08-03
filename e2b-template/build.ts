@@ -5,6 +5,7 @@ import {
   E2B_TOOLBOX_MEMORY_MB,
   E2B_TOOLBOX_PRODUCTION_TAG,
   E2B_TOOLBOX_TEMPLATE_NAME,
+  e2bToolboxBuildRef,
   e2bToolboxTemplate,
 } from "./template.js";
 import { requireE2BApiKey, validateE2BToolboxTemplate } from "./validate.js";
@@ -19,10 +20,10 @@ const buildInfo = await Template.build(e2bToolboxTemplate, E2B_TOOLBOX_TEMPLATE_
   onBuildLogs: defaultBuildLogger(),
 });
 
-const exactRef = `${E2B_TOOLBOX_TEMPLATE_NAME}:${buildInfo.buildId}`;
+const exactRef = e2bToolboxBuildRef(buildTag);
 await validateE2BToolboxTemplate(exactRef, apiKey);
 await Template.assignTags(
-  `${E2B_TOOLBOX_TEMPLATE_NAME}:${buildTag}`,
+  exactRef,
   E2B_TOOLBOX_PRODUCTION_TAG,
   { apiKey },
 );
