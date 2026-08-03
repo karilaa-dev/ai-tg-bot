@@ -222,6 +222,52 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().inventoryCalls).toBe(2);
   });
 
+  it("refreshes restored bytes when the logical file descriptor changes", async () => {
+    const original = Buffer.from("old");
+    const updated = Buffer.from("updated");
+    client.telegramFiles.set("tg-changing", original);
+    const base: SandboxThreadFile = {
+      fileId: 2_900,
+      messageId: 90,
+      name: "changing.txt",
+      mimeType: "text/plain",
+      expectedSize: original.length,
+      expectedSha256: createHash("sha256").update(original).digest("hex"),
+      telegramRefs: [{
+        id: 3_900,
+        telegramFileId: "tg-changing",
+        telegramSize: original.length,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: Date.now(),
+      }],
+    };
+    await runtime.execute(commandRequest(userId, threadId, [base]));
+    const sandboxPath = `${E2B_TELEGRAM_FILES}/${base.fileId}--changing.txt`;
+    expect(client.onlySandbox().files.get(sandboxPath)).toEqual(original);
+
+    client.telegramFiles.set("tg-changing", updated);
+    const refreshed: SandboxThreadFile = {
+      ...base,
+      expectedSize: updated.length,
+      expectedSha256: createHash("sha256").update(updated).digest("hex"),
+      telegramRefs: [{ ...base.telegramRefs[0]!, telegramSize: updated.length }],
+    };
+    await runtime.execute(commandRequest(userId, threadId, [refreshed]));
+
+    expect(client.telegramDownloadCalls).toBe(2);
+    expect(client.onlySandbox().files.get(sandboxPath)).toEqual(updated);
+    const index = JSON.parse(await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(index.files).toContainEqual(expect.objectContaining({
+      file_id: base.fileId,
+      descriptor_size: updated.length,
+      descriptor_sha256: refreshed.expectedSha256,
+      size: updated.length,
+      sha256: refreshed.expectedSha256,
+    }));
+  });
+
   it("scales the sandbox operation window by projected restore batches", async () => {
     const files: SandboxThreadFile[] = Array.from({ length: 9 }, (_, index) => ({
       fileId: 3_000 + index,

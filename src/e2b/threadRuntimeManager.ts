@@ -71,6 +71,8 @@ type ThreadFileIndexEntry = {
   original_name: string;
   sandbox_name: string;
   mime_type: string | null;
+  descriptor_size?: number | null;
+  descriptor_sha256?: string | null;
   size: number | null;
   sha256: string | null;
   status: "available" | "error";
@@ -547,6 +549,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           : undefined;
         const expectedUnchanged = old?.status === "available"
           && old.sandbox_name === sandboxName
+          && old.descriptor_size === file.expectedSize
+          && old.descriptor_sha256 === file.expectedSha256
           && existingInfo?.regular === true
           && (old.size === null || existingInfo.size === old.size)
           && old.sha256 !== null
@@ -587,6 +591,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
             original_name: item.file.name,
             sandbox_name: item.sandboxName,
             mime_type: item.file.mimeType,
+            descriptor_size: item.file.expectedSize,
+            descriptor_sha256: item.file.expectedSha256,
             size: result.size ?? null,
             sha256: result.sha256 ?? null,
             status: "available",
@@ -612,6 +618,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
             original_name: item.file.name,
             sandbox_name: item.sandboxName,
             mime_type: item.file.mimeType,
+            descriptor_size: item.file.expectedSize,
+            descriptor_sha256: item.file.expectedSha256,
             size: null,
             sha256: null,
             status: "error",
@@ -1341,6 +1349,8 @@ async function readThreadFileIndex(
         original_name: entry.original_name,
         sandbox_name: entry.sandbox_name,
         mime_type: entry.mime_type,
+        descriptor_size: entry.descriptor_size,
+        descriptor_sha256: entry.descriptor_sha256,
         size: entry.size,
         sha256: entry.sha256,
         status: entry.status,
