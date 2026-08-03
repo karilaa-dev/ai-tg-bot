@@ -26,7 +26,7 @@ Sandbox-created attachment buffers are released after indexing and reloaded from
 
 Partial Telegram-file restoration is cached per sandbox revision. Failed entries retry after an exponential backoff from five minutes to one hour, while a changed file descriptor or recreated sandbox triggers immediate reconciliation. Ambiguous Telegram send outcomes are stored separately from confirmed deliveries and are not advertised as delivered files.
 
-Each sandbox-created file version initially has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. Unshared versions remain there while database file records depend on them. After every record sharing the same snapshot has a durable Telegram source, a later sandbox operation removes the redundant snapshot and its E2B source locators; the normal workspace copy is unaffected. Deleting the sandbox reclaims any remaining snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
+Each sandbox-created file version initially has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. Unshared versions remain there while database file records depend on them, up to the configured aggregate byte limit; least-recently-verified snapshots are evicted first when that limit is exceeded. Orphan snapshots are removed automatically. After every record sharing the same snapshot has a durable Telegram source, a later sandbox operation removes the redundant snapshot and its E2B source locators; the normal workspace copy is unaffected. Deleting the sandbox reclaims any remaining snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
 
 Build and validate a version, then atomically promote it to `production`:
 
@@ -114,12 +114,13 @@ E2B_API_KEY=<secret>
 E2B_TEMPLATE=ai-tg-bot-tools:production
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
+E2B_FILE_SOURCE_MAX_BYTES=2147483648
 TELEGRAM_FILE_RESTORE_TIMEOUT_MS=300000
 TELEGRAM_FILE_RESTORE_CONCURRENCY=4
 ```
 
 Use a distinct `E2B_DEPLOYMENT_ID` for each deployment sharing an E2B account. Do not change it casually: it is part of sandbox ownership and recovery.
-`E2B_REQUEST_TIMEOUT_MS` applies to short control-plane operations. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` is also the data-plane request budget for large E2B file uploads and downloads, so the default five-minute restore window is not shortened by the control timeout.
+`E2B_REQUEST_TIMEOUT_MS` applies to short control-plane operations. `E2B_FILE_SOURCE_MAX_BYTES` bounds immutable snapshots that still lack Telegram recovery; least-recently-verified snapshots are evicted first after the limit is crossed. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` is also the data-plane request budget for large E2B file uploads and downloads, so the default five-minute restore window is not shortened by the control timeout.
 
 The bot creates secured sandboxes with public port traffic and internet access enabled, timeout action `pause`, memory preservation enabled, and automatic resume disabled. E2B's public-traffic setting is selected at sandbox creation and remains enabled so a persistent thread sandbox can later publish a requested site without destructive recreation. Agent guidance requires ordinary local services to bind to `127.0.0.1`; only an explicitly requested website may bind to `0.0.0.0` and proceed through `publish_website`.
 

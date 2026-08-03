@@ -65,6 +65,18 @@ describe("BrowserUseClient", () => {
     expect(JSON.parse(String(init.body))).toEqual({ action: "stop" });
   });
 
+  it("cancels a successful profile-deletion response body", async () => {
+    const cancelled = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream({
+      cancel: cancelled,
+    }))));
+    const client = createBrowserUseClient(loadTestConfig({ BROWSER_USE_API_KEY: "secret" }));
+
+    await client.deleteProfile("123e4567-e89b-12d3-a456-426614174001");
+
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
   it("redacts API and browser connection credentials from errors", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       detail: "secret https://abc.cdp.browser-use.com?token=visible",

@@ -591,6 +591,24 @@ describe("thread E2B runtime manager", () => {
       maxBytes: 100,
       preserveSource: true,
     });
+    const firstFile = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      contentSha256: first.contentSha256,
+      mimeType: "text/plain",
+      name: "report-v1.txt",
+      size: first.size,
+      isInline: true,
+    });
+    await repos.files.rememberSource(firstFile.id, e2bFileSource(config, {
+      ...first,
+      fileId: firstFile.id,
+      sourceCanonicalPath: first.sourceCanonicalPath!,
+      userId,
+      threadId,
+      mimeType: "text/plain",
+    }));
     sandbox.files.set(workspacePath, Buffer.from("version two"));
     const second = await runtime.readWorkspaceFile({
       userId,
@@ -599,6 +617,24 @@ describe("thread E2B runtime manager", () => {
       maxBytes: 100,
       preserveSource: true,
     });
+    const secondFile = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      contentSha256: second.contentSha256,
+      mimeType: "text/plain",
+      name: "report-v2.txt",
+      size: second.size,
+      isInline: true,
+    });
+    await repos.files.rememberSource(secondFile.id, e2bFileSource(config, {
+      ...second,
+      fileId: secondFile.id,
+      sourceCanonicalPath: second.sourceCanonicalPath!,
+      userId,
+      threadId,
+      mimeType: "text/plain",
+    }));
 
     expect(first.sourceCanonicalPath).toBe(`${E2B_FILE_SOURCES}/${first.contentSha256}`);
     expect(second.sourceCanonicalPath).toBe(`${E2B_FILE_SOURCES}/${second.contentSha256}`);
@@ -619,6 +655,57 @@ describe("thread E2B runtime manager", () => {
       user: "root",
       requestTimeoutMs: config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
     });
+  });
+
+  it("bounds unshared snapshots by least-recently-verified use and removes orphans", async () => {
+    await runtime.dispose();
+    config = loadTestConfig({ E2B_FILE_SOURCE_MAX_BYTES: 10 });
+    runtime = createRuntime();
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    const snapshots: Array<{ fileId: number; path: string }> = [];
+    for (const [index, value] of ["first!", "second"].entries()) {
+      const bytes = Buffer.from(value);
+      const hash = createHash("sha256").update(bytes).digest("hex");
+      const sourcePath = `${E2B_FILE_SOURCES}/${hash}`;
+      sandbox.files.set(sourcePath, bytes);
+      const stored = await repos.files.insertFile({
+        userId,
+        threadId,
+        type: "other",
+        contentSha256: hash,
+        mimeType: "application/octet-stream",
+        name: `${index}.bin`,
+        size: bytes.length,
+        isInline: false,
+      });
+      await repos.files.rememberSource(stored.id, e2bFileSource(config, {
+        sandboxId: sandbox.id,
+        fileId: stored.id,
+        sourceCanonicalPath: sourcePath,
+        userId,
+        threadId,
+        size: bytes.length,
+        contentSha256: hash,
+        mimeType: stored.mime_type,
+      }));
+      snapshots.push({ fileId: stored.id, path: sourcePath });
+      now += 1;
+    }
+    const orphanHash = "f".repeat(64);
+    const orphanPath = `${E2B_FILE_SOURCES}/${orphanHash}`;
+    sandbox.files.set(orphanPath, Buffer.from("orphan"));
+
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(sandbox.files.has(snapshots[0]!.path)).toBe(false);
+    expect(sandbox.files.has(snapshots[1]!.path)).toBe(true);
+    expect(sandbox.files.has(orphanPath)).toBe(false);
+    await expect(repos.files.listSources(snapshots[0]!.fileId)).resolves.toEqual([]);
+    await expect(repos.files.listSources(snapshots[1]!.fileId)).resolves.toHaveLength(1);
   });
 
   it("reuses an outbound artifact locally, prunes its snapshot, and falls back to Telegram after sandbox loss", async () => {
@@ -1340,6 +1427,16 @@ class FakeSandbox implements E2BSandbox {
     }
     if (command.startsWith("'python3' '-c' ")) {
       const candidate = command.match(/ '([^']+)'$/)?.[1];
+      if (command.includes("source_root=sys.argv[1]")) {
+        const prefix = `${E2B_FILE_SOURCES}/`;
+        const inventory = [...this.files.entries()].flatMap(([filePath, bytes]) => {
+          if (!filePath.startsWith(prefix)) return [];
+          const name = filePath.slice(prefix.length);
+          if (name.includes("/") || !/^[0-9a-f]{64}$/i.test(name)) return [];
+          return [{ name, size: bytes.length }];
+        });
+        return { stdout: JSON.stringify(inventory), stderr: "", exitCode: 0 };
+      }
       if (command.includes("index_path=sys.argv[1]")) {
         this.inventoryCalls += 1;
         const indexBytes = candidate ? this.files.get(candidate) : undefined;

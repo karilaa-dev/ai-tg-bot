@@ -32,6 +32,7 @@
   <Config Name="E2B Template" Target="E2B_TEMPLATE" Default="ai-tg-bot-tools:production" Description="Reusable custom E2B template reference. Build it explicitly before starting the bot; runtime never installs it." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="E2B Deployment ID" Target="E2B_DEPLOYMENT_ID" Default="ai-tg-bot" Description="Stable ownership namespace for sandbox recovery. Use a different value for each deployment sharing an E2B account." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="E2B Request Timeout" Target="E2B_REQUEST_TIMEOUT_MS" Default="30000" Description="Control-plane request timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="E2B File Source Limit" Target="E2B_FILE_SOURCE_MAX_BYTES" Default="2147483648" Description="Maximum bytes retained for immutable generated-file snapshots that do not yet have Telegram recovery." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Telegram Restore Timeout" Target="TELEGRAM_FILE_RESTORE_TIMEOUT_MS" Default="300000" Description="Telegram restoration and large E2B file-transfer timeout in milliseconds." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Telegram Restore Concurrency" Target="TELEGRAM_FILE_RESTORE_CONCURRENCY" Default="4" Description="Concurrent sandbox-side Telegram downloads." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 

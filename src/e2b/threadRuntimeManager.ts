@@ -103,6 +103,11 @@ type ThreadFileInventoryEntry = {
   sha256: string | null;
 };
 
+type FileSourceInventoryEntry = {
+  canonicalPath: string;
+  size: number;
+};
+
 function e2bSnapshotPath(locatorJson: string): string | undefined {
   try {
     const locator: unknown = JSON.parse(locatorJson);
@@ -397,8 +402,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     await sandbox.setTimeout(effectiveWindowMs, signal);
     await this.ensureLayout(sandbox, signal);
     const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
-    await this.pruneTelegramBackedFileSources(scope, sandbox, signal).catch((error) => {
-      this.input.logger?.warn("failed to prune redundant E2B file sources", {
+    await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
+      this.input.logger?.warn("failed to prune E2B file sources", {
         ...scope,
         sandboxId: sandbox.id,
         error: String(error),
@@ -575,7 +580,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     });
   }
 
-  private async pruneTelegramBackedFileSources(
+  private async pruneFileSources(
     scope: SandboxScope,
     sandbox: E2BSandbox,
     signal?: AbortSignal,
@@ -584,8 +589,6 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       this.input.config.E2B_DEPLOYMENT_ID,
       sandbox.id,
     );
-    if (!sources.length) return;
-
     const refs = await this.input.repos.files.listTelegramFileRefs(
       [...new Set(sources.map((source) => source.file_id))],
     );
@@ -599,28 +602,79 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       byCanonicalPath.set(canonicalPath, group);
     }
 
+    const inventory = await inspectFileSourceInventory(
+      sandbox,
+      this.input.config.E2B_REQUEST_TIMEOUT_MS,
+      signal,
+    );
+    const inventoryPaths = new Set(inventory.map((entry) => entry.canonicalPath));
+
     let removedFiles = 0;
     let removedSources = 0;
+    let evictedUnbackedFiles = 0;
     for (const [canonicalPath, group] of byCanonicalPath) {
-      throwIfAborted(signal);
-      // Content-addressed snapshots can be shared by duplicate file rows. Keep the
-      // bytes until every row pointing at the snapshot has its own Telegram source.
-      if (group.some((source) => !telegramBacked.has(source.file_id))) continue;
-      await runControl(
-        sandbox,
-        `rm -f -- ${quoteShellToken(canonicalPath)}`,
-        this.input.config.E2B_REQUEST_TIMEOUT_MS,
-        signal,
-      );
-      removedFiles += 1;
+      if (inventoryPaths.has(canonicalPath)) continue;
+      // A missing physical snapshot can no longer satisfy its locator. Remove the
+      // stale rows so normal source fallback does not keep retrying them.
       removedSources += await this.input.repos.files.deleteSourcesByIds(group.map((source) => source.id));
     }
-    if (!removedSources) return;
-    this.input.logger?.info("pruned Telegram-backed E2B file sources", {
+
+    const retained: Array<{
+      entry: FileSourceInventoryEntry;
+      sources: typeof sources;
+      lastUsedAt: number;
+    }> = [];
+    for (const entry of inventory) {
+      throwIfAborted(signal);
+      const group = byCanonicalPath.get(entry.canonicalPath) ?? [];
+      const orphaned = group.length === 0;
+      const fullyTelegramBacked = group.length > 0
+        && group.every((source) => telegramBacked.has(source.file_id));
+      if (orphaned || fullyTelegramBacked) {
+        await removeFileSourceSnapshot(sandbox, entry.canonicalPath, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+        removedFiles += 1;
+        removedSources += await this.input.repos.files.deleteSourcesByIds(group.map((source) => source.id));
+        continue;
+      }
+      retained.push({
+        entry,
+        sources: group,
+        lastUsedAt: Math.max(...group.map((source) => source.last_verified_at ?? source.created_at)),
+      });
+    }
+
+    let retainedBytes = retained.reduce((total, item) => total + item.entry.size, 0);
+    const maxBytes = this.input.config.E2B_FILE_SOURCE_MAX_BYTES;
+    if (retainedBytes > maxBytes) {
+      retained.sort((left, right) =>
+        left.lastUsedAt - right.lastUsedAt
+        || left.entry.canonicalPath.localeCompare(right.entry.canonicalPath));
+      for (const item of retained) {
+        if (retainedBytes <= maxBytes) break;
+        throwIfAborted(signal);
+        await removeFileSourceSnapshot(
+          sandbox,
+          item.entry.canonicalPath,
+          this.input.config.E2B_REQUEST_TIMEOUT_MS,
+          signal,
+        );
+        removedFiles += 1;
+        evictedUnbackedFiles += 1;
+        retainedBytes -= item.entry.size;
+        removedSources += await this.input.repos.files.deleteSourcesByIds(
+          item.sources.map((source) => source.id),
+        );
+      }
+    }
+    if (!removedFiles && !removedSources) return;
+    this.input.logger?.info("pruned E2B file sources", {
       ...scope,
       sandboxId: sandbox.id,
       files: removedFiles,
       sources: removedSources,
+      evictedUnbackedFiles,
+      retainedBytes,
+      maxBytes,
     });
   }
 
@@ -1460,6 +1514,64 @@ function primaryTelegramRestoreCandidates(
     return newestFirst(primary.filter((ref) => ref.telegramSize === largestSize));
   }
   return newestFirst(primary);
+}
+
+async function inspectFileSourceInventory(
+  sandbox: E2BSandbox,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<FileSourceInventoryEntry[]> {
+  const script = [
+    "import json,os,re,stat,sys",
+    "source_root=sys.argv[1]",
+    "out=[]",
+    "try:",
+    " entries=list(os.scandir(source_root))",
+    "except Exception:",
+    " entries=[]",
+    "for entry in entries:",
+    " if not re.fullmatch(r'[0-9a-fA-F]{64}',entry.name): continue",
+    " try:",
+    "  info=entry.stat(follow_symlinks=False)",
+    "  if not stat.S_ISREG(info.st_mode): continue",
+    "  out.append({'name':entry.name,'size':info.st_size})",
+    " except Exception:",
+    "  pass",
+    "print(json.dumps(out,separators=(',',':')))",
+  ].join("\n");
+  const result = await runCommandResult(
+    sandbox,
+    shellJoin(["python3", "-c", script, E2B_FILE_SOURCES]),
+    timeoutMs,
+    signal,
+    "root",
+  );
+  const parsed = JSON.parse(result.stdout) as unknown;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((value): FileSourceInventoryEntry[] => {
+    if (!value || typeof value !== "object") return [];
+    const record = value as Record<string, unknown>;
+    if (typeof record.name !== "string" || !/^[0-9a-f]{64}$/i.test(record.name)) return [];
+    if (typeof record.size !== "number" || !Number.isSafeInteger(record.size) || record.size < 0) return [];
+    return [{
+      canonicalPath: path.posix.join(E2B_FILE_SOURCES, record.name),
+      size: record.size,
+    }];
+  });
+}
+
+function removeFileSourceSnapshot(
+  sandbox: E2BSandbox,
+  canonicalPath: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return runControl(
+    sandbox,
+    `rm -f -- ${quoteShellToken(canonicalPath)}`,
+    timeoutMs,
+    signal,
+  );
 }
 
 async function inspectThreadFileIndex(

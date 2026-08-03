@@ -91,7 +91,8 @@ export class BrowserUseClient {
   }
 
   async deleteProfile(profileId: string, signal?: AbortSignal): Promise<void> {
-    await this.request("DELETE", `profiles/${encodeURIComponent(profileId)}`, undefined, signal);
+    const response = await this.request("DELETE", `profiles/${encodeURIComponent(profileId)}`, undefined, signal);
+    await response.body?.cancel().catch(() => undefined);
   }
 
   createBrowser(input: {

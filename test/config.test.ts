@@ -12,6 +12,7 @@ describe("Browser Use configuration", () => {
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
     expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:production");
+    expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);
     expect(config.BROWSER_USE_IDLE_TIMEOUT_MS).toBe(300_000);
     expect(isBrowserUseConfigured(config)).toBe(false);
