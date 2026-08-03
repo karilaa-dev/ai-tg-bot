@@ -244,6 +244,67 @@ describe("thread E2B runtime manager", () => {
       });
   });
 
+  it("waits for every restore worker to stop before sealing after cancellation", async () => {
+    await runtime.dispose();
+    const bothStarted = deferred<void>();
+    const releaseDelayedWorker = deferred<void>();
+    let started = 0;
+    runtime = new ThreadE2BSandboxRuntimeManager({
+      config,
+      repos,
+      client,
+      downloadTelegramBytes: async (fileId, signal) => {
+        if (!signal) throw new Error("test restore requires a cancellation signal");
+        started += 1;
+        if (started === 2) bothStarted.resolve();
+        if (fileId === "abort-first") {
+          return new Promise<Buffer>((_resolve, reject) => {
+            const onAbort = () => reject(signal.reason);
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+        }
+        await releaseDelayedWorker.promise;
+        throw new Error("delayed restore worker stopped");
+      },
+    });
+    const files: SandboxThreadFile[] = ["abort-first", "delay-second"].map((telegramFileId, index) => ({
+      fileId: 1_200 + index,
+      messageId: null,
+      name: `${index}.txt`,
+      mimeType: "text/plain",
+      expectedSize: 1,
+      expectedSha256: null,
+      telegramRefs: [{
+        id: 2_200 + index,
+        telegramFileId,
+        telegramSize: 1,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: Date.now(),
+      }],
+    }));
+    const controller = new AbortController();
+    const execution = runtime.execute({
+      ...commandRequest(userId, threadId, files),
+      signal: controller.signal,
+    });
+    void execution.catch(() => undefined);
+    await bothStarted.promise;
+
+    controller.abort(new Error("restore cancelled"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(client.onlySandbox().controlCommands.some((command) =>
+      command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")))
+      .toBe(false);
+
+    releaseDelayedWorker.resolve();
+    await expect(execution).rejects.toThrow("restore cancelled");
+    expect(client.onlySandbox().controlCommands.some((command) =>
+      command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")))
+      .toBe(true);
+  });
+
   it("preserves the publication window without resetting it after later turns", async () => {
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);

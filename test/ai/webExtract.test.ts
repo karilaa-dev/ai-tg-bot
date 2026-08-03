@@ -10,9 +10,13 @@ describe("web_extract", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it("always performs a single stateless Tavily extraction", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       results: [{ url: "https://example.com/", raw_content: "Example content" }],
       failed_results: [],
@@ -56,6 +60,34 @@ describe("web_extract", () => {
       }),
       signal: expect.any(AbortSignal),
     }));
+    expect(timeoutSpy).toHaveBeenCalledWith(35_000);
+  });
+
+  it("keeps a client-side response margin beyond Tavily's extraction budget", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      results: [],
+      failed_results: [],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const tool = createWebExtractTool({
+      config: loadTestConfig({ TAVILY_API_KEY: "tavily-key" }),
+      user: { tg_id: 9 },
+      thread: { id: 10 },
+    } as never);
+
+    await tool.execute({
+      urls: ["https://example.com"],
+      chunks_per_source: 3,
+      extract_depth: "basic",
+      format: "markdown",
+      include_images: false,
+      include_favicon: false,
+      timeout: 12,
+      max_chars_per_url: 12_000,
+    });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ timeout: 12 });
+    expect(timeoutSpy).toHaveBeenCalledWith(17_000);
   });
 
   it("aborts the underlying extraction request when the tool is cancelled", async () => {

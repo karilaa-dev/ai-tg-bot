@@ -5,6 +5,7 @@ import { defineBotTool, type ToolBuildInput } from "./types.js";
 
 const TAVILY_EXTRACT_URL = "https://api.tavily.com/extract";
 const DEFAULT_TAVILY_EXTRACT_TIMEOUT_SECONDS = 30;
+const TAVILY_CLIENT_TIMEOUT_MARGIN_SECONDS = 5;
 
 export function createWebExtractTool(input: ToolBuildInput) {
   return defineBotTool({
@@ -53,7 +54,10 @@ export function createWebExtractTool(input: ToolBuildInput) {
           extractDepth: extract_depth,
         });
         const requestTimeout = AbortSignal.timeout(
-          (timeout ?? DEFAULT_TAVILY_EXTRACT_TIMEOUT_SECONDS) * 1_000,
+          (
+            (timeout ?? DEFAULT_TAVILY_EXTRACT_TIMEOUT_SECONDS)
+            + TAVILY_CLIENT_TIMEOUT_MARGIN_SECONDS
+          ) * 1_000,
         );
         const requestSignal = signal
           ? AbortSignal.any([signal, requestTimeout])

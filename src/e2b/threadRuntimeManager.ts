@@ -716,12 +716,16 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         results[index] = await this.restoreTelegramFile(sandbox, item, signal);
       }
     };
-    await Promise.all(
+    const settlements = await Promise.allSettled(
       Array.from(
         { length: Math.min(pending.length, this.input.config.TELEGRAM_FILE_RESTORE_CONCURRENCY) },
         () => worker(),
       ),
     );
+    const rejected = settlements.find(
+      (settlement): settlement is PromiseRejectedResult => settlement.status === "rejected",
+    );
+    if (rejected) throw rejected.reason;
     return results;
   }
 
