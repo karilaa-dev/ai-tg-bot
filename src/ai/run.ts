@@ -736,6 +736,25 @@ export function buildFinalThinkingSummary(input: {
 
   const sections = [counters.join(" · ")];
 
+  if (deliveredFiles || filesWereCapped) {
+    const sentNames = input.attachments
+      .slice(0, deliveredFiles)
+      .map((file) => `<code>${escapeHtml(file.name)}</code>`)
+      .join(", ");
+    const filesLabel =
+      filesWereCapped
+        ? input.t("thinking-final-files-capped", {
+            sent: deliveredFiles,
+            requested: requestedFiles,
+            limit: MAX_CREATED_FILES_PER_ANSWER,
+          })
+        : input.t("thinking-final-files", { count: deliveredFiles });
+    // Keep confirmed deliveries ahead of verbose reasoning/tool sections. The
+    // Telegram final-thinking renderer caps long summaries from the end, so this
+    // ordering guarantees that file outcomes survive that cap.
+    sections.push(sentNames ? `${filesLabel}\n\n${sentNames}` : filesLabel);
+  }
+
   if (reasoningSummaries.length) {
     sections.push(reasoningSummaries.map(formatMarkdownListItem).join("\n\n"));
   }
@@ -747,22 +766,6 @@ export function buildFinalThinkingSummary(input: {
       toolsHeading,
       summary.toolCounts.map((tool) => `- ${tool.label}: ${tool.count}`).join("\n"),
     ].join("\n\n"));
-  }
-
-  if (deliveredFiles || filesWereCapped) {
-    const sentNames = input.attachments
-      .slice(0, deliveredFiles)
-      .map((file) => `<code>${escapeHtml(file.name)}</code>`)
-      .join(", ");
-    const filesLabel =
-      filesWereCapped
-        ? input.t("thinking-final-files-capped", {
-            sent: MAX_CREATED_FILES_PER_ANSWER,
-            requested: requestedFiles,
-            limit: MAX_CREATED_FILES_PER_ANSWER,
-          })
-        : input.t("thinking-final-files", { count: deliveredFiles });
-    sections.push(sentNames ? `${filesLabel}\n\n${sentNames}` : filesLabel);
   }
 
   return sections.join("\n\n");
@@ -1010,7 +1013,7 @@ async function sendFinalThinkingVisible(
   return ids;
 }
 
-async function refreshFinalThinkingVisible(
+export async function refreshFinalThinkingVisible(
   input: TurnInput,
   existingMessageIds: number[],
   visibleThinking: string,
@@ -1023,16 +1026,36 @@ async function refreshFinalThinkingVisible(
   });
   const existing = existingMessageIds.filter((id) => id > 0);
   if (existing.length) {
-    if (existing.length === 1 && messages.length === 1) {
-      await editFinalThinkingVisible(input, existing[0]!, messages[0]!);
-    } else {
-      input.logger.debug("skipping multipart final-thinking refresh to avoid duplicate messages", {
-        threadId: input.thread.id,
-        existingParts: existing.length,
-        updatedParts: messages.length,
-      });
+    const sharedParts = Math.min(existing.length, messages.length);
+    for (let index = 0; index < sharedParts; index += 1) {
+      const edited = await editFinalThinkingVisible(input, existing[index]!, messages[index]!);
+      if (!edited) return existingMessageIds;
     }
-    return existingMessageIds;
+
+    const updatedIds = [...existing];
+    for (const rich of messages.slice(sharedParts)) {
+      const sent = await sendRichWithFallback(input, rich);
+      updatedIds.push(...sent.map((message) => message.message_id).filter((id) => id > 0));
+    }
+
+    if (existing.length > messages.length) {
+      const staleIds = existing.slice(messages.length);
+      const retainedStaleIds: number[] = [];
+      for (const messageId of staleIds) {
+        try {
+          await input.api.deleteMessage(input.chatId, messageId);
+        } catch (error) {
+          retainedStaleIds.push(messageId);
+          input.logger.warn("failed to delete stale multipart final-thinking message", {
+            threadId: input.thread.id,
+            telegramMessageId: messageId,
+            err: String(error),
+          });
+        }
+      }
+      return [...updatedIds.slice(0, messages.length), ...retainedStaleIds];
+    }
+    return updatedIds;
   }
   const sent = await sendFinalThinkingVisible(input, visibleThinking, elapsedMs);
   return [...existingMessageIds, ...sent];

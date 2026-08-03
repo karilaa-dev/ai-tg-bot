@@ -26,7 +26,7 @@ Sandbox-created attachment buffers are released after indexing and reloaded from
 
 Partial Telegram-file restoration is cached per sandbox revision. Failed entries retry after an exponential backoff from five minutes to one hour, while a changed file descriptor or recreated sandbox triggers immediate reconciliation. Ambiguous Telegram send outcomes are stored separately from confirmed deliveries and are not advertised as delivered files.
 
-Each sandbox-created file version has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. These sources are retained while database file records may resolve to them, so an older shared version remains recoverable; deleting the sandbox reclaims the snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
+Each sandbox-created file version initially has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. Unshared versions remain there while database file records depend on them. After every record sharing the same snapshot has a durable Telegram source, a later sandbox operation removes the redundant snapshot and its E2B source locators; the normal workspace copy is unaffected. Deleting the sandbox reclaims any remaining snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
 
 Build and validate a version, then atomically promote it to `production`:
 

@@ -103,6 +103,21 @@ type ThreadFileInventoryEntry = {
   sha256: string | null;
 };
 
+function e2bSnapshotPath(locatorJson: string): string | undefined {
+  try {
+    const locator: unknown = JSON.parse(locatorJson);
+    if (!locator || typeof locator !== "object" || Array.isArray(locator)) return undefined;
+    const candidate = (locator as Record<string, unknown>).path;
+    if (typeof candidate !== "string") return undefined;
+    const normalized = path.posix.normalize(candidate);
+    if (path.posix.dirname(normalized) !== E2B_FILE_SOURCES) return undefined;
+    if (!/^[a-f0-9]{64}$/i.test(path.posix.basename(normalized))) return undefined;
+    return normalized;
+  } catch {
+    return undefined;
+  }
+}
+
 const RENEW_INTERVAL_MS = 60_000;
 const CONTINUOUS_ROTATE_MS = 55 * 60_000;
 const ROTATION_GUARD_MS = 5 * 60_000;
@@ -364,6 +379,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     await sandbox.setTimeout(effectiveWindowMs, signal);
     await this.ensureLayout(sandbox, signal);
     const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
+    await this.pruneTelegramBackedFileSources(scope, sandbox, signal).catch((error) => {
+      this.input.logger?.warn("failed to prune redundant E2B file sources", {
+        ...scope,
+        sandboxId: sandbox.id,
+        error: String(error),
+      });
+    });
     return { sandbox, threadFiles };
   }
 
@@ -532,6 +554,55 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       ...scope,
       sandboxId,
       sources: removed,
+    });
+  }
+
+  private async pruneTelegramBackedFileSources(
+    scope: SandboxScope,
+    sandbox: E2BSandbox,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const sources = await this.input.repos.files.listE2BSourcesForSandbox(
+      this.input.config.E2B_DEPLOYMENT_ID,
+      sandbox.id,
+    );
+    if (!sources.length) return;
+
+    const refs = await this.input.repos.files.listTelegramFileRefs(
+      [...new Set(sources.map((source) => source.file_id))],
+    );
+    const telegramBacked = new Set(refs.map((ref) => ref.file_id));
+    const byCanonicalPath = new Map<string, typeof sources>();
+    for (const source of sources) {
+      const canonicalPath = e2bSnapshotPath(source.locator_json);
+      if (!canonicalPath) continue;
+      const group = byCanonicalPath.get(canonicalPath) ?? [];
+      group.push(source);
+      byCanonicalPath.set(canonicalPath, group);
+    }
+
+    let removedFiles = 0;
+    let removedSources = 0;
+    for (const [canonicalPath, group] of byCanonicalPath) {
+      throwIfAborted(signal);
+      // Content-addressed snapshots can be shared by duplicate file rows. Keep the
+      // bytes until every row pointing at the snapshot has its own Telegram source.
+      if (group.some((source) => !telegramBacked.has(source.file_id))) continue;
+      await runControl(
+        sandbox,
+        `rm -f -- ${quoteShellToken(canonicalPath)}`,
+        this.input.config.E2B_REQUEST_TIMEOUT_MS,
+        signal,
+      );
+      removedFiles += 1;
+      removedSources += await this.input.repos.files.deleteSourcesByIds(group.map((source) => source.id));
+    }
+    if (!removedSources) return;
+    this.input.logger?.info("pruned Telegram-backed E2B file sources", {
+      ...scope,
+      sandboxId: sandbox.id,
+      files: removedFiles,
+      sources: removedSources,
     });
   }
 

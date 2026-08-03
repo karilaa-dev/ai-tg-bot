@@ -592,7 +592,7 @@ describe("thread E2B runtime manager", () => {
     });
   });
 
-  it("reuses an outbound artifact locally and falls back to Telegram after sandbox loss", async () => {
+  it("reuses an outbound artifact locally, prunes its snapshot, and falls back to Telegram after sandbox loss", async () => {
     const bytes = Buffer.from("outbound file");
     const hash = createHash("sha256").update(bytes).digest("hex");
     const stored = await repos.files.insertFile({
@@ -646,6 +646,8 @@ describe("thread E2B runtime manager", () => {
 
     expect(client.telegramDownloadCalls).toBe(0);
     expect(original.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+    expect(original.files.has(`${E2B_FILE_SOURCES}/${hash}`)).toBe(false);
+    await expect(repos.files.listSources(stored.id)).resolves.toEqual([]);
 
     await runtime.dispose();
     client.sandboxes.clear();
@@ -656,6 +658,59 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
     await expect(repos.files.listSources(stored.id)).resolves.toEqual([]);
     await expect(repos.files.listRecoverableIds([stored.id])).resolves.toEqual([]);
+  });
+
+  it("keeps a shared immutable snapshot while any referencing file lacks a Telegram source", async () => {
+    const bytes = Buffer.from("shared snapshot");
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const first = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "other",
+      contentSha256: hash,
+      mimeType: "application/octet-stream",
+      name: "shared-a.bin",
+      size: bytes.length,
+      isInline: false,
+    });
+    const second = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "other",
+      contentSha256: hash,
+      mimeType: "application/octet-stream",
+      name: "shared-b.bin",
+      size: bytes.length,
+      isInline: false,
+    });
+    await repos.files.rememberTelegramFileRefs(first.id, {
+      direction: "outbound",
+      mediaKind: "document",
+      refs: [{ fileId: "tg-shared", size: bytes.length, primary: true }],
+    });
+
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const sourcePath = `${E2B_FILE_SOURCES}/${hash}`;
+    sandbox.files.set(sourcePath, bytes);
+    for (const file of [first, second]) {
+      await repos.files.rememberSource(file.id, e2bFileSource(config, {
+        sandboxId: sandbox.id,
+        fileId: file.id,
+        sourceCanonicalPath: sourcePath,
+        userId,
+        threadId,
+        size: bytes.length,
+        contentSha256: hash,
+        mimeType: file.mime_type,
+      }));
+    }
+
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(sandbox.files.get(sourcePath)).toEqual(bytes);
+    await expect(repos.files.listSources(first.id)).resolves.toHaveLength(1);
+    await expect(repos.files.listSources(second.id)).resolves.toHaveLength(1);
   });
 
   it("accepts a Telegram-reencoded outbound photo as best-effort recovery", async () => {
@@ -1271,7 +1326,7 @@ class FakeSandbox implements E2BSandbox {
         this.files.delete(source);
       }
     }
-    for (const match of command.matchAll(/rm -f ('[^']*'|\S+)/g)) {
+    for (const match of command.matchAll(/rm -f (?:-- )?('[^']*'|\S+)/g)) {
       this.files.delete(unquote(match[1]!));
     }
     return { stdout: "", stderr: "", exitCode: 0 };
