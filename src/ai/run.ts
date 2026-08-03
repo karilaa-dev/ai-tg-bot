@@ -1069,7 +1069,15 @@ async function sendAttachmentBatch(
   if (!attachments.length) return;
   const delivered = attachments.filter((attachment) => attachment.telegramDelivery);
   for (const attachment of delivered) {
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined).catch((error) => {
+      input.logger.warn("failed to persist previously delivered attachment", {
+        threadId: input.thread.id,
+        messageId: assistantMessage.id,
+        fileId: attachment.fileId,
+        telegramMessageId: attachment.telegramDelivery?.messageId,
+        err: String(error),
+      });
+    });
   }
   const pending = attachments.filter((attachment) => !attachment.telegramDelivery);
   const sendable = pending.filter((attachment) => !attachment.telegramDeliveryUnknown);
@@ -1080,32 +1088,42 @@ async function sendAttachmentBatch(
       continue;
     }
 
-    try {
-      for (const attachment of batch) await ensureAttachmentData(input, attachment);
-    } catch (error) {
-      for (const attachment of batch) releaseAttachmentData(attachment);
-      input.logger.warn(`failed to load ${strategy.label} media group bytes`, {
-        threadId: input.thread.id,
-        messageId: assistantMessage.id,
-        fileIds: batch.map((attachment) => attachment.fileId),
-        err: String(error),
-      });
+    const ready: CreatedFileAttachment[] = [];
+    for (const attachment of batch) {
+      try {
+        await ensureAttachmentData(input, attachment);
+        ready.push(attachment);
+      } catch (error) {
+        input.logger.warn(`failed to load ${strategy.label} bytes`, {
+          threadId: input.thread.id,
+          messageId: assistantMessage.id,
+          fileId: attachment.fileId,
+          name: attachment.name,
+          err: String(error),
+        });
+      }
+    }
+    if (ready.length === 1) {
+      await sendOneBufferedAttachment(input, assistantMessage, ready[0]!, strategy);
+      continue;
+    }
+    if (!ready.length) {
       continue;
     }
     let sent: SentTelegramFileMessage[];
     try {
-      sent = await strategy.sendGroup(input, batch);
+      sent = await strategy.sendGroup(input, ready);
     } catch (err) {
       if (!isDefinitiveTelegramRejection(err)) {
-        for (const attachment of batch) {
+        for (const attachment of ready) {
           attachment.telegramDeliveryUnknown = true;
           releaseAttachmentData(attachment);
         }
         input.logger.warn(`${strategy.label} media group delivery outcome is unknown; not retrying`, {
           threadId: input.thread.id,
           messageId: assistantMessage.id,
-          files: batch.length,
-          fileIds: batch.map((attachment) => attachment.fileId),
+          files: ready.length,
+          fileIds: ready.map((attachment) => attachment.fileId),
           err: String(err),
         });
         continue;
@@ -1113,20 +1131,20 @@ async function sendAttachmentBatch(
       input.logger.warn(`failed to send ${strategy.label} media group; retrying files individually`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
-        files: batch.length,
-        fileIds: batch.map((attachment) => attachment.fileId),
+        files: ready.length,
+        fileIds: ready.map((attachment) => attachment.fileId),
         err: String(err),
       });
-      for (const attachment of batch) {
+      for (const attachment of ready) {
         await sendOneBufferedAttachment(input, assistantMessage, attachment, strategy);
       }
       continue;
     }
-    for (let index = 0; index < batch.length; index += 1) {
-      batch[index]!.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
-      releaseAttachmentData(batch[index]!);
+    for (let index = 0; index < ready.length; index += 1) {
+      ready[index]!.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
+      releaseAttachmentData(ready[index]!);
     }
-    for (const attachment of batch) {
+    for (const attachment of ready) {
       await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined).catch((error) => {
         input.logger.warn(`failed to persist delivered ${strategy.label}`, {
           threadId: input.thread.id,
@@ -1140,7 +1158,7 @@ async function sendAttachmentBatch(
     input.logger.info(`${strategy.label} media group sent`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
-      files: batch.length,
+      files: ready.length,
       telegramMessages: sent.map((message) => message.message_id),
     });
   }

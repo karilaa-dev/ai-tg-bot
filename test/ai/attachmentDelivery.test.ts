@@ -108,6 +108,43 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.sendPhoto).toHaveBeenCalledTimes(1);
     expect(attachment.data).toBeUndefined();
   });
+
+  it("continues with readable files when one media-group source cannot be loaded", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const first = imageAttachment(1, "first.jpg", 100);
+    const missing = imageAttachment(2, "missing.jpg", 100);
+    const third = imageAttachment(3, "third.jpg", 100);
+    missing.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: missing.fileId } as never);
+    input.resolveFile = vi.fn(async () => { throw new Error("source unavailable"); });
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [first, missing, third]);
+
+    expect(api.sendMediaGroup).toHaveBeenCalledTimes(1);
+    expect(api.sendMediaGroup.mock.calls[0]?.[1]).toHaveLength(2);
+    expect(first.telegramDelivery).toBeDefined();
+    expect(missing.telegramDelivery).toBeUndefined();
+    expect(third.telegramDelivery).toBeDefined();
+  });
+
+  it("continues pending delivery when bookkeeping for an earlier photo fails", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const delivered = imageAttachment(1, "delivered.jpg", 100);
+    delivered.telegramDelivery = {
+      messageId: 400,
+      fileId: "existing-photo",
+      fileUniqueId: "existing-photo-unique",
+    };
+    const pending = imageAttachment(2, "pending.jpg", 100);
+    vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [delivered, pending]);
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(pending.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
+  });
 });
 
 function imageAttachment(fileId: number, name: string, size: number): CreatedFileAttachment {
@@ -137,7 +174,10 @@ function fakeApi() {
       },
     })),
     sendPhoto: vi.fn(async () => photoMessage(500, "photo-file")),
-    sendMediaGroup: vi.fn(async () => [photoMessage(500, "photo-1"), photoMessage(501, "photo-2")]),
+    sendMediaGroup: vi.fn(async (_chatId: number, _media: unknown[]) => [
+      photoMessage(500, "photo-1"),
+      photoMessage(501, "photo-2"),
+    ]),
   };
 }
 

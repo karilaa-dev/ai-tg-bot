@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { TimeoutError } from "e2b";
+import { autoRetry } from "@grammyjs/auto-retry";
 import { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { Repos } from "../db/repos/index.js";
@@ -124,6 +125,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       this.downloadTelegramBytes = input.downloadTelegramBytes;
     } else {
       const telegramApi = new Api(input.config.BOT_TOKEN);
+      telegramApi.config.use(autoRetry());
       this.downloadTelegramBytes = async (fileId, signal) =>
         (await downloadTelegramFile({
           api: telegramApi,
