@@ -129,6 +129,35 @@ describe("thread E2B runtime manager", () => {
       .toBe(true);
   });
 
+  it("ignores traversal names read from a tampered sandbox index", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const outsidePath = "/home/etc/hosts";
+    sandbox.files.set(outsidePath, Buffer.from("must survive"));
+    sandbox.files.set(`${E2B_TELEGRAM_FILES}/INDEX.json`, Buffer.from(JSON.stringify({
+      version: 2,
+      generated_at: new Date().toISOString(),
+      files: [{
+        file_id: 999,
+        message_id: null,
+        original_name: "hosts",
+        sandbox_name: "../../etc/hosts",
+        mime_type: "text/plain",
+        size: 12,
+        sha256: null,
+        status: "available",
+      }],
+    })));
+    await runtime.dispose();
+    runtime = createRuntime();
+
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(sandbox.files.get(outsidePath)?.toString()).toBe("must survive");
+    const rewritten = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(rewritten.files).toEqual([]);
+  });
+
   it("records a partial restore failure without surfacing failure details in the command result", async () => {
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -969,6 +998,36 @@ describe("thread E2B runtime manager", () => {
     expect(client.connectCalls).toBe(1);
   });
 
+  it("waits for active work and pauses the live sandbox during shutdown", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const started = deferred<void>();
+    const release = deferred<void>();
+    sandbox.nextCommandGate = { started, release };
+    const active = runtime.execute(commandRequest(userId, threadId));
+    await started.promise;
+
+    const disposing = runtime.dispose();
+    await Promise.resolve();
+    expect(sandbox.pauseCalls).toBe(0);
+
+    release.resolve();
+    await active;
+    await disposing;
+
+    expect(sandbox.pauseCalls).toBe(1);
+    expect(sandbox.running).toBe(false);
+  });
+
+  it("continues shutdown when pausing a sandbox fails", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.nextPauseError = new Error("E2B unavailable");
+
+    await expect(runtime.dispose()).resolves.toBeUndefined();
+    expect(sandbox.pauseCalls).toBe(1);
+  });
+
   it("refuses to run an agent command when the Telegram directory cannot be sealed", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
@@ -1239,6 +1298,7 @@ class FakeSandbox implements E2BSandbox {
   failWebsiteScope = false;
   nextWaitError?: unknown;
   nextSetTimeoutError?: unknown;
+  nextPauseError?: unknown;
   readonly readFilePaths: string[] = [];
   readonly readFileCalls: Array<{ path: string; user: string; requestTimeoutMs?: number }> = [];
   readonly fileInfoCalls: Array<{ path: string; user: string }> = [];
@@ -1424,6 +1484,11 @@ class FakeSandbox implements E2BSandbox {
 
   async pause(): Promise<boolean> {
     this.pauseCalls += 1;
+    if (this.nextPauseError) {
+      const error = this.nextPauseError;
+      this.nextPauseError = undefined;
+      throw error;
+    }
     this.running = false;
     return true;
   }

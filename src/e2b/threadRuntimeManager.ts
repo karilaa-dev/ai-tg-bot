@@ -326,8 +326,26 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
 
   async dispose(): Promise<void> {
     this.shuttingDown = true;
-    for (const state of this.states.values()) this.clearRenewal(state);
-    await Promise.allSettled([...this.states.values()].map((state) => state.tail));
+    const states = [...this.states.values()];
+    for (const state of states) this.clearRenewal(state);
+    await Promise.allSettled(states.map((state) => state.tail));
+    await Promise.allSettled(states.map(async (state) => {
+      const sandbox = state.connection;
+      if (!sandbox) return;
+      try {
+        await sandbox.pause();
+        this.input.logger?.info("paused E2B sandbox during shutdown", {
+          sandboxId: sandbox.id,
+        });
+      } catch (error) {
+        // Shutdown must continue even if E2B is temporarily unavailable. The
+        // provider-side timeout remains the final fallback for this sandbox.
+        this.input.logger?.warn("failed to pause E2B sandbox during shutdown", {
+          sandboxId: sandbox.id,
+          error: String(error),
+        });
+      }
+    }));
     this.states.clear();
   }
 
@@ -804,6 +822,14 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
 
       for (const old of previous.files) {
         if (old.sandbox_name === "INDEX.json" || desiredNames.has(old.sandbox_name)) continue;
+        if (!isSandboxThreadFileName(old.sandbox_name)) {
+          this.input.logger?.warn("ignored unsafe sandbox file name from Telegram index", {
+            ...scope,
+            sandboxId: sandbox.id,
+            fileId: old.file_id,
+          });
+          continue;
+        }
         await sandbox.removeFile(path.posix.join(E2B_TELEGRAM_FILES, old.sandbox_name), "root", signal)
           .catch(() => undefined);
       }
@@ -1589,6 +1615,16 @@ function sandboxThreadFileName(fileId: number, originalName: string): string {
     throw new Error("unsafe Telegram file sandbox path");
   }
   return sandboxName;
+}
+
+function isSandboxThreadFileName(value: string): boolean {
+  if (path.posix.basename(value) !== value) return false;
+  const match = /^([1-9]\d*)--([A-Za-z0-9][A-Za-z0-9._-]{0,119})$/.exec(value);
+  if (!match) return false;
+  const fileId = Number(match[1]);
+  if (!Number.isSafeInteger(fileId) || fileId <= 0) return false;
+  const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, value);
+  return path.posix.dirname(candidate) === E2B_TELEGRAM_FILES;
 }
 
 function sanitizeRestoreCode(value: unknown): string {
