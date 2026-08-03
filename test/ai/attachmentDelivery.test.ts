@@ -63,6 +63,29 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.sendMediaGroup).toHaveBeenCalledTimes(1);
     expect(api.sendPhoto).not.toHaveBeenCalled();
     expect(api.sendDocument).not.toHaveBeenCalled();
+    expect(first.telegramDeliveryUnknown).toBe(true);
+    expect(second.telegramDeliveryUnknown).toBe(true);
+  });
+
+  it("persists an ambiguous send in a separate operational bucket", async () => {
+    const api = fakeApi();
+    api.sendMediaGroup.mockRejectedValue(new Error("request timed out after upload"));
+    const input = turnInput(api);
+    const first = imageAttachment(1, "first.jpg", 100);
+    const second = imageAttachment(2, "second.jpg", 200);
+
+    await sendFinal(input, "", "", 0, [first, second]);
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 99,
+      content: {
+        text: "",
+        attachment_delivery_unknown: [
+          { file_id: 1, status: "delivery_unknown" },
+          { file_id: 2, status: "delivery_unknown" },
+        ],
+      },
+    }));
   });
 
   it("does not resend a photo when post-delivery bookkeeping fails", async () => {
@@ -235,6 +258,7 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
       messages: {
         insert: vi.fn(async () => ({ id: 99 })),
         setDeliveryContent: vi.fn(async () => undefined),
+        setThinking: vi.fn(async () => undefined),
       },
       files: {
         setMessageId: vi.fn(async () => undefined),

@@ -24,6 +24,8 @@ E2B documents the relevant behavior in [Sandbox lifecycle](https://e2b.dev/docs/
 
 Sandbox-created attachment buffers are released after indexing and reloaded from their durable E2B source only for the Telegram batch currently being sent. Browser and generated-image payloads remain in memory only until their send attempt completes. The bot installs grammY's `autoRetry()` transformer, which handles Telegram flood waits, HTTP failures, and 5xx responses before delivery code sees a terminal error.
 
+Partial Telegram-file restoration is cached per sandbox revision. Failed entries retry after an exponential backoff from five minutes to one hour, while a changed file descriptor or recreated sandbox triggers immediate reconciliation. Ambiguous Telegram send outcomes are stored separately from confirmed deliveries and are not advertised as delivered files.
+
 Each sandbox-created file version has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. These sources are retained while database file records may resolve to them, so an older shared version remains recoverable; deleting the sandbox reclaims the snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
 
 Build and validate a version, then atomically promote it to `production`:

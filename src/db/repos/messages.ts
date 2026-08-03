@@ -63,6 +63,15 @@ export class MessagesRepo {
     await this.search.indexMessage(message.id, message.thread_id, input.textPlain);
   }
 
+  async setThinking(messageId: number, thinking: string, tgMessageId?: number): Promise<void> {
+    await this.db.execute(sql`
+      update messages
+      set thinking = ${thinking},
+          tg_message_id = coalesce(tg_message_id, ${tgMessageId ?? null})
+      where id = ${messageId}
+    `);
+  }
+
   listThread(threadId: number): Promise<MessageRow[]> {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }

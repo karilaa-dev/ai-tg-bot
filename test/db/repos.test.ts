@@ -51,6 +51,13 @@ describe("repository round-trip on sqlite", () => {
     });
     await expect(db.search.searchMessages([thread.id], `delivered-${tgId}`, 5))
       .resolves.toEqual([expect.objectContaining({ id: message.id })]);
+
+    await repos.messages.setThinking(message.id, "final delivery summary", 5678);
+    await expect(repos.messages.get(message.id)).resolves.toMatchObject({
+      thinking: "final delivery summary",
+      // The already known Telegram message remains authoritative.
+      tg_message_id: 1234,
+    });
   });
 
   it("persists one opaque Browser Use profile key per deployment user", async () => {

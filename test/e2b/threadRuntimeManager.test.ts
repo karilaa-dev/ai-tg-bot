@@ -122,6 +122,8 @@ describe("thread E2B runtime manager", () => {
   });
 
   it("records a partial restore failure without surfacing failure details in the command result", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
     const stored = await repos.files.insertFile({
       userId,
       threadId,
@@ -174,6 +176,47 @@ describe("thread E2B runtime manager", () => {
       status: "error",
       error_code: "file_unavailable",
     }]);
+
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    }]));
+    expect(client.telegramDownloadCalls).toBe(1);
+    expect(client.onlySandbox().inventoryCalls).toBe(1);
+
+    now += 5 * 60_000 + 1;
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    }]));
+    expect(client.telegramDownloadCalls).toBe(2);
+    expect(client.onlySandbox().inventoryCalls).toBe(2);
   });
 
   it("preserves the publication window without resetting it after later turns", async () => {
@@ -511,6 +554,17 @@ describe("thread E2B runtime manager", () => {
       siteDirectory: E2B_TELEGRAM_FILES,
     })).toThrow("cannot contain Telegram files");
 
+    expect(client.createCalls).toBe(0);
+  });
+
+  it("rejects website paths that normalize to another host", () => {
+    expect(() => runtime.publishWebsite({
+      userId,
+      threadId,
+      port: 3000,
+      siteDirectory: "/site",
+      path: "/..//attacker.example/x",
+    })).toThrow("remain relative after normalization");
     expect(client.createCalls).toBe(0);
   });
 

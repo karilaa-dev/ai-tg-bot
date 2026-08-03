@@ -56,6 +56,8 @@ type RuntimeState = {
     sandboxId: string;
     revision: string;
     result: SandboxThreadFileSyncResult;
+    retryAt?: number;
+    failureAttempts?: number;
   };
   connection?: E2BSandbox;
   sandboxId?: string;
@@ -106,6 +108,8 @@ const MAX_FOREGROUND_COMMAND_MS = 45 * 60_000;
 const WEBSITE_MIN_PORT = 1024;
 const WEBSITE_MAX_PORT = 65_535;
 const RESERVED_PORTS = new Set([49_983, 49_999, 50_005]);
+const FILE_RESTORE_RETRY_BASE_MS = 5 * 60_000;
+const FILE_RESTORE_RETRY_MAX_MS = 60 * 60_000;
 
 export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   private readonly states = new Map<string, RuntimeState>();
@@ -276,7 +280,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         this.input.config.E2B_REQUEST_TIMEOUT_MS,
         request.signal,
       );
-      const url = new URL(sitePath, `https://${prepared.sandbox.getHost(request.port)}`).toString();
+      const url = websiteUrlForHost(prepared.sandbox.getHost(request.port), sitePath);
       await verifyWebsite(url, this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal);
       state.websiteSandboxId = prepared.sandbox.id;
       state.websitePublishedPending = true;
@@ -493,13 +497,16 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     signal?: AbortSignal,
   ): Promise<SandboxThreadFileSyncResult> {
     const revision = threadFilesRevision(files);
-    if (
-      state.threadFilesSync?.sandboxId === sandbox.id
-      && state.threadFilesSync.revision === revision
-    ) {
-      return state.threadFilesSync.result;
+    const previousSync = state.threadFilesSync;
+    if (previousSync?.sandboxId === sandbox.id && previousSync.revision === revision) {
+      if (previousSync.retryAt === undefined || Date.now() < previousSync.retryAt) {
+        return previousSync.result;
+      }
     }
     state.threadFilesSync = undefined;
+    const failureAttempts = previousSync?.sandboxId === sandbox.id && previousSync.revision === revision
+      ? previousSync.failureAttempts ?? 0
+      : 0;
     const indexPath = path.posix.join(E2B_TELEGRAM_FILES, "INDEX.json");
     const previous = await readThreadFileIndex(sandbox, indexPath, signal);
     const previousById = new Map(previous.files.map((entry) => [entry.file_id, entry]));
@@ -661,9 +668,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       directory: E2B_TELEGRAM_FILES,
       available: next.filter((entry) => entry.status === "available").length,
     };
-    if (next.every((entry) => entry.status === "available")) {
-      state.threadFilesSync = { sandboxId: sandbox.id, revision, result };
-    }
+    const hasFailures = next.some((entry) => entry.status === "error");
+    const nextFailureAttempts = hasFailures ? failureAttempts + 1 : 0;
+    state.threadFilesSync = {
+      sandboxId: sandbox.id,
+      revision,
+      result,
+      ...(hasFailures
+        ? {
+            failureAttempts: nextFailureAttempts,
+            retryAt: Date.now() + restoreRetryDelayMs(nextFailureAttempts),
+          }
+        : {}),
+    };
     return result;
   }
 
@@ -1432,7 +1449,25 @@ function normalizeWebsitePath(value: string | undefined): string {
   if (!raw.startsWith("/") || raw.startsWith("//")) throw new Error("website path must start with one slash");
   const url = new URL(raw, "https://example.invalid");
   if (url.origin !== "https://example.invalid") throw new Error("website path must be relative to the published host");
-  return `${url.pathname}${url.search}${url.hash}`;
+  const normalized = `${url.pathname}${url.search}${url.hash}`;
+  if (!normalized.startsWith("/") || normalized.startsWith("//")) {
+    throw new Error("website path must remain relative after normalization");
+  }
+  return normalized;
+}
+
+function websiteUrlForHost(host: string, sitePath: string): string {
+  const source = new URL(sitePath, "https://example.invalid");
+  const target = new URL(`https://${host}`);
+  target.pathname = source.pathname;
+  target.search = source.search;
+  target.hash = source.hash;
+  return target.toString();
+}
+
+function restoreRetryDelayMs(failureAttempts: number): number {
+  const exponent = Math.max(0, Math.min(10, failureAttempts - 1));
+  return Math.min(FILE_RESTORE_RETRY_MAX_MS, FILE_RESTORE_RETRY_BASE_MS * (2 ** exponent));
 }
 
 async function verifyWebsiteListenerScope(

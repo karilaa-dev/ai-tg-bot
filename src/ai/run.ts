@@ -193,7 +193,7 @@ export const runTurn: TurnRunner = async (input) => {
           : undefined,
       });
     }
-    const finalThinking = buildFinalThinkingSummary({
+    let finalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
       // Normal create_file attachments are delivered after the final text is ready.
@@ -204,7 +204,7 @@ export const runTurn: TurnRunner = async (input) => {
     });
     const thinkingDelivery = await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
     const assistantEntry = [...piEntries].reverse().find((entry) => entry.role === "assistant");
-    await sendFinalVisible(
+    const finalDelivery = await sendFinalVisible(
       input,
       finalThinking,
       finalAnswer,
@@ -213,6 +213,40 @@ export const runTurn: TurnRunner = async (input) => {
       assistantEntry?.id,
       thinkingDelivery,
     );
+    const deliveredFinalThinking = buildFinalThinkingSummary({
+      t: input.t,
+      shaper,
+      attachments: createdFiles.filter((file) => file.telegramDelivery),
+      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
+    });
+    if (deliveredFinalThinking !== finalThinking) {
+      try {
+        const thinkingMessageIds = await refreshFinalThinkingVisible(
+          input,
+          finalDelivery.thinkingMessageIds,
+          deliveredFinalThinking,
+          Date.now() - startedAt,
+        );
+        finalThinking = deliveredFinalThinking;
+        await input.repos.messages.setThinking(
+          finalDelivery.assistantMessageId,
+          finalThinking,
+          thinkingMessageIds.find((id) => id > 0),
+        ).catch((error) => {
+          input.logger.warn("failed to persist finalized attachment thinking summary", {
+            threadId: input.thread.id,
+            messageId: finalDelivery.assistantMessageId,
+            err: String(error),
+          });
+        });
+      } catch (error) {
+        input.logger.warn("failed to refresh finalized attachment thinking summary", {
+          threadId: input.thread.id,
+          messageId: finalDelivery.assistantMessageId,
+          err: String(error),
+        });
+      }
+    }
     await status?.finish(shaper.toolStatusMd());
     input.logger.info("turn complete", {
       threadId: input.thread.id,
@@ -820,6 +854,11 @@ export async function sendFinal(
   await sendFinalVisible(input, visibleThinking, finalText.answer, elapsedMs, attachments);
 }
 
+interface FinalVisibleDelivery {
+  assistantMessageId: number;
+  thinkingMessageIds: number[];
+}
+
 async function sendFinalVisible(
   input: TurnInput,
   visibleThinking: string,
@@ -828,7 +867,7 @@ async function sendFinalVisible(
   attachments: CreatedFileAttachment[],
   piEntryId?: string,
   thinkingDelivery?: ThinkingDelivery,
-): Promise<void> {
+): Promise<FinalVisibleDelivery> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
   if (attachments.length > outboundAttachments.length) {
     input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
@@ -882,7 +921,9 @@ async function sendFinalVisible(
     piEntryId: piEntryId ?? null,
   });
   await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
-  const retainedAttachments = outboundAttachments.filter((attachment) => !attachment.telegramDeliveryFailure);
+  const retainedAttachments = outboundAttachments.filter((attachment) => attachment.telegramDelivery);
+  const unknownAttachments = outboundAttachments.filter((attachment) =>
+    !attachment.telegramDelivery && attachment.telegramDeliveryUnknown);
   const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
   const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(retainedAttachments);
   const persistedContent: Record<string, unknown> = { text: persistedText };
@@ -903,6 +944,12 @@ async function sendFinalVisible(
       status: file.telegramDeliveryFailure,
     }));
   }
+  if (unknownAttachments.length) {
+    persistedContent.attachment_delivery_unknown = unknownAttachments.map((file) => ({
+      file_id: file.fileId,
+      status: "delivery_unknown",
+    }));
+  }
   const attachmentMessageId = retainedAttachments
     .map((attachment) => attachment.telegramDelivery?.messageId)
     .find((id) => typeof id === "number" && id > 0);
@@ -919,6 +966,7 @@ async function sendFinalVisible(
       threadId: input.thread.id,
       messageId: assistantMessage.id,
       retainedFiles: retainedAttachments.length,
+      unknownFiles: unknownAttachments.length,
       failedFiles: attachmentFailures.length,
       err: String(error),
     });
@@ -928,8 +976,13 @@ async function sendFinalVisible(
     messageId: assistantMessage.id,
     telegramMessages: thinkingIds.length + answerIds.length,
     files: retainedAttachments.length,
+    unknownFiles: unknownAttachments.length,
     failedFiles: attachmentFailures.length,
   });
+  return {
+    assistantMessageId: assistantMessage.id,
+    thinkingMessageIds: thinkingIds,
+  };
 }
 
 async function sendFinalThinkingVisible(
