@@ -119,6 +119,23 @@ describe("buffered Telegram attachment delivery", () => {
     expect(attachment.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
   });
 
+  it("retries the durable Telegram source before associating the delivered message", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    vi.mocked(input.repos.files.rememberTelegramObservation)
+      .mockRejectedValueOnce(new Error("database temporarily unavailable"));
+    const attachment = imageAttachment(1, "picture.jpg", 100);
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(input.repos.files.rememberTelegramObservation).toHaveBeenCalledTimes(2);
+    expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(1);
+    const sourceWrite = vi.mocked(input.repos.files.rememberTelegramObservation).mock.invocationCallOrder.at(-1)!;
+    const messageWrite = vi.mocked(input.repos.files.setMessageId).mock.invocationCallOrder[0]!;
+    expect(sourceWrite).toBeLessThan(messageWrite);
+  });
+
   it("does not resend a media group when one delivery record fails", async () => {
     const api = fakeApi();
     const input = turnInput(api);
@@ -133,7 +150,7 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.sendDocument).not.toHaveBeenCalled();
     expect(first.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-1" });
     expect(second.telegramDelivery).toMatchObject({ messageId: 501, fileId: "photo-2" });
-    expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(2);
+    expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(3);
   });
 
   it("splits large albums to bound simultaneously buffered file bytes", async () => {

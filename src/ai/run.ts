@@ -1459,34 +1459,62 @@ async function rememberSentCreatedFileAttachment(
 ): Promise<void> {
   const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
   if (delivery) attachment.telegramDelivery = delivery;
-  await input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
-    displayName: attachment.name,
-    caption: attachment.caption ?? null,
-  });
   await rememberTelegramDeliverySource(input, attachment);
+  await retryTelegramDeliveryMetadataWrite(input, attachment, "message association", () =>
+    input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
+      displayName: attachment.name,
+      caption: attachment.caption ?? null,
+    }));
 }
 
 async function rememberTelegramDeliverySource(input: TurnInput, attachment: CreatedFileAttachment): Promise<void> {
   const delivery = attachment.telegramDelivery;
   if (!delivery?.fileId) return;
-  await input.repos.files.rememberTelegramObservation(attachment.fileId, telegramFileSource({
-    fileId: delivery.fileId,
-    fileUniqueId: delivery.fileUniqueId,
-    mimeType: attachment.type === "image"
-      ? attachment.delivery === "photo" ? "image/jpeg" : attachment.mimeType ?? null
-      : null,
-  }), {
-    direction: "outbound",
-    mediaKind: attachment.delivery === "photo" ? "photo" : "document",
-    telegramMessageId: delivery.messageId,
-    refs: delivery.refs?.length
-      ? delivery.refs
-      : [{
-        fileId: delivery.fileId,
-        fileUniqueId: delivery.fileUniqueId,
-        primary: true,
-      }],
-  });
+  await retryTelegramDeliveryMetadataWrite(input, attachment, "Telegram source", () =>
+    input.repos.files.rememberTelegramObservation(attachment.fileId, telegramFileSource({
+      fileId: delivery.fileId!,
+      fileUniqueId: delivery.fileUniqueId,
+      mimeType: attachment.type === "image"
+        ? attachment.delivery === "photo" ? "image/jpeg" : attachment.mimeType ?? null
+        : null,
+    }), {
+      direction: "outbound",
+      mediaKind: attachment.delivery === "photo" ? "photo" : "document",
+      telegramMessageId: delivery.messageId,
+      refs: delivery.refs?.length
+        ? delivery.refs
+        : [{
+          fileId: delivery.fileId!,
+          fileUniqueId: delivery.fileUniqueId,
+          primary: true,
+        }],
+    }));
+}
+
+async function retryTelegramDeliveryMetadataWrite(
+  input: TurnInput,
+  attachment: CreatedFileAttachment,
+  label: string,
+  write: () => Promise<unknown>,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await write();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) {
+        input.logger.warn(`retrying delivered attachment ${label} write`, {
+          threadId: input.thread.id,
+          fileId: attachment.fileId,
+          telegramMessageId: attachment.telegramDelivery?.messageId,
+          err: String(error),
+        });
+      }
+    }
+  }
+  throw lastError;
 }
 
 type SentTelegramPhotoSize = { file_id?: string; file_unique_id?: string; width?: number; height?: number; file_size?: number };

@@ -416,7 +416,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         if (winner.sandbox_id === info.sandboxId) {
           acquired = { mapping: winner, info };
         } else {
-          await this.removeRedundantSandbox(scope, info.sandboxId, winner.sandbox_id);
+          await this.preserveDiscoveredSandboxAfterMappingRace(scope, info, winner.sandbox_id);
         }
         continue;
       }
@@ -491,6 +491,30 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       sandboxId,
       winnerSandboxId,
       error: String(lastError),
+    });
+  }
+
+  private async preserveDiscoveredSandboxAfterMappingRace(
+    scope: SandboxScope,
+    sandbox: Pick<Awaited<ReturnType<E2BClient["getInfo"]>>, "sandboxId" | "state">,
+    winnerSandboxId: string,
+  ): Promise<void> {
+    let pauseError: unknown;
+    let paused = sandbox.state === "paused";
+    if (!paused) {
+      try {
+        const connection = await this.client.connect(sandbox.sandboxId, E2B_IDLE_PAUSE_MS);
+        paused = await connection.pause();
+      } catch (error) {
+        pauseError = error;
+      }
+    }
+    this.input.logger?.warn("preserved discovered E2B sandbox after ambiguous mapping race", {
+      ...scope,
+      sandboxId: sandbox.sandboxId,
+      winnerSandboxId,
+      paused,
+      ...(pauseError ? { error: String(pauseError) } : {}),
     });
   }
 
@@ -649,7 +673,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           });
         } else {
           const errorCode = sanitizeRestoreCode(result.error_code);
-          const errorDetail = sanitizeRestoreDetail(result.error_detail);
+          const errorDetail = sanitizeRestoreDetail(result.error_detail, this.input.config.BOT_TOKEN);
           await runControl(
             sandbox,
             `rm -f ${quoteShellToken(path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName))}`,
@@ -853,7 +877,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       status: "error",
       ref_id: lastRefId,
       error_code: candidates.length ? "file_unavailable" : "missing_telegram_reference",
-      error_detail: sanitizeRestoreDetail(lastError),
+      error_detail: sanitizeRestoreDetail(lastError, this.input.config.BOT_TOKEN),
     };
   }
 
@@ -1464,8 +1488,16 @@ function sanitizeRestoreCode(value: unknown): string {
   return normalized || "download_failed";
 }
 
-function sanitizeRestoreDetail(value: unknown): string {
-  const normalized = String(value ?? "file restoration failed")
+function sanitizeRestoreDetail(value: unknown, botToken?: string): string {
+  let detail = String(value ?? "file restoration failed");
+  const token = botToken?.trim();
+  if (token) {
+    const encoded = encodeURIComponent(token);
+    const variants = new Set([token, encoded, encoded.replace(/%[0-9A-F]{2}/g, (part) => part.toLowerCase())]);
+    for (const variant of variants) detail = detail.replaceAll(variant, "[redacted]");
+  }
+  const normalized = detail
+    .replace(/https?:\/\/api\.telegram\.org\/file\/bot[^/\s"']+/gi, "https://api.telegram.org/file/bot[redacted]")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
     .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[redacted]")
     .replace(/[\r\n]+/g, " ")

@@ -222,6 +222,63 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().inventoryCalls).toBe(2);
   });
 
+  it("redacts configured Telegram tokens from persisted restore diagnostics", async () => {
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      mimeType: "text/plain",
+      name: "secret-error.txt",
+      size: 7,
+      isInline: true,
+    });
+    const [telegramRef] = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "inbound",
+      mediaKind: "document",
+      refs: [{ fileId: "tg-secret-error", size: 7, primary: true }],
+    });
+    const leakedUrl = `https://api.telegram.org/file/bot${config.BOT_TOKEN}/documents/file.txt`;
+    const encodedToken = encodeURIComponent(config.BOT_TOKEN);
+    await runtime.dispose();
+    runtime = new ThreadE2BSandboxRuntimeManager({
+      config,
+      repos,
+      client,
+      downloadTelegramBytes: async () => {
+        throw new Error(`download failed at ${leakedUrl}; token=${encodedToken}`);
+      },
+    });
+
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "inbound",
+        mediaKind: "document",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    }]));
+
+    const indexText = await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`);
+    expect(indexText).not.toContain(config.BOT_TOKEN);
+    expect(indexText).not.toContain(encodedToken);
+    expect(indexText).toContain("[redacted]");
+    const records = await repos.sandboxFileRestores.listForSandbox(
+      config.E2B_DEPLOYMENT_ID,
+      client.onlySandbox().id,
+    );
+    expect(records[0]?.error_detail).not.toContain(config.BOT_TOKEN);
+    expect(records[0]?.error_detail).not.toContain(encodedToken);
+  });
+
   it("refreshes restored bytes when the logical file descriptor changes", async () => {
     const original = Buffer.from("old");
     const updated = Buffer.from("updated");
@@ -932,7 +989,7 @@ describe("thread E2B runtime manager", () => {
     }
   });
 
-  it("removes a discovered sandbox that loses the mapping race", async () => {
+  it("pauses and preserves a discovered sandbox that loses an ambiguous mapping race", async () => {
     const metadata = {
       app: "ai-tg-bot",
       deployment: config.E2B_DEPLOYMENT_ID,
@@ -955,9 +1012,11 @@ describe("thread E2B runtime manager", () => {
 
     await runtime.execute(commandRequest(userId, threadId));
 
-    expect(client.sandboxes.has(discovered.id)).toBe(false);
+    expect(client.sandboxes.has(discovered.id)).toBe(true);
+    expect(client.sandboxes.get(discovered.id)?.running).toBe(false);
+    expect(client.sandboxes.get(discovered.id)?.pauseCalls).toBe(1);
     expect(client.sandboxes.has(winnerId)).toBe(true);
-    expect(client.killCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
     await expect(repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId))
       .resolves.toMatchObject({ sandbox_id: winnerId });
   });
