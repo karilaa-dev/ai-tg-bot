@@ -233,6 +233,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         || mapping.sandbox_id !== request.sandboxId
         || mapping.user_id !== request.userId
       ) {
+        if (!mapping || mapping.sandbox_id !== request.sandboxId) {
+          await this.retireSandboxFileSources(scope, request.sandboxId);
+        }
         throw new Error("E2B file source does not belong to this Telegram thread");
       }
       let sandbox = state.connection?.id === request.sandboxId ? state.connection : undefined;
@@ -394,6 +397,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           break;
         } catch (error) {
           if (!isSandboxMissing(error)) throw error;
+          await this.retireSandboxFileSources(scope, mapping.sandbox_id);
           await repo.removeIfMatches(deploymentId, scope.threadId, mapping.sandbox_id);
           continue;
         }
@@ -515,6 +519,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       winnerSandboxId,
       paused,
       ...(pauseError ? { error: String(pauseError) } : {}),
+    });
+  }
+
+  private async retireSandboxFileSources(scope: SandboxScope, sandboxId: string): Promise<void> {
+    const removed = await this.input.repos.files.deleteE2BSourcesForSandbox(
+      this.input.config.E2B_DEPLOYMENT_ID,
+      sandboxId,
+    );
+    if (!removed) return;
+    this.input.logger?.info("retired stale E2B file sources", {
+      ...scope,
+      sandboxId,
+      sources: removed,
     });
   }
 

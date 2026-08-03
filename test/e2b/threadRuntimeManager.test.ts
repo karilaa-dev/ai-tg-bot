@@ -13,6 +13,7 @@ import {
   type E2BSandbox,
 } from "../../src/e2b/client.js";
 import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
+import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { deferred } from "../helpers/async.js";
@@ -631,6 +632,16 @@ describe("thread E2B runtime manager", () => {
     await runtime.execute(commandRequest(userId, threadId));
     const original = client.onlySandbox();
     original.files.set(`${E2B_FILE_SOURCES}/${hash}`, bytes);
+    await repos.files.rememberSource(stored.id, e2bFileSource(config, {
+      sandboxId: original.id,
+      fileId: stored.id,
+      sourceCanonicalPath: `${E2B_FILE_SOURCES}/${hash}`,
+      userId,
+      threadId,
+      size: bytes.length,
+      contentSha256: hash,
+      mimeType: stored.mime_type,
+    }));
     await runtime.execute(commandRequest(userId, threadId, [descriptor]));
 
     expect(client.telegramDownloadCalls).toBe(0);
@@ -643,6 +654,8 @@ describe("thread E2B runtime manager", () => {
 
     expect(client.telegramDownloadCalls).toBe(1);
     expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+    await expect(repos.files.listSources(stored.id)).resolves.toEqual([]);
+    await expect(repos.files.listRecoverableIds([stored.id])).resolves.toEqual([]);
   });
 
   it("accepts a Telegram-reencoded outbound photo as best-effort recovery", async () => {

@@ -369,6 +369,18 @@ export class FilesRepo {
     `);
   }
 
+  async deleteE2BSourcesForSandbox(connectionKey: string, sandboxId: string): Promise<number> {
+    const prefix = `${sandboxId}:`;
+    const deleted = await this.db.query<{ id: number }>(sql`
+      delete from file_sources
+      where transport = 'e2b'
+        and connection_key = ${connectionKey}
+        and substr(remote_key, 1, ${prefix.length}) = ${prefix}
+      returning id
+    `);
+    return deleted.length;
+  }
+
   async markSourceVerified(sourceId: number): Promise<void> {
     await this.db.execute(sql`update file_sources set last_verified_at = ${Date.now()} where id = ${sourceId}`);
   }
