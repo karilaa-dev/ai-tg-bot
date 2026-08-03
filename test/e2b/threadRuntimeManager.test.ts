@@ -288,6 +288,26 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().timeoutCalls).toContain(expectedWindowMs);
   });
 
+  it("does not repeatedly rotate a file-heavy sandbox when synchronization is cached", async () => {
+    const files: SandboxThreadFile[] = Array.from({ length: 40 }, (_, index) => ({
+      fileId: 4_000 + index,
+      messageId: null,
+      name: `${index}.txt`,
+      mimeType: "text/plain",
+      expectedSize: 1,
+      expectedSha256: null,
+      telegramRefs: [],
+    }));
+
+    await runtime.execute(commandRequest(userId, threadId, files));
+    const sandbox = client.onlySandbox();
+    const rotationsAfterFirstSync = sandbox.pauseCalls;
+    await runtime.execute(commandRequest(userId, threadId, files));
+
+    expect(sandbox.pauseCalls).toBe(rotationsAfterFirstSync);
+    expect(sandbox.inventoryCalls).toBe(1);
+  });
+
   it("preserves the primary synchronization error when directory sealing also fails", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();

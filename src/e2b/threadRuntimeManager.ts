@@ -321,8 +321,15 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     signal?: AbortSignal,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
+    const previousSync = state.threadFilesSync;
+    const filesRevision = threadFilesRevision(files);
+    const synchronizationCached = previousSync !== undefined
+      && previousSync.sandboxId === state.sandboxId
+      && previousSync.revision === filesRevision
+      && (previousSync.retryAt === undefined || Date.now() < previousSync.retryAt);
+    const projectedFileCount = synchronizationCached ? 0 : files.length;
     const restoreBatches = Math.ceil(
-      files.length / this.input.config.TELEGRAM_FILE_RESTORE_CONCURRENCY,
+      projectedFileCount / this.input.config.TELEGRAM_FILE_RESTORE_CONCURRENCY,
     );
     const projectedRestoreMs = Math.min(
       CONTINUOUS_ROTATE_MS,

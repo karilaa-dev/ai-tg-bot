@@ -36,6 +36,7 @@ const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
 const TG_MEDIA_GROUP_LIMIT = 10;
+const MAX_BUFFERED_MEDIA_GROUP_BYTES = 40 * 1024 * 1024;
 const TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const MIN_SPLIT_RATIO = 0.5;
 
@@ -1404,10 +1405,16 @@ function attachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAtt
   const batches: CreatedFileAttachment[][] = [];
   let index = 0;
   while (index < attachments.length) {
-    const remaining = attachments.length - index;
-    const batchSize = remaining === TG_MEDIA_GROUP_LIMIT + 1
-      ? TG_MEDIA_GROUP_LIMIT - 1
-      : Math.min(remaining, TG_MEDIA_GROUP_LIMIT);
+    let batchSize = 0;
+    let bufferedBytes = 0;
+    while (batchSize < TG_MEDIA_GROUP_LIMIT && index + batchSize < attachments.length) {
+      const nextSize = attachments[index + batchSize]!.size;
+      if (batchSize > 0 && bufferedBytes + nextSize > MAX_BUFFERED_MEDIA_GROUP_BYTES) break;
+      bufferedBytes += nextSize;
+      batchSize += 1;
+    }
+    const remainingAfterBatch = attachments.length - index - batchSize;
+    if (remainingAfterBatch === 1 && batchSize > 2) batchSize -= 1;
     batches.push(attachments.slice(index, index + batchSize));
     index += batchSize;
   }

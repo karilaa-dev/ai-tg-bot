@@ -119,6 +119,18 @@ describe("buffered Telegram attachment delivery", () => {
     expect(input.repos.files.setMessageId).toHaveBeenCalledTimes(2);
   });
 
+  it("splits large albums to bound simultaneously buffered file bytes", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const attachments = Array.from({ length: 4 }, (_, index) =>
+      imageAttachment(index + 1, `${index + 1}.jpg`, 20 * 1024 * 1024));
+
+    await sendCreatedFileAttachments(input, { id: 99 } as never, attachments);
+
+    expect(api.sendMediaGroup).toHaveBeenCalledTimes(2);
+    expect(api.sendMediaGroup.mock.calls.map((call) => call[1].length)).toEqual([2, 2]);
+  });
+
   it("loads a sandbox attachment only for its send and releases the buffer afterward", async () => {
     const api = fakeApi();
     const input = turnInput(api);
