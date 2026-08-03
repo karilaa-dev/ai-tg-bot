@@ -122,6 +122,10 @@ describe("thread E2B runtime manager", () => {
         status: "available",
         restored_size: 5,
       }]);
+    expect(sandbox.writeFileCalls.some((call) =>
+      call.user === "root"
+      && call.requestTimeoutMs === config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS))
+      .toBe(true);
   });
 
   it("records a partial restore failure without surfacing failure details in the command result", async () => {
@@ -580,7 +584,11 @@ describe("thread E2B runtime manager", () => {
       maxBytes: 100,
     })).resolves.toEqual(Buffer.from("version one"));
     expect(sandbox.fileInfoCalls).toContainEqual({ path: first.sourceCanonicalPath, user: "root" });
-    expect(sandbox.readFileCalls).toContainEqual({ path: first.sourceCanonicalPath, user: "root" });
+    expect(sandbox.readFileCalls).toContainEqual({
+      path: first.sourceCanonicalPath,
+      user: "root",
+      requestTimeoutMs: config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+    });
   });
 
   it("reuses an outbound artifact locally and falls back to Telegram after sandbox loss", async () => {
@@ -1151,6 +1159,7 @@ class FakeSandbox implements E2BSandbox {
   readonly files = new Map<string, Buffer>();
   readonly controlCommands: string[] = [];
   readonly timeoutCalls: number[] = [];
+  readonly writeFileCalls: Array<{ path: string; user: string; requestTimeoutMs?: number }> = [];
   timeoutAttempts = 0;
   startedAt = new Date();
   running = true;
@@ -1163,7 +1172,7 @@ class FakeSandbox implements E2BSandbox {
   nextWaitError?: unknown;
   nextSetTimeoutError?: unknown;
   readonly readFilePaths: string[] = [];
-  readonly readFileCalls: Array<{ path: string; user: string }> = [];
+  readonly readFileCalls: Array<{ path: string; user: string; requestTimeoutMs?: number }> = [];
   readonly fileInfoCalls: Array<{ path: string; user: string }> = [];
   nextCommandGate?: {
     started: ReturnType<typeof deferred<void>>;
@@ -1277,16 +1286,28 @@ class FakeSandbox implements E2BSandbox {
     };
   }
 
-  async writeFile(filePath: string, data: string | Buffer | Uint8Array): Promise<void> {
+  async writeFile(
+    filePath: string,
+    data: string | Buffer | Uint8Array,
+    user = "root",
+    _signal?: AbortSignal,
+    requestTimeoutMs?: number,
+  ): Promise<void> {
+    this.writeFileCalls.push({ path: filePath, user, requestTimeoutMs });
     if (this.failIndexWrite && filePath.includes("/index-")) {
       throw new Error("index write failed");
     }
     this.files.set(filePath, Buffer.from(data));
   }
 
-  async readFile(filePath: string, user = "user"): Promise<Uint8Array> {
+  async readFile(
+    filePath: string,
+    user = "user",
+    _signal?: AbortSignal,
+    requestTimeoutMs?: number,
+  ): Promise<Uint8Array> {
     this.readFilePaths.push(filePath);
-    this.readFileCalls.push({ path: filePath, user });
+    this.readFileCalls.push({ path: filePath, user, requestTimeoutMs });
     const bytes = this.files.get(filePath);
     if (!bytes) throw new Error("not found");
     return bytes;

@@ -845,7 +845,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         }
         const stagingPath = path.posix.join(E2B_CONTROL_TMP, `restore-${randomUUID()}`);
         const destination = path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName);
-        await sandbox.writeFile(stagingPath, bytes, "root", transferSignal);
+        await sandbox.writeFile(
+          stagingPath,
+          bytes,
+          "root",
+          transferSignal,
+          this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+        );
         try {
           await runControl(
             sandbox,
@@ -1078,7 +1084,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const info = await sandbox.fileInfo(canonicalPath, realpathUser, signal);
     if (info.type !== FileType.FILE || info.symlinkTarget) throw new Error("path is not a regular file");
     if (info.size > maxBytes) throw new Error("file is larger than the allowed limit");
-    const bytes = Buffer.from(await sandbox.readFile(canonicalPath, realpathUser, signal));
+    const bytes = Buffer.from(await sandbox.readFile(
+      canonicalPath,
+      realpathUser,
+      signal,
+      this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+    ));
     if (bytes.length > maxBytes) throw new Error("file is larger than the allowed limit");
     const after = await sandbox.fileInfo(canonicalPath, realpathUser, signal);
     if (after.type !== FileType.FILE || after.symlinkTarget || after.size !== bytes.length) {
@@ -1097,7 +1108,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     try {
       const info = await sandbox.fileInfo(destination, "root", signal);
       if (info.type === FileType.FILE && !info.symlinkTarget && info.size === bytes.length) {
-        const existing = Buffer.from(await sandbox.readFile(destination, "root", signal));
+        const existing = Buffer.from(await sandbox.readFile(
+          destination,
+          "root",
+          signal,
+          this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+        ));
         if (sha256Hex(existing) === contentSha256) return destination;
       }
     } catch {
@@ -1105,7 +1121,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
 
     const stagingPath = path.posix.join(E2B_CONTROL_TMP, `source-${randomUUID()}`);
-    await sandbox.writeFile(stagingPath, bytes, "root", signal);
+    await sandbox.writeFile(
+      stagingPath,
+      bytes,
+      "root",
+      signal,
+      this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+    );
     try {
       await runControl(
         sandbox,

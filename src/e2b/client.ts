@@ -41,8 +41,14 @@ export interface E2BSandbox {
       signal?: AbortSignal;
     },
   ): Promise<E2BCommandHandle>;
-  writeFile(path: string, data: string | Buffer | Uint8Array, user?: string, signal?: AbortSignal): Promise<void>;
-  readFile(path: string, user?: string, signal?: AbortSignal): Promise<Uint8Array>;
+  writeFile(
+    path: string,
+    data: string | Buffer | Uint8Array,
+    user?: string,
+    signal?: AbortSignal,
+    requestTimeoutMs?: number,
+  ): Promise<void>;
+  readFile(path: string, user?: string, signal?: AbortSignal, requestTimeoutMs?: number): Promise<Uint8Array>;
   readText(path: string, user?: string, signal?: AbortSignal): Promise<string>;
   fileInfo(path: string, user?: string, signal?: AbortSignal): Promise<EntryInfo>;
   fileExists(path: string, user?: string, signal?: AbortSignal): Promise<boolean>;
@@ -166,21 +172,27 @@ class SdkE2BSandbox implements E2BSandbox {
     data: string | Buffer | Uint8Array,
     user = "root",
     signal?: AbortSignal,
+    requestTimeoutMs = this.config.E2B_REQUEST_TIMEOUT_MS,
   ): Promise<void> {
     const payload = typeof data === "string" ? data : exactArrayBuffer(data);
     await this.sandbox.files.write(path, payload, {
       user,
       signal,
-      requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
+      requestTimeoutMs,
     });
   }
 
-  readFile(path: string, user = "user", signal?: AbortSignal): Promise<Uint8Array> {
+  readFile(
+    path: string,
+    user = "user",
+    signal?: AbortSignal,
+    requestTimeoutMs = this.config.E2B_REQUEST_TIMEOUT_MS,
+  ): Promise<Uint8Array> {
     return this.sandbox.files.read(path, {
       format: "bytes",
       user,
       signal,
-      requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
+      requestTimeoutMs,
     });
   }
 

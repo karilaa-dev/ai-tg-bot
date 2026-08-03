@@ -239,6 +239,42 @@ describe("BrowserUseRuntimeManager", () => {
     await expect(later).resolves.toMatchObject({ tabs: [expect.any(Object)] });
   });
 
+  it("retains user state while a browser operation is queued behind endTurn", async () => {
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    await browser.open("https://example.com/first");
+    const stopStarted = deferred<void>();
+    const releaseStop = deferred<void>();
+    fixture.api.stopBrowser.mockImplementationOnce(async (id: string) => {
+      stopStarted.resolve();
+      await releaseStop.promise;
+      return stoppedBrowser(id);
+    });
+    const createStarted = deferred<void>();
+    const releaseCreate = deferred<void>();
+    fixture.api.createBrowser.mockImplementationOnce(async (input: { timeout: number }) => {
+      createStarted.resolve();
+      await releaseCreate.promise;
+      return activeBrowser("123e4567-e89b-12d3-a456-426614174777", input.timeout);
+    });
+
+    const closing = browser.closeSession();
+    await stopStarted.promise;
+    const ending = fixture.manager.endTurn(7, 10);
+    const reopening = browser.open("https://example.com/second");
+    releaseStop.resolve();
+    await createStarted.promise;
+    await ending;
+    releaseCreate.resolve();
+
+    await expect(closing).resolves.toMatchObject({ closed: true });
+    await expect(reopening).resolves.toMatchObject({ url: "https://example.com/second" });
+    await expect(fixture.manager.forThread(7, 10).listTabs()).resolves.toMatchObject({
+      tabs: [expect.objectContaining({ url: "https://example.com/second" })],
+    });
+  });
+
   async function runtimeFixture(
     overrides: Parameters<typeof loadTestConfig>[0] = {},
     storageStateUnavailable = false,
@@ -284,27 +320,39 @@ function fakeApi() {
     getProfile: vi.fn(async () => ({ id: PROFILE_ID, updatedAt: `2026-08-02T00:00:0${profileRevision}.000Z` })),
     createBrowser: vi.fn(async (input: { timeout: number; profileId: string }) => {
       session += 1;
-      return {
-        id: `123e4567-e89b-12d3-a456-${String(session).padStart(12, "0")}`,
-        status: "active" as const,
-        timeoutAt: new Date(Date.now() + input.timeout * 60_000).toISOString(),
-        startedAt: new Date().toISOString(),
-        cdpUrl: `https://session-${session}.cdp.browser-use.test`,
-      };
+      return activeBrowser(
+        `123e4567-e89b-12d3-a456-${String(session).padStart(12, "0")}`,
+        input.timeout,
+        `https://session-${session}.cdp.browser-use.test`,
+      );
     }),
     stopBrowser: vi.fn(async (id: string) => {
       profileRevision += 1;
-      return {
-        id,
-        status: "stopped" as const,
-        timeoutAt: new Date().toISOString(),
-        startedAt: new Date().toISOString(),
-        cdpUrl: null,
-        proxyUsedMb: "0",
-        proxyCost: "0",
-      };
+      return stoppedBrowser(id);
     }),
     listDownloads: vi.fn(async () => ({ files: [], hasMore: false })),
+  };
+}
+
+function activeBrowser(id: string, timeout: number, cdpUrl = "https://session.cdp.browser-use.test") {
+  return {
+    id,
+    status: "active" as const,
+    timeoutAt: new Date(Date.now() + timeout * 60_000).toISOString(),
+    startedAt: new Date().toISOString(),
+    cdpUrl,
+  };
+}
+
+function stoppedBrowser(id: string) {
+  return {
+    id,
+    status: "stopped" as const,
+    timeoutAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    cdpUrl: null,
+    proxyUsedMb: "0",
+    proxyCost: "0",
   };
 }
 

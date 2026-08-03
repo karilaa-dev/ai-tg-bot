@@ -160,7 +160,6 @@ export class BrowserUseRuntimeManager {
       }
       this.scheduleCleanup(state);
     });
-    if (!state.session && !state.activeTurns.size) this.states.delete(userId);
   }
 
   forThread(userId: number, threadId: number): BrowserUseToolRuntime {
@@ -201,7 +200,18 @@ export class BrowserUseRuntimeManager {
   private state(userId: number): UserState {
     let state = this.states.get(userId);
     if (!state) {
-      state = { userId, activeTurns: new Map(), lock: new AsyncLock() };
+      const lock = new AsyncLock(() => {
+        const current = this.states.get(userId);
+        if (
+          current?.lock === lock
+          && !current.session
+          && !current.sessionPromise
+          && !current.activeTurns.size
+        ) {
+          this.states.delete(userId);
+        }
+      });
+      state = { userId, activeTurns: new Map(), lock };
       this.states.set(userId, state);
     }
     return state;
@@ -1069,7 +1079,12 @@ function delay(milliseconds: number): Promise<void> {
 class AsyncLock {
   private tail: Promise<void> = Promise.resolve();
 
+  private pending = 0;
+
+  constructor(private readonly onIdle?: () => void) {}
+
   async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    this.pending += 1;
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
     const previous = this.tail;
@@ -1080,6 +1095,8 @@ class AsyncLock {
       return await operation();
     } finally {
       release();
+      this.pending -= 1;
+      if (this.pending === 0) this.onIdle?.();
     }
   }
 }
