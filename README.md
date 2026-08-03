@@ -136,7 +136,13 @@ Keep the access key only in `.env`. It is redacted from client errors and never 
 
 ## Public websites
 
-The agent starts an HTTP server with `bash`, binds it to `0.0.0.0`, and then calls:
+The agent starts an HTTP server with `bash`, binds it to `0.0.0.0`, and detaches all inherited input/output so command capture can finish, for example:
+
+```bash
+nohup python3 -m http.server 3000 --bind 0.0.0.0 </dev/null >server.log 2>&1 &
+```
+
+It then calls:
 
 ```json
 {"port": 3000, "path": "/"}

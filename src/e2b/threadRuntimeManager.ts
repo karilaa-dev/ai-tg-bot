@@ -48,6 +48,8 @@ type RuntimeState = {
   tail: Promise<void>;
   leases: number;
   websiteSandboxId?: string;
+  websiteIdleUntil?: number;
+  websitePublishedPending?: boolean;
   threadFilesSync?: {
     sandboxId: string;
     revision: string;
@@ -145,9 +147,25 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         state.leases = Math.max(0, state.leases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
-        const websitePublished = state.websiteSandboxId !== undefined
+        const now = Date.now();
+        const websiteSandboxMatches = state.websiteSandboxId !== undefined
           && state.websiteSandboxId === state.sandboxId;
-        const timeoutMs = websitePublished ? E2B_WEBSITE_IDLE_PAUSE_MS : E2B_IDLE_PAUSE_MS;
+        if (websiteSandboxMatches && state.websitePublishedPending) {
+          state.websiteIdleUntil = now + E2B_WEBSITE_IDLE_PAUSE_MS;
+          state.websitePublishedPending = false;
+        }
+        const websiteRemainingMs = websiteSandboxMatches && state.websiteIdleUntil !== undefined
+          ? Math.max(0, state.websiteIdleUntil - now)
+          : 0;
+        const websitePublished = websiteRemainingMs > 0;
+        const timeoutMs = websitePublished
+          ? Math.max(E2B_IDLE_PAUSE_MS, websiteRemainingMs)
+          : E2B_IDLE_PAUSE_MS;
+        if (!websitePublished) {
+          state.websiteSandboxId = undefined;
+          state.websiteIdleUntil = undefined;
+          state.websitePublishedPending = false;
+        }
         void this.enqueue(scope, undefined, async () => {
           if (!state.connection) return;
           await state.connection.setTimeout(timeoutMs);
@@ -267,6 +285,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       const url = new URL(sitePath, `https://${prepared.sandbox.getHost(request.port)}`).toString();
       await verifyWebsite(url, this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal);
       state.websiteSandboxId = prepared.sandbox.id;
+      state.websitePublishedPending = true;
       this.input.logger?.info("E2B website published", {
         ...scope,
         sandboxId: prepared.sandbox.id,
@@ -676,6 +695,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         const exactRepresentation = candidate.telegramSize !== null
           && item.file.expectedSize !== null
           && candidate.telegramSize === item.file.expectedSize;
+        // Telegram may re-encode outbound photos. When the recorded Telegram size differs
+        // from the original, accept that primary representation as best-effort recovery;
+        // INDEX.json and restore diagnostics retain the bytes' actual size and hash.
         if (exactRepresentation && item.file.expectedSha256 && sha256 !== item.file.expectedSha256) {
           throw new Error("Telegram file hash did not match the recorded representation");
         }
@@ -820,7 +842,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const stderrPath = path.posix.join(runRoot, "stderr");
     await runControl(
       sandbox,
-      `mkdir -p ${quoteShellToken(runRoot)} && chown user ${quoteShellToken(runRoot)} && chmod 700 ${quoteShellToken(runRoot)}`,
+      `umask 077 && mkdir -p ${quoteShellToken(runRoot)} && chown user ${quoteShellToken(runRoot)} && chmod 700 ${quoteShellToken(runRoot)}`,
       this.input.config.E2B_REQUEST_TIMEOUT_MS,
       request.signal,
     );
@@ -966,6 +988,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   ): void {
     if (state.sandboxId !== sandbox.id) {
       state.websiteSandboxId = undefined;
+      state.websiteIdleUntil = undefined;
+      state.websitePublishedPending = false;
       state.threadFilesSync = undefined;
     }
     state.connection = sandbox;

@@ -6,6 +6,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import {
+  E2B_IDLE_PAUSE_MS,
   E2B_WEBSITE_IDLE_PAUSE_MS,
   type E2BClient,
   type E2BCommandHandle,
@@ -40,6 +41,7 @@ describe("thread E2B runtime manager", () => {
 
   afterEach(async () => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     await runtime.dispose();
     await db.destroy();
   });
@@ -174,7 +176,9 @@ describe("thread E2B runtime manager", () => {
     }]);
   });
 
-  it("uses the website pause delay only after a verified explicit publication", async () => {
+  it("preserves the publication window without resetting it after later turns", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
     const lease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
@@ -189,11 +193,20 @@ describe("thread E2B runtime manager", () => {
       pausesAfterMinutes: 15,
     });
 
+    now += 5 * 60_000;
     const followUpLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
     followUpLease.release();
     await vi.waitFor(() => {
-      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
+      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
+    });
+
+    now += 8 * 60_000;
+    const lateFollowUpLease = runtime.acquireActivityLease(userId, threadId);
+    await runtime.execute(commandRequest(userId, threadId));
+    lateFollowUpLease.release();
+    await vi.waitFor(() => {
+      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_IDLE_PAUSE_MS);
     });
   });
 
@@ -285,6 +298,55 @@ describe("thread E2B runtime manager", () => {
 
     expect(client.telegramDownloadCalls).toBe(1);
     expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+  });
+
+  it("accepts a Telegram-reencoded outbound photo as best-effort recovery", async () => {
+    const original = Buffer.from("original outbound photo bytes");
+    const recovered = Buffer.from("telegram photo");
+    const recoveredHash = createHash("sha256").update(recovered).digest("hex");
+    const stored = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "image",
+      contentSha256: createHash("sha256").update(original).digest("hex"),
+      mimeType: "image/jpeg",
+      name: "photo.jpg",
+      size: original.length,
+      isInline: false,
+    });
+    const [telegramRef] = await repos.files.rememberTelegramFileRefs(stored.id, {
+      direction: "outbound",
+      mediaKind: "photo",
+      refs: [{ fileId: "tg-photo", size: recovered.length, primary: true }],
+    });
+    client.telegramFiles.set("tg-photo", recovered);
+    await runtime.execute(commandRequest(userId, threadId, [{
+      fileId: stored.id,
+      messageId: null,
+      name: stored.name,
+      mimeType: stored.mime_type,
+      expectedSize: stored.size,
+      expectedSha256: stored.content_sha256,
+      telegramRefs: [{
+        id: telegramRef!.id,
+        telegramFileId: telegramRef!.telegram_file_id,
+        telegramSize: telegramRef!.telegram_size,
+        direction: "outbound",
+        mediaKind: "photo",
+        isPrimary: true,
+        lastSeenAt: telegramRef!.last_seen_at,
+      }],
+    }]));
+
+    const sandbox = client.onlySandbox();
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--photo.jpg`)).toEqual(recovered);
+    const index = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(index.files[0]).toMatchObject({
+      file_id: stored.id,
+      status: "available",
+      size: recovered.length,
+      sha256: recoveredHash,
+    });
   });
 
   it("uses conservative attachment paths for hostile Telegram names", async () => {

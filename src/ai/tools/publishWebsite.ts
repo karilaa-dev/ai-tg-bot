@@ -6,7 +6,7 @@ export function createPublishWebsiteTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Publish an HTTP server already running persistently in this thread's E2B sandbox and bound to 0.0.0.0. The returned HTTPS URL is public, and the result reports when the sandbox will pause; publishing again explicitly resumes it.",
+      "Publish an HTTP server already running persistently in this thread's E2B sandbox and bound to 0.0.0.0. Start it through Bash with stdin and output detached (for example: nohup command </dev/null >server.log 2>&1 &), serve only its dedicated site directory, then call this tool. The returned HTTPS URL is public, and the result reports when the sandbox will pause; publishing again explicitly resumes it.",
     inputSchema: z.object({
       port: z.number().int().min(1024).max(65_535),
       path: z.string().max(2048).default("/"),

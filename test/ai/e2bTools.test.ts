@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { appendPublishedWebsiteNotice } from "../../src/ai/run.js";
+import { createBashTool } from "../../src/ai/tools/bash.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
 import { loadTestConfig } from "../../src/config.js";
 import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
 
 describe("E2B-backed agent tools", () => {
+  it("tells the model how to detach long-lived background processes", () => {
+    const description = createBashTool(buildInput(fakeRuntime())).description;
+
+    expect(description).toContain("nohup command </dev/null >server.log 2>&1 &");
+    expect(description).toContain("inherited output pipes");
+  });
+
   it("publishes through the explicit tool and registers the final-answer notice", async () => {
     const published = {
       sandboxId: "sandbox-1",
@@ -17,6 +25,9 @@ describe("E2B-backed agent tools", () => {
     runtime.publishWebsite = vi.fn(async () => published);
     const register = vi.fn();
     const tool = createPublishWebsiteTool(buildInput(runtime, register));
+
+    expect(tool.description).toContain("nohup command </dev/null >server.log 2>&1 &");
+    expect(tool.description).toContain("dedicated site directory");
 
     const result = await tool.execute({ port: 3000, path: "/" });
 
