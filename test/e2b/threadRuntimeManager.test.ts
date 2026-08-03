@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { TimeoutError } from "e2b";
+import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../src/config.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -109,6 +109,9 @@ describe("thread E2B runtime manager", () => {
       .toBe(true);
     expect(sandbox.controlCommands.some((command) =>
       command.includes("chmod 555 '/home/user/telegram-files'")))
+      .toBe(true);
+    expect(sandbox.controlCommands.some((command) =>
+      command.includes("chown root '/home/user/telegram-files'")))
       .toBe(true);
     expect(await repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId))
       .toMatchObject({ sandbox_id: sandbox.id, thread_id: threadId, user_id: userId });
@@ -737,6 +740,23 @@ describe("thread E2B runtime manager", () => {
     }
   });
 
+  it("keeps the sandbox mapping when a transient error merely mentions 404", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandboxId = client.onlySandbox().id;
+    await runtime.dispose();
+    runtime = createRuntime();
+    client.nextGetInfoError = new Error("gateway request failed after unrelated /404 route");
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .rejects.toThrow("unrelated /404 route");
+    await expect(repos.threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId))
+      .resolves.toMatchObject({ sandbox_id: sandboxId });
+    expect(client.createCalls).toBe(1);
+
+    await expect(runtime.execute(commandRequest(userId, threadId))).resolves.toMatchObject({ exitCode: 0 });
+    expect(client.onlySandbox().id).toBe(sandboxId);
+  });
+
   function createRuntime(): ThreadE2BSandboxRuntimeManager {
     return new ThreadE2BSandboxRuntimeManager({
       config,
@@ -778,6 +798,7 @@ class FakeClient implements E2BClient {
   createCalls = 0;
   connectCalls = 0;
   killCalls = 0;
+  nextGetInfoError?: unknown;
   nextCreateGate?: {
     started: ReturnType<typeof deferred<void>>;
     release: ReturnType<typeof deferred<void>>;
@@ -795,8 +816,13 @@ class FakeClient implements E2BClient {
   }
 
   async getInfo(sandboxId: string) {
+    if (this.nextGetInfoError) {
+      const error = this.nextGetInfoError;
+      this.nextGetInfoError = undefined;
+      throw error;
+    }
     const sandbox = this.sandboxes.get(sandboxId);
-    if (!sandbox) throw new Error("404 not found");
+    if (!sandbox) throw new SandboxNotFoundError(`Sandbox ${sandboxId} not found`);
     return sandbox.info();
   }
 
@@ -819,7 +845,7 @@ class FakeClient implements E2BClient {
   async connect(sandboxId: string): Promise<E2BSandbox> {
     this.connectCalls += 1;
     const sandbox = this.sandboxes.get(sandboxId);
-    if (!sandbox) throw new Error("404 not found");
+    if (!sandbox) throw new SandboxNotFoundError(`Sandbox ${sandboxId} not found`);
     sandbox.running = true;
     return sandbox;
   }

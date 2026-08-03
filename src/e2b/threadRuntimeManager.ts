@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { TimeoutError } from "e2b";
+import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { Api } from "grammy";
 import type { AppConfig } from "../config.js";
@@ -519,6 +519,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       sandboxName: string;
     }> = [];
 
+    // ensureLayout keeps this directory root-owned. Mode 0755 lets the agent read
+    // and traverse it but grants write permission only to root during reconciliation.
     await runControl(
       sandbox,
       `chmod 755 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
@@ -1448,7 +1450,7 @@ function truncateUtf8(bytes: Buffer, maxChars: number): { text: string; truncate
 }
 
 function isSandboxMissing(error: unknown): boolean {
-  return /not.?found|404|does not exist|no such sandbox/i.test(String(error));
+  return error instanceof SandboxNotFoundError;
 }
 
 function validateWebsitePort(port: number): void {

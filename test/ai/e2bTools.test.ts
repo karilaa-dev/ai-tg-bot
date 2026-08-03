@@ -12,6 +12,8 @@ describe("E2B-backed agent tools", () => {
 
     expect(description).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(description).toContain("inherited output pipes");
+    expect(description).toContain("Bind local or diagnostic services to 127.0.0.1");
+    expect(description).toContain("next action is publish_website");
   });
 
   it("holds sandbox activity while exporting a created file", () => {

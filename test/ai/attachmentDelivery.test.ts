@@ -73,6 +73,7 @@ describe("buffered Telegram attachment delivery", () => {
     const input = turnInput(api);
     const first = imageAttachment(1, "first.jpg", 100);
     const second = imageAttachment(2, "second.jpg", 200);
+    vi.mocked(input.repos.files.get).mockImplementation(async (fileId) => ({ id: fileId } as never));
 
     await sendFinal(input, "", "", 0, [first, second]);
 
@@ -86,6 +87,7 @@ describe("buffered Telegram attachment delivery", () => {
         ],
       },
     }));
+    expect(input.repos.files.deleteFile).toHaveBeenCalledTimes(2);
   });
 
   it("does not resend a photo when post-delivery bookkeeping fails", async () => {

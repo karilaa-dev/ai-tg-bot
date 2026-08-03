@@ -120,7 +120,7 @@ TELEGRAM_FILE_RESTORE_CONCURRENCY=4
 
 Use a distinct `E2B_DEPLOYMENT_ID` for each deployment sharing an E2B account. Do not change it casually: it is part of sandbox ownership and recovery.
 
-The bot creates secured sandboxes with public port traffic and internet access enabled, timeout action `pause`, memory preservation enabled, and automatic resume disabled.
+The bot creates secured sandboxes with public port traffic and internet access enabled, timeout action `pause`, memory preservation enabled, and automatic resume disabled. E2B's public-traffic setting is selected at sandbox creation and remains enabled so a persistent thread sandbox can later publish a requested site without destructive recreation. Agent guidance requires ordinary local services to bind to `127.0.0.1`; only an explicitly requested website may bind to `0.0.0.0` and proceed through `publish_website`.
 
 ## Browser Use Cloud configuration
 

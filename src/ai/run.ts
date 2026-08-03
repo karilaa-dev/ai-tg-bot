@@ -1017,10 +1017,18 @@ async function refreshFinalThinkingVisible(
     elapsedMs,
     t: input.t,
   });
-  const messageId = existingMessageIds.find((id) => id > 0);
-  if (messageId && messages.length === 1) {
-    const edited = await editFinalThinkingVisible(input, messageId, messages[0]!);
-    if (edited) return existingMessageIds;
+  const existing = existingMessageIds.filter((id) => id > 0);
+  if (existing.length) {
+    if (existing.length === 1 && messages.length === 1) {
+      await editFinalThinkingVisible(input, existing[0]!, messages[0]!);
+    } else {
+      input.logger.debug("skipping multipart final-thinking refresh to avoid duplicate messages", {
+        threadId: input.thread.id,
+        existingParts: existing.length,
+        updatedParts: messages.length,
+      });
+    }
+    return existingMessageIds;
   }
   const sent = await sendFinalThinkingVisible(input, visibleThinking, elapsedMs);
   return [...existingMessageIds, ...sent];
@@ -1053,7 +1061,7 @@ async function editFinalThinkingVisible(
       });
     }
   }
-  input.logger.warn("failed to edit stale final thinking; sending corrected thinking separately", {
+  input.logger.warn("failed to edit stale final thinking; leaving the existing message unchanged", {
     threadId: input.thread.id,
     telegramMessageId: messageId,
   });
@@ -1120,6 +1128,7 @@ async function sendGeneratedImageAttachmentsEarly(
         for (const attachment of batch) {
           attachment.telegramDeliveryUnknown = true;
           releaseAttachmentData(attachment);
+          await removeUnresolvableUndeliveredAttachment(input, attachment);
         }
       }
       input.logger.warn(definitive
@@ -1212,6 +1221,7 @@ async function sendAttachmentBatch(
         for (const attachment of ready) {
           attachment.telegramDeliveryUnknown = true;
           releaseAttachmentData(attachment);
+          await removeUnresolvableUndeliveredAttachment(input, attachment);
         }
         input.logger.warn(`${strategy.label} media group delivery outcome is unknown; not retrying`, {
           threadId: input.thread.id,
@@ -1314,6 +1324,7 @@ async function sendOneBufferedAttachment(
       name: attachment.name,
       err: String(failure),
     });
+    await removeUnresolvableUndeliveredAttachment(input, attachment);
     return;
   }
   if (strategy === photoSendStrategy) {
@@ -1355,6 +1366,7 @@ async function sendOneBufferedAttachment(
       name: attachment.name,
       err: String(failure),
     });
+    await removeUnresolvableUndeliveredAttachment(input, attachment);
     return;
   }
   input.logger.warn(`failed to send ${strategy.label}`, {

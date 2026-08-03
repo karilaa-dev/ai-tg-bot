@@ -27,7 +27,7 @@ export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace, while synchronized Telegram files under /home/user/telegram-files are read-only. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
+      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace, while synchronized Telegram files under /home/user/telegram-files are read-only. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Bind local or diagnostic services to 127.0.0.1; bind to 0.0.0.0 only for a user-requested website whose next action is publish_website. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
