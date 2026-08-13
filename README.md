@@ -147,6 +147,7 @@ SOURCE_BOT_TOKEN=$(node --env-file=.env -e 'const v=process.env.BOT_TOKEN; if (!
 SOURCE_APP_UID=$(node --env-file=.env -e 'const v=process.env.APP_UID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_UID must be numeric"); process.stdout.write(v)')
 SOURCE_APP_GID=$(node --env-file=.env -e 'const v=process.env.APP_GID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_GID must be numeric"); process.stdout.write(v)')
 SOURCE_E2B_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.E2B_DEPLOYMENT_ID||process.env.OPEN_SANDBOX_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("sandbox deployment ID is invalid"); process.stdout.write(v)')
+SOURCE_BROWSER_USE_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.BROWSER_USE_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("Browser Use deployment ID is invalid"); process.stdout.write(v)')
 
 docker run --rm \
   --user "${SOURCE_APP_UID}:${SOURCE_APP_GID}" \
@@ -155,6 +156,7 @@ docker run --rm \
   -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
   -e "BOT_TOKEN=${SOURCE_BOT_TOKEN}" \
   -e "E2B_DEPLOYMENT_ID=${SOURCE_E2B_DEPLOYMENT_ID}" \
+  -e "BROWSER_USE_DEPLOYMENT_ID=${SOURCE_BROWSER_USE_DEPLOYMENT_ID}" \
   -e PI_CODING_AGENT_DIR=/app/data/pi \
   --entrypoint node \
   ai-tg-bot-upgrade-audit \
@@ -166,7 +168,8 @@ schema. Running it as the source application UID keeps the mode-0600 manifest re
 the Pi volume. It fails on malformed Telegram locators, unsafe PostgreSQL sequences, missing
 Pi sessions, or unsafe Pi runtime state files. Its manifest contains counts and SHA-256
 fingerprints—including the bot account identity and any Pi `auth.json`, `models.json`, or
-`settings.json`—not chat text, credentials, or raw Telegram identifiers.
+`settings.json`—not chat text, credentials, or raw Telegram identifiers. Database rows are
+read in bounded batches so the audit does not load the full chat or document corpus at once.
 
 Create the two transfer artifacts while the bot remains stopped:
 
@@ -197,6 +200,7 @@ DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
 PI_CODING_AGENT_DIR=/app/data/pi
 UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
 E2B_DEPLOYMENT_ID=<source E2B_DEPLOYMENT_ID, or old OPEN_SANDBOX_DEPLOYMENT_ID>
+BROWSER_USE_DEPLOYMENT_ID=<source BROWSER_USE_DEPLOYMENT_ID, default ai-tg-bot>
 APP_UID=<source APP_UID, default 1000>
 APP_GID=<source APP_GID, default 1000>
 ```
@@ -207,10 +211,10 @@ other legacy OpenSandbox variables or mounts. Ensure
 `E2B_TEMPLATE=ai-tg-bot-tools:production` exists before deployment.
 
 At first startup, the bot migrates the restored database transactionally, requires exact
-membership for pre-existing datasets (including any E2B thread mappings), verifies every
-baseline record and Telegram locator, checks the configured bot and E2B deployment identities
-and Pi runtime state, verifies the original byte prefix of every referenced Pi JSONL session,
-and only then starts Telegram polling. Success writes
+membership for pre-existing datasets (including E2B thread mappings and sandbox restoration
+history), verifies every baseline record and Telegram locator, checks the configured bot, E2B,
+and Browser Use deployment identities and Pi runtime state, verifies the original byte prefix
+of every referenced Pi JSONL session, and only then starts Telegram polling. Success writes
 `upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
 one-time scan only while that exact manifest is unchanged.
 

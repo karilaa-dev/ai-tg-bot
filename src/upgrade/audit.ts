@@ -9,6 +9,7 @@ import { isPathWithin } from "../util/paths.js";
 
 const MANIFEST_VERSION = 1 as const;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const DATASET_BATCH_SIZE = 64;
 
 const AuditEntrySchema = z.object({
   keySha256: z.string().regex(SHA256_PATTERN),
@@ -40,6 +41,7 @@ export const UpgradeAuditManifestSchema = z.object({
   databaseDialect: z.enum(["sqlite", "postgres"]),
   telegramBotIdentitySha256: z.string().regex(SHA256_PATTERN),
   e2bDeploymentIdentitySha256: z.string().regex(SHA256_PATTERN),
+  browserUseDeploymentIdentitySha256: z.string().regex(SHA256_PATTERN),
   datasets: z.object({
     users: AuditDatasetSchema,
     threads: AuditDatasetSchema,
@@ -50,6 +52,7 @@ export const UpgradeAuditManifestSchema = z.object({
     fileChunks: AuditDatasetSchema,
     messageFiles: AuditDatasetSchema,
     browserUseProfiles: AuditDatasetSchema,
+    sandboxFileRestoreStatus: AuditDatasetSchema,
     messageSearch: AuditDatasetSchema,
     chunkSearch: AuditDatasetSchema,
     embeddings: AuditDatasetSchema,
@@ -162,6 +165,16 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     snapshotOptional: true,
   },
   {
+    name: "sandboxFileRestoreStatus",
+    table: "sandbox_file_restore_status",
+    key: (row) => [row.deployment_id, row.sandbox_id, row.file_id],
+    query: `select deployment_id, thread_id, sandbox_id, file_id, telegram_file_ref_id,
+      sandbox_name, status, restored_size, restored_sha256, error_code, error_detail,
+      attempted_at, completed_at
+      from sandbox_file_restore_status order by deployment_id, sandbox_id, file_id`,
+    snapshotOptional: true,
+  },
+  {
     name: "messageSearch",
     table: { sqlite: "messages_fts", postgres: "message_search" },
     key: (row) => row.message_id,
@@ -201,6 +214,7 @@ export async function createUpgradeAuditManifest(
   piCodingAgentDir: string,
   botToken: string,
   e2bDeploymentId: string,
+  browserUseDeploymentId: string,
 ): Promise<UpgradeAuditManifest> {
   const datasets = await collectDatasets(db, "snapshot");
   const piSessions = await collectPiSessions(db, piCodingAgentDir);
@@ -211,6 +225,7 @@ export async function createUpgradeAuditManifest(
     databaseDialect: db.dialect,
     telegramBotIdentitySha256: telegramBotIdentitySha256(botToken),
     e2bDeploymentIdentitySha256: e2bDeploymentIdentitySha256(e2bDeploymentId),
+    browserUseDeploymentIdentitySha256: browserUseDeploymentIdentitySha256(browserUseDeploymentId),
     datasets,
     piSessions,
     piState,
@@ -249,10 +264,19 @@ export async function verifyUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
   manifest: UpgradeAuditManifest,
-  options: { botToken: string; e2bDeploymentId: string; requireExactDatasets?: boolean },
+  options: {
+    botToken: string;
+    e2bDeploymentId: string;
+    browserUseDeploymentId: string;
+    requireExactDatasets?: boolean;
+  },
 ): Promise<UpgradeAuditSummary> {
   verifyTelegramBotIdentity(options.botToken, manifest.telegramBotIdentitySha256);
   verifyE2bDeploymentIdentity(options.e2bDeploymentId, manifest.e2bDeploymentIdentitySha256);
+  verifyBrowserUseDeploymentIdentity(
+    options.browserUseDeploymentId,
+    manifest.browserUseDeploymentIdentitySha256,
+  );
   const current = await collectDatasets(db, "verify");
   for (const name of Object.keys(manifest.datasets) as DatasetName[]) {
     verifyDataset(
@@ -272,6 +296,7 @@ export async function verifyUpgradeBaselineOnce(input: {
   piCodingAgentDir: string;
   botToken: string;
   e2bDeploymentId: string;
+  browserUseDeploymentId: string;
   baselineFile?: string;
   logger?: Logger;
 }): Promise<{ skipped: boolean; summary?: UpgradeAuditSummary }> {
@@ -298,6 +323,10 @@ export async function verifyUpgradeBaselineOnce(input: {
   const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
   verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256);
   verifyE2bDeploymentIdentity(input.e2bDeploymentId, loaded.manifest.e2bDeploymentIdentitySha256);
+  verifyBrowserUseDeploymentIdentity(
+    input.browserUseDeploymentId,
+    loaded.manifest.browserUseDeploymentIdentitySha256,
+  );
   const marker = await readVerificationMarker(markerFile);
   if (marker?.manifestSha256 === loaded.manifestSha256) {
     input.logger?.info("upgrade preservation baseline already verified", {
@@ -314,6 +343,7 @@ export async function verifyUpgradeBaselineOnce(input: {
     {
       botToken: input.botToken,
       e2bDeploymentId: input.e2bDeploymentId,
+      browserUseDeploymentId: input.browserUseDeploymentId,
       requireExactDatasets: true,
     },
   );
@@ -347,14 +377,40 @@ async function collectDatasets(
       }
       throw new Error(`Upgrade audit requires the ${table} table.`);
     }
-    const rows = await db.query<Row>(sql.raw(dialectValue(definition.query, db.dialect)));
-    result[definition.name] = datasetFromRows(definition.name, rows, definition.key);
+    result[definition.name] = await collectDatasetInBatches(db, definition);
   }
   return {
     ...result,
     postgresSequences: await collectPostgresSequences(db),
     telegramFileRefs: await collectTelegramFileRefs(db, mode),
   };
+}
+
+async function collectDatasetInBatches(
+  db: SqlExecutor,
+  definition: DatasetDefinition,
+): Promise<UpgradeAuditManifest["datasets"][DatasetName]> {
+  const entries: UpgradeAuditManifest["datasets"][DatasetName]["entries"] = [];
+  const seenKeys = new Set<string>();
+  const query = dialectValue(definition.query, db.dialect);
+  let offset = 0;
+  while (true) {
+    const rows = await db.query<Row>(sql.raw(
+      `${query} limit ${DATASET_BATCH_SIZE} offset ${offset}`,
+    ));
+    for (const row of rows) {
+      const entry = datasetEntry(definition.name, row, definition.key);
+      if (seenKeys.has(entry.keySha256)) {
+        throw new Error(`Upgrade audit found duplicate ${definition.name} record keys.`);
+      }
+      seenKeys.add(entry.keySha256);
+      entries.push(entry);
+    }
+    if (rows.length < DATASET_BATCH_SIZE) break;
+    offset += rows.length;
+  }
+  entries.sort((left, right) => left.keySha256.localeCompare(right.keySha256));
+  return { count: entries.length, entries };
 }
 
 function dialectValue(value: DialectValue, dialect: "sqlite" | "postgres"): string {
@@ -654,13 +710,22 @@ function datasetFromRows(
   rows: Row[],
   key: (row: Row) => unknown,
 ): UpgradeAuditManifest["datasets"][DatasetName] {
-  const entries = rows.map((row) => ({
-    keySha256: opaqueKey(name, key(row)),
-    rowSha256: digest(`${name}:row`, row),
-  })).sort((left, right) => left.keySha256.localeCompare(right.keySha256));
+  const entries = rows.map((row) => datasetEntry(name, row, key))
+    .sort((left, right) => left.keySha256.localeCompare(right.keySha256));
   const keys = new Set(entries.map((entry) => entry.keySha256));
   if (keys.size !== entries.length) throw new Error(`Upgrade audit found duplicate ${name} record keys.`);
   return { count: entries.length, entries };
+}
+
+function datasetEntry(
+  name: DatasetName,
+  row: Row,
+  key: (row: Row) => unknown,
+): UpgradeAuditManifest["datasets"][DatasetName]["entries"][number] {
+  return {
+    keySha256: opaqueKey(name, key(row)),
+    rowSha256: digest(`${name}:row`, row),
+  };
 }
 
 function verifyDataset(
@@ -827,6 +892,20 @@ function e2bDeploymentIdentitySha256(deploymentId: string): string {
 function verifyE2bDeploymentIdentity(deploymentId: string, expectedSha256: string): void {
   if (e2bDeploymentIdentitySha256(deploymentId) !== expectedSha256) {
     throw new Error("E2B deployment identity does not match the upgrade baseline.");
+  }
+}
+
+function browserUseDeploymentIdentitySha256(deploymentId: string): string {
+  const normalized = deploymentId.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(normalized)) {
+    throw new Error("BROWSER_USE_DEPLOYMENT_ID must be valid for upgrade auditing.");
+  }
+  return digest("browser-use-deployment-identity", normalized);
+}
+
+function verifyBrowserUseDeploymentIdentity(deploymentId: string, expectedSha256: string): void {
+  if (browserUseDeploymentIdentitySha256(deploymentId) !== expectedSha256) {
+    throw new Error("Browser Use deployment identity does not match the upgrade baseline.");
   }
 }
 

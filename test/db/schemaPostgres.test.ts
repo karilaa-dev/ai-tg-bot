@@ -15,8 +15,15 @@ import {
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 const BOT_TOKEN = "778899:postgres-audit-token";
 const E2B_DEPLOYMENT_ID = "postgres-audit-deployment";
+const BROWSER_USE_DEPLOYMENT_ID = "postgres-browser-deployment";
 const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
-  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN, E2B_DEPLOYMENT_ID);
+  createUpgradeAuditManifestImpl(
+    db,
+    piCodingAgentDir,
+    BOT_TOKEN,
+    E2B_DEPLOYMENT_ID,
+    BROWSER_USE_DEPLOYMENT_ID,
+  );
 const verifyUpgradeAuditManifest = (
   db: AppDatabase["db"],
   piCodingAgentDir: string,
@@ -24,6 +31,7 @@ const verifyUpgradeAuditManifest = (
 ) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, {
   botToken: BOT_TOKEN,
   e2bDeploymentId: E2B_DEPLOYMENT_ID,
+  browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
 });
 
 describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
@@ -128,6 +136,14 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           sandbox_id text not null unique, created_at bigint not null, updated_at bigint not null,
           primary key(deployment_id, thread_id)
         )`,
+        `create table sandbox_file_restore_status (
+          deployment_id text not null, thread_id bigint not null references threads(id) on delete cascade,
+          sandbox_id text not null, file_id bigint not null references files(id) on delete cascade,
+          telegram_file_ref_id bigint, sandbox_name text not null, status text not null,
+          restored_size bigint, restored_sha256 text, error_code text, error_detail text,
+          attempted_at bigint not null, completed_at bigint,
+          primary key(deployment_id, sandbox_id, file_id)
+        )`,
         `create table message_search (
           message_id bigint primary key references messages(id) on delete cascade,
           thread_id bigint not null, text text not null, ts tsvector not null
@@ -185,6 +201,13 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         insert into thread_sandboxes(deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at)
         values ('legacy', 73, 73, 'sandbox-73', 2, 2)
       `);
+      await legacy.db.execute(sql`
+        insert into sandbox_file_restore_status(
+          deployment_id, thread_id, sandbox_id, file_id, telegram_file_ref_id, sandbox_name,
+          status, restored_size, restored_sha256, attempted_at, completed_at
+        ) values ('legacy', 73, 'sandbox-73', 73, null, 'preserved.txt',
+          'available', 9, 'restore-sha-73', 2, 2)
+      `);
       for (const table of ["threads", "messages", "files", "file_chunks", "embeddings"]) {
         await legacy.db.execute(sql.raw(
           `select setval(pg_get_serial_sequence('${table}', 'id'), (select max(id) from ${table}), true)`,
@@ -197,6 +220,7 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
       expect(manifest.datasets.embeddings.count).toBe(1);
       expect(manifest.datasets.browserUseProfiles.count).toBe(1);
       expect(manifest.datasets.threadSandboxes.count).toBe(1);
+      expect(manifest.datasets.sandboxFileRestoreStatus.count).toBe(1);
       expect(manifest.datasets.postgresSequences.count).toBe(6);
 
       await legacy.initialize();
@@ -209,6 +233,7 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           embeddings: 1,
           browserUseProfiles: 1,
           threadSandboxes: 1,
+          sandboxFileRestoreStatus: 1,
           postgresSequences: 6,
         },
       });

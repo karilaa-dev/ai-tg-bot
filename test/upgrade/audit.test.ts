@@ -17,8 +17,15 @@ const TELEGRAM_FILE_ID = "BQAC-private-telegram-file-id";
 const BROWSER_PROFILE_KEY = "private-browser-profile-user";
 const BOT_TOKEN = "778899:private-bot-token";
 const E2B_DEPLOYMENT_ID = "private-e2b-deployment";
+const BROWSER_USE_DEPLOYMENT_ID = "private-browser-deployment";
 const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
-  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN, E2B_DEPLOYMENT_ID);
+  createUpgradeAuditManifestImpl(
+    db,
+    piCodingAgentDir,
+    BOT_TOKEN,
+    E2B_DEPLOYMENT_ID,
+    BROWSER_USE_DEPLOYMENT_ID,
+  );
 const verifyUpgradeAuditManifest = (
   db: AppDatabase["db"],
   piCodingAgentDir: string,
@@ -26,6 +33,7 @@ const verifyUpgradeAuditManifest = (
 ) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, {
   botToken: BOT_TOKEN,
   e2bDeploymentId: E2B_DEPLOYMENT_ID,
+  browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
 });
 
 describe("upgrade preservation audit", () => {
@@ -58,6 +66,7 @@ describe("upgrade preservation audit", () => {
     expect(serialized).not.toContain(TELEGRAM_FILE_ID);
     expect(serialized).not.toContain(BROWSER_PROFILE_KEY);
     expect(serialized).not.toContain(E2B_DEPLOYMENT_ID);
+    expect(serialized).not.toContain(BROWSER_USE_DEPLOYMENT_ID);
     expect(serialized).not.toContain("987654321");
     expect(serialized).not.toContain("778899");
     expect(manifest.datasets.messages.count).toBe(1);
@@ -67,6 +76,7 @@ describe("upgrade preservation audit", () => {
     expect(manifest.datasets.embeddings.count).toBe(1);
     expect(manifest.datasets.browserUseProfiles.count).toBe(0);
     expect(manifest.datasets.threadSandboxes.count).toBe(0);
+    expect(manifest.datasets.sandboxFileRestoreStatus.count).toBe(0);
     expect(manifest.datasets.postgresSequences.count).toBe(0);
     expect(manifest.piSessions.count).toBe(1);
     expect(manifest.piState.count).toBe(2);
@@ -84,6 +94,25 @@ describe("upgrade preservation audit", () => {
       datasets: { messages: 1, telegramFileRefs: 1 },
     });
     await expect(columns(database, "files")).resolves.not.toContain("path");
+  });
+
+  it("preserves every row across bounded dataset batches", async () => {
+    await database.db.execute(sql`
+      with recursive ids(id) as (
+        select 2
+        union all
+        select id + 1 from ids where id < 70
+      )
+      insert into messages(id, thread_id, role, kind, content_json, text_plain, created_at)
+      select id, 1, 'assistant', 'text', '{}', 'batch row ' || id, id + 2 from ids
+    `);
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    expect(manifest.datasets.messages.count).toBe(70);
+
+    await database.initialize();
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest)).resolves.toMatchObject({
+      datasets: { messages: 70 },
+    });
   });
 
   it("rejects missing persisted lexical and embedding retrieval data", async () => {
@@ -152,6 +181,16 @@ describe("upgrade preservation audit", () => {
       )
     `);
     await database.db.execute(sql`
+      create table sandbox_file_restore_status (
+        deployment_id text not null, thread_id integer not null references threads(id) on delete cascade,
+        sandbox_id text not null, file_id integer not null references files(id) on delete cascade,
+        telegram_file_ref_id integer, sandbox_name text not null, status text not null,
+        restored_size integer, restored_sha256 text, error_code text, error_detail text,
+        attempted_at integer not null, completed_at integer,
+        primary key(deployment_id, sandbox_id, file_id)
+      )
+    `);
+    await database.db.execute(sql`
       insert into thread_sandboxes(deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at)
       values (${E2B_DEPLOYMENT_ID}, 987654321, 1, 'sandbox-private', 2, 2)
     `);
@@ -159,9 +198,17 @@ describe("upgrade preservation audit", () => {
       insert into browser_use_profiles(deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at)
       values (${E2B_DEPLOYMENT_ID}, 987654321, ${BROWSER_PROFILE_KEY}, 'browser-profile-1', 2, 2)
     `);
+    await database.db.execute(sql`
+      insert into sandbox_file_restore_status(
+        deployment_id, thread_id, sandbox_id, file_id, telegram_file_ref_id, sandbox_name,
+        status, restored_size, restored_sha256, attempted_at, completed_at
+      ) values (${E2B_DEPLOYMENT_ID}, 1, 'sandbox-private', 1, null, 'history.txt',
+        'available', 7, 'restore-sha256', 2, 2)
+    `);
     const manifest = await createUpgradeAuditManifest(database.db, piDir);
     expect(manifest.datasets.threadSandboxes.count).toBe(1);
     expect(manifest.datasets.browserUseProfiles.count).toBe(1);
+    expect(manifest.datasets.sandboxFileRestoreStatus.count).toBe(1);
     await database.initialize();
 
     await database.db.execute(sql`delete from thread_sandboxes`);
@@ -175,6 +222,14 @@ describe("upgrade preservation audit", () => {
 
     await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
       .rejects.toThrow("browserUseProfiles count fell");
+
+    await database.db.execute(sql`
+      insert into browser_use_profiles(deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at)
+      values (${E2B_DEPLOYMENT_ID}, 987654321, ${BROWSER_PROFILE_KEY}, 'browser-profile-1', 2, 2)
+    `);
+    await database.db.execute(sql`delete from sandbox_file_restore_status`);
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("sandboxFileRestoreStatus count fell");
   });
 
   it("rejects a different Telegram bot identity or missing Pi runtime state", async () => {
@@ -184,6 +239,7 @@ describe("upgrade preservation audit", () => {
     await expect(verifyUpgradeAuditManifestImpl(database.db, piDir, manifest, {
       botToken: "998877:different-bot-token",
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
     })).rejects.toThrow("Telegram bot identity does not match");
 
     await fs.unlink(path.join(piDir, "auth.json"));
@@ -245,6 +301,7 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: BOT_TOKEN,
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile,
     })).resolves.toMatchObject({ skipped: false, summary: { manifestSha256 } });
     const marker = JSON.parse(await fs.readFile(`${baselineFile}.verified`, "utf8"));
@@ -255,6 +312,7 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: "998877:different-bot-token",
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile,
     })).rejects.toThrow("Telegram bot identity does not match");
 
@@ -263,8 +321,18 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: BOT_TOKEN,
       e2bDeploymentId: "different-e2b-deployment",
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile,
     })).rejects.toThrow("E2B deployment identity does not match");
+
+    await expect(verifyUpgradeBaselineOnce({
+      db: database.db,
+      piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
+      e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: "different-browser-deployment",
+      baselineFile,
+    })).rejects.toThrow("Browser Use deployment identity does not match");
 
     await database.db.execute(sql`delete from telegram_file_refs`);
     await expect(verifyUpgradeBaselineOnce({
@@ -272,6 +340,7 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: BOT_TOKEN,
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile,
     })).resolves.toMatchObject({ skipped: true });
   });
@@ -291,6 +360,7 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: BOT_TOKEN,
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile,
     })).rejects.toThrow("users membership differs from the baseline");
     await expect(fs.access(`${baselineFile}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
@@ -307,6 +377,7 @@ describe("upgrade preservation audit", () => {
       piCodingAgentDir: piDir,
       botToken: BOT_TOKEN,
       e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
       baselineFile: outsideBaseline,
     })).rejects.toThrow("must be inside PI_CODING_AGENT_DIR");
     await expect(fs.access(`${outsideBaseline}.verified`)).rejects.toMatchObject({ code: "ENOENT" });

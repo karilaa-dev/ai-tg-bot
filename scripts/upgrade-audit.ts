@@ -18,6 +18,7 @@ const botToken = process.env.BOT_TOKEN?.trim() || "";
 const e2bDeploymentId = process.env.E2B_DEPLOYMENT_ID?.trim()
   || process.env.OPEN_SANDBOX_DEPLOYMENT_ID?.trim()
   || "ai-tg-bot";
+const browserUseDeploymentId = process.env.BROWSER_USE_DEPLOYMENT_ID?.trim() || "ai-tg-bot";
 const database = createDatabase({ DB_URL: dbUrl });
 
 try {
@@ -27,6 +28,7 @@ try {
       piCodingAgentDir,
       botToken,
       e2bDeploymentId,
+      browserUseDeploymentId,
     );
     const manifestSha256 = await writeUpgradeAuditManifest(command.file, manifest);
     process.stdout.write(`${JSON.stringify({
@@ -45,7 +47,7 @@ try {
       database.db,
       piCodingAgentDir,
       loaded.manifest,
-      { botToken, e2bDeploymentId },
+      { botToken, e2bDeploymentId, browserUseDeploymentId },
     );
     process.stdout.write(`${JSON.stringify({
       status: "verified",
@@ -72,7 +74,7 @@ function usage(): never {
     "  npm run upgrade:audit -- snapshot --out <manifest.json>",
     "  npm run upgrade:audit -- verify --against <manifest.json>",
     "",
-    "DB_URL, PI_CODING_AGENT_DIR, BOT_TOKEN, and E2B_DEPLOYMENT_ID select the preserved deployment state.",
+    "DB_URL, PI_CODING_AGENT_DIR, BOT_TOKEN, E2B_DEPLOYMENT_ID, and BROWSER_USE_DEPLOYMENT_ID select the preserved deployment state.",
     "The command never initializes or migrates the database schema.",
     "",
   ].join("\n"));
