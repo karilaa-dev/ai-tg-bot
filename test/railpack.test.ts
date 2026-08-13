@@ -7,6 +7,7 @@ describe("Railpack deployment configuration", () => {
 
     expect(config.provider).toBe("node");
     expect(config.packages.node).toBe("24.18.0");
+    expect(config.buildAptPackages).toEqual(expect.arrayContaining(["...", "g++", "make", "python3"]));
     expect(config.steps.install.commands).toContain("npm ci");
     expect(config.deploy.startCommand).toBe("tini -- ./docker/entrypoint.sh");
     expect(config.deploy.aptPackages).toEqual(expect.arrayContaining(["tini", "util-linux"]));

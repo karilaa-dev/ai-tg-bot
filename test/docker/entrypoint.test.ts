@@ -59,9 +59,12 @@ describe("container entrypoint", () => {
     expect(result.stdout).toBe(external);
   });
 
-  it("replaces only the image's default SQLite URL for legacy Compose", async () => {
+  it.each([
+    "sqlite:/app/data/bot.db",
+    "sqlite:./data/bot.db",
+  ])("replaces the legacy Compose SQLite URL %s", async (dbUrl) => {
     const result = await runEntrypoint(
-      { ...env, DB_URL: "sqlite:/app/data/bot.db", POSTGRES_PASSWORD: "compose-password" },
+      { ...env, DB_URL: dbUrl, POSTGRES_PASSWORD: "compose-password" },
       "printf '%s' \"$DB_URL\"",
     );
 

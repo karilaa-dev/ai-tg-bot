@@ -10,7 +10,9 @@ valid_id() {
 }
 
 configure_postgres_url() {
-    if [ -n "${DB_URL:-}" ] && [ "${DB_URL}" != "sqlite:/app/data/bot.db" ]; then
+    if [ -n "${DB_URL:-}" ] \
+        && [ "${DB_URL}" != "sqlite:/app/data/bot.db" ] \
+        && [ "${DB_URL}" != "sqlite:./data/bot.db" ]; then
         return
     fi
     if [ -z "${POSTGRES_PASSWORD:-}" ]; then

@@ -210,6 +210,13 @@ can also be rerun manually inside the built application container:
 npm run upgrade:audit -- verify --against /app/data/pi/upgrade-baseline.json
 ```
 
+After the verification and smoke tests pass, remove `UPGRADE_BASELINE_FILE` from the Dokploy
+application variables and redeploy once. The manifest and success marker remain available as
+cutover evidence, but the one-time gate is disarmed. This matters if the original pre-cutover
+Pi archive is restored later: that archive contains the baseline but not the success marker,
+so leaving the variable configured could re-run the obsolete baseline against a database that
+has legitimately changed since cutover.
+
 For rollback, stop the Dokploy application before restarting the old bot. The old host state
 was never modified beyond stopping the bot and writing the baseline into `pi-home`; the dump
 and Pi archive provide an additional recovery copy.
