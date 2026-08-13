@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import {
-  createUpgradeAuditManifest,
-  verifyUpgradeAuditManifest,
+  createUpgradeAuditManifest as createUpgradeAuditManifestImpl,
+  verifyUpgradeAuditManifest as verifyUpgradeAuditManifestImpl,
   verifyUpgradeBaselineOnce,
   writeUpgradeAuditManifest,
 } from "../../src/upgrade/audit.js";
@@ -15,6 +15,14 @@ import {
 const CHAT_SECRET = "private migration conversation";
 const TELEGRAM_FILE_ID = "BQAC-private-telegram-file-id";
 const BROWSER_PROFILE_KEY = "private-browser-profile-user";
+const BOT_TOKEN = "778899:private-bot-token";
+const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
+  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN);
+const verifyUpgradeAuditManifest = (
+  db: AppDatabase["db"],
+  piCodingAgentDir: string,
+  manifest: Awaited<ReturnType<typeof createUpgradeAuditManifestImpl>>,
+) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, { botToken: BOT_TOKEN });
 
 describe("upgrade preservation audit", () => {
   let tempDir: string;
@@ -28,6 +36,8 @@ describe("upgrade preservation audit", () => {
     sessionFile = path.join(piDir, "sessions", "telegram", "thread-1.jsonl");
     await fs.mkdir(path.dirname(sessionFile), { recursive: true });
     await fs.writeFile(sessionFile, `${JSON.stringify({ role: "user", content: CHAT_SECRET })}\n`);
+    await fs.writeFile(path.join(piDir, "auth.json"), '{"openai-codex":{"type":"oauth"}}\n');
+    await fs.writeFile(path.join(piDir, "models.json"), '{"providers":{}}\n');
     database = createDatabase(loadTestConfig({ DB_URL: `sqlite:${path.join(tempDir, "legacy.db")}` }));
     await createLatestMainSchema(database, sessionFile);
   });
@@ -53,6 +63,7 @@ describe("upgrade preservation audit", () => {
     expect(manifest.datasets.browserUseProfiles.count).toBe(1);
     expect(manifest.datasets.postgresSequences.count).toBe(0);
     expect(manifest.piSessions.count).toBe(1);
+    expect(manifest.piState.count).toBe(2);
 
     await database.initialize();
     await fs.appendFile(sessionFile, `${JSON.stringify({ role: "assistant", content: "later" })}\n`);
@@ -63,6 +74,7 @@ describe("upgrade preservation audit", () => {
 
     await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest)).resolves.toMatchObject({
       piSessions: 1,
+      piStateFiles: 2,
       datasets: { messages: 1, telegramFileRefs: 1 },
     });
     await expect(columns(database, "files")).resolves.not.toContain("path");
@@ -126,6 +138,19 @@ describe("upgrade preservation audit", () => {
       .rejects.toThrow("browserUseProfiles count fell");
   });
 
+  it("rejects a different Telegram bot identity or missing Pi runtime state", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    await database.initialize();
+
+    await expect(verifyUpgradeAuditManifestImpl(database.db, piDir, manifest, {
+      botToken: "998877:different-bot-token",
+    })).rejects.toThrow("Telegram bot identity does not match");
+
+    await fs.unlink(path.join(piDir, "auth.json"));
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("Pi state file membership differs");
+  });
+
   it("rejects malformed Telegram locators and missing referenced Pi sessions", async () => {
     await database.db.execute(sql`update file_sources set locator_json = '{bad-json' where id = 1`);
     await expect(createUpgradeAuditManifest(database.db, piDir)).rejects.toThrow("malformed locator JSON");
@@ -178,17 +203,45 @@ describe("upgrade preservation audit", () => {
     await expect(verifyUpgradeBaselineOnce({
       db: database.db,
       piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
       baselineFile,
     })).resolves.toMatchObject({ skipped: false, summary: { manifestSha256 } });
     const marker = JSON.parse(await fs.readFile(`${baselineFile}.verified`, "utf8"));
     expect(marker.manifestSha256).toBe(manifestSha256);
 
+    await expect(verifyUpgradeBaselineOnce({
+      db: database.db,
+      piCodingAgentDir: piDir,
+      botToken: "998877:different-bot-token",
+      baselineFile,
+    })).rejects.toThrow("Telegram bot identity does not match");
+
     await database.db.execute(sql`delete from telegram_file_refs`);
     await expect(verifyUpgradeBaselineOnce({
       db: database.db,
       piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
       baselineFile,
     })).resolves.toMatchObject({ skipped: true });
+  });
+
+  it("refuses to mark a reused destination database as verified", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    const baselineFile = path.join(piDir, "upgrade-baseline.json");
+    await writeUpgradeAuditManifest(baselineFile, manifest);
+    await database.initialize();
+    await database.db.execute(sql`
+      insert into users(tg_id, first_name, username, lang, stream_mode, created_at)
+      values (123456789, 'foreign', 'foreign', 'en', 1, 3)
+    `);
+
+    await expect(verifyUpgradeBaselineOnce({
+      db: database.db,
+      piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
+      baselineFile,
+    })).rejects.toThrow("users membership differs from the baseline");
+    await expect(fs.access(`${baselineFile}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("refuses a startup baseline outside the Pi data root", async () => {
@@ -200,6 +253,7 @@ describe("upgrade preservation audit", () => {
     await expect(verifyUpgradeBaselineOnce({
       db: database.db,
       piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
       baselineFile: outsideBaseline,
     })).rejects.toThrow("must be inside PI_CODING_AGENT_DIR");
     await expect(fs.access(`${outsideBaseline}.verified`)).rejects.toMatchObject({ code: "ENOENT" });

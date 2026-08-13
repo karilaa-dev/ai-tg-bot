@@ -34,6 +34,7 @@ try {
   await verifyUpgradeBaselineOnce({
     db: db.db,
     piCodingAgentDir: config.PI_CODING_AGENT_DIR,
+    botToken: config.BOT_TOKEN,
     baselineFile: config.UPGRADE_BASELINE_FILE,
     logger,
   });

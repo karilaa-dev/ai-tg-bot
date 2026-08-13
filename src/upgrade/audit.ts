@@ -28,10 +28,17 @@ const SessionFileSchema = z.object({
   prefixSha256: z.string().regex(SHA256_PATTERN),
 });
 
+const PiStateFileSchema = z.object({
+  relativePath: z.enum(["auth.json", "models.json", "settings.json"]),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(SHA256_PATTERN),
+});
+
 export const UpgradeAuditManifestSchema = z.object({
   version: z.literal(MANIFEST_VERSION),
   createdAt: z.string().datetime(),
   databaseDialect: z.enum(["sqlite", "postgres"]),
+  telegramBotIdentitySha256: z.string().regex(SHA256_PATTERN),
   datasets: z.object({
     users: AuditDatasetSchema,
     threads: AuditDatasetSchema,
@@ -53,6 +60,12 @@ export const UpgradeAuditManifestSchema = z.object({
   }).refine((sessions) => sessions.count === sessions.files.length, {
     message: "Pi session count does not match file count",
   }),
+  piState: z.object({
+    count: z.number().int().nonnegative(),
+    files: z.array(PiStateFileSchema),
+  }).refine((state) => state.count === state.files.length, {
+    message: "Pi state count does not match file count",
+  }),
 });
 
 const VerificationMarkerSchema = z.object({
@@ -66,6 +79,7 @@ export type UpgradeAuditSummary = {
   manifestSha256: string;
   datasets: Record<keyof UpgradeAuditManifest["datasets"], number>;
   piSessions: number;
+  piStateFiles: number;
 };
 
 type Row = Record<string, unknown>;
@@ -168,18 +182,24 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
   },
 ];
 
+const PI_STATE_FILES = ["auth.json", "models.json", "settings.json"] as const;
+
 export async function createUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
+  botToken: string,
 ): Promise<UpgradeAuditManifest> {
   const datasets = await collectDatasets(db, "snapshot");
   const piSessions = await collectPiSessions(db, piCodingAgentDir);
+  const piState = await collectPiStateFiles(piCodingAgentDir);
   return UpgradeAuditManifestSchema.parse({
     version: MANIFEST_VERSION,
     createdAt: new Date().toISOString(),
     databaseDialect: db.dialect,
+    telegramBotIdentitySha256: telegramBotIdentitySha256(botToken),
     datasets,
     piSessions,
+    piState,
   });
 }
 
@@ -215,18 +235,27 @@ export async function verifyUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
   manifest: UpgradeAuditManifest,
+  options: { botToken: string; requireExactDatasets?: boolean },
 ): Promise<UpgradeAuditSummary> {
+  verifyTelegramBotIdentity(options.botToken, manifest.telegramBotIdentitySha256);
   const current = await collectDatasets(db, "verify");
   for (const name of Object.keys(manifest.datasets) as DatasetName[]) {
-    verifyDataset(name, manifest.datasets[name], current[name]);
+    verifyDataset(
+      name,
+      manifest.datasets[name],
+      current[name],
+      Boolean(options.requireExactDatasets && name !== "postgresSequences"),
+    );
   }
   await verifyPiSessionPrefixes(piCodingAgentDir, manifest.piSessions.files);
+  await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files);
   return summarize(manifest, sha256(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)));
 }
 
 export async function verifyUpgradeBaselineOnce(input: {
   db: SqlExecutor;
   piCodingAgentDir: string;
+  botToken: string;
   baselineFile?: string;
   logger?: Logger;
 }): Promise<{ skipped: boolean; summary?: UpgradeAuditSummary }> {
@@ -251,6 +280,7 @@ export async function verifyUpgradeBaselineOnce(input: {
     throw new Error("Upgrade verification marker must not be a symbolic link.");
   }
   const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
+  verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256);
   const marker = await readVerificationMarker(markerFile);
   if (marker?.manifestSha256 === loaded.manifestSha256) {
     input.logger?.info("upgrade preservation baseline already verified", {
@@ -264,6 +294,7 @@ export async function verifyUpgradeBaselineOnce(input: {
     input.db,
     input.piCodingAgentDir,
     loaded.manifest,
+    { botToken: input.botToken, requireExactDatasets: true },
   );
   summary.manifestSha256 = loaded.manifestSha256;
   await writeAtomic(markerFile, Buffer.from(`${JSON.stringify({
@@ -276,6 +307,7 @@ export async function verifyUpgradeBaselineOnce(input: {
     markerFile,
     datasets: summary.datasets,
     piSessions: summary.piSessions,
+    piStateFiles: summary.piStateFiles,
   });
   return { skipped: false, summary };
 }
@@ -324,26 +356,29 @@ async function collectTelegramFileRefs(
   };
   const references = new Map<string, TelegramReference>();
   const currentTableExists = await tableExists(db, "telegram_file_refs");
-  const legacyRows = await db.query<{
-    id: number;
-    file_id: number;
-    locator_json: string;
-    mime_type: string | null;
-    file_type: string;
-    message_role: string | null;
-    created_at: unknown;
-  }>(sql`
-    select s.id, s.file_id, s.locator_json, coalesce(s.mime_type, f.mime_type) as mime_type,
-      f.type as file_type, m.role as message_role, s.created_at
-    from file_sources s
-    join files f on f.id = s.file_id
-    left join messages m on m.id = f.message_id
-    where s.transport = 'telegram'
-    order by s.id
-  `);
-  for (const row of legacyRows) {
-    const locator = parseTelegramLocator(row.id, row.locator_json);
-    if (mode === "snapshot" || !currentTableExists) {
+  if (mode === "verify" && !currentTableExists) {
+    throw new Error("Upgrade audit verification requires the migrated telegram_file_refs table.");
+  }
+  if (mode === "snapshot") {
+    const legacyRows = await db.query<{
+      id: number;
+      file_id: number;
+      locator_json: string;
+      mime_type: string | null;
+      file_type: string;
+      message_role: string | null;
+      created_at: unknown;
+    }>(sql`
+      select s.id, s.file_id, s.locator_json, coalesce(s.mime_type, f.mime_type) as mime_type,
+        f.type as file_type, m.role as message_role, s.created_at
+      from file_sources s
+      join files f on f.id = s.file_id
+      left join messages m on m.id = f.message_id
+      where s.transport = 'telegram'
+      order by s.id
+    `);
+    for (const row of legacyRows) {
+      const locator = parseTelegramLocator(row.id, row.locator_json);
       const key = stableJson([row.file_id, locator.fileId]);
       references.set(key, {
         fileId: row.file_id,
@@ -360,10 +395,6 @@ async function collectTelegramFileRefs(
         lastSeenAt: row.created_at,
       });
     }
-  }
-
-  if (mode === "verify" && !currentTableExists) {
-    throw new Error("Upgrade audit verification requires the migrated telegram_file_refs table.");
   }
   if (currentTableExists) {
     const rows = await db.query<{
@@ -551,6 +582,48 @@ async function verifyPiSessionPrefixes(
   }
 }
 
+async function collectPiStateFiles(
+  piCodingAgentDir: string,
+): Promise<UpgradeAuditManifest["piState"]> {
+  const root = path.resolve(piCodingAgentDir);
+  const realRoot = await fs.realpath(root);
+  const files: UpgradeAuditManifest["piState"]["files"] = [];
+  for (const relativePath of PI_STATE_FILES) {
+    const statePath = path.join(root, relativePath);
+    const exists = await fs.lstat(statePath).then(() => true).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
+    if (!exists) continue;
+    const resolved = await resolveRegularFileWithin(realRoot, statePath);
+    if (!resolved) throw new Error(`Pi state file is unsafe: ${relativePath}`);
+    files.push({
+      relativePath,
+      size: resolved.size,
+      sha256: await sha256FilePrefix(resolved.realPath, resolved.size),
+    });
+  }
+  return { count: files.length, files };
+}
+
+async function verifyPiStateFiles(
+  piCodingAgentDir: string,
+  baselineFiles: UpgradeAuditManifest["piState"]["files"],
+): Promise<void> {
+  const current = await collectPiStateFiles(piCodingAgentDir);
+  if (current.count !== baselineFiles.length) {
+    throw new Error("Upgrade audit failed: Pi state file membership differs from the baseline.");
+  }
+  const currentByPath = new Map(current.files.map((file) => [file.relativePath, file]));
+  for (const baseline of baselineFiles) {
+    const actual = currentByPath.get(baseline.relativePath);
+    if (!actual) throw new Error(`Preserved Pi state file is missing: ${baseline.relativePath}`);
+    if (actual.size !== baseline.size || actual.sha256 !== baseline.sha256) {
+      throw new Error(`Preserved Pi state file changed: ${baseline.relativePath}`);
+    }
+  }
+}
+
 function datasetFromRows(
   name: DatasetName,
   rows: Row[],
@@ -569,7 +642,11 @@ function verifyDataset(
   name: DatasetName,
   baseline: UpgradeAuditManifest["datasets"][DatasetName],
   current: UpgradeAuditManifest["datasets"][DatasetName],
+  requireExact: boolean,
 ): void {
+  if (requireExact && current.count !== baseline.count) {
+    throw new Error(`Upgrade audit failed: ${name} membership differs from the baseline.`);
+  }
   if (current.count < baseline.count) {
     throw new Error(`Upgrade audit failed: ${name} count fell from ${baseline.count} to ${current.count}.`);
   }
@@ -686,6 +763,7 @@ function summarize(manifest: UpgradeAuditManifest, manifestSha256: string): Upgr
       Object.entries(manifest.datasets).map(([name, dataset]) => [name, dataset.count]),
     ) as UpgradeAuditSummary["datasets"],
     piSessions: manifest.piSessions.count,
+    piStateFiles: manifest.piState.count,
   };
 }
 
@@ -695,6 +773,22 @@ function opaqueKey(domain: string, key: unknown): string {
 
 function digest(domain: string, value: unknown): string {
   return sha256(Buffer.from(`${domain}\0${stableJson(value)}`));
+}
+
+function telegramBotIdentitySha256(botToken: string): string {
+  const token = botToken.trim();
+  const separator = token.indexOf(":");
+  const botId = separator > 0 ? token.slice(0, separator) : "";
+  if (!/^\d+$/.test(botId)) {
+    throw new Error("BOT_TOKEN must contain a valid Telegram bot identity prefix for upgrade auditing.");
+  }
+  return digest("telegram-bot-identity", botId);
+}
+
+function verifyTelegramBotIdentity(botToken: string, expectedSha256: string): void {
+  if (telegramBotIdentitySha256(botToken) !== expectedSha256) {
+    throw new Error("Telegram bot identity does not match the upgrade baseline.");
+  }
 }
 
 function sha256(bytes: Buffer): string {

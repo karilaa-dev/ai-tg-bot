@@ -140,17 +140,19 @@ docker compose stop bot
 OLD_PI_VOLUME=<compose-project>_pi-home
 OLD_DATABASE_NETWORK=<compose-project>_database
 
-# Source .env first. URL encoding avoids corrupting passwords containing URL punctuation.
-set -a
-. ./.env
-set +a
-POSTGRES_PASSWORD_ENCODED=$(node -e 'process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))')
+# Parse dotenv syntax without evaluating it as shell code. Keep the source UID/GID so the
+# mode-0600 manifest is owned by the same identity that owns the Pi volume.
+POSTGRES_PASSWORD_ENCODED=$(node --env-file=.env -e 'const v=process.env.POSTGRES_PASSWORD; if (!v) throw new Error("POSTGRES_PASSWORD is required"); process.stdout.write(encodeURIComponent(v))')
+SOURCE_BOT_TOKEN=$(node --env-file=.env -e 'const v=process.env.BOT_TOKEN; if (!v) throw new Error("BOT_TOKEN is required"); process.stdout.write(v)')
+SOURCE_APP_UID=$(node --env-file=.env -e 'const v=process.env.APP_UID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_UID must be numeric"); process.stdout.write(v)')
+SOURCE_APP_GID=$(node --env-file=.env -e 'const v=process.env.APP_GID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_GID must be numeric"); process.stdout.write(v)')
 
 docker run --rm \
-  --user 1000:1000 \
+  --user "${SOURCE_APP_UID}:${SOURCE_APP_GID}" \
   --network "${OLD_DATABASE_NETWORK}" \
   --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
   -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
+  -e "BOT_TOKEN=${SOURCE_BOT_TOKEN}" \
   -e PI_CODING_AGENT_DIR=/app/data/pi \
   --entrypoint node \
   ai-tg-bot-upgrade-audit \
@@ -158,10 +160,11 @@ docker run --rm \
 ```
 
 The snapshot command is read-only with respect to the database and never initializes its
-schema. Running it as the application UID keeps the mode-0600 manifest readable after
-transfer even if the destination runtime is already non-root. It fails on malformed Telegram
-locators, unsafe PostgreSQL sequences, or missing Pi session files. Its manifest contains
-counts and SHA-256 fingerprints, not chat text or raw Telegram identifiers.
+schema. Running it as the source application UID keeps the mode-0600 manifest readable from
+the Pi volume. It fails on malformed Telegram locators, unsafe PostgreSQL sequences, missing
+Pi sessions, or unsafe Pi runtime state files. Its manifest contains counts and SHA-256
+fingerprints—including the bot account identity and any Pi `auth.json`, `models.json`, or
+`settings.json`—not chat text, credentials, or raw Telegram identifiers.
 
 Create the two transfer artifacts while the bot remains stopped:
 
@@ -191,16 +194,17 @@ Configure these application variables in addition to the normal E2B/provider cre
 DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
 PI_CODING_AGENT_DIR=/app/data/pi
 UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
-APP_UID=1000
-APP_GID=1000
+APP_UID=<source APP_UID, default 1000>
+APP_GID=<source APP_GID, default 1000>
 ```
 
 Do not configure legacy OpenSandbox variables or mounts. Ensure
 `E2B_TEMPLATE=ai-tg-bot-tools:production` exists before deployment.
 
-At first startup, the bot migrates the restored database transactionally, verifies every
-baseline record and Telegram locator, verifies the original byte prefix of every referenced
-Pi JSONL session, and only then starts Telegram polling. Success writes
+At first startup, the bot migrates the restored database transactionally, requires exact
+membership for pre-existing datasets, verifies every baseline record and Telegram locator,
+checks the configured bot identity and Pi runtime state, verifies the original byte prefix of
+every referenced Pi JSONL session, and only then starts Telegram polling. Success writes
 `upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
 one-time scan only while that exact manifest is unchanged.
 

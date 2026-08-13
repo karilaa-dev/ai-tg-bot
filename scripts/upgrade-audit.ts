@@ -14,11 +14,12 @@ type Command =
 const command = parseCommand(process.argv.slice(2));
 const dbUrl = process.env.DB_URL?.trim() || "sqlite:./data/bot.db";
 const piCodingAgentDir = path.resolve(process.env.PI_CODING_AGENT_DIR?.trim() || "./data/pi");
+const botToken = process.env.BOT_TOKEN?.trim() || "";
 const database = createDatabase({ DB_URL: dbUrl });
 
 try {
   if (command.kind === "snapshot") {
-    const manifest = await createUpgradeAuditManifest(database.db, piCodingAgentDir);
+    const manifest = await createUpgradeAuditManifest(database.db, piCodingAgentDir, botToken);
     const manifestSha256 = await writeUpgradeAuditManifest(command.file, manifest);
     process.stdout.write(`${JSON.stringify({
       status: "snapshot-created",
@@ -28,10 +29,16 @@ try {
         Object.entries(manifest.datasets).map(([name, dataset]) => [name, dataset.count]),
       ),
       piSessions: manifest.piSessions.count,
+      piStateFiles: manifest.piState.count,
     })}\n`);
   } else {
     const loaded = await readUpgradeAuditManifest(command.file);
-    const summary = await verifyUpgradeAuditManifest(database.db, piCodingAgentDir, loaded.manifest);
+    const summary = await verifyUpgradeAuditManifest(
+      database.db,
+      piCodingAgentDir,
+      loaded.manifest,
+      { botToken },
+    );
     process.stdout.write(`${JSON.stringify({
       status: "verified",
       file: path.resolve(command.file),
@@ -57,7 +64,7 @@ function usage(): never {
     "  npm run upgrade:audit -- snapshot --out <manifest.json>",
     "  npm run upgrade:audit -- verify --against <manifest.json>",
     "",
-    "DB_URL and PI_CODING_AGENT_DIR select the database and Pi session root.",
+    "DB_URL, PI_CODING_AGENT_DIR, and BOT_TOKEN select the preserved deployment state.",
     "The command never initializes or migrates the database schema.",
     "",
   ].join("\n"));

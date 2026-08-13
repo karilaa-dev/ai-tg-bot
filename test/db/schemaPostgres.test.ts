@@ -7,9 +7,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { createUpgradeAuditManifest, verifyUpgradeAuditManifest } from "../../src/upgrade/audit.js";
+import {
+  createUpgradeAuditManifest as createUpgradeAuditManifestImpl,
+  verifyUpgradeAuditManifest as verifyUpgradeAuditManifestImpl,
+} from "../../src/upgrade/audit.js";
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
+const BOT_TOKEN = "778899:postgres-audit-token";
+const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
+  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN);
+const verifyUpgradeAuditManifest = (
+  db: AppDatabase["db"],
+  piCodingAgentDir: string,
+  manifest: Awaited<ReturnType<typeof createUpgradeAuditManifestImpl>>,
+) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, { botToken: BOT_TOKEN });
 
 describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
   let admin: AppDatabase;
