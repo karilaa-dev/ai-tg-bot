@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -90,11 +90,16 @@ export type UpgradeAuditSummary = {
 type Row = Record<string, unknown>;
 type DatasetName = keyof UpgradeAuditManifest["datasets"];
 type DialectValue = string | Record<"sqlite" | "postgres", string>;
+type AuditHasher = {
+  digest: (domain: string, value: unknown) => string;
+  filePrefix: (filePath: string, size: number) => Promise<string>;
+};
 type DatasetDefinition = {
   name: Exclude<DatasetName, "telegramFileRefs" | "postgresSequences">;
   table: DialectValue;
   key: (row: Row) => unknown;
   query: DialectValue;
+  pageColumns: readonly string[];
   snapshotOptional?: boolean;
 };
 
@@ -103,7 +108,8 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     name: "users",
     table: "users",
     key: (row) => row.tg_id,
-    query: `select tg_id, first_name, username, lang, tz_offset_min, stream_mode, created_at from users order by tg_id`,
+    query: `select tg_id, first_name, username, lang, tz_offset_min, stream_mode, created_at from users`,
+    pageColumns: ["tg_id"],
   },
   {
     name: "threads",
@@ -111,14 +117,16 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     key: (row) => row.id,
     query: `select id, user_id, topic_id, parent_thread_id, fork_point_message_id, title,
       title_source, title_attempts, topic_title_synced, pi_session_file, pi_session_id,
-      archived, created_at from threads order by id`,
+      archived, created_at from threads`,
+    pageColumns: ["id"],
   },
   {
     name: "threadSandboxes",
     table: "thread_sandboxes",
     key: (row) => [row.deployment_id, row.thread_id],
     query: `select deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at
-      from thread_sandboxes order by deployment_id, thread_id`,
+      from thread_sandboxes`,
+    pageColumns: ["deployment_id", "thread_id"],
     snapshotOptional: true,
   },
   {
@@ -126,7 +134,8 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     table: "messages",
     key: (row) => row.id,
     query: `select id, thread_id, role, kind, content_json, text_plain, thinking,
-      tg_message_id, pi_entry_id, created_at from messages order by id`,
+      tg_message_id, pi_entry_id, created_at from messages`,
+    pageColumns: ["id"],
   },
   {
     name: "files",
@@ -134,34 +143,39 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     key: (row) => row.id,
     query: `select id, user_id, thread_id, message_id, type, content_sha256, mime_type,
       extraction_status, name, size, content_md, summary, outline_json, is_inline,
-      created_at from files order by id`,
+      created_at from files`,
+    pageColumns: ["id"],
   },
   {
     name: "fileSources",
     table: "file_sources",
     key: (row) => row.id,
     query: `select id, file_id, transport, connection_key, remote_key, locator_json,
-      mime_type, last_verified_at, created_at from file_sources order by id`,
+      mime_type, last_verified_at, created_at from file_sources`,
+    pageColumns: ["id"],
   },
   {
     name: "fileChunks",
     table: "file_chunks",
     key: (row) => row.id,
-    query: `select id, file_id, idx, heading_path, content, created_at from file_chunks order by id`,
+    query: `select id, file_id, idx, heading_path, content, created_at from file_chunks`,
+    pageColumns: ["id"],
   },
   {
     name: "messageFiles",
     table: "message_files",
     key: (row) => [row.message_id, row.file_id],
     query: `select message_id, file_id, display_name, caption, created_at
-      from message_files order by message_id, file_id`,
+      from message_files`,
+    pageColumns: ["message_id", "file_id"],
   },
   {
     name: "browserUseProfiles",
     table: "browser_use_profiles",
     key: (row) => [row.deployment_id, row.user_id],
     query: `select deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at
-      from browser_use_profiles order by deployment_id, user_id`,
+      from browser_use_profiles`,
+    pageColumns: ["deployment_id", "user_id"],
     snapshotOptional: true,
   },
   {
@@ -171,7 +185,8 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     query: `select deployment_id, thread_id, sandbox_id, file_id, telegram_file_ref_id,
       sandbox_name, status, restored_size, restored_sha256, error_code, error_detail,
       attempted_at, completed_at
-      from sandbox_file_restore_status order by deployment_id, sandbox_id, file_id`,
+      from sandbox_file_restore_status`,
+    pageColumns: ["deployment_id", "sandbox_id", "file_id"],
     snapshotOptional: true,
   },
   {
@@ -181,10 +196,11 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     query: {
       sqlite: `select cast(message_id as integer) as message_id,
         cast(thread_id as integer) as thread_id, text
-        from messages_fts order by cast(message_id as integer)`,
+        from messages_fts`,
       postgres: `select message_id, thread_id, text, ts::text as ts
-        from message_search order by message_id`,
+        from message_search`,
     },
+    pageColumns: ["message_id"],
   },
   {
     name: "chunkSearch",
@@ -193,17 +209,19 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     query: {
       sqlite: `select cast(chunk_id as integer) as chunk_id,
         cast(file_id as integer) as file_id, text
-        from chunks_fts order by cast(chunk_id as integer)`,
+        from chunks_fts`,
       postgres: `select chunk_id, file_id, text, ts::text as ts
-        from chunk_search order by chunk_id`,
+        from chunk_search`,
     },
+    pageColumns: ["chunk_id"],
   },
   {
     name: "embeddings",
     table: "embeddings",
     key: (row) => row.id,
     query: `select id, kind, ref_id, model, dim, vector, created_at
-      from embeddings order by id`,
+      from embeddings`,
+    pageColumns: ["id"],
   },
 ];
 
@@ -216,16 +234,17 @@ export async function createUpgradeAuditManifest(
   e2bDeploymentId: string,
   browserUseDeploymentId: string,
 ): Promise<UpgradeAuditManifest> {
-  const datasets = await collectDatasets(db, "snapshot");
-  const piSessions = await collectPiSessions(db, piCodingAgentDir);
-  const piState = await collectPiStateFiles(piCodingAgentDir);
+  const hasher = createAuditHasher(botToken);
+  const datasets = await collectDatasets(db, "snapshot", hasher);
+  const piSessions = await collectPiSessions(db, piCodingAgentDir, hasher);
+  const piState = await collectPiStateFiles(piCodingAgentDir, hasher);
   return UpgradeAuditManifestSchema.parse({
     version: MANIFEST_VERSION,
     createdAt: new Date().toISOString(),
     databaseDialect: db.dialect,
-    telegramBotIdentitySha256: telegramBotIdentitySha256(botToken),
-    e2bDeploymentIdentitySha256: e2bDeploymentIdentitySha256(e2bDeploymentId),
-    browserUseDeploymentIdentitySha256: browserUseDeploymentIdentitySha256(browserUseDeploymentId),
+    telegramBotIdentitySha256: telegramBotIdentitySha256(botToken, hasher),
+    e2bDeploymentIdentitySha256: e2bDeploymentIdentitySha256(e2bDeploymentId, hasher),
+    browserUseDeploymentIdentitySha256: browserUseDeploymentIdentitySha256(browserUseDeploymentId, hasher),
     datasets,
     piSessions,
     piState,
@@ -271,13 +290,15 @@ export async function verifyUpgradeAuditManifest(
     requireExactDatasets?: boolean;
   },
 ): Promise<UpgradeAuditSummary> {
-  verifyTelegramBotIdentity(options.botToken, manifest.telegramBotIdentitySha256);
-  verifyE2bDeploymentIdentity(options.e2bDeploymentId, manifest.e2bDeploymentIdentitySha256);
+  const hasher = createAuditHasher(options.botToken);
+  verifyTelegramBotIdentity(options.botToken, manifest.telegramBotIdentitySha256, hasher);
+  verifyE2bDeploymentIdentity(options.e2bDeploymentId, manifest.e2bDeploymentIdentitySha256, hasher);
   verifyBrowserUseDeploymentIdentity(
     options.browserUseDeploymentId,
     manifest.browserUseDeploymentIdentitySha256,
+    hasher,
   );
-  const current = await collectDatasets(db, "verify");
+  const current = await collectDatasets(db, "verify", hasher);
   for (const name of Object.keys(manifest.datasets) as DatasetName[]) {
     verifyDataset(
       name,
@@ -286,8 +307,8 @@ export async function verifyUpgradeAuditManifest(
       Boolean(options.requireExactDatasets && name !== "postgresSequences"),
     );
   }
-  await verifyPiSessionPrefixes(piCodingAgentDir, manifest.piSessions.files);
-  await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files);
+  await verifyPiSessionPrefixes(piCodingAgentDir, manifest.piSessions.files, hasher);
+  await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files, hasher);
   return summarize(manifest, sha256(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)));
 }
 
@@ -321,11 +342,17 @@ export async function verifyUpgradeBaselineOnce(input: {
     throw new Error("Upgrade verification marker must not be a symbolic link.");
   }
   const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
-  verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256);
-  verifyE2bDeploymentIdentity(input.e2bDeploymentId, loaded.manifest.e2bDeploymentIdentitySha256);
+  const hasher = createAuditHasher(input.botToken);
+  verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256, hasher);
+  verifyE2bDeploymentIdentity(
+    input.e2bDeploymentId,
+    loaded.manifest.e2bDeploymentIdentitySha256,
+    hasher,
+  );
   verifyBrowserUseDeploymentIdentity(
     input.browserUseDeploymentId,
     loaded.manifest.browserUseDeploymentIdentitySha256,
+    hasher,
   );
   const marker = await readVerificationMarker(markerFile);
   if (marker?.manifestSha256 === loaded.manifestSha256) {
@@ -366,40 +393,40 @@ export async function verifyUpgradeBaselineOnce(input: {
 async function collectDatasets(
   db: SqlExecutor,
   mode: "snapshot" | "verify",
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["datasets"]> {
   const result = {} as Omit<UpgradeAuditManifest["datasets"], "telegramFileRefs" | "postgresSequences">;
   for (const definition of DATASET_DEFINITIONS) {
     const table = dialectValue(definition.table, db.dialect);
     if (!(await tableExists(db, table))) {
       if (mode === "snapshot" && definition.snapshotOptional) {
-        result[definition.name] = datasetFromRows(definition.name, [], definition.key);
+        result[definition.name] = datasetFromRows(definition.name, [], definition.key, hasher);
         continue;
       }
       throw new Error(`Upgrade audit requires the ${table} table.`);
     }
-    result[definition.name] = await collectDatasetInBatches(db, definition);
+    result[definition.name] = await collectDatasetInBatches(db, definition, hasher);
   }
   return {
     ...result,
-    postgresSequences: await collectPostgresSequences(db),
-    telegramFileRefs: await collectTelegramFileRefs(db, mode),
+    postgresSequences: await collectPostgresSequences(db, hasher),
+    telegramFileRefs: await collectTelegramFileRefs(db, mode, hasher),
   };
 }
 
 async function collectDatasetInBatches(
   db: SqlExecutor,
   definition: DatasetDefinition,
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["datasets"][DatasetName]> {
   const entries: UpgradeAuditManifest["datasets"][DatasetName]["entries"] = [];
   const seenKeys = new Set<string>();
   const query = dialectValue(definition.query, db.dialect);
-  let offset = 0;
+  let lastRow: Row | undefined;
   while (true) {
-    const rows = await db.query<Row>(sql.raw(
-      `${query} limit ${DATASET_BATCH_SIZE} offset ${offset}`,
-    ));
+    const rows = await db.query<Row>(keysetPageQuery(query, definition.pageColumns, lastRow));
     for (const row of rows) {
-      const entry = datasetEntry(definition.name, row, definition.key);
+      const entry = datasetEntry(definition.name, row, definition.key, hasher);
       if (seenKeys.has(entry.keySha256)) {
         throw new Error(`Upgrade audit found duplicate ${definition.name} record keys.`);
       }
@@ -407,10 +434,35 @@ async function collectDatasetInBatches(
       entries.push(entry);
     }
     if (rows.length < DATASET_BATCH_SIZE) break;
-    offset += rows.length;
+    lastRow = rows.at(-1);
   }
   entries.sort((left, right) => left.keySha256.localeCompare(right.keySha256));
   return { count: entries.length, entries };
+}
+
+function keysetPageQuery(
+  query: string,
+  columns: readonly string[],
+  lastRow: Row | undefined,
+) {
+  const source = sql.raw(`select * from (${query}) audit_page`);
+  const order = sql.raw(`order by ${columns.map(pgIdentifier).join(", ")}`);
+  if (!lastRow) return sql`${source} ${order} limit ${DATASET_BATCH_SIZE}`;
+  const terms = columns.map((column, index) => {
+    const prefix = columns.slice(0, index).map((prefixColumn) =>
+      sql`${sql.raw(pgIdentifier(prefixColumn))} = ${requiredPageValue(lastRow, prefixColumn)}`);
+    const greater = sql`${sql.raw(pgIdentifier(column))} > ${requiredPageValue(lastRow, column)}`;
+    return prefix.length ? sql`(${sql.join([...prefix, greater], sql` and `)})` : greater;
+  });
+  return sql`${source} where (${sql.join(terms, sql` or `)}) ${order} limit ${DATASET_BATCH_SIZE}`;
+}
+
+function requiredPageValue(row: Row, column: string): unknown {
+  const value = row[column];
+  if (value === null || value === undefined) {
+    throw new Error(`Upgrade audit pagination column ${column} must not be null.`);
+  }
+  return value;
 }
 
 function dialectValue(value: DialectValue, dialect: "sqlite" | "postgres"): string {
@@ -420,6 +472,7 @@ function dialectValue(value: DialectValue, dialect: "sqlite" | "postgres"): stri
 async function collectTelegramFileRefs(
   db: SqlExecutor,
   mode: "snapshot" | "verify",
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["datasets"]["telegramFileRefs"]> {
   type TelegramReference = {
     fileId: unknown;
@@ -459,7 +512,7 @@ async function collectTelegramFileRefs(
       order by s.id
     `);
     for (const row of legacyRows) {
-      const locator = parseTelegramLocator(row.id, row.locator_json);
+      const locator = parseTelegramLocator(row.id, row.locator_json, hasher);
       const key = stableJson([row.file_id, locator.fileId]);
       references.set(key, {
         fileId: row.file_id,
@@ -520,11 +573,17 @@ async function collectTelegramFileRefs(
 
   const rows = [...references.values()].sort((left, right) =>
     stableJson([left.fileId, left.telegramFileId]).localeCompare(stableJson([right.fileId, right.telegramFileId])));
-  return datasetFromRows("telegramFileRefs", rows, (row) => [row.fileId, row.telegramFileId]);
+  return datasetFromRows(
+    "telegramFileRefs",
+    rows,
+    (row) => [row.fileId, row.telegramFileId],
+    hasher,
+  );
 }
 
 async function collectPostgresSequences(
   db: SqlExecutor,
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["datasets"]["postgresSequences"]> {
   if (db.dialect === "sqlite") return { count: 0, entries: [] };
   const sequences = await db.query<{
@@ -582,16 +641,14 @@ async function collectPostgresSequences(
       tableName: sequence.table_name,
       columnName: sequence.column_name,
       sequenceName: sequence.sequence_name,
-      lastValue: state.last_value,
-      isCalled: state.is_called,
       incrementBy: sequence.increment_by,
-      maximumValue: maximum?.maximum_value ?? null,
     });
   }
   return datasetFromRows(
     "postgresSequences",
     rows,
     (row) => [row.sequenceSchemaName, row.tableSchemaName, row.tableName, row.columnName, row.sequenceName],
+    hasher,
   );
 }
 
@@ -606,6 +663,7 @@ function pgQualifiedName(schema: string, relation: string): string {
 async function collectPiSessions(
   db: SqlExecutor,
   piCodingAgentDir: string,
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["piSessions"]> {
   const rows = await db.query<{ id: number; pi_session_file: string | null }>(sql`
     select id, pi_session_file from threads
@@ -618,11 +676,11 @@ async function collectPiSessions(
   for (const row of rows) {
     const sessionPath = path.resolve(row.pi_session_file!);
     if (!isPathWithin(root, sessionPath)) {
-      throw new Error(`Pi session for audited thread key ${opaqueKey("thread", row.id)} is outside PI_CODING_AGENT_DIR.`);
+      throw new Error(`Pi session for audited thread key ${opaqueKey(hasher, "thread", row.id)} is outside PI_CODING_AGENT_DIR.`);
     }
     const relativePath = path.relative(root, sessionPath);
     if (!relativePath) {
-      throw new Error(`Pi session for audited thread key ${opaqueKey("thread", row.id)} points at PI_CODING_AGENT_DIR itself.`);
+      throw new Error(`Pi session for audited thread key ${opaqueKey(hasher, "thread", row.id)} points at PI_CODING_AGENT_DIR itself.`);
     }
     uniqueFiles.set(relativePath, sessionPath);
   }
@@ -634,7 +692,7 @@ async function collectPiSessions(
     files.push({
       relativePath,
       size: resolved.size,
-      prefixSha256: await sha256FilePrefix(resolved.realPath, resolved.size),
+      prefixSha256: await hasher.filePrefix(resolved.realPath, resolved.size),
     });
   }
   return { count: files.length, files };
@@ -643,6 +701,7 @@ async function collectPiSessions(
 async function verifyPiSessionPrefixes(
   piCodingAgentDir: string,
   files: UpgradeAuditManifest["piSessions"]["files"],
+  hasher: AuditHasher,
 ): Promise<void> {
   const root = path.resolve(piCodingAgentDir);
   const realRoot = await fs.realpath(root);
@@ -656,7 +715,7 @@ async function verifyPiSessionPrefixes(
     if (resolved.size < baseline.size) {
       throw new Error(`Preserved Pi session was truncated: ${baseline.relativePath}`);
     }
-    const currentPrefix = await sha256FilePrefix(resolved.realPath, baseline.size);
+    const currentPrefix = await hasher.filePrefix(resolved.realPath, baseline.size);
     if (currentPrefix !== baseline.prefixSha256) {
       throw new Error(`Preserved Pi session prefix changed: ${baseline.relativePath}`);
     }
@@ -665,6 +724,7 @@ async function verifyPiSessionPrefixes(
 
 async function collectPiStateFiles(
   piCodingAgentDir: string,
+  hasher: AuditHasher,
 ): Promise<UpgradeAuditManifest["piState"]> {
   const root = path.resolve(piCodingAgentDir);
   const realRoot = await fs.realpath(root);
@@ -681,7 +741,7 @@ async function collectPiStateFiles(
     files.push({
       relativePath,
       size: resolved.size,
-      sha256: await sha256FilePrefix(resolved.realPath, resolved.size),
+      sha256: await hasher.filePrefix(resolved.realPath, resolved.size),
     });
   }
   return { count: files.length, files };
@@ -690,8 +750,9 @@ async function collectPiStateFiles(
 async function verifyPiStateFiles(
   piCodingAgentDir: string,
   baselineFiles: UpgradeAuditManifest["piState"]["files"],
+  hasher: AuditHasher,
 ): Promise<void> {
-  const current = await collectPiStateFiles(piCodingAgentDir);
+  const current = await collectPiStateFiles(piCodingAgentDir, hasher);
   if (current.count !== baselineFiles.length) {
     throw new Error("Upgrade audit failed: Pi state file membership differs from the baseline.");
   }
@@ -709,8 +770,9 @@ function datasetFromRows(
   name: DatasetName,
   rows: Row[],
   key: (row: Row) => unknown,
+  hasher: AuditHasher,
 ): UpgradeAuditManifest["datasets"][DatasetName] {
-  const entries = rows.map((row) => datasetEntry(name, row, key))
+  const entries = rows.map((row) => datasetEntry(name, row, key, hasher))
     .sort((left, right) => left.keySha256.localeCompare(right.keySha256));
   const keys = new Set(entries.map((entry) => entry.keySha256));
   if (keys.size !== entries.length) throw new Error(`Upgrade audit found duplicate ${name} record keys.`);
@@ -721,10 +783,11 @@ function datasetEntry(
   name: DatasetName,
   row: Row,
   key: (row: Row) => unknown,
+  hasher: AuditHasher,
 ): UpgradeAuditManifest["datasets"][DatasetName]["entries"][number] {
   return {
-    keySha256: opaqueKey(name, key(row)),
-    rowSha256: digest(`${name}:row`, row),
+    keySha256: opaqueKey(hasher, name, key(row)),
+    rowSha256: hasher.digest(`${name}:row`, row),
   };
 }
 
@@ -750,19 +813,23 @@ function verifyDataset(
   }
 }
 
-function parseTelegramLocator(sourceId: number, locatorJson: string): { fileId: string; uniqueId: string | null } {
+function parseTelegramLocator(
+  sourceId: number,
+  locatorJson: string,
+  hasher: AuditHasher,
+): { fileId: string; uniqueId: string | null } {
   let locator: unknown;
   try {
     locator = JSON.parse(locatorJson);
   } catch (error) {
-    throw new Error(`Telegram source ${opaqueKey("file-source", sourceId)} has malformed locator JSON: ${formatError(error)}`);
+    throw new Error(`Telegram source ${opaqueKey(hasher, "file-source", sourceId)} has malformed locator JSON: ${formatError(error)}`);
   }
   if (!locator || typeof locator !== "object") {
-    throw new Error(`Telegram source ${opaqueKey("file-source", sourceId)} has a non-object locator.`);
+    throw new Error(`Telegram source ${opaqueKey(hasher, "file-source", sourceId)} has a non-object locator.`);
   }
   const record = locator as Record<string, unknown>;
   const fileId = typeof record.file_id === "string" ? record.file_id.trim() : "";
-  if (!fileId) throw new Error(`Telegram source ${opaqueKey("file-source", sourceId)} has no file_id.`);
+  if (!fileId) throw new Error(`Telegram source ${opaqueKey(hasher, "file-source", sourceId)} has no file_id.`);
   return {
     fileId,
     uniqueId: typeof record.file_unique_id === "string" ? record.file_unique_id.trim() || null : null,
@@ -798,9 +865,9 @@ async function resolveRegularFileWithin(
   return { realPath, size: realStat.size };
 }
 
-async function sha256FilePrefix(filePath: string, size: number): Promise<string> {
+async function hmacSha256FilePrefix(filePath: string, size: number, key: Buffer): Promise<string> {
   const handle = await fs.open(filePath, "r");
-  const hash = createHash("sha256");
+  const hash = createHmac("sha256", key).update("upgrade-audit-file-prefix\0");
   const buffer = Buffer.allocUnsafe(64 * 1024);
   let offset = 0;
   try {
@@ -857,54 +924,73 @@ function summarize(manifest: UpgradeAuditManifest, manifestSha256: string): Upgr
   };
 }
 
-function opaqueKey(domain: string, key: unknown): string {
-  return digest(`${domain}:key`, key);
+function opaqueKey(hasher: AuditHasher, domain: string, key: unknown): string {
+  return hasher.digest(`${domain}:key`, key);
 }
 
-function digest(domain: string, value: unknown): string {
-  return sha256(Buffer.from(`${domain}\0${stableJson(value)}`));
+function createAuditHasher(botToken: string): AuditHasher {
+  const { token } = parseBotToken(botToken);
+  const key = createHash("sha256").update("upgrade-audit-key\0").update(token).digest();
+  return {
+    digest: (domain, value) => createHmac("sha256", key)
+      .update(`${domain}\0${stableJson(value)}`)
+      .digest("hex"),
+    filePrefix: (filePath, size) => hmacSha256FilePrefix(filePath, size, key),
+  };
 }
 
-function telegramBotIdentitySha256(botToken: string): string {
+function parseBotToken(botToken: string): { token: string; botId: string } {
   const token = botToken.trim();
   const separator = token.indexOf(":");
   const botId = separator > 0 ? token.slice(0, separator) : "";
-  if (!/^\d+$/.test(botId)) {
+  if (!/^\d+$/.test(botId) || !token.slice(separator + 1)) {
     throw new Error("BOT_TOKEN must contain a valid Telegram bot identity prefix for upgrade auditing.");
   }
-  return digest("telegram-bot-identity", botId);
+  return { token, botId };
 }
 
-function verifyTelegramBotIdentity(botToken: string, expectedSha256: string): void {
-  if (telegramBotIdentitySha256(botToken) !== expectedSha256) {
+function telegramBotIdentitySha256(botToken: string, hasher: AuditHasher): string {
+  return hasher.digest("telegram-bot-identity", parseBotToken(botToken).botId);
+}
+
+function verifyTelegramBotIdentity(botToken: string, expectedSha256: string, hasher: AuditHasher): void {
+  if (telegramBotIdentitySha256(botToken, hasher) !== expectedSha256) {
     throw new Error("Telegram bot identity does not match the upgrade baseline.");
   }
 }
 
-function e2bDeploymentIdentitySha256(deploymentId: string): string {
+function e2bDeploymentIdentitySha256(deploymentId: string, hasher: AuditHasher): string {
   const normalized = deploymentId.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(normalized)) {
     throw new Error("E2B_DEPLOYMENT_ID must be valid for upgrade auditing.");
   }
-  return digest("e2b-deployment-identity", normalized);
+  return hasher.digest("e2b-deployment-identity", normalized);
 }
 
-function verifyE2bDeploymentIdentity(deploymentId: string, expectedSha256: string): void {
-  if (e2bDeploymentIdentitySha256(deploymentId) !== expectedSha256) {
+function verifyE2bDeploymentIdentity(
+  deploymentId: string,
+  expectedSha256: string,
+  hasher: AuditHasher,
+): void {
+  if (e2bDeploymentIdentitySha256(deploymentId, hasher) !== expectedSha256) {
     throw new Error("E2B deployment identity does not match the upgrade baseline.");
   }
 }
 
-function browserUseDeploymentIdentitySha256(deploymentId: string): string {
+function browserUseDeploymentIdentitySha256(deploymentId: string, hasher: AuditHasher): string {
   const normalized = deploymentId.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(normalized)) {
     throw new Error("BROWSER_USE_DEPLOYMENT_ID must be valid for upgrade auditing.");
   }
-  return digest("browser-use-deployment-identity", normalized);
+  return hasher.digest("browser-use-deployment-identity", normalized);
 }
 
-function verifyBrowserUseDeploymentIdentity(deploymentId: string, expectedSha256: string): void {
-  if (browserUseDeploymentIdentitySha256(deploymentId) !== expectedSha256) {
+function verifyBrowserUseDeploymentIdentity(
+  deploymentId: string,
+  expectedSha256: string,
+  hasher: AuditHasher,
+): void {
+  if (browserUseDeploymentIdentitySha256(deploymentId, hasher) !== expectedSha256) {
     throw new Error("Browser Use deployment identity does not match the upgrade baseline.");
   }
 }

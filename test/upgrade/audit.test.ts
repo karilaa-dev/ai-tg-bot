@@ -63,6 +63,7 @@ describe("upgrade preservation audit", () => {
     const manifest = await createUpgradeAuditManifest(database.db, piDir);
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain(CHAT_SECRET);
+    expect(serialized).not.toContain(BOT_TOKEN);
     expect(serialized).not.toContain(TELEGRAM_FILE_ID);
     expect(serialized).not.toContain(BROWSER_PROFILE_KEY);
     expect(serialized).not.toContain(E2B_DEPLOYMENT_ID);
@@ -94,6 +95,24 @@ describe("upgrade preservation audit", () => {
       datasets: { messages: 1, telegramFileRefs: 1 },
     });
     await expect(columns(database, "files")).resolves.not.toContain("path");
+  });
+
+  it("keys row fingerprints with the preserved bot token", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    const otherTokenManifest = await createUpgradeAuditManifestImpl(
+      database.db,
+      piDir,
+      "778899:different-private-bot-token",
+      E2B_DEPLOYMENT_ID,
+      BROWSER_USE_DEPLOYMENT_ID,
+    );
+
+    expect(otherTokenManifest.datasets.messages.entries[0]?.keySha256)
+      .not.toBe(manifest.datasets.messages.entries[0]?.keySha256);
+    expect(otherTokenManifest.datasets.messages.entries[0]?.rowSha256)
+      .not.toBe(manifest.datasets.messages.entries[0]?.rowSha256);
+    expect(otherTokenManifest.piSessions.files[0]?.prefixSha256)
+      .not.toBe(manifest.piSessions.files[0]?.prefixSha256);
   });
 
   it("preserves every row across bounded dataset batches", async () => {

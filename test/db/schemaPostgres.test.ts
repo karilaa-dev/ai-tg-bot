@@ -250,6 +250,9 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
       `);
       expect(fileColumns.map((column) => column.name)).not.toContain("path");
 
+      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 100, true)`);
+      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest)).resolves.toBeDefined();
+
       await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 1, false)`);
       await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))
         .rejects.toThrow("unsafe PostgreSQL sequence");

@@ -166,10 +166,11 @@ docker run --rm \
 The snapshot command is read-only with respect to the database and never initializes its
 schema. Running it as the source application UID keeps the mode-0600 manifest readable from
 the Pi volume. It fails on malformed Telegram locators, unsafe PostgreSQL sequences, missing
-Pi sessions, or unsafe Pi runtime state files. Its manifest contains counts and SHA-256
-fingerprints—including the bot account identity and any Pi `auth.json`, `models.json`, or
-`settings.json`—not chat text, credentials, or raw Telegram identifiers. Database rows are
-read in bounded batches so the audit does not load the full chat or document corpus at once.
+Pi sessions, or unsafe Pi runtime state files. Its manifest contains counts and keyed
+HMAC-SHA-256 fingerprints—including the bot account identity and any Pi `auth.json`,
+`models.json`, or `settings.json`—not chat text, credentials, or raw Telegram identifiers.
+The same bot token is required to verify them. Database rows are read in bounded keyset pages
+so the audit neither loads the full corpus at once nor repeatedly scans earlier pages.
 
 Create the two transfer artifacts while the bot remains stopped:
 
