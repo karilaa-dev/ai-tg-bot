@@ -35,6 +35,7 @@ try {
     db: db.db,
     piCodingAgentDir: config.PI_CODING_AGENT_DIR,
     botToken: config.BOT_TOKEN,
+    e2bDeploymentId: config.E2B_DEPLOYMENT_ID,
     baselineFile: config.UPGRADE_BASELINE_FILE,
     logger,
   });

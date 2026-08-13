@@ -39,9 +39,11 @@ export const UpgradeAuditManifestSchema = z.object({
   createdAt: z.string().datetime(),
   databaseDialect: z.enum(["sqlite", "postgres"]),
   telegramBotIdentitySha256: z.string().regex(SHA256_PATTERN),
+  e2bDeploymentIdentitySha256: z.string().regex(SHA256_PATTERN),
   datasets: z.object({
     users: AuditDatasetSchema,
     threads: AuditDatasetSchema,
+    threadSandboxes: AuditDatasetSchema,
     messages: AuditDatasetSchema,
     files: AuditDatasetSchema,
     fileSources: AuditDatasetSchema,
@@ -90,6 +92,7 @@ type DatasetDefinition = {
   table: DialectValue;
   key: (row: Row) => unknown;
   query: DialectValue;
+  snapshotOptional?: boolean;
 };
 
 const DATASET_DEFINITIONS: DatasetDefinition[] = [
@@ -106,6 +109,14 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     query: `select id, user_id, topic_id, parent_thread_id, fork_point_message_id, title,
       title_source, title_attempts, topic_title_synced, pi_session_file, pi_session_id,
       archived, created_at from threads order by id`,
+  },
+  {
+    name: "threadSandboxes",
+    table: "thread_sandboxes",
+    key: (row) => [row.deployment_id, row.thread_id],
+    query: `select deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at
+      from thread_sandboxes order by deployment_id, thread_id`,
+    snapshotOptional: true,
   },
   {
     name: "messages",
@@ -148,6 +159,7 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     key: (row) => [row.deployment_id, row.user_id],
     query: `select deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at
       from browser_use_profiles order by deployment_id, user_id`,
+    snapshotOptional: true,
   },
   {
     name: "messageSearch",
@@ -188,6 +200,7 @@ export async function createUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
   botToken: string,
+  e2bDeploymentId: string,
 ): Promise<UpgradeAuditManifest> {
   const datasets = await collectDatasets(db, "snapshot");
   const piSessions = await collectPiSessions(db, piCodingAgentDir);
@@ -197,6 +210,7 @@ export async function createUpgradeAuditManifest(
     createdAt: new Date().toISOString(),
     databaseDialect: db.dialect,
     telegramBotIdentitySha256: telegramBotIdentitySha256(botToken),
+    e2bDeploymentIdentitySha256: e2bDeploymentIdentitySha256(e2bDeploymentId),
     datasets,
     piSessions,
     piState,
@@ -235,9 +249,10 @@ export async function verifyUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
   manifest: UpgradeAuditManifest,
-  options: { botToken: string; requireExactDatasets?: boolean },
+  options: { botToken: string; e2bDeploymentId: string; requireExactDatasets?: boolean },
 ): Promise<UpgradeAuditSummary> {
   verifyTelegramBotIdentity(options.botToken, manifest.telegramBotIdentitySha256);
+  verifyE2bDeploymentIdentity(options.e2bDeploymentId, manifest.e2bDeploymentIdentitySha256);
   const current = await collectDatasets(db, "verify");
   for (const name of Object.keys(manifest.datasets) as DatasetName[]) {
     verifyDataset(
@@ -256,6 +271,7 @@ export async function verifyUpgradeBaselineOnce(input: {
   db: SqlExecutor;
   piCodingAgentDir: string;
   botToken: string;
+  e2bDeploymentId: string;
   baselineFile?: string;
   logger?: Logger;
 }): Promise<{ skipped: boolean; summary?: UpgradeAuditSummary }> {
@@ -281,6 +297,7 @@ export async function verifyUpgradeBaselineOnce(input: {
   }
   const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
   verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256);
+  verifyE2bDeploymentIdentity(input.e2bDeploymentId, loaded.manifest.e2bDeploymentIdentitySha256);
   const marker = await readVerificationMarker(markerFile);
   if (marker?.manifestSha256 === loaded.manifestSha256) {
     input.logger?.info("upgrade preservation baseline already verified", {
@@ -294,7 +311,11 @@ export async function verifyUpgradeBaselineOnce(input: {
     input.db,
     input.piCodingAgentDir,
     loaded.manifest,
-    { botToken: input.botToken, requireExactDatasets: true },
+    {
+      botToken: input.botToken,
+      e2bDeploymentId: input.e2bDeploymentId,
+      requireExactDatasets: true,
+    },
   );
   summary.manifestSha256 = loaded.manifestSha256;
   await writeAtomic(markerFile, Buffer.from(`${JSON.stringify({
@@ -320,6 +341,10 @@ async function collectDatasets(
   for (const definition of DATASET_DEFINITIONS) {
     const table = dialectValue(definition.table, db.dialect);
     if (!(await tableExists(db, table))) {
+      if (mode === "snapshot" && definition.snapshotOptional) {
+        result[definition.name] = datasetFromRows(definition.name, [], definition.key);
+        continue;
+      }
       throw new Error(`Upgrade audit requires the ${table} table.`);
     }
     const rows = await db.query<Row>(sql.raw(dialectValue(definition.query, db.dialect)));
@@ -788,6 +813,20 @@ function telegramBotIdentitySha256(botToken: string): string {
 function verifyTelegramBotIdentity(botToken: string, expectedSha256: string): void {
   if (telegramBotIdentitySha256(botToken) !== expectedSha256) {
     throw new Error("Telegram bot identity does not match the upgrade baseline.");
+  }
+}
+
+function e2bDeploymentIdentitySha256(deploymentId: string): string {
+  const normalized = deploymentId.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(normalized)) {
+    throw new Error("E2B_DEPLOYMENT_ID must be valid for upgrade auditing.");
+  }
+  return digest("e2b-deployment-identity", normalized);
+}
+
+function verifyE2bDeploymentIdentity(deploymentId: string, expectedSha256: string): void {
+  if (e2bDeploymentIdentitySha256(deploymentId) !== expectedSha256) {
+    throw new Error("E2B deployment identity does not match the upgrade baseline.");
   }
 }
 

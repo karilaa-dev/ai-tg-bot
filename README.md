@@ -146,6 +146,7 @@ POSTGRES_PASSWORD_ENCODED=$(node --env-file=.env -e 'const v=process.env.POSTGRE
 SOURCE_BOT_TOKEN=$(node --env-file=.env -e 'const v=process.env.BOT_TOKEN; if (!v) throw new Error("BOT_TOKEN is required"); process.stdout.write(v)')
 SOURCE_APP_UID=$(node --env-file=.env -e 'const v=process.env.APP_UID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_UID must be numeric"); process.stdout.write(v)')
 SOURCE_APP_GID=$(node --env-file=.env -e 'const v=process.env.APP_GID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_GID must be numeric"); process.stdout.write(v)')
+SOURCE_E2B_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.E2B_DEPLOYMENT_ID||process.env.OPEN_SANDBOX_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("sandbox deployment ID is invalid"); process.stdout.write(v)')
 
 docker run --rm \
   --user "${SOURCE_APP_UID}:${SOURCE_APP_GID}" \
@@ -153,6 +154,7 @@ docker run --rm \
   --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
   -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
   -e "BOT_TOKEN=${SOURCE_BOT_TOKEN}" \
+  -e "E2B_DEPLOYMENT_ID=${SOURCE_E2B_DEPLOYMENT_ID}" \
   -e PI_CODING_AGENT_DIR=/app/data/pi \
   --entrypoint node \
   ai-tg-bot-upgrade-audit \
@@ -194,17 +196,21 @@ Configure these application variables in addition to the normal E2B/provider cre
 DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
 PI_CODING_AGENT_DIR=/app/data/pi
 UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
+E2B_DEPLOYMENT_ID=<source E2B_DEPLOYMENT_ID, or old OPEN_SANDBOX_DEPLOYMENT_ID>
 APP_UID=<source APP_UID, default 1000>
 APP_GID=<source APP_GID, default 1000>
 ```
 
-Do not configure legacy OpenSandbox variables or mounts. Ensure
+Reusing the deployment ID preserves database namespaces and source metadata; it does not
+transfer or reconnect old OpenSandbox files, workspaces, or containers. Do not configure
+other legacy OpenSandbox variables or mounts. Ensure
 `E2B_TEMPLATE=ai-tg-bot-tools:production` exists before deployment.
 
 At first startup, the bot migrates the restored database transactionally, requires exact
-membership for pre-existing datasets, verifies every baseline record and Telegram locator,
-checks the configured bot identity and Pi runtime state, verifies the original byte prefix of
-every referenced Pi JSONL session, and only then starts Telegram polling. Success writes
+membership for pre-existing datasets (including any E2B thread mappings), verifies every
+baseline record and Telegram locator, checks the configured bot and E2B deployment identities
+and Pi runtime state, verifies the original byte prefix of every referenced Pi JSONL session,
+and only then starts Telegram polling. Success writes
 `upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
 one-time scan only while that exact manifest is unchanged.
 

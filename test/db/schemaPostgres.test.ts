@@ -14,13 +14,17 @@ import {
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 const BOT_TOKEN = "778899:postgres-audit-token";
+const E2B_DEPLOYMENT_ID = "postgres-audit-deployment";
 const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
-  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN);
+  createUpgradeAuditManifestImpl(db, piCodingAgentDir, BOT_TOKEN, E2B_DEPLOYMENT_ID);
 const verifyUpgradeAuditManifest = (
   db: AppDatabase["db"],
   piCodingAgentDir: string,
   manifest: Awaited<ReturnType<typeof createUpgradeAuditManifestImpl>>,
-) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, { botToken: BOT_TOKEN });
+) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, {
+  botToken: BOT_TOKEN,
+  e2bDeploymentId: E2B_DEPLOYMENT_ID,
+});
 
 describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
   let admin: AppDatabase;
@@ -118,6 +122,12 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           provider_user_key text not null unique, profile_id text, created_at bigint not null,
           updated_at bigint not null, primary key(deployment_id, user_id)
         )`,
+        `create table thread_sandboxes (
+          deployment_id text not null, user_id bigint not null references users(tg_id),
+          thread_id bigint not null references threads(id) on delete cascade,
+          sandbox_id text not null unique, created_at bigint not null, updated_at bigint not null,
+          primary key(deployment_id, thread_id)
+        )`,
         `create table message_search (
           message_id bigint primary key references messages(id) on delete cascade,
           thread_id bigint not null, text text not null, ts tsvector not null
@@ -171,6 +181,10 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         insert into browser_use_profiles(deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at)
         values ('legacy', 73, 'browser-user-73', 'browser-profile-73', 2, 2)
       `);
+      await legacy.db.execute(sql`
+        insert into thread_sandboxes(deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at)
+        values ('legacy', 73, 73, 'sandbox-73', 2, 2)
+      `);
       for (const table of ["threads", "messages", "files", "file_chunks", "embeddings"]) {
         await legacy.db.execute(sql.raw(
           `select setval(pg_get_serial_sequence('${table}', 'id'), (select max(id) from ${table}), true)`,
@@ -182,6 +196,7 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
       expect(manifest.datasets.chunkSearch.count).toBe(1);
       expect(manifest.datasets.embeddings.count).toBe(1);
       expect(manifest.datasets.browserUseProfiles.count).toBe(1);
+      expect(manifest.datasets.threadSandboxes.count).toBe(1);
       expect(manifest.datasets.postgresSequences.count).toBe(6);
 
       await legacy.initialize();
@@ -193,6 +208,7 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           chunkSearch: 1,
           embeddings: 1,
           browserUseProfiles: 1,
+          threadSandboxes: 1,
           postgresSequences: 6,
         },
       });

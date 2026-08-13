@@ -15,11 +15,19 @@ const command = parseCommand(process.argv.slice(2));
 const dbUrl = process.env.DB_URL?.trim() || "sqlite:./data/bot.db";
 const piCodingAgentDir = path.resolve(process.env.PI_CODING_AGENT_DIR?.trim() || "./data/pi");
 const botToken = process.env.BOT_TOKEN?.trim() || "";
+const e2bDeploymentId = process.env.E2B_DEPLOYMENT_ID?.trim()
+  || process.env.OPEN_SANDBOX_DEPLOYMENT_ID?.trim()
+  || "ai-tg-bot";
 const database = createDatabase({ DB_URL: dbUrl });
 
 try {
   if (command.kind === "snapshot") {
-    const manifest = await createUpgradeAuditManifest(database.db, piCodingAgentDir, botToken);
+    const manifest = await createUpgradeAuditManifest(
+      database.db,
+      piCodingAgentDir,
+      botToken,
+      e2bDeploymentId,
+    );
     const manifestSha256 = await writeUpgradeAuditManifest(command.file, manifest);
     process.stdout.write(`${JSON.stringify({
       status: "snapshot-created",
@@ -37,7 +45,7 @@ try {
       database.db,
       piCodingAgentDir,
       loaded.manifest,
-      { botToken },
+      { botToken, e2bDeploymentId },
     );
     process.stdout.write(`${JSON.stringify({
       status: "verified",
@@ -64,7 +72,7 @@ function usage(): never {
     "  npm run upgrade:audit -- snapshot --out <manifest.json>",
     "  npm run upgrade:audit -- verify --against <manifest.json>",
     "",
-    "DB_URL, PI_CODING_AGENT_DIR, and BOT_TOKEN select the preserved deployment state.",
+    "DB_URL, PI_CODING_AGENT_DIR, BOT_TOKEN, and E2B_DEPLOYMENT_ID select the preserved deployment state.",
     "The command never initializes or migrates the database schema.",
     "",
   ].join("\n"));
