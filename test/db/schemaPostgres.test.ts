@@ -1,9 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
+import { createUpgradeAuditManifest, verifyUpgradeAuditManifest } from "../../src/upgrade/audit.js";
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 
@@ -47,6 +51,10 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
 
   it("migrates latest-main history and Telegram locators without changing durable rows", async () => {
     const legacySchema = `legacy_schema_${randomUUID().replaceAll("-", "")}`;
+    const piDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-postgres-audit-"));
+    const sessionFile = path.join(piDir, "sessions", "telegram", "preserved.jsonl");
+    await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+    await fs.writeFile(sessionFile, '{"role":"user","content":"preserve me"}\n');
     await admin.db.execute(sql.raw(`create schema ${legacySchema}`));
     const url = new URL(postgresUrl!);
     url.searchParams.set("options", `-c search_path=${legacySchema}`);
@@ -81,13 +89,34 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           transport text not null, connection_key text not null, remote_key text not null,
           locator_json text not null, mime_type text, last_verified_at bigint, created_at bigint not null
         )`,
+        `create table file_chunks (
+          id bigserial primary key, file_id bigint not null references files(id), idx integer not null,
+          heading_path text, content text not null, created_at bigint not null
+        )`,
+        `create table message_files (
+          message_id bigint not null references messages(id) on delete cascade,
+          file_id bigint not null references files(id) on delete cascade,
+          display_name text, caption text, created_at bigint not null, primary key(message_id, file_id)
+        )`,
+        `create table embeddings (
+          id bigserial primary key, kind text not null, ref_id bigint not null, model text,
+          dim integer not null, vector bytea not null, created_at bigint not null
+        )`,
+        `create table message_search (
+          message_id bigint primary key references messages(id) on delete cascade,
+          thread_id bigint not null, text text not null, ts tsvector not null
+        )`,
+        `create table chunk_search (
+          chunk_id bigint primary key references file_chunks(id) on delete cascade,
+          file_id bigint not null, text text not null, ts tsvector not null
+        )`,
       ]) await legacy.db.execute(sql.raw(statement));
       await legacy.db.execute(sql`
         insert into users(tg_id, first_name, lang, created_at) values (73, 'Legacy', 'en', 1)
       `);
       await legacy.db.execute(sql`
         insert into threads(id, user_id, title, pi_session_file, pi_session_id, created_at)
-        values (73, 73, 'Preserved', '/app/data/pi/sessions/telegram/preserved.jsonl', 'session-73', 1)
+        values (73, 73, 'Preserved', ${sessionFile}, 'session-73', 1)
       `);
       await legacy.db.execute(sql`
         insert into messages(id, thread_id, role, kind, content_json, text_plain, tg_message_id, pi_entry_id, created_at)
@@ -102,9 +131,38 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         values (73, 'telegram', 'default', 'unique-73',
           '{"file_id":"telegram-73","file_unique_id":"unique-73"}', 2)
       `);
+      await legacy.db.execute(sql`
+        insert into file_chunks(id, file_id, idx, content, created_at)
+        values (73, 73, 0, 'indexed attachment', 2)
+      `);
+      await legacy.db.execute(sql`
+        insert into message_files(message_id, file_id, display_name, caption, created_at)
+        values (73, 73, 'preserved.txt', 'attachment', 2)
+      `);
+      await legacy.db.execute(sql`
+        insert into embeddings(id, kind, ref_id, model, dim, vector, created_at)
+        values (73, 'chunk', 73, 'legacy-embedding', 2, ${Buffer.from([0, 0, 128, 63, 0, 0, 0, 0])}, 2)
+      `);
+      await legacy.db.execute(sql`
+        insert into message_search(message_id, thread_id, text, ts)
+        values (73, 73, 'preserve me', to_tsvector('simple', 'preserve me'))
+      `);
+      await legacy.db.execute(sql`
+        insert into chunk_search(chunk_id, file_id, text, ts)
+        values (73, 73, 'indexed attachment', to_tsvector('simple', 'indexed attachment'))
+      `);
+
+      const manifest = await createUpgradeAuditManifest(legacy.db, piDir);
+      expect(manifest.datasets.messageSearch.count).toBe(1);
+      expect(manifest.datasets.chunkSearch.count).toBe(1);
+      expect(manifest.datasets.embeddings.count).toBe(1);
 
       await legacy.initialize();
       await legacy.initialize();
+
+      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest)).resolves.toMatchObject({
+        datasets: { messageSearch: 1, chunkSearch: 1, embeddings: 1 },
+      });
 
       await expect(legacy.db.query<{ text_plain: string; pi_session_id: string }>(sql`
         select m.text_plain, t.pi_session_id from messages m join threads t on t.id = m.thread_id
@@ -117,9 +175,14 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         where table_schema = current_schema() and table_name = 'files'
       `);
       expect(fileColumns.map((column) => column.name)).not.toContain("path");
+
+      await legacy.db.execute(sql`delete from message_search`);
+      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))
+        .rejects.toThrow("messageSearch count fell");
     } finally {
       await legacy.destroy();
       await admin.db.execute(sql.raw(`drop schema if exists ${legacySchema} cascade`));
+      await fs.rm(piDir, { recursive: true, force: true });
     }
   });
 

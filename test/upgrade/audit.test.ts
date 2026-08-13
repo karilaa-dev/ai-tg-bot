@@ -45,6 +45,9 @@ describe("upgrade preservation audit", () => {
     expect(serialized).not.toContain("778899");
     expect(manifest.datasets.messages.count).toBe(1);
     expect(manifest.datasets.telegramFileRefs.count).toBe(1);
+    expect(manifest.datasets.messageSearch.count).toBe(1);
+    expect(manifest.datasets.chunkSearch.count).toBe(1);
+    expect(manifest.datasets.embeddings.count).toBe(1);
     expect(manifest.piSessions.count).toBe(1);
 
     await database.initialize();
@@ -59,6 +62,29 @@ describe("upgrade preservation audit", () => {
       datasets: { messages: 1, telegramFileRefs: 1 },
     });
     await expect(columns(database, "files")).resolves.not.toContain("path");
+  });
+
+  it("rejects missing persisted lexical and embedding retrieval data", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    await database.initialize();
+
+    await database.db.execute(sql`delete from messages_fts`);
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("messageSearch count fell");
+    await database.db.execute(sql`
+      insert into messages_fts(text, message_id, thread_id) values (${CHAT_SECRET}, 1, 1)
+    `);
+
+    await database.db.execute(sql`delete from chunks_fts`);
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("chunkSearch count fell");
+    await database.db.execute(sql`
+      insert into chunks_fts(text, chunk_id, file_id) values ('searchable content', 1, 1)
+    `);
+
+    await database.db.execute(sql`delete from embeddings`);
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("embeddings count fell");
   });
 
   it("rejects changed chat rows, missing Telegram references, and changed Pi prefixes", async () => {
@@ -161,6 +187,8 @@ async function createLatestMainSchema(database: AppDatabase, piSessionFile: stri
       id integer primary key autoincrement, kind text not null, ref_id integer not null, model text,
       dim integer not null, vector blob not null, created_at integer not null
     )`,
+    `create virtual table messages_fts using fts5(text, message_id unindexed, thread_id unindexed)`,
+    `create virtual table chunks_fts using fts5(text, chunk_id unindexed, file_id unindexed)`,
   ];
   for (const statement of statements) await database.db.execute(sql.raw(statement));
   await database.db.execute(sql`
@@ -195,6 +223,16 @@ async function createLatestMainSchema(database: AppDatabase, piSessionFile: stri
   await database.db.execute(sql`
     insert into message_files(message_id, file_id, display_name, caption, created_at)
     values (1, 1, 'history.txt', 'attachment caption', 2)
+  `);
+  await database.db.execute(sql`
+    insert into messages_fts(text, message_id, thread_id) values (${CHAT_SECRET}, 1, 1)
+  `);
+  await database.db.execute(sql`
+    insert into chunks_fts(text, chunk_id, file_id) values ('searchable content', 1, 1)
+  `);
+  await database.db.execute(sql`
+    insert into embeddings(id, kind, ref_id, model, dim, vector, created_at)
+    values (1, 'chunk', 1, 'legacy-embedding', 2, ${Buffer.from([0, 0, 128, 63, 0, 0, 0, 0])}, 2)
   `);
 }
 

@@ -40,6 +40,9 @@ export const UpgradeAuditManifestSchema = z.object({
     fileSources: AuditDatasetSchema,
     fileChunks: AuditDatasetSchema,
     messageFiles: AuditDatasetSchema,
+    messageSearch: AuditDatasetSchema,
+    chunkSearch: AuditDatasetSchema,
+    embeddings: AuditDatasetSchema,
     telegramFileRefs: AuditDatasetSchema,
   }),
   piSessions: z.object({
@@ -65,11 +68,12 @@ export type UpgradeAuditSummary = {
 
 type Row = Record<string, unknown>;
 type DatasetName = keyof UpgradeAuditManifest["datasets"];
+type DialectValue = string | Record<"sqlite" | "postgres", string>;
 type DatasetDefinition = {
   name: Exclude<DatasetName, "telegramFileRefs">;
-  table: string;
+  table: DialectValue;
   key: (row: Row) => unknown;
-  query: string;
+  query: DialectValue;
 };
 
 const DATASET_DEFINITIONS: DatasetDefinition[] = [
@@ -121,6 +125,37 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     key: (row) => [row.message_id, row.file_id],
     query: `select message_id, file_id, display_name, caption, created_at
       from message_files order by message_id, file_id`,
+  },
+  {
+    name: "messageSearch",
+    table: { sqlite: "messages_fts", postgres: "message_search" },
+    key: (row) => row.message_id,
+    query: {
+      sqlite: `select cast(message_id as integer) as message_id,
+        cast(thread_id as integer) as thread_id, text
+        from messages_fts order by cast(message_id as integer)`,
+      postgres: `select message_id, thread_id, text, ts::text as ts
+        from message_search order by message_id`,
+    },
+  },
+  {
+    name: "chunkSearch",
+    table: { sqlite: "chunks_fts", postgres: "chunk_search" },
+    key: (row) => row.chunk_id,
+    query: {
+      sqlite: `select cast(chunk_id as integer) as chunk_id,
+        cast(file_id as integer) as file_id, text
+        from chunks_fts order by cast(chunk_id as integer)`,
+      postgres: `select chunk_id, file_id, text, ts::text as ts
+        from chunk_search order by chunk_id`,
+    },
+  },
+  {
+    name: "embeddings",
+    table: "embeddings",
+    key: (row) => row.id,
+    query: `select id, kind, ref_id, model, dim, vector, created_at
+      from embeddings order by id`,
   },
 ];
 
@@ -225,16 +260,21 @@ async function collectDatasets(
 ): Promise<UpgradeAuditManifest["datasets"]> {
   const result = {} as Omit<UpgradeAuditManifest["datasets"], "telegramFileRefs">;
   for (const definition of DATASET_DEFINITIONS) {
-    if (!(await tableExists(db, definition.table))) {
-      throw new Error(`Upgrade audit requires the ${definition.table} table.`);
+    const table = dialectValue(definition.table, db.dialect);
+    if (!(await tableExists(db, table))) {
+      throw new Error(`Upgrade audit requires the ${table} table.`);
     }
-    const rows = await db.query<Row>(sql.raw(definition.query));
+    const rows = await db.query<Row>(sql.raw(dialectValue(definition.query, db.dialect)));
     result[definition.name] = datasetFromRows(definition.name, rows, definition.key);
   }
   return {
     ...result,
     telegramFileRefs: await collectTelegramFileRefs(db, mode),
   };
+}
+
+function dialectValue(value: DialectValue, dialect: "sqlite" | "postgres"): string {
+  return typeof value === "string" ? value : value[dialect];
 }
 
 async function collectTelegramFileRefs(
