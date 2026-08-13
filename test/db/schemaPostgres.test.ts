@@ -102,6 +102,11 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
           id bigserial primary key, kind text not null, ref_id bigint not null, model text,
           dim integer not null, vector bytea not null, created_at bigint not null
         )`,
+        `create table browser_use_profiles (
+          deployment_id text not null, user_id bigint not null references users(tg_id) on delete cascade,
+          provider_user_key text not null unique, profile_id text, created_at bigint not null,
+          updated_at bigint not null, primary key(deployment_id, user_id)
+        )`,
         `create table message_search (
           message_id bigint primary key references messages(id) on delete cascade,
           thread_id bigint not null, text text not null, ts tsvector not null
@@ -151,17 +156,34 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         insert into chunk_search(chunk_id, file_id, text, ts)
         values (73, 73, 'indexed attachment', to_tsvector('simple', 'indexed attachment'))
       `);
+      await legacy.db.execute(sql`
+        insert into browser_use_profiles(deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at)
+        values ('legacy', 73, 'browser-user-73', 'browser-profile-73', 2, 2)
+      `);
+      for (const table of ["threads", "messages", "files", "file_chunks", "embeddings"]) {
+        await legacy.db.execute(sql.raw(
+          `select setval(pg_get_serial_sequence('${table}', 'id'), (select max(id) from ${table}), true)`,
+        ));
+      }
 
       const manifest = await createUpgradeAuditManifest(legacy.db, piDir);
       expect(manifest.datasets.messageSearch.count).toBe(1);
       expect(manifest.datasets.chunkSearch.count).toBe(1);
       expect(manifest.datasets.embeddings.count).toBe(1);
+      expect(manifest.datasets.browserUseProfiles.count).toBe(1);
+      expect(manifest.datasets.postgresSequences.count).toBe(6);
 
       await legacy.initialize();
       await legacy.initialize();
 
       await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest)).resolves.toMatchObject({
-        datasets: { messageSearch: 1, chunkSearch: 1, embeddings: 1 },
+        datasets: {
+          messageSearch: 1,
+          chunkSearch: 1,
+          embeddings: 1,
+          browserUseProfiles: 1,
+          postgresSequences: 6,
+        },
       });
 
       await expect(legacy.db.query<{ text_plain: string; pi_session_id: string }>(sql`
@@ -175,6 +197,11 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         where table_schema = current_schema() and table_name = 'files'
       `);
       expect(fileColumns.map((column) => column.name)).not.toContain("path");
+
+      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 1, false)`);
+      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))
+        .rejects.toThrow("unsafe PostgreSQL sequence");
+      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 73, true)`);
 
       await legacy.db.execute(sql`delete from message_search`);
       await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))

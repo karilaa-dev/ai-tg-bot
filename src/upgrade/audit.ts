@@ -40,9 +40,11 @@ export const UpgradeAuditManifestSchema = z.object({
     fileSources: AuditDatasetSchema,
     fileChunks: AuditDatasetSchema,
     messageFiles: AuditDatasetSchema,
+    browserUseProfiles: AuditDatasetSchema,
     messageSearch: AuditDatasetSchema,
     chunkSearch: AuditDatasetSchema,
     embeddings: AuditDatasetSchema,
+    postgresSequences: AuditDatasetSchema,
     telegramFileRefs: AuditDatasetSchema,
   }),
   piSessions: z.object({
@@ -70,7 +72,7 @@ type Row = Record<string, unknown>;
 type DatasetName = keyof UpgradeAuditManifest["datasets"];
 type DialectValue = string | Record<"sqlite" | "postgres", string>;
 type DatasetDefinition = {
-  name: Exclude<DatasetName, "telegramFileRefs">;
+  name: Exclude<DatasetName, "telegramFileRefs" | "postgresSequences">;
   table: DialectValue;
   key: (row: Row) => unknown;
   query: DialectValue;
@@ -125,6 +127,13 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
     key: (row) => [row.message_id, row.file_id],
     query: `select message_id, file_id, display_name, caption, created_at
       from message_files order by message_id, file_id`,
+  },
+  {
+    name: "browserUseProfiles",
+    table: "browser_use_profiles",
+    key: (row) => [row.deployment_id, row.user_id],
+    query: `select deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at
+      from browser_use_profiles order by deployment_id, user_id`,
   },
   {
     name: "messageSearch",
@@ -223,8 +232,25 @@ export async function verifyUpgradeBaselineOnce(input: {
 }): Promise<{ skipped: boolean; summary?: UpgradeAuditSummary }> {
   if (!input.baselineFile?.trim()) return { skipped: true };
   const baselineFile = path.resolve(input.baselineFile);
+  const piRoot = path.resolve(input.piCodingAgentDir);
+  if (!isPathWithin(piRoot, baselineFile)) {
+    throw new Error("UPGRADE_BASELINE_FILE must be inside PI_CODING_AGENT_DIR.");
+  }
+  const realPiRoot = await fs.realpath(piRoot);
+  const resolvedBaseline = await resolveRegularFileWithin(realPiRoot, baselineFile);
+  if (!resolvedBaseline) {
+    throw new Error("UPGRADE_BASELINE_FILE must be a regular file inside PI_CODING_AGENT_DIR.");
+  }
   const markerFile = `${baselineFile}.verified`;
-  const loaded = await readUpgradeAuditManifest(baselineFile);
+  const markerParent = await fs.realpath(path.dirname(markerFile));
+  if (!isPathWithin(realPiRoot, markerParent)) {
+    throw new Error("Upgrade verification marker must be inside PI_CODING_AGENT_DIR.");
+  }
+  const markerStat = await fs.lstat(markerFile).catch(() => undefined);
+  if (markerStat?.isSymbolicLink()) {
+    throw new Error("Upgrade verification marker must not be a symbolic link.");
+  }
+  const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
   const marker = await readVerificationMarker(markerFile);
   if (marker?.manifestSha256 === loaded.manifestSha256) {
     input.logger?.info("upgrade preservation baseline already verified", {
@@ -258,7 +284,7 @@ async function collectDatasets(
   db: SqlExecutor,
   mode: "snapshot" | "verify",
 ): Promise<UpgradeAuditManifest["datasets"]> {
-  const result = {} as Omit<UpgradeAuditManifest["datasets"], "telegramFileRefs">;
+  const result = {} as Omit<UpgradeAuditManifest["datasets"], "telegramFileRefs" | "postgresSequences">;
   for (const definition of DATASET_DEFINITIONS) {
     const table = dialectValue(definition.table, db.dialect);
     if (!(await tableExists(db, table))) {
@@ -269,6 +295,7 @@ async function collectDatasets(
   }
   return {
     ...result,
+    postgresSequences: await collectPostgresSequences(db),
     telegramFileRefs: await collectTelegramFileRefs(db, mode),
   };
 }
@@ -281,18 +308,57 @@ async function collectTelegramFileRefs(
   db: SqlExecutor,
   mode: "snapshot" | "verify",
 ): Promise<UpgradeAuditManifest["datasets"]["telegramFileRefs"]> {
-  const references = new Map<string, { fileId: unknown; telegramFileId: string; uniqueId: string | null }>();
+  type TelegramReference = {
+    fileId: unknown;
+    telegramFileId: string;
+    uniqueId: string | null;
+    direction: string;
+    mediaKind: string;
+    telegramMessageId: unknown;
+    width: unknown;
+    height: unknown;
+    telegramSize: unknown;
+    isPrimary: unknown;
+    firstSeenAt: unknown;
+    lastSeenAt: unknown;
+  };
+  const references = new Map<string, TelegramReference>();
   const currentTableExists = await tableExists(db, "telegram_file_refs");
   const legacyRows = await db.query<{
     id: number;
     file_id: number;
     locator_json: string;
-  }>(sql`select id, file_id, locator_json from file_sources where transport = 'telegram' order by id`);
+    mime_type: string | null;
+    file_type: string;
+    message_role: string | null;
+    created_at: unknown;
+  }>(sql`
+    select s.id, s.file_id, s.locator_json, coalesce(s.mime_type, f.mime_type) as mime_type,
+      f.type as file_type, m.role as message_role, s.created_at
+    from file_sources s
+    join files f on f.id = s.file_id
+    left join messages m on m.id = f.message_id
+    where s.transport = 'telegram'
+    order by s.id
+  `);
   for (const row of legacyRows) {
     const locator = parseTelegramLocator(row.id, row.locator_json);
     if (mode === "snapshot" || !currentTableExists) {
       const key = stableJson([row.file_id, locator.fileId]);
-      references.set(key, { fileId: row.file_id, telegramFileId: locator.fileId, uniqueId: locator.uniqueId });
+      references.set(key, {
+        fileId: row.file_id,
+        telegramFileId: locator.fileId,
+        uniqueId: locator.uniqueId,
+        direction: row.message_role === "assistant" ? "outbound" : "inbound",
+        mediaKind: row.file_type === "image" && row.mime_type === "image/jpeg" ? "photo" : "document",
+        telegramMessageId: null,
+        width: null,
+        height: null,
+        telegramSize: null,
+        isPrimary: 1,
+        firstSeenAt: row.created_at,
+        lastSeenAt: row.created_at,
+      });
     }
   }
 
@@ -304,8 +370,18 @@ async function collectTelegramFileRefs(
       file_id: number;
       telegram_file_id: string;
       telegram_file_unique_id: string | null;
+      direction: string;
+      media_kind: string;
+      telegram_message_id: unknown;
+      width: unknown;
+      height: unknown;
+      telegram_size: unknown;
+      is_primary: unknown;
+      first_seen_at: unknown;
+      last_seen_at: unknown;
     }>(sql`
-      select file_id, telegram_file_id, telegram_file_unique_id
+      select file_id, telegram_file_id, telegram_file_unique_id, direction, media_kind,
+        telegram_message_id, width, height, telegram_size, is_primary, first_seen_at, last_seen_at
       from telegram_file_refs
       order by file_id, telegram_file_id
     `);
@@ -317,6 +393,15 @@ async function collectTelegramFileRefs(
         fileId: row.file_id,
         telegramFileId,
         uniqueId: row.telegram_file_unique_id?.trim() || null,
+        direction: row.direction,
+        mediaKind: row.media_kind,
+        telegramMessageId: row.telegram_message_id,
+        width: row.width,
+        height: row.height,
+        telegramSize: row.telegram_size,
+        isPrimary: row.is_primary,
+        firstSeenAt: row.first_seen_at,
+        lastSeenAt: row.last_seen_at,
       });
     }
   }
@@ -324,6 +409,86 @@ async function collectTelegramFileRefs(
   const rows = [...references.values()].sort((left, right) =>
     stableJson([left.fileId, left.telegramFileId]).localeCompare(stableJson([right.fileId, right.telegramFileId])));
   return datasetFromRows("telegramFileRefs", rows, (row) => [row.fileId, row.telegramFileId]);
+}
+
+async function collectPostgresSequences(
+  db: SqlExecutor,
+): Promise<UpgradeAuditManifest["datasets"]["postgresSequences"]> {
+  if (db.dialect === "sqlite") return { count: 0, entries: [] };
+  const sequences = await db.query<{
+    sequence_schema_name: string;
+    table_schema_name: string;
+    table_name: string;
+    column_name: string;
+    sequence_name: string;
+    increment_by: string;
+  }>(sql`
+    select sequence_ns.nspname as sequence_schema_name, table_ns.nspname as table_schema_name,
+      table_class.relname as table_name,
+      table_attr.attname as column_name, sequence_class.relname as sequence_name,
+      sequence_data.seqincrement::text as increment_by
+    from pg_class sequence_class
+    join pg_namespace sequence_ns on sequence_ns.oid = sequence_class.relnamespace
+    join pg_sequence sequence_data on sequence_data.seqrelid = sequence_class.oid
+    join pg_depend dependency on dependency.objid = sequence_class.oid
+      and dependency.classid = 'pg_class'::regclass
+      and dependency.refclassid = 'pg_class'::regclass
+      and dependency.deptype in ('a', 'i')
+    join pg_class table_class on table_class.oid = dependency.refobjid
+    join pg_namespace table_ns on table_ns.oid = table_class.relnamespace
+    join pg_attribute table_attr on table_attr.attrelid = table_class.oid
+      and table_attr.attnum = dependency.refobjsubid
+    where sequence_class.relkind = 'S'
+      and sequence_ns.nspname = current_schema()
+      and table_ns.nspname = current_schema()
+    order by table_class.relname, table_attr.attname
+  `);
+  const rows: Row[] = [];
+  for (const sequence of sequences) {
+    const qualifiedSequence = pgQualifiedName(sequence.sequence_schema_name, sequence.sequence_name);
+    const qualifiedTable = pgQualifiedName(sequence.table_schema_name, sequence.table_name);
+    const column = pgIdentifier(sequence.column_name);
+    const [state] = await db.query<{ last_value: string; is_called: boolean }>(sql.raw(
+      `select last_value::text as last_value, is_called from ${qualifiedSequence}`,
+    ));
+    const [maximum] = await db.query<{ maximum_value: string | null }>(sql.raw(
+      `select max(${column})::text as maximum_value from ${qualifiedTable}`,
+    ));
+    if (!state) throw new Error(`Upgrade audit could not read PostgreSQL sequence ${sequence.sequence_name}.`);
+    const increment = BigInt(sequence.increment_by);
+    const lastValue = BigInt(state.last_value);
+    const nextValue = state.is_called ? lastValue + increment : lastValue;
+    const maximumValue = maximum?.maximum_value === null || maximum?.maximum_value === undefined
+      ? null
+      : BigInt(maximum.maximum_value);
+    if (increment <= 0n || (maximumValue !== null && nextValue <= maximumValue)) {
+      throw new Error(`Upgrade audit found unsafe PostgreSQL sequence ${sequence.sequence_name}.`);
+    }
+    rows.push({
+      sequenceSchemaName: sequence.sequence_schema_name,
+      tableSchemaName: sequence.table_schema_name,
+      tableName: sequence.table_name,
+      columnName: sequence.column_name,
+      sequenceName: sequence.sequence_name,
+      lastValue: state.last_value,
+      isCalled: state.is_called,
+      incrementBy: sequence.increment_by,
+      maximumValue: maximum?.maximum_value ?? null,
+    });
+  }
+  return datasetFromRows(
+    "postgresSequences",
+    rows,
+    (row) => [row.sequenceSchemaName, row.tableSchemaName, row.tableName, row.columnName, row.sequenceName],
+  );
+}
+
+function pgIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function pgQualifiedName(schema: string, relation: string): string {
+  return `${pgIdentifier(schema)}.${pgIdentifier(relation)}`;
 }
 
 async function collectPiSessions(

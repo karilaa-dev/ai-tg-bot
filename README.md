@@ -147,6 +147,7 @@ set +a
 POSTGRES_PASSWORD_ENCODED=$(node -e 'process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))')
 
 docker run --rm \
+  --user 1000:1000 \
   --network "${OLD_DATABASE_NETWORK}" \
   --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
   -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
@@ -157,8 +158,10 @@ docker run --rm \
 ```
 
 The snapshot command is read-only with respect to the database and never initializes its
-schema. It fails on malformed Telegram locators or missing Pi session files. Its manifest
-contains counts and SHA-256 fingerprints, not chat text or raw Telegram identifiers.
+schema. Running it as the application UID keeps the mode-0600 manifest readable after
+transfer even if the destination runtime is already non-root. It fails on malformed Telegram
+locators, unsafe PostgreSQL sequences, or missing Pi session files. Its manifest contains
+counts and SHA-256 fingerprints, not chat text or raw Telegram identifiers.
 
 Create the two transfer artifacts while the bot remains stopped:
 
@@ -203,12 +206,9 @@ one-time scan only while that exact manifest is unchanged.
 
 Confirm the logs contain `upgrade preservation baseline verified`, `database initialized`,
 and `bot started`. Then verify an old thread, `search_thread` recall, restoration of an old
-Telegram attachment into a newly created E2B sandbox, and delivery of a new file. The audit
-can also be rerun manually inside the built application container:
-
-```bash
-npm run upgrade:audit -- verify --against /app/data/pi/upgrade-baseline.json
-```
+Telegram attachment into a newly created E2B sandbox, and delivery of a new file. The baseline
+check is intentionally a one-time cutover gate, not an ongoing integrity check: normal bot use
+updates operational file/source fields and appends messages after startup.
 
 After the verification and smoke tests pass, remove `UPGRADE_BASELINE_FILE` from the Dokploy
 application variables and redeploy once. The manifest and success marker remain available as

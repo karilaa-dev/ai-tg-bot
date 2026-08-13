@@ -14,6 +14,7 @@ import {
 
 const CHAT_SECRET = "private migration conversation";
 const TELEGRAM_FILE_ID = "BQAC-private-telegram-file-id";
+const BROWSER_PROFILE_KEY = "private-browser-profile-user";
 
 describe("upgrade preservation audit", () => {
   let tempDir: string;
@@ -41,6 +42,7 @@ describe("upgrade preservation audit", () => {
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain(CHAT_SECRET);
     expect(serialized).not.toContain(TELEGRAM_FILE_ID);
+    expect(serialized).not.toContain(BROWSER_PROFILE_KEY);
     expect(serialized).not.toContain("987654321");
     expect(serialized).not.toContain("778899");
     expect(manifest.datasets.messages.count).toBe(1);
@@ -48,6 +50,8 @@ describe("upgrade preservation audit", () => {
     expect(manifest.datasets.messageSearch.count).toBe(1);
     expect(manifest.datasets.chunkSearch.count).toBe(1);
     expect(manifest.datasets.embeddings.count).toBe(1);
+    expect(manifest.datasets.browserUseProfiles.count).toBe(1);
+    expect(manifest.datasets.postgresSequences.count).toBe(0);
     expect(manifest.piSessions.count).toBe(1);
 
     await database.initialize();
@@ -96,6 +100,11 @@ describe("upgrade preservation audit", () => {
       .rejects.toThrow("baseline messages record changed");
 
     await database.db.execute(sql`update messages set text_plain = ${CHAT_SECRET} where id = 1`);
+    await database.db.execute(sql`update telegram_file_refs set is_primary = 0`);
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("baseline telegramFileRefs record changed");
+
+    await database.db.execute(sql`update telegram_file_refs set is_primary = 1`);
     await database.db.execute(sql`delete from telegram_file_refs`);
     await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
       .rejects.toThrow("telegramFileRefs count fell");
@@ -106,6 +115,15 @@ describe("upgrade preservation audit", () => {
     await fs.writeFile(sessionFile, bytes);
     await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
       .rejects.toThrow("Pi session prefix changed");
+  });
+
+  it("rejects missing Browser Use profile mappings", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    await database.initialize();
+    await database.db.execute(sql`delete from browser_use_profiles`);
+
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("browserUseProfiles count fell");
   });
 
   it("rejects malformed Telegram locators and missing referenced Pi sessions", async () => {
@@ -172,6 +190,20 @@ describe("upgrade preservation audit", () => {
       baselineFile,
     })).resolves.toMatchObject({ skipped: true });
   });
+
+  it("refuses a startup baseline outside the Pi data root", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    const outsideBaseline = path.join(tempDir, "outside-baseline.json");
+    await writeUpgradeAuditManifest(outsideBaseline, manifest);
+    await database.initialize();
+
+    await expect(verifyUpgradeBaselineOnce({
+      db: database.db,
+      piCodingAgentDir: piDir,
+      baselineFile: outsideBaseline,
+    })).rejects.toThrow("must be inside PI_CODING_AGENT_DIR");
+    await expect(fs.access(`${outsideBaseline}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 async function createLatestMainSchema(database: AppDatabase, piSessionFile: string): Promise<void> {
@@ -216,6 +248,11 @@ async function createLatestMainSchema(database: AppDatabase, piSessionFile: stri
     `create table embeddings (
       id integer primary key autoincrement, kind text not null, ref_id integer not null, model text,
       dim integer not null, vector blob not null, created_at integer not null
+    )`,
+    `create table browser_use_profiles (
+      deployment_id text not null, user_id integer not null references users(tg_id) on delete cascade,
+      provider_user_key text not null unique, profile_id text, created_at integer not null,
+      updated_at integer not null, primary key(deployment_id, user_id)
     )`,
     `create virtual table messages_fts using fts5(text, message_id unindexed, thread_id unindexed)`,
     `create virtual table chunks_fts using fts5(text, chunk_id unindexed, file_id unindexed)`,
@@ -263,6 +300,10 @@ async function createLatestMainSchema(database: AppDatabase, piSessionFile: stri
   await database.db.execute(sql`
     insert into embeddings(id, kind, ref_id, model, dim, vector, created_at)
     values (1, 'chunk', 1, 'legacy-embedding', 2, ${Buffer.from([0, 0, 128, 63, 0, 0, 0, 0])}, 2)
+  `);
+  await database.db.execute(sql`
+    insert into browser_use_profiles(deployment_id, user_id, provider_user_key, profile_id, created_at, updated_at)
+    values ('legacy', 987654321, ${BROWSER_PROFILE_KEY}, 'browser-profile-1', 2, 2)
   `);
 }
 
