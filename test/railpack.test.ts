@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
@@ -18,7 +19,7 @@ describe("Railpack deployment configuration", () => {
   });
 
   it("keeps all runtime assets in the Railpack build context", async () => {
-    await expect(fs.access("docker/entrypoint.sh")).resolves.toBeUndefined();
+    await expect(fs.access("docker/entrypoint.sh", constants.X_OK)).resolves.toBeUndefined();
     await expect(fs.access("locales/en.ftl")).resolves.toBeUndefined();
     await expect(fs.access("skills/officecli-docx/SKILL.md")).resolves.toBeUndefined();
     await expect(fs.access("system_prompt.md")).resolves.toBeUndefined();

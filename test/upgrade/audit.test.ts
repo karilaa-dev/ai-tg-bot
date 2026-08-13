@@ -157,6 +157,37 @@ describe("upgrade preservation audit", () => {
       .rejects.toThrow("embeddings count fell");
   });
 
+  it("does not derive legacy Telegram references for a file that already has one", async () => {
+    await database.db.execute(sql`
+      create table telegram_file_refs (
+        id integer primary key autoincrement, file_id integer not null references files(id) on delete cascade,
+        telegram_file_id text not null, telegram_file_unique_id text, direction text not null,
+        media_kind text not null, telegram_message_id integer, width integer, height integer,
+        telegram_size integer, is_primary integer not null, first_seen_at integer not null,
+        last_seen_at integer not null, unique(file_id, telegram_file_id)
+      )
+    `);
+    await database.db.execute(sql`
+      insert into telegram_file_refs(
+        file_id, telegram_file_id, telegram_file_unique_id, direction, media_kind,
+        telegram_message_id, width, height, telegram_size, is_primary, first_seen_at, last_seen_at
+      ) values (1, 'already-saved', null, 'inbound', 'document', null, null, null, null, 1, 2, 2)
+    `);
+
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    expect(manifest.datasets.telegramFileRefs.count).toBe(1);
+    await database.initialize();
+    await expect(verifyUpgradeAuditManifestImpl(database.db, piDir, manifest, {
+      botToken: BOT_TOKEN,
+      e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
+      requireExactDatasets: true,
+    })).resolves.toBeDefined();
+    await expect(database.db.query<{ telegram_file_id: string }>(sql`
+      select telegram_file_id from telegram_file_refs
+    `)).resolves.toEqual([{ telegram_file_id: "already-saved" }]);
+  });
+
   it("rejects changed chat rows, missing Telegram references, and changed Pi prefixes", async () => {
     const manifest = await createUpgradeAuditManifest(database.db, piDir);
     await database.initialize();

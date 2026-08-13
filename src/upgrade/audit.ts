@@ -589,6 +589,12 @@ async function collectTelegramFileRefs(
     throw new Error("Upgrade audit verification requires the migrated telegram_file_refs table.");
   }
   if (mode === "snapshot") {
+    const withoutCurrentReferences = currentTableExists
+      ? sql`and not exists (
+          select 1 from telegram_file_refs r
+          where r.file_id = s.file_id
+        )`
+      : sql``;
     const legacyRows = await db.query<{
       id: number;
       file_id: number;
@@ -604,6 +610,7 @@ async function collectTelegramFileRefs(
       join files f on f.id = s.file_id
       left join messages m on m.id = f.message_id
       where s.transport = 'telegram'
+        ${withoutCurrentReferences}
       order by s.id
     `);
     for (const row of legacyRows) {
