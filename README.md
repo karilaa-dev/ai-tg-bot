@@ -140,27 +140,53 @@ docker compose stop bot
 OLD_PI_VOLUME=<compose-project>_pi-home
 OLD_DATABASE_NETWORK=<compose-project>_database
 
-# Parse dotenv syntax without evaluating it as shell code. Keep the source UID/GID so the
-# mode-0600 manifest is owned by the same identity that owns the Pi volume.
-POSTGRES_PASSWORD_ENCODED=$(node --env-file=.env -e 'const v=process.env.POSTGRES_PASSWORD; if (!v) throw new Error("POSTGRES_PASSWORD is required"); process.stdout.write(encodeURIComponent(v))')
-SOURCE_BOT_TOKEN=$(node --env-file=.env -e 'const v=process.env.BOT_TOKEN; if (!v) throw new Error("BOT_TOKEN is required"); process.stdout.write(v)')
+# Parse dotenv syntax without evaluating it as shell code. Put secrets in owner-only temporary
+# files so neither the Docker command line nor the container environment contains their values.
+AUDIT_SECRET_DIR=$(mktemp -d)
+chmod 700 "${AUDIT_SECRET_DIR}"
+trap 'rm -f -- "${AUDIT_SECRET_DIR}/db-url" "${AUDIT_SECRET_DIR}/bot-token"; rmdir -- "${AUDIT_SECRET_DIR}"' EXIT
+node --env-file=.env --input-type=module -e '
+  import fs from "node:fs";
+  const [directory] = process.argv.slice(1);
+  const password = process.env.POSTGRES_PASSWORD;
+  const token = process.env.BOT_TOKEN;
+  if (!password || !token) throw new Error("POSTGRES_PASSWORD and BOT_TOKEN are required");
+  fs.writeFileSync(`${directory}/db-url`, `postgres://aibot:${encodeURIComponent(password)}@postgres:5432/aibot`, { mode: 0o600 });
+  fs.writeFileSync(`${directory}/bot-token`, token, { mode: 0o600 });
+' "${AUDIT_SECRET_DIR}"
+
+# Keep the source UID/GID so the mode-0600 manifest is owned by the Pi volume identity.
 SOURCE_APP_UID=$(node --env-file=.env -e 'const v=process.env.APP_UID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_UID must be numeric"); process.stdout.write(v)')
 SOURCE_APP_GID=$(node --env-file=.env -e 'const v=process.env.APP_GID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_GID must be numeric"); process.stdout.write(v)')
 SOURCE_E2B_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.E2B_DEPLOYMENT_ID||process.env.OPEN_SANDBOX_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("sandbox deployment ID is invalid"); process.stdout.write(v)')
 SOURCE_BROWSER_USE_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.BROWSER_USE_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("Browser Use deployment ID is invalid"); process.stdout.write(v)')
+HOST_OPERATOR_UID=$(id -u)
+
+# Keep the host operator as owner while granting the source application GID read-only access.
+docker run --rm \
+  --mount "type=bind,source=${AUDIT_SECRET_DIR},target=/run/secrets" \
+  --entrypoint sh \
+  ai-tg-bot-upgrade-audit \
+  -c 'chown "$1:$2" /run/secrets /run/secrets/db-url /run/secrets/bot-token && chmod 750 /run/secrets && chmod 440 /run/secrets/db-url /run/secrets/bot-token' \
+  sh "${HOST_OPERATOR_UID}" "${SOURCE_APP_GID}"
 
 docker run --rm \
   --user "${SOURCE_APP_UID}:${SOURCE_APP_GID}" \
   --network "${OLD_DATABASE_NETWORK}" \
   --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
-  -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
-  -e "BOT_TOKEN=${SOURCE_BOT_TOKEN}" \
+  --mount "type=bind,source=${AUDIT_SECRET_DIR},target=/run/secrets,readonly" \
+  -e DB_URL_FILE=/run/secrets/db-url \
+  -e BOT_TOKEN_FILE=/run/secrets/bot-token \
   -e "E2B_DEPLOYMENT_ID=${SOURCE_E2B_DEPLOYMENT_ID}" \
   -e "BROWSER_USE_DEPLOYMENT_ID=${SOURCE_BROWSER_USE_DEPLOYMENT_ID}" \
   -e PI_CODING_AGENT_DIR=/app/data/pi \
   --entrypoint node \
   ai-tg-bot-upgrade-audit \
   dist/scripts/upgrade-audit.js snapshot --out /app/data/pi/upgrade-baseline.json
+
+rm -f -- "${AUDIT_SECRET_DIR}/db-url" "${AUDIT_SECRET_DIR}/bot-token"
+rmdir -- "${AUDIT_SECRET_DIR}"
+trap - EXIT
 ```
 
 The snapshot command is read-only with respect to the database and never initializes its

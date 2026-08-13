@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { createDatabase } from "../src/db/index.js";
 import {
   createUpgradeAuditManifest,
@@ -12,9 +13,9 @@ type Command =
   | { kind: "verify"; file: string };
 
 const command = parseCommand(process.argv.slice(2));
-const dbUrl = process.env.DB_URL?.trim() || "sqlite:./data/bot.db";
+const dbUrl = readEnvironmentOrFile("DB_URL") || "sqlite:./data/bot.db";
 const piCodingAgentDir = path.resolve(process.env.PI_CODING_AGENT_DIR?.trim() || "./data/pi");
-const botToken = process.env.BOT_TOKEN?.trim() || "";
+const botToken = readEnvironmentOrFile("BOT_TOKEN");
 const e2bDeploymentId = process.env.E2B_DEPLOYMENT_ID?.trim()
   || process.env.OPEN_SANDBOX_DEPLOYMENT_ID?.trim()
   || "ai-tg-bot";
@@ -79,4 +80,12 @@ function usage(): never {
     "",
   ].join("\n"));
   process.exit(2);
+}
+
+function readEnvironmentOrFile(name: "DB_URL" | "BOT_TOKEN"): string {
+  const direct = process.env[name]?.trim();
+  const file = process.env[`${name}_FILE`]?.trim();
+  if (direct && file) throw new Error(`Set only ${name} or ${name}_FILE, not both.`);
+  if (file) return readFileSync(file, "utf8").trim();
+  return direct || "";
 }

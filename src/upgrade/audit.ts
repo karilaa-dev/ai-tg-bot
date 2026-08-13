@@ -89,13 +89,14 @@ export type UpgradeAuditSummary = {
 
 type Row = Record<string, unknown>;
 type DatasetName = keyof UpgradeAuditManifest["datasets"];
+type StandardDatasetName = Exclude<DatasetName, "telegramFileRefs" | "postgresSequences">;
 type DialectValue = string | Record<"sqlite" | "postgres", string>;
 type AuditHasher = {
   digest: (domain: string, value: unknown) => string;
   filePrefix: (filePath: string, size: number) => Promise<string>;
 };
-type DatasetDefinition = {
-  name: Exclude<DatasetName, "telegramFileRefs" | "postgresSequences">;
+type DatasetDefinition<Name extends DatasetName = DatasetName> = {
+  name: Name;
   table: DialectValue;
   key: (row: Row) => unknown;
   query: DialectValue;
@@ -103,7 +104,7 @@ type DatasetDefinition = {
   snapshotOptional?: boolean;
 };
 
-const DATASET_DEFINITIONS: DatasetDefinition[] = [
+const DATASET_DEFINITIONS: DatasetDefinition<StandardDatasetName>[] = [
   {
     name: "users",
     table: "users",
@@ -227,6 +228,18 @@ const DATASET_DEFINITIONS: DatasetDefinition[] = [
 
 const PI_STATE_FILES = ["auth.json", "models.json", "settings.json"] as const;
 
+const TELEGRAM_FILE_REFS_DEFINITION: DatasetDefinition<"telegramFileRefs"> = {
+  name: "telegramFileRefs",
+  table: "telegram_file_refs",
+  key: (row) => [row.fileId, row.telegramFileId],
+  query: `select file_id as "fileId", trim(telegram_file_id) as "telegramFileId",
+    nullif(trim(telegram_file_unique_id), '') as "uniqueId", direction, media_kind as "mediaKind",
+    telegram_message_id as "telegramMessageId", width, height, telegram_size as "telegramSize",
+    is_primary as "isPrimary", first_seen_at as "firstSeenAt", last_seen_at as "lastSeenAt"
+    from telegram_file_refs`,
+  pageColumns: ["fileId", "telegramFileId"],
+};
+
 export async function createUpgradeAuditManifest(
   db: SqlExecutor,
   piCodingAgentDir: string,
@@ -298,15 +311,12 @@ export async function verifyUpgradeAuditManifest(
     manifest.browserUseDeploymentIdentitySha256,
     hasher,
   );
-  const current = await collectDatasets(db, "verify", hasher);
-  for (const name of Object.keys(manifest.datasets) as DatasetName[]) {
-    verifyDataset(
-      name,
-      manifest.datasets[name],
-      current[name],
-      Boolean(options.requireExactDatasets && name !== "postgresSequences"),
-    );
-  }
+  await verifyDatasets(
+    db,
+    manifest.datasets,
+    Boolean(options.requireExactDatasets),
+    hasher,
+  );
   await verifyPiSessionPrefixes(piCodingAgentDir, manifest.piSessions.files, hasher);
   await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files, hasher);
   return summarize(manifest, sha256(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)));
@@ -421,23 +431,101 @@ async function collectDatasetInBatches(
 ): Promise<UpgradeAuditManifest["datasets"][DatasetName]> {
   const entries: UpgradeAuditManifest["datasets"][DatasetName]["entries"] = [];
   const seenKeys = new Set<string>();
+  for await (const row of queryDatasetRows(db, definition)) {
+    const entry = datasetEntry(definition.name, row, definition.key, hasher);
+    if (seenKeys.has(entry.keySha256)) {
+      throw new Error(`Upgrade audit found duplicate ${definition.name} record keys.`);
+    }
+    seenKeys.add(entry.keySha256);
+    entries.push(entry);
+  }
+  entries.sort((left, right) => left.keySha256.localeCompare(right.keySha256));
+  return { count: entries.length, entries };
+}
+
+async function* queryDatasetRows(
+  db: SqlExecutor,
+  definition: DatasetDefinition,
+): AsyncGenerator<Row> {
   const query = dialectValue(definition.query, db.dialect);
   let lastRow: Row | undefined;
   while (true) {
     const rows = await db.query<Row>(keysetPageQuery(query, definition.pageColumns, lastRow));
-    for (const row of rows) {
-      const entry = datasetEntry(definition.name, row, definition.key, hasher);
-      if (seenKeys.has(entry.keySha256)) {
-        throw new Error(`Upgrade audit found duplicate ${definition.name} record keys.`);
-      }
-      seenKeys.add(entry.keySha256);
-      entries.push(entry);
-    }
+    for (const row of rows) yield row;
     if (rows.length < DATASET_BATCH_SIZE) break;
     lastRow = rows.at(-1);
   }
-  entries.sort((left, right) => left.keySha256.localeCompare(right.keySha256));
-  return { count: entries.length, entries };
+}
+
+async function verifyDatasets(
+  db: SqlExecutor,
+  baseline: UpgradeAuditManifest["datasets"],
+  requireExact: boolean,
+  hasher: AuditHasher,
+): Promise<void> {
+  for (const definition of DATASET_DEFINITIONS) {
+    const table = dialectValue(definition.table, db.dialect);
+    if (!(await tableExists(db, table))) throw new Error(`Upgrade audit requires the ${table} table.`);
+    await verifyDatasetFromDatabase(db, definition, baseline[definition.name], requireExact, hasher);
+  }
+  if (!(await tableExists(db, "telegram_file_refs"))) {
+    throw new Error("Upgrade audit verification requires the migrated telegram_file_refs table.");
+  }
+  await verifyDatasetFromDatabase(
+    db,
+    TELEGRAM_FILE_REFS_DEFINITION,
+    baseline.telegramFileRefs,
+    requireExact,
+    hasher,
+  );
+  verifyDataset(
+    "postgresSequences",
+    baseline.postgresSequences,
+    await collectPostgresSequences(db, hasher),
+    false,
+  );
+}
+
+async function verifyDatasetFromDatabase(
+  db: SqlExecutor,
+  definition: DatasetDefinition,
+  baseline: UpgradeAuditManifest["datasets"][DatasetName],
+  requireExact: boolean,
+  hasher: AuditHasher,
+): Promise<void> {
+  const remaining = new Map(baseline.entries.map((entry) => [entry.keySha256, entry.rowSha256]));
+  let count = 0;
+  let previousKey: string | undefined;
+  for await (const row of queryDatasetRows(db, definition)) {
+    const rawKey = stableJson(definition.key(row));
+    if (rawKey === previousKey) {
+      throw new Error(`Upgrade audit found duplicate ${definition.name} record keys.`);
+    }
+    previousKey = rawKey;
+    count += 1;
+    const actual = datasetEntry(definition.name, row, definition.key, hasher);
+    const expected = remaining.get(actual.keySha256);
+    if (expected === undefined) {
+      if (requireExact) {
+        throw new Error(`Upgrade audit failed: ${definition.name} membership differs from the baseline.`);
+      }
+      continue;
+    }
+    if (actual.rowSha256 !== expected) {
+      throw new Error(`Upgrade audit failed: a baseline ${definition.name} record changed (${actual.keySha256}).`);
+    }
+    remaining.delete(actual.keySha256);
+  }
+  if (requireExact && count !== baseline.count) {
+    throw new Error(`Upgrade audit failed: ${definition.name} membership differs from the baseline.`);
+  }
+  if (count < baseline.count) {
+    throw new Error(`Upgrade audit failed: ${definition.name} count fell from ${baseline.count} to ${count}.`);
+  }
+  const missing = remaining.keys().next().value as string | undefined;
+  if (missing) {
+    throw new Error(`Upgrade audit failed: a baseline ${definition.name} record is missing (${missing}).`);
+  }
 }
 
 function keysetPageQuery(
