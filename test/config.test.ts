@@ -9,6 +9,11 @@ const required = {
 };
 
 describe("Browser Use configuration", () => {
+  it("accepts an optional one-time upgrade baseline path", () => {
+    expect(loadConfig({ ...required, UPGRADE_BASELINE_FILE: "/app/data/pi/upgrade-baseline.json" }).UPGRADE_BASELINE_FILE)
+      .toBe("/app/data/pi/upgrade-baseline.json");
+  });
+
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
     expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:production");

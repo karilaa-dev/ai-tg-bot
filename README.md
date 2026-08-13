@@ -95,7 +95,7 @@ PI_CODING_AGENT_DIR=./data/pi npx pi
 
 The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source, extracted text, or search chunks remain in active thread scope. Host-only records without a recoverable source are retained as diagnostic rows but excluded from agent-visible thread scope. Physical files in the old host-storage directory are not deleted automatically.
 
-For an OpenSandbox-era deployment, stop the old bot before upgrading and move its former managed-file root out of the deployment mounts as a rollback quarantine. The E2B release never reads that directory, so every physical file below it is unreferenced after the database migration. Keep the quarantined directory for a bounded 30-day rollback window, confirm Telegram-backed files and new E2B file delivery work, then delete the whole quarantined directory manually. Back it up first if legacy generated files must be retained; they cannot be imported automatically because they have no Telegram or E2B source.
+For an OpenSandbox-era deployment, stop the old bot before upgrading and detach its former managed-file root from the new deployment. The E2B release never reads that directory, so every physical file below it is unreferenced after the database migration. It can remain on the old host as rollback material. Legacy generated files that were never delivered through Telegram cannot be imported automatically.
 
 ## Docker Compose
 
@@ -106,6 +106,113 @@ docker compose up --build -d
 ```
 
 The bot container has normal outbound access for E2B/provider APIs and a second internal-only network for PostgreSQL. It does not need a Docker socket, host workspace mount, privileged mode, or a local sandbox service.
+
+## Dokploy / Railpack cutover
+
+[`railpack.json`](railpack.json) pins Node 24.18, runs a deterministic `npm ci`, installs
+`tini` and `setpriv`, and launches the normal non-root entrypoint. Dokploy must run one
+application replica and attach a persistent named volume at `/app/data/pi`. Create a
+separate Dokploy PostgreSQL service and configure the application with its explicit
+`DB_URL`; do not set application-level `POSTGRES_PASSWORD`. Dokploy documents application
+[volume mounts](https://docs.dokploy.com/docs/core/applications/advanced) and
+[database restores](https://docs.dokploy.com/docs/core/databases/restore).
+
+The only state transferred from the old Compose host is:
+
+- a logical dump of the `aibot` PostgreSQL database;
+- the complete `pi-home` volume, restored at the same `/app/data/pi` container path.
+
+Do not transfer `bot-data`, `BOT_SHARED_HOST_PATH`, `.chat-files`, OpenSandbox workspaces,
+outbox contents, or sandbox containers. Keep the same `BOT_TOKEN`: Telegram file IDs are
+scoped to the bot that received them and cannot be transferred to another bot.
+
+### 1. Snapshot the stopped source
+
+Build the upgrade branch while the old deployment remains live. At the maintenance window,
+stop only the bot and leave its PostgreSQL service running. Never run the old and new bot
+simultaneously with the same token.
+
+```bash
+docker build -t ai-tg-bot-upgrade-audit .
+docker compose stop bot
+
+# Resolve these with `docker volume ls`; Compose normally prefixes the project name.
+OLD_PI_VOLUME=<compose-project>_pi-home
+OLD_DATABASE_NETWORK=<compose-project>_database
+
+# Source .env first. URL encoding avoids corrupting passwords containing URL punctuation.
+set -a
+. ./.env
+set +a
+POSTGRES_PASSWORD_ENCODED=$(node -e 'process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))')
+
+docker run --rm \
+  --network "${OLD_DATABASE_NETWORK}" \
+  --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
+  -e "DB_URL=postgres://aibot:${POSTGRES_PASSWORD_ENCODED}@postgres:5432/aibot" \
+  -e PI_CODING_AGENT_DIR=/app/data/pi \
+  --entrypoint node \
+  ai-tg-bot-upgrade-audit \
+  dist/scripts/upgrade-audit.js snapshot --out /app/data/pi/upgrade-baseline.json
+```
+
+The snapshot command is read-only with respect to the database and never initializes its
+schema. It fails on malformed Telegram locators or missing Pi session files. Its manifest
+contains counts and SHA-256 fingerprints, not chat text or raw Telegram identifiers.
+
+Create the two transfer artifacts while the bot remains stopped:
+
+```bash
+docker compose exec -T postgres \
+  pg_dump -Fc --no-owner --no-acl -U aibot aibot > aibot.dump
+
+docker run --rm \
+  --mount "type=volume,source=${OLD_PI_VOLUME},target=/source,readonly" \
+  --mount "type=bind,source=$(pwd),target=/backup" \
+  alpine:3.22 \
+  tar -C /source -czpf /backup/pi-home.tgz .
+```
+
+Copy `aibot.dump` and `pi-home.tgz` to the Dokploy host. Leave the old database, Pi volume,
+shared root, and OpenSandbox state stopped and unchanged for rollback.
+
+### 2. Restore and deploy on Dokploy
+
+Restore `aibot.dump` into the new Dokploy PostgreSQL service. Restore `pi-home.tgz` into the
+named application volume before its first deployment, preserving the archive paths and
+permissions. Mount that volume at `/app/data/pi`.
+
+Configure these application variables in addition to the normal E2B/provider credentials:
+
+```dotenv
+DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
+PI_CODING_AGENT_DIR=/app/data/pi
+UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
+APP_UID=1000
+APP_GID=1000
+```
+
+Do not configure legacy OpenSandbox variables or mounts. Ensure
+`E2B_TEMPLATE=ai-tg-bot-tools:production` exists before deployment.
+
+At first startup, the bot migrates the restored database transactionally, verifies every
+baseline record and Telegram locator, verifies the original byte prefix of every referenced
+Pi JSONL session, and only then starts Telegram polling. Success writes
+`upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
+one-time scan only while that exact manifest is unchanged.
+
+Confirm the logs contain `upgrade preservation baseline verified`, `database initialized`,
+and `bot started`. Then verify an old thread, `search_thread` recall, restoration of an old
+Telegram attachment into a newly created E2B sandbox, and delivery of a new file. The audit
+can also be rerun manually inside the built application container:
+
+```bash
+npm run upgrade:audit -- verify --against /app/data/pi/upgrade-baseline.json
+```
+
+For rollback, stop the Dokploy application before restarting the old bot. The old host state
+was never modified beyond stopping the bot and writing the baseline into `pi-home`; the dump
+and Pi archive provide an additional recovery copy.
 
 ## E2B configuration
 

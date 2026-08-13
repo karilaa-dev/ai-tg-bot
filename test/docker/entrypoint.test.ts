@@ -49,6 +49,25 @@ describe("container entrypoint", () => {
     );
   });
 
+  it("preserves an explicit external DB_URL even when POSTGRES_PASSWORD is present", async () => {
+    const external = "postgresql://dokploy:secret@dokploy-postgres:5432/aibot";
+    const result = await runEntrypoint(
+      { ...env, DB_URL: external, POSTGRES_PASSWORD: "compose-only" },
+      "printf '%s' \"$DB_URL\"",
+    );
+
+    expect(result.stdout).toBe(external);
+  });
+
+  it("replaces only the image's default SQLite URL for legacy Compose", async () => {
+    const result = await runEntrypoint(
+      { ...env, DB_URL: "sqlite:/app/data/bot.db", POSTGRES_PASSWORD: "compose-password" },
+      "printf '%s' \"$DB_URL\"",
+    );
+
+    expect(result.stdout).toBe("postgres://aibot:compose-password@postgres:5432/aibot");
+  });
+
   it.skipIf((process.getuid?.() ?? 1) !== 0)(
     "drops identity and capabilities through setpriv when started as root",
     async () => {

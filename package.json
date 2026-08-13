@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "upgrade:audit": "node dist/scripts/upgrade-audit.js",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
     "live:e2b-check": "tsx scripts/live-e2b-check.ts",

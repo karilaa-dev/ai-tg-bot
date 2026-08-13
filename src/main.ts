@@ -10,6 +10,7 @@ import { createLogger, type Logger } from "./logger.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
+import { verifyUpgradeBaselineOnce } from "./upgrade/audit.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -30,6 +31,12 @@ try {
   }
   logger.debug("initializing database");
   await db.initialize();
+  await verifyUpgradeBaselineOnce({
+    db: db.db,
+    piCodingAgentDir: config.PI_CODING_AGENT_DIR,
+    baselineFile: config.UPGRADE_BASELINE_FILE,
+    logger,
+  });
   await checkConfiguredDocling(config, logger);
   await checkConfiguredBrowserUse(config, logger);
   const repos = createRepos(db.db, db.search);

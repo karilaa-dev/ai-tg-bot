@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": {
+    "node": "24.18.0"
+  },
+  "steps": {
+    "install": {
+      "deployOutputs": [],
+      "commands": [
+        { "path": "/app/node_modules/.bin" },
+        { "src": "package-lock.json", "dest": "package-lock.json" },
+        { "src": "package.json", "dest": "package.json" },
+        "npm ci"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "tini -- ./docker/entrypoint.sh",
+    "aptPackages": ["ca-certificates", "tini", "util-linux"],
+    "variables": {
+      "NODE_ENV": "production",
+      "APP_DATA_ROOT": "/app/data",
+      "PI_CODING_AGENT_DIR": "/app/data/pi"
+    }
+  }
+}
