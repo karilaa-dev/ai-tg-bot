@@ -121,6 +121,36 @@ describe("upgrade preservation audit", () => {
     await expect(createUpgradeAuditManifest(database.db, piDir)).rejects.toThrow("Pi session is missing");
   });
 
+  it("rejects referenced Pi sessions reached through a directory symlink outside the Pi root", async () => {
+    const outsideDir = path.join(tempDir, "outside-sessions");
+    const linkedDir = path.join(piDir, "linked-sessions");
+    const outsideFile = path.join(outsideDir, "outside.jsonl");
+    await fs.mkdir(outsideDir);
+    await fs.writeFile(outsideFile, '{"role":"user","content":"outside"}\n');
+    await fs.symlink(outsideDir, linkedDir, "dir");
+    await database.db.execute(sql`
+      update threads set pi_session_file = ${path.join(linkedDir, "outside.jsonl")} where id = 1
+    `);
+
+    await expect(createUpgradeAuditManifest(database.db, piDir))
+      .rejects.toThrow("Referenced Pi session is missing or unsafe");
+  });
+
+  it("rejects verification when a Pi session directory is replaced by an escaping symlink", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    await database.initialize();
+    const sessionDir = path.dirname(sessionFile);
+    const savedSessionDir = path.join(path.dirname(sessionDir), "telegram-saved");
+    const outsideDir = path.join(tempDir, "replacement-sessions");
+    await fs.mkdir(outsideDir);
+    await fs.copyFile(sessionFile, path.join(outsideDir, path.basename(sessionFile)));
+    await fs.rename(sessionDir, savedSessionDir);
+    await fs.symlink(outsideDir, sessionDir, "dir");
+
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest))
+      .rejects.toThrow("Preserved Pi session is missing or unsafe");
+  });
+
   it("writes a hash-bound marker and skips only the already verified manifest", async () => {
     const manifest = await createUpgradeAuditManifest(database.db, piDir);
     const baselineFile = path.join(piDir, "upgrade-baseline.json");

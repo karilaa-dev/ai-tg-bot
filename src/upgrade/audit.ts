@@ -336,6 +336,7 @@ async function collectPiSessions(
     order by id
   `);
   const root = path.resolve(piCodingAgentDir);
+  const realRoot = await fs.realpath(root);
   const uniqueFiles = new Map<string, string>();
   for (const row of rows) {
     const sessionPath = path.resolve(row.pi_session_file!);
@@ -351,12 +352,12 @@ async function collectPiSessions(
 
   const files: UpgradeAuditManifest["piSessions"]["files"] = [];
   for (const [relativePath, sessionPath] of [...uniqueFiles].sort(([left], [right]) => left.localeCompare(right))) {
-    const stat = await safeRegularFileStat(sessionPath);
-    if (!stat) throw new Error(`Referenced Pi session is missing or unsafe: ${relativePath}`);
+    const resolved = await resolveRegularFileWithin(realRoot, sessionPath);
+    if (!resolved) throw new Error(`Referenced Pi session is missing or unsafe: ${relativePath}`);
     files.push({
       relativePath,
-      size: stat.size,
-      prefixSha256: await sha256FilePrefix(sessionPath, stat.size),
+      size: resolved.size,
+      prefixSha256: await sha256FilePrefix(resolved.realPath, resolved.size),
     });
   }
   return { count: files.length, files };
@@ -367,17 +368,18 @@ async function verifyPiSessionPrefixes(
   files: UpgradeAuditManifest["piSessions"]["files"],
 ): Promise<void> {
   const root = path.resolve(piCodingAgentDir);
+  const realRoot = await fs.realpath(root);
   for (const baseline of files) {
     const sessionPath = path.resolve(root, baseline.relativePath);
     if (!isPathWithin(root, sessionPath) || path.relative(root, sessionPath) !== baseline.relativePath) {
       throw new Error("Upgrade audit manifest contains an unsafe Pi session path.");
     }
-    const stat = await safeRegularFileStat(sessionPath);
-    if (!stat) throw new Error(`Preserved Pi session is missing or unsafe: ${baseline.relativePath}`);
-    if (stat.size < baseline.size) {
+    const resolved = await resolveRegularFileWithin(realRoot, sessionPath);
+    if (!resolved) throw new Error(`Preserved Pi session is missing or unsafe: ${baseline.relativePath}`);
+    if (resolved.size < baseline.size) {
       throw new Error(`Preserved Pi session was truncated: ${baseline.relativePath}`);
     }
-    const currentPrefix = await sha256FilePrefix(sessionPath, baseline.size);
+    const currentPrefix = await sha256FilePrefix(resolved.realPath, baseline.size);
     if (currentPrefix !== baseline.prefixSha256) {
       throw new Error(`Preserved Pi session prefix changed: ${baseline.relativePath}`);
     }
@@ -451,10 +453,17 @@ async function tableExists(db: SqlExecutor, table: string): Promise<boolean> {
   return Boolean(rows[0]?.exists);
 }
 
-async function safeRegularFileStat(filePath: string): Promise<{ size: number } | undefined> {
+async function resolveRegularFileWithin(
+  realRoot: string,
+  filePath: string,
+): Promise<{ realPath: string; size: number } | undefined> {
   const stat = await fs.lstat(filePath).catch(() => undefined);
   if (!stat || !stat.isFile() || stat.isSymbolicLink()) return undefined;
-  return { size: stat.size };
+  const realPath = await fs.realpath(filePath).catch(() => undefined);
+  if (!realPath || !isPathWithin(realRoot, realPath)) return undefined;
+  const realStat = await fs.stat(realPath).catch(() => undefined);
+  if (!realStat?.isFile()) return undefined;
+  return { realPath, size: realStat.size };
 }
 
 async function sha256FilePrefix(filePath: string, size: number): Promise<string> {
