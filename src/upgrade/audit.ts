@@ -301,6 +301,7 @@ export async function verifyUpgradeAuditManifest(
     e2bDeploymentId: string;
     browserUseDeploymentId: string;
     requireExactDatasets?: boolean;
+    requireExactPiSessions?: boolean;
   },
 ): Promise<UpgradeAuditSummary> {
   const hasher = createAuditHasher(options.botToken);
@@ -317,7 +318,12 @@ export async function verifyUpgradeAuditManifest(
     Boolean(options.requireExactDatasets),
     hasher,
   );
-  await verifyPiSessionPrefixes(piCodingAgentDir, manifest.piSessions.files, hasher);
+  await verifyPiSessionPrefixes(
+    piCodingAgentDir,
+    manifest.piSessions.files,
+    hasher,
+    Boolean(options.requireExactPiSessions),
+  );
   await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files, hasher);
   return summarize(manifest, sha256(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)));
 }
@@ -382,6 +388,7 @@ export async function verifyUpgradeBaselineOnce(input: {
       e2bDeploymentId: input.e2bDeploymentId,
       browserUseDeploymentId: input.browserUseDeploymentId,
       requireExactDatasets: true,
+      requireExactPiSessions: true,
     },
   );
   summary.manifestSha256 = loaded.manifestSha256;
@@ -790,6 +797,7 @@ async function verifyPiSessionPrefixes(
   piCodingAgentDir: string,
   files: UpgradeAuditManifest["piSessions"]["files"],
   hasher: AuditHasher,
+  requireExactSize: boolean,
 ): Promise<void> {
   const root = path.resolve(piCodingAgentDir);
   const realRoot = await fs.realpath(root);
@@ -802,6 +810,9 @@ async function verifyPiSessionPrefixes(
     if (!resolved) throw new Error(`Preserved Pi session is missing or unsafe: ${baseline.relativePath}`);
     if (resolved.size < baseline.size) {
       throw new Error(`Preserved Pi session was truncated: ${baseline.relativePath}`);
+    }
+    if (requireExactSize && resolved.size > baseline.size) {
+      throw new Error(`Preserved Pi session contains data beyond the baseline: ${baseline.relativePath}`);
     }
     const currentPrefix = await hasher.filePrefix(resolved.realPath, baseline.size);
     if (currentPrefix !== baseline.prefixSha256) {

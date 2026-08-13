@@ -240,8 +240,8 @@ other legacy OpenSandbox variables or mounts. Ensure
 At first startup, the bot migrates the restored database transactionally, requires exact
 membership for pre-existing datasets (including E2B thread mappings and sandbox restoration
 history), verifies every baseline record and Telegram locator, checks the configured bot, E2B,
-and Browser Use deployment identities and Pi runtime state, verifies the original byte prefix
-of every referenced Pi JSONL session, and only then starts Telegram polling. Success writes
+and Browser Use deployment identities and Pi runtime state, requires every referenced Pi JSONL
+session to match its snapshotted size and byte content, and only then starts Telegram polling. Success writes
 `upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
 one-time scan only while that exact manifest is unchanged.
 

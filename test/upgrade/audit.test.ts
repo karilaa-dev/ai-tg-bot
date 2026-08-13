@@ -364,6 +364,25 @@ describe("upgrade preservation audit", () => {
     })).resolves.toMatchObject({ skipped: true });
   });
 
+  it("refuses appended Pi session data during the one-time startup check", async () => {
+    const manifest = await createUpgradeAuditManifest(database.db, piDir);
+    const baselineFile = path.join(piDir, "upgrade-baseline.json");
+    await writeUpgradeAuditManifest(baselineFile, manifest);
+    await database.initialize();
+    await fs.appendFile(sessionFile, `${JSON.stringify({ role: "assistant", content: "foreign" })}\n`);
+
+    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest)).resolves.toBeDefined();
+    await expect(verifyUpgradeBaselineOnce({
+      db: database.db,
+      piCodingAgentDir: piDir,
+      botToken: BOT_TOKEN,
+      e2bDeploymentId: E2B_DEPLOYMENT_ID,
+      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
+      baselineFile,
+    })).rejects.toThrow("Pi session contains data beyond the baseline");
+    await expect(fs.access(`${baselineFile}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses to mark a reused destination database as verified", async () => {
     const manifest = await createUpgradeAuditManifest(database.db, piDir);
     const baselineFile = path.join(piDir, "upgrade-baseline.json");
