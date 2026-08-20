@@ -177,6 +177,7 @@ describe("Pi generate_image extension", () => {
       tools: [{ type: "image_generation", output_format: "webp", action: "generate" }],
     });
     expect(bridge.attachments[0]?.data).toEqual(Buffer.from("codex-image"));
+    expect(bridge.attachments[0]?.caption).toBe("Codex revised prompt");
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 

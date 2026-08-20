@@ -97,6 +97,25 @@ describe("buffered Telegram attachment delivery", () => {
     }));
   });
 
+  it("delivers a generated image before assistant persistence can fail", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    vi.mocked(input.repos.messages.insert).mockRejectedValueOnce(new Error("database unavailable"));
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "Generated image";
+
+    await expect(sendFinal(input, "Image generation details", "", 1000, [attachment]))
+      .rejects.toThrow("database unavailable");
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(attachment.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
+    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0])
+      .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
+    expect(api.sendPhoto.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0]!);
+  });
+
   it("sends images over Telegram's photo limit as documents", async () => {
     const api = fakeApi();
     const input = turnInput(api);

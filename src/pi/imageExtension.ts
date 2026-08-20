@@ -50,7 +50,7 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
     name: "generate_image",
     label: "Generate image",
     description:
-      "Use only when the user explicitly asks to synthesize a new image or edit/restyle an existing image. Never use this tool to find, download, collect, save, or send existing images, or to create a collage from existing photos; retrieve those files and compose the collage in the workspace instead. Character or subject names alone do not authorize generation. Generates or edits exactly one chat-delivered image using current-thread image file ids as references. A successful call ends tool use for the turn. Put the final user-facing text in caption because the bot sends the captioned image without a separate completion message.",
+      "Use only when the user explicitly asks to synthesize a new image or edit/restyle an existing image. Never use this tool to find, download, collect, save, or send existing images, or to create a collage from existing photos; retrieve those files and compose the collage in the workspace instead. Character or subject names alone do not authorize generation. Generates or edits exactly one chat-delivered image using current-thread image file ids as references. A successful call ends tool use for the turn. Put the final user-facing text in caption as plain text without Markdown because the bot sends the captioned image without a separate completion message.",
     parameters: Type.Object({
       prompt: Type.String({ minLength: 1, maxLength: 4000 }),
       mode: Type.Optional(Type.Union([
@@ -67,7 +67,10 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
         Type.Literal("jpeg"),
         Type.Literal("webp"),
       ], { default: "png" })),
-      caption: Type.Optional(Type.String({ maxLength: 1024 })),
+      caption: Type.Optional(Type.String({
+        maxLength: 1024,
+        description: "Plain-text final caption. Do not use Markdown.",
+      })),
     }, { additionalProperties: false }),
     executionMode: "sequential",
     async execute(_toolCallId, rawParams, signal, onUpdate) {
@@ -114,7 +117,7 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
         mimeType: generated.mimeType,
         data: generated.bytes,
         size: generated.bytes.length,
-        caption: params.caption?.trim() || null,
+        caption: generatedImageCaption(params.caption, generated.revisedPrompt, prompt),
         inline: false,
         card: `${chatFileMarker(file.id)} [Generated image #${file.id}: ${generated.revisedPrompt ?? prompt}]`,
         delivery: "photo",
@@ -425,6 +428,12 @@ function dataUrlParts(value: string, fallbackMimeType: string): { data: string; 
 
 function mimeFor(format: "png" | "jpeg" | "webp"): string {
   return format === "jpeg" ? "image/jpeg" : `image/${format}`;
+}
+
+function generatedImageCaption(requested: string | undefined, revisedPrompt: string | undefined, prompt: string): string {
+  const text = requested?.trim() || revisedPrompt?.trim() || prompt.trim();
+  const characters = Array.from(text);
+  return characters.length <= 1024 ? text : `${characters.slice(0, 1021).join("")}...`;
 }
 
 function combineSignals(first?: AbortSignal, second?: AbortSignal): AbortSignal | undefined {

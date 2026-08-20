@@ -859,6 +859,7 @@ async function sendFinalVisible(
   thinkingDelivery?: ThinkingDelivery,
 ): Promise<FinalVisibleDelivery> {
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
+  normalizeTelegramAttachmentDeliveries(outboundAttachments);
   if (attachments.length > outboundAttachments.length) {
     input.logger.warn("created file attachment limit exceeded before final send; sending capped subset", {
       threadId: input.thread.id,
@@ -891,6 +892,7 @@ async function sendFinalVisible(
     const sent = await sendRichWithFallback(input, rich);
     thinkingIds.push(...sent.map((message) => message.message_id));
   }
+  await sendGeneratedImageAttachmentsBeforePersistence(input, outboundAttachments);
   const answerIds: number[] = [];
   for (const rich of answerMessages) {
     const sent = await sendRichWithFallback(input, rich);
@@ -1094,6 +1096,82 @@ export function normalizeTelegramAttachmentDeliveries(
     if (attachment.delivery === "photo" && attachment.size > TG_PHOTO_MAX_BYTES) {
       attachment.delivery = "document";
     }
+  }
+}
+
+async function sendGeneratedImageAttachmentsBeforePersistence(
+  input: TurnInput,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
+  const generated = attachments.filter((attachment) =>
+    attachment.origin === "generated_image"
+    && !attachment.telegramDelivery
+    && !attachment.telegramDeliveryUnknown);
+  for (const attachment of generated) {
+    try {
+      await ensureAttachmentData(input, attachment);
+    } catch (error) {
+      attachment.telegramDeliveryFailure = "source_unavailable";
+      input.logger.warn("failed to load generated image before assistant persistence", {
+        threadId: input.thread.id,
+        fileId: attachment.fileId,
+        name: attachment.name,
+        err: String(error),
+      });
+      continue;
+    }
+
+    let failure: unknown;
+    try {
+      let sent: SentTelegramFileMessage;
+      if (attachment.delivery === "photo") {
+        try {
+          sent = await sendPhotoWithThreadFallback(input, attachment);
+        } catch (error) {
+          if (!isDefinitiveTelegramRejection(error)) throw error;
+          sent = await sendDocumentWithThreadFallback(input, attachment);
+          attachment.delivery = "document";
+        }
+      } else {
+        sent = await sendDocumentWithThreadFallback(input, attachment);
+      }
+      attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+      attachment.telegramDeliveryFailure = undefined;
+      releaseAttachmentData(attachment);
+      await rememberTelegramDeliverySource(input, attachment).catch((error) => {
+        input.logger.warn("failed to persist generated image Telegram reference", {
+          threadId: input.thread.id,
+          fileId: attachment.fileId,
+          telegramMessageId: attachment.telegramDelivery?.messageId,
+          err: String(error),
+        });
+      });
+      input.logger.info("generated image sent before assistant persistence", {
+        threadId: input.thread.id,
+        fileId: attachment.fileId,
+        telegramMessageId: sent.message_id,
+        delivery: attachment.delivery,
+      });
+      continue;
+    } catch (error) {
+      failure = error;
+    }
+
+    if (!isDefinitiveTelegramRejection(failure)) {
+      attachment.telegramDeliveryUnknown = true;
+      releaseAttachmentData(attachment);
+      input.logger.warn("generated image delivery outcome is unknown; not retrying", {
+        threadId: input.thread.id,
+        fileId: attachment.fileId,
+        err: String(failure),
+      });
+      continue;
+    }
+    input.logger.warn("generated image delivery rejected before assistant persistence; retrying after persistence", {
+      threadId: input.thread.id,
+      fileId: attachment.fileId,
+      err: String(failure),
+    });
   }
 }
 
