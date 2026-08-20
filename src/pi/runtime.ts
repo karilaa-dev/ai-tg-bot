@@ -9,6 +9,7 @@ import {
   DefaultResourceLoader,
   ModelRegistry,
   ModelRuntime,
+  readStoredCredential,
   SessionManager,
   SettingsManager,
   type AgentSession,
@@ -45,6 +46,12 @@ import {
   validateOfficeSkills,
 } from "./officeSkills.js";
 import { createTurnPromptContextExtension, type TurnPromptContextSource } from "./turnContext.js";
+import {
+  CODEX_PROVIDER_ID,
+  discoverCodexCliCredentials,
+  isOAuthCredential,
+  resolveCodexAuthFile,
+} from "./codexCliCredentials.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -107,8 +114,21 @@ export class PiRuntimeManager implements PiRuntimeService {
 
   private async initializeModelRuntime(): Promise<void> {
     await validateOfficeSkills();
+    const piAuthPath = path.join(this.agentDir, "auth.json");
+    const piCodexCredential = readStoredCredential(CODEX_PROVIDER_ID, piAuthPath);
+    const cliCredentials = isOAuthCredential(piCodexCredential)
+      ? undefined
+      : await discoverCodexCliCredentials({
+          authFile: resolveCodexAuthFile(this.input.config),
+          onPersistenceError: (errorCode) => {
+            this.input.logger.warn(
+              "Codex OAuth refresh could not be persisted; continuing with the refreshed in-memory credential",
+              { errorCode },
+            );
+          },
+        });
     this.modelRuntime = await ModelRuntime.create({
-      authPath: path.join(this.agentDir, "auth.json"),
+      ...(cliCredentials?.store ? { credentials: cliCredentials.store } : { authPath: piAuthPath }),
       modelsPath: path.join(this.agentDir, "models.json"),
     });
     await this.modelRuntime.setRuntimeApiKey(
@@ -116,6 +136,22 @@ export class PiRuntimeManager implements PiRuntimeService {
       this.input.config.OPENROUTER_API_KEY,
       { allowNetwork: false },
     );
+    const codexConfigured = this.modelRuntime.hasConfiguredAuth(CODEX_PROVIDER_ID);
+    this.input.logger.info("Pi inference providers initialized", {
+      primary: "codex",
+      fallback: "openrouter",
+      codexConfigured,
+      codexCredentialSource: isOAuthCredential(piCodexCredential)
+        ? "pi"
+        : cliCredentials?.status === "available"
+          ? "codex-cli"
+          : "none",
+    });
+    if (!codexConfigured) {
+      this.input.logger.warn("Codex OAuth is unavailable; Pi inference will use OpenRouter until Codex is configured", {
+        codexCredentialStatus: cliCredentials?.status ?? "missing",
+      });
+    }
     this.modelRegistry = new ModelRegistry(this.modelRuntime);
     this.providerRouter = registerPiProviderRouter({
       config: this.input.config,

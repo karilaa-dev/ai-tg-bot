@@ -207,6 +207,11 @@ function cleanReasoningMarkdown(text: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]*<!--(?:[\s\S]*?-->|[\s\S]*$)[ \t]*/g, "\n\n")
     .replace(/<(?:!|!-)?$/, "")
+    // Some providers concatenate consecutive titled reasoning sections without
+    // emitting a protocol boundary or even a newline. Preserve the section
+    // boundary before rendering the Markdown instead of gluing the next title
+    // to the previous paragraph.
+    .replace(/([^\n])(\*\*[^*\n]{1,120}\*\*(?=\n|$))/g, "$1\n\n$2")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }

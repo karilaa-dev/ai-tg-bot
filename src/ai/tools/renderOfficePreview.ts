@@ -94,7 +94,14 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
         if (!/(?:<!doctype\s+html\b|<html(?:\s|>))/i.test(html)) {
           return { error: "OfficeCLI did not produce an HTML document." };
         }
-        const screenshot = await input.browserRuntime.renderOfficeHtml(sanitizeOfficeHtml(html), signal);
+        const selector = extension === ".pptx"
+          ? `.slide-container[data-slide="${page}"] .slide`
+          : undefined;
+        const screenshot = await input.browserRuntime.renderOfficeHtml(
+          sanitizeOfficeHtml(html),
+          { selector },
+          signal,
+        );
         input.logger?.info("tool render_office_preview complete", {
           threadId: input.thread.id,
           path: normalizedPath,

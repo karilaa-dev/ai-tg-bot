@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleStreamPart, normalizeStreamPart } from "../../src/ai/run.js";
+import { handleStreamPart, normalizeStreamPart, toolErrorText } from "../../src/ai/run.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
 
 describe("StreamShaper", () => {
@@ -144,6 +144,30 @@ describe("StreamShaper", () => {
       toolCallCount: 0,
       toolCounts: [],
     });
+  });
+
+  it("separates provider-concatenated titled reasoning sections", () => {
+    const s = new StreamShaper();
+    s.onReasoningStart();
+    s.onReasoningDelta([
+      "**Planning the deck**",
+      "",
+      "I will use a simple visual system.**Designing the slides**",
+      "",
+      "I will create the layouts next.",
+    ].join("\n"));
+    s.onReasoningEnd();
+
+    expect(s.streamingThinkingMd()).toBe([
+      "**Planning the deck**",
+      "",
+      "I will use a simple visual system.",
+      "",
+      "**Designing the slides**",
+      "",
+      "I will create the layouts next.",
+    ].join("\n"));
+    expect(s.runSummary().reasoningSummaries).toEqual([s.streamingThinkingMd()]);
   });
 
   it("keeps only streamed section titles from verbose reasoning text", () => {
@@ -323,5 +347,15 @@ describe("StreamShaper", () => {
       kind: "text-final",
       text: "done",
     });
+  });
+});
+
+describe("toolErrorText", () => {
+  it("extracts direct Pi tool-result text when details are empty", () => {
+    expect(toolErrorText({
+      content: [{ type: "text", text: "Image request failed: Billing hard limit has been reached." }],
+      details: {},
+      isError: true,
+    })).toBe("Image request failed: Billing hard limit has been reached.");
   });
 });

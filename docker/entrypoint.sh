@@ -62,7 +62,17 @@ valid_id "${APP_GID}" || { log "ERROR: APP_GID must be a non-negative numeric GI
 [ "${APP_UID}" != "0" ] || { log "ERROR: APP_UID must not be 0."; exit 1; }
 [ "${APP_GID}" != "0" ] || { log "ERROR: APP_GID must not be 0."; exit 1; }
 
-if [ "$#" -eq 0 ]; then
+case "${UPGRADE_MODE:-}" in
+    ""|import) ;;
+    *) log "ERROR: UPGRADE_MODE must be unset or 'import'."; exit 1 ;;
+esac
+
+if [ "${UPGRADE_MODE:-}" = "import" ] \
+    && { [ "$#" -eq 0 ] \
+        || { [ "$#" -eq 2 ] && [ "$1" = "node" ] && [ "$2" = "dist/src/main.js" ]; }; }; then
+    log "offline import staging mode; Telegram polling is disabled"
+    set -- sleep infinity
+elif [ "$#" -eq 0 ]; then
     set -- node dist/src/main.js
 fi
 

@@ -192,6 +192,15 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain("For every created or materially edited PPTX");
   });
 
+  it("routes existing-image retrieval and photo collages away from generation", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser });
+
+    expect(prompt).toContain("explicit request to synthesize or edit an image");
+    expect(prompt).toContain("collaging existing photos");
+    expect(prompt).toContain("are retrieval/composition");
+    expect(prompt).toContain("Ask if unclear");
+  });
+
   it("is byte-identical when only per-turn metadata would change", async () => {
     const first = await renderSystemPrompt({ user: baseUser });
     const second = await renderSystemPrompt({ user: baseUser });

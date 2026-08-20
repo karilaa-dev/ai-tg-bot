@@ -120,14 +120,17 @@ export interface BrowserUseToolRuntime {
   closeTab(tabId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   extendSession(timeoutMinutes: number, signal?: AbortSignal): Promise<Record<string, unknown>>;
   closeSession(signal?: AbortSignal): Promise<Record<string, unknown>>;
-  renderOfficeHtml(html: string, signal?: AbortSignal): Promise<{ bytes: Buffer; mediaType: string; session_remaining_seconds: number }>;
+  renderOfficeHtml(
+    html: string,
+    options?: { selector?: string },
+    signal?: AbortSignal,
+  ): Promise<{ bytes: Buffer; mediaType: string; session_remaining_seconds: number }>;
 }
 
 export class BrowserUseRuntimeManager {
   private readonly states = new Map<number, UserState>();
   private readonly api: BrowserUseApi;
   private readonly connect: (cdpUrl: string, timeoutMs: number) => Promise<Browser>;
-  private proxyViolationDetected = false;
 
   constructor(private readonly input: {
     config: BrowserUseRuntimeConfig;
@@ -183,7 +186,7 @@ export class BrowserUseRuntimeManager {
       closeTab: (tabId, signal) => this.closeTab(userId, threadId, tabId, signal),
       extendSession: (timeout, signal) => this.extendSession(userId, threadId, timeout, signal),
       closeSession: (signal) => this.closeSession(userId, threadId, signal),
-      renderOfficeHtml: (html, signal) => this.renderOfficeHtml(userId, threadId, html, signal),
+      renderOfficeHtml: (html, options, signal) => this.renderOfficeHtml(userId, threadId, html, options, signal),
     };
   }
 
@@ -578,6 +581,7 @@ export class BrowserUseRuntimeManager {
     userId: number,
     threadId: number,
     html: string,
+    options?: { selector?: string },
     signal?: AbortSignal,
   ): Promise<{ bytes: Buffer; mediaType: string; session_remaining_seconds: number }> {
     const state = this.state(userId);
@@ -590,13 +594,30 @@ export class BrowserUseRuntimeManager {
         office = { context, page: await context.newPage() };
         session.officeContexts.set(threadId, office);
       }
-      await office.page.setContent(html, {
-        waitUntil: "load",
-        timeout: this.input.config.BROWSER_USE_NAVIGATION_TIMEOUT_MS,
-      });
+      // Browser Use's remote CDP page can leave Playwright setContent() waiting
+      // forever for a lifecycle event. The HTML is already sanitized and contains
+      // no active elements or remote resources, so replace the blank document
+      // directly without depending on navigation lifecycle reporting.
+      await office.page.evaluate((markup) => {
+        document.open();
+        document.write(markup);
+        document.close();
+      }, html);
       await office.page.evaluate("document.fonts?.ready").catch(() => undefined);
       await office.page.waitForTimeout(250);
-      const bytes = await office.page.screenshot({ type: "png", fullPage: true });
+      let bytes: Buffer;
+      if (options?.selector) {
+        const target = office.page.locator(options.selector).first();
+        if (await target.count() === 0) {
+          throw new BrowserUseRuntimeError(
+            "office_preview_page_not_found",
+            "OfficeCLI preview HTML did not contain the requested page or slide.",
+          );
+        }
+        bytes = await target.screenshot({ type: "png" });
+      } else {
+        bytes = await office.page.screenshot({ type: "png", fullPage: true });
+      }
       assertImageSize(bytes);
       return { bytes, mediaType: "image/png", session_remaining_seconds: remainingSeconds(session) };
     }, signal);
@@ -629,12 +650,6 @@ export class BrowserUseRuntimeManager {
     requestedTimeout: number | undefined,
     signal?: AbortSignal,
   ): Promise<SessionState> {
-    if (this.proxyViolationDetected) {
-      throw new BrowserUseRuntimeError(
-        "proxy_detected",
-        "Browser Use reported proxy usage even though proxies were disabled. New browser sessions are blocked until the bot restarts.",
-      );
-    }
     if (state.session?.browser.isConnected() && state.session.timeoutAt > Date.now() + DEADLINE_MARGIN_MS) {
       return state.session;
     }
@@ -654,13 +669,7 @@ export class BrowserUseRuntimeManager {
         allowResizing: true,
         enableRecording: false,
       }, signal);
-      if (this.recordProxyViolation(remote, "create")) {
-        await this.stopRemote(remote.id).catch(() => undefined);
-        throw new BrowserUseRuntimeError(
-          "proxy_detected",
-          "Browser Use assigned proxy usage to a no-proxy browser session. The session was stopped.",
-        );
-      }
+      this.logUnexpectedProxyUsage(remote, "create");
       if (!remote.cdpUrl) {
         await this.stopRemote(remote.id).catch(() => undefined);
         throw new Error("Browser Use Cloud did not return a CDP URL.");
@@ -894,7 +903,7 @@ export class BrowserUseRuntimeManager {
     for (let attempt = 1; attempt <= STOP_RETRIES; attempt += 1) {
       try {
         const stopped = await this.api.stopBrowser(sessionId, AbortSignal.timeout(5_000));
-        this.recordProxyViolation(stopped, "stop");
+        this.logUnexpectedProxyUsage(stopped, "stop");
         return;
       } catch (error) {
         if (error instanceof BrowserUseHttpError && error.status === 404) return;
@@ -905,17 +914,15 @@ export class BrowserUseRuntimeManager {
     throw redactBrowserUseError(this.input.config, lastError);
   }
 
-  private recordProxyViolation(session: BrowserUseSession, phase: "create" | "stop"): boolean {
+  private logUnexpectedProxyUsage(session: BrowserUseSession, phase: "create" | "stop"): void {
     const usedMb = Number(session.proxyUsedMb ?? 0);
     const cost = Number(session.proxyCost ?? 0);
-    if (Number.isFinite(usedMb) && usedMb <= 0 && Number.isFinite(cost) && cost <= 0) return false;
-    this.proxyViolationDetected = true;
-    this.input.logger?.error("Browser Use no-proxy invariant violated", {
+    if (Number.isFinite(usedMb) && usedMb <= 0 && Number.isFinite(cost) && cost <= 0) return;
+    this.input.logger?.warn("Browser Use reported proxy usage for a no-proxy session", {
       phase,
       proxyUsedMb: Number.isFinite(usedMb) ? usedMb : "reported",
       proxyCost: Number.isFinite(cost) ? cost : "reported",
     });
-    return true;
   }
 
   private async allDownloads(session: SessionState, includeUrls: boolean, signal?: AbortSignal): Promise<BrowserUseDownload[]> {

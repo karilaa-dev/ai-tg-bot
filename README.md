@@ -75,7 +75,7 @@ Existing completion, cancellation, and failure logs include the final inference 
 - OpenRouter API key
 - Tavily API key
 - Optional Browser Use Cloud API key for interactive browsing and Office visual QA
-- Optional Codex OAuth login through Pi
+- Codex CLI OAuth login (primary inference provider)
 - Optional external Docling service
 
 ## Source setup
@@ -87,11 +87,18 @@ npm install
 npm run dev
 ```
 
-To configure Codex OAuth in the same Pi directory:
+Sign in once with the official Codex CLI. The bot reads and refreshes the standard
+owner-only Codex credential cache in place; OpenRouter is used only when Codex is
+unavailable or a Codex request fails before producing output.
 
 ```bash
-PI_CODING_AGENT_DIR=./data/pi npx pi
+codex login
 ```
+
+By default the cache is `~/.codex/auth.json`. Set `CODEX_AUTH_FILE` when the bot
+runs under another user or in a container. Mount that one file read-write so OAuth
+refreshes survive restarts. Existing `openai-codex` OAuth credentials in
+`PI_CODING_AGENT_DIR/auth.json` remain supported and take precedence.
 
 The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source, extracted text, or search chunks remain in active thread scope. Host-only records without a recoverable source are retained as diagnostic rows but excluded from agent-visible thread scope. Physical files in the old host-storage directory are not deleted automatically.
 
@@ -107,160 +114,10 @@ docker compose up --build -d
 
 The bot container has normal outbound access for E2B/provider APIs and a second internal-only network for PostgreSQL. It does not need a Docker socket, host workspace mount, privileged mode, or a local sandbox service.
 
-## Dokploy / Railpack cutover
+## Unraid to Dokploy migration
 
-[`railpack.json`](railpack.json) pins Node 24.18, runs a deterministic `npm ci`, installs
-`tini` and `setpriv`, and launches the normal non-root entrypoint. Dokploy must run one
-application replica and attach a persistent named volume at `/app/data/pi`. Create a
-separate Dokploy PostgreSQL service and configure the application with its explicit
-`DB_URL`; do not set application-level `POSTGRES_PASSWORD`. Dokploy documents application
-[volume mounts](https://docs.dokploy.com/docs/core/applications/advanced) and
-[database restores](https://docs.dokploy.com/docs/core/databases/restore).
-
-The only state transferred from the old Compose host is:
-
-- a logical dump of the `aibot` PostgreSQL database;
-- the complete `pi-home` volume, restored at the same `/app/data/pi` container path.
-
-Do not transfer `bot-data`, `BOT_SHARED_HOST_PATH`, `.chat-files`, OpenSandbox workspaces,
-outbox contents, or sandbox containers. Keep the same `BOT_TOKEN`: Telegram file IDs are
-scoped to the bot that received them and cannot be transferred to another bot.
-
-### 1. Snapshot the stopped source
-
-Build the upgrade branch while the old deployment remains live. At the maintenance window,
-stop only the bot and leave its PostgreSQL service running. Never run the old and new bot
-simultaneously with the same token.
-
-```bash
-docker build -t ai-tg-bot-upgrade-audit .
-docker compose stop bot
-
-# Resolve these with `docker volume ls`; Compose normally prefixes the project name.
-OLD_PI_VOLUME=<compose-project>_pi-home
-OLD_DATABASE_NETWORK=<compose-project>_database
-
-# Parse dotenv syntax without evaluating it as shell code. Put secrets in owner-only temporary
-# files so neither the Docker command line nor the container environment contains their values.
-AUDIT_SECRET_DIR=$(mktemp -d)
-chmod 700 "${AUDIT_SECRET_DIR}"
-trap 'rm -f -- "${AUDIT_SECRET_DIR}/db-url" "${AUDIT_SECRET_DIR}/bot-token"; rmdir -- "${AUDIT_SECRET_DIR}"' EXIT
-node --env-file=.env --input-type=module -e '
-  import fs from "node:fs";
-  const [directory] = process.argv.slice(1);
-  const password = process.env.POSTGRES_PASSWORD;
-  const token = process.env.BOT_TOKEN;
-  if (!password || !token) throw new Error("POSTGRES_PASSWORD and BOT_TOKEN are required");
-  fs.writeFileSync(`${directory}/db-url`, `postgres://aibot:${encodeURIComponent(password)}@postgres:5432/aibot`, { mode: 0o600 });
-  fs.writeFileSync(`${directory}/bot-token`, token, { mode: 0o600 });
-' "${AUDIT_SECRET_DIR}"
-
-# Keep the source UID/GID so the mode-0600 manifest is owned by the Pi volume identity.
-SOURCE_APP_UID=$(node --env-file=.env -e 'const v=process.env.APP_UID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_UID must be numeric"); process.stdout.write(v)')
-SOURCE_APP_GID=$(node --env-file=.env -e 'const v=process.env.APP_GID||"1000"; if (!/^\d+$/.test(v)) throw new Error("APP_GID must be numeric"); process.stdout.write(v)')
-SOURCE_E2B_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.E2B_DEPLOYMENT_ID||process.env.OPEN_SANDBOX_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("sandbox deployment ID is invalid"); process.stdout.write(v)')
-SOURCE_BROWSER_USE_DEPLOYMENT_ID=$(node --env-file=.env -e 'const v=process.env.BROWSER_USE_DEPLOYMENT_ID||"ai-tg-bot"; if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(v)) throw new Error("Browser Use deployment ID is invalid"); process.stdout.write(v)')
-HOST_OPERATOR_UID=$(id -u)
-
-# Keep the host operator as owner while granting the source application GID read-only access.
-docker run --rm \
-  --mount "type=bind,source=${AUDIT_SECRET_DIR},target=/run/secrets" \
-  --entrypoint sh \
-  ai-tg-bot-upgrade-audit \
-  -c 'chown "$1:$2" /run/secrets /run/secrets/db-url /run/secrets/bot-token && chmod 750 /run/secrets && chmod 440 /run/secrets/db-url /run/secrets/bot-token' \
-  sh "${HOST_OPERATOR_UID}" "${SOURCE_APP_GID}"
-
-docker run --rm \
-  --user "${SOURCE_APP_UID}:${SOURCE_APP_GID}" \
-  --network "${OLD_DATABASE_NETWORK}" \
-  --mount "type=volume,source=${OLD_PI_VOLUME},target=/app/data/pi" \
-  --mount "type=bind,source=${AUDIT_SECRET_DIR},target=/run/secrets,readonly" \
-  -e DB_URL_FILE=/run/secrets/db-url \
-  -e BOT_TOKEN_FILE=/run/secrets/bot-token \
-  -e "E2B_DEPLOYMENT_ID=${SOURCE_E2B_DEPLOYMENT_ID}" \
-  -e "BROWSER_USE_DEPLOYMENT_ID=${SOURCE_BROWSER_USE_DEPLOYMENT_ID}" \
-  -e PI_CODING_AGENT_DIR=/app/data/pi \
-  --entrypoint node \
-  ai-tg-bot-upgrade-audit \
-  dist/scripts/upgrade-audit.js snapshot --out /app/data/pi/upgrade-baseline.json
-
-rm -f -- "${AUDIT_SECRET_DIR}/db-url" "${AUDIT_SECRET_DIR}/bot-token"
-rmdir -- "${AUDIT_SECRET_DIR}"
-trap - EXIT
-```
-
-The snapshot command is read-only with respect to the database and never initializes its
-schema. Running it as the source application UID keeps the mode-0600 manifest readable from
-the Pi volume. It fails on malformed Telegram locators, unsafe PostgreSQL sequences, missing
-Pi sessions, or unsafe Pi runtime state files. Its manifest contains counts and keyed
-HMAC-SHA-256 fingerprints—including the bot account identity and any Pi `auth.json`,
-`models.json`, or `settings.json`—not chat text, credentials, or raw Telegram identifiers.
-The same bot token is required to verify them. Database rows are read in bounded keyset pages
-so the audit neither loads the full corpus at once nor repeatedly scans earlier pages.
-
-Create the two transfer artifacts while the bot remains stopped:
-
-```bash
-docker compose exec -T postgres \
-  pg_dump -Fc --no-owner --no-acl -U aibot aibot > aibot.dump
-
-docker run --rm \
-  --mount "type=volume,source=${OLD_PI_VOLUME},target=/source,readonly" \
-  --mount "type=bind,source=$(pwd),target=/backup" \
-  alpine:3.22 \
-  tar -C /source -czpf /backup/pi-home.tgz .
-```
-
-Copy `aibot.dump` and `pi-home.tgz` to the Dokploy host. Leave the old database, Pi volume,
-shared root, and OpenSandbox state stopped and unchanged for rollback.
-
-### 2. Restore and deploy on Dokploy
-
-Restore `aibot.dump` into the new Dokploy PostgreSQL service. Restore `pi-home.tgz` into the
-named application volume before its first deployment, preserving the archive paths and
-permissions. Mount that volume at `/app/data/pi`.
-
-Configure these application variables in addition to the normal E2B/provider credentials:
-
-```dotenv
-DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
-PI_CODING_AGENT_DIR=/app/data/pi
-UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
-E2B_DEPLOYMENT_ID=<source E2B_DEPLOYMENT_ID, or old OPEN_SANDBOX_DEPLOYMENT_ID>
-BROWSER_USE_DEPLOYMENT_ID=<source BROWSER_USE_DEPLOYMENT_ID, default ai-tg-bot>
-APP_UID=<source APP_UID, default 1000>
-APP_GID=<source APP_GID, default 1000>
-```
-
-Reusing the deployment ID preserves database namespaces and source metadata; it does not
-transfer or reconnect old OpenSandbox files, workspaces, or containers. Do not configure
-other legacy OpenSandbox variables or mounts. Ensure
-`E2B_TEMPLATE=ai-tg-bot-tools:production` exists before deployment.
-
-At first startup, the bot migrates the restored database transactionally, requires exact
-membership for pre-existing datasets (including E2B thread mappings and sandbox restoration
-history), verifies every baseline record and Telegram locator, checks the configured bot, E2B,
-and Browser Use deployment identities and Pi runtime state, requires every referenced Pi JSONL
-session to match its snapshotted size and byte content, and only then starts Telegram polling. Success writes
-`upgrade-baseline.json.verified`, bound to the manifest hash; subsequent restarts skip the
-one-time scan only while that exact manifest is unchanged.
-
-Confirm the logs contain `upgrade preservation baseline verified`, `database initialized`,
-and `bot started`. Then verify an old thread, `search_thread` recall, restoration of an old
-Telegram attachment into a newly created E2B sandbox, and delivery of a new file. The baseline
-check is intentionally a one-time cutover gate, not an ongoing integrity check: normal bot use
-updates operational file/source fields and appends messages after startup.
-
-After the verification and smoke tests pass, remove `UPGRADE_BASELINE_FILE` from the Dokploy
-application variables and redeploy once. The manifest and success marker remain available as
-cutover evidence, but the one-time gate is disarmed. This matters if the original pre-cutover
-Pi archive is restored later: that archive contains the baseline but not the success marker,
-so leaving the variable configured could re-run the obsolete baseline against a database that
-has legitimately changed since cutover.
-
-For rollback, stop the Dokploy application before restarting the old bot. The old host state
-was never modified beyond stopping the bot and writing the baseline into `pi-home`; the dump
-and Pi archive provide an additional recovery copy.
+Follow the standalone [Unraid to Dokploy migration guide](MIGRATION.md). It covers the export
+wizard, Dokploy setup, import, smoke tests, and rollback.
 
 ## E2B configuration
 

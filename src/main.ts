@@ -11,7 +11,9 @@ import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
 import { verifyUpgradeBaselineOnce } from "./upgrade/audit.js";
+import { assertTelegramStartupAllowed } from "./upgrade/mode.js";
 
+assertTelegramStartupAllowed();
 const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);

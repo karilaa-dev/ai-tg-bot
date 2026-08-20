@@ -24,7 +24,11 @@ describe("render_office_preview", () => {
     const details = await tool.toToolDetails!({ toolCallId: "preview", input: { path: "/deck.pptx", page: 2 }, output });
 
     expect(output).toMatchObject({ rendered: true, path: "/deck.pptx", page: 2, size: PNG.length });
-    expect(browserRuntime.renderOfficeHtml).toHaveBeenCalledWith(expect.not.stringContaining("steal"), undefined);
+    expect(browserRuntime.renderOfficeHtml).toHaveBeenCalledWith(
+      expect.not.stringContaining("steal"),
+      { selector: '.slide-container[data-slide="2"] .slide' },
+      undefined,
+    );
     expect(model).toMatchObject({ type: "content" });
     expect(details).not.toHaveProperty("image_base64");
     expect(runtime.execute).toHaveBeenCalledTimes(2);

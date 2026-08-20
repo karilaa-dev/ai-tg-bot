@@ -71,6 +71,69 @@ describe("container entrypoint", () => {
     expect(result.stdout).toBe("postgres://aibot:compose-password@postgres:5432/aibot");
   });
 
+  it("keeps import mode idle without starting the bot", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "sleep"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await runEntrypointDefault({
+      ...env,
+      PATH: `${binDir}:${env.PATH}`,
+      UPGRADE_MODE: "import",
+    });
+
+    expect(result.stdout).toBe("infinity");
+    expect(result.stderr).toContain("Telegram polling is disabled");
+  });
+
+  it("overrides the image's default bot command in import mode", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "sleep"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await execFileAsync("/bin/sh", [entrypoint, "node", "dist/src/main.js"], {
+      env: { ...env, PATH: `${binDir}:${env.PATH}`, UPGRADE_MODE: "import" },
+    });
+
+    expect(result.stdout).toBe("infinity");
+    expect(result.stderr).toContain("Telegram polling is disabled");
+  });
+
+  it("uses the normal bot command when upgrade mode is unset", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "node"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await runEntrypointDefault({ ...env, PATH: `${binDir}:${env.PATH}` });
+    expect(result.stdout).toBe("dist/src/main.js");
+  });
+
+  it("allows an explicit migration command in import mode", async () => {
+    const result = await runEntrypoint(
+      { ...env, UPGRADE_MODE: "import" },
+      "printf 'migration-command'",
+    );
+    expect(result.stdout).toBe("migration-command");
+  });
+
+  it("fails closed for an unknown upgrade mode", async () => {
+    await expect(runEntrypoint({ ...env, UPGRADE_MODE: "typo" })).rejects.toMatchObject({
+      stderr: expect.stringContaining("UPGRADE_MODE must be unset or 'import'"),
+    });
+  });
+
   it.skipIf((process.getuid?.() ?? 1) !== 0)(
     "drops identity and capabilities through setpriv when started as root",
     async () => {
@@ -124,4 +187,8 @@ function runEntrypoint(
     "-c",
     command,
   ], { env: environment });
+}
+
+function runEntrypointDefault(environment: NodeJS.ProcessEnv) {
+  return execFileAsync("/bin/sh", [entrypoint], { env: environment });
 }

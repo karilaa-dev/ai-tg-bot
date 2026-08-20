@@ -148,7 +148,7 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(6);
   });
 
-  it("fails closed after the provider reports proxy usage", async () => {
+  it("does not poison later no-proxy sessions when the provider reports proxy usage", async () => {
     const fixture = await runtimeFixture();
     fixture.api.stopBrowser.mockResolvedValueOnce({
       id: "123e4567-e89b-12d3-a456-426614174999",
@@ -164,11 +164,25 @@ describe("BrowserUseRuntimeManager", () => {
     await browser.open("https://example.com");
 
     await expect(browser.closeSession()).resolves.toMatchObject({ closed: true });
-    await expect(browser.open("https://example.org")).rejects.toSatisfy((error: BrowserUseRuntimeError) => {
-      expect(error.code).toBe("proxy_detected");
-      return true;
-    });
-    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(1);
+    await expect(browser.open("https://example.org")).resolves.toMatchObject({ url: "https://example.org" });
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders a requested Office slide without waiting for remote page lifecycle events", async () => {
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+
+    await browser.renderOfficeHtml(
+      '<!doctype html><div class="slide-container" data-slide="2"><div class="slide">Two</div></div>',
+      { selector: '.slide-container[data-slide="2"] .slide' },
+    );
+
+    const officeContext = fixture.browsers[0]!.allContexts[1]!;
+    const officePage = officeContext.pageList.at(-1)!;
+    expect(officePage.lastInjectedHtml).toContain('data-slide="2"');
+    expect(officePage.lastLocatorSelector).toBe('.slide-container[data-slide="2"] .slide');
+    expect(officePage.locatorScreenshotCount).toBe(1);
   });
 
   it("closes Office contexts and cancels automatic cleanup timers on explicit close", async () => {
@@ -413,6 +427,9 @@ class FakePage {
   scroll = { x: 0, y: 0 };
   closeListeners: Array<() => void> = [];
   screenshotBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+  lastInjectedHtml?: string;
+  lastLocatorSelector?: string;
+  locatorScreenshotCount = 0;
   nextGotoGate?: {
     started: ReturnType<typeof deferred<void>>;
     release: ReturnType<typeof deferred<void>>;
@@ -442,11 +459,19 @@ class FakePage {
     return this.screenshotBytes;
   }
 
-  locator() {
-    return {
+  locator(selector: string) {
+    this.lastLocatorSelector = selector;
+    const locator = {
+      first: () => locator,
+      count: async () => 1,
+      screenshot: async () => {
+        this.locatorScreenshotCount += 1;
+        return this.screenshotBytes;
+      },
       ariaSnapshot: async () => "Page content",
       innerText: async () => "Page content",
     };
+    return locator;
   }
 
   async title(): Promise<string> {
@@ -472,7 +497,11 @@ class FakePage {
     for (const listener of this.closeListeners) listener();
   }
 
-  async evaluate<T>(expression: string): Promise<T> {
+  async evaluate<T, Arg = unknown>(expression: string | ((arg: Arg) => T), arg?: Arg): Promise<T> {
+    if (typeof expression === "function") {
+      if (typeof arg === "string") this.lastInjectedHtml = arg;
+      return undefined as T;
+    }
     if (expression.includes("window.scrollX")) return this.scroll as T;
     if (expression.includes("data-ai-tg-browser-ref")) return [] as T;
     const match = expression.match(/window\.scrollTo\(([-\d]+), ([-\d]+)\)/);

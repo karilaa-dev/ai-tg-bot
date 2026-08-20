@@ -9,6 +9,11 @@ const required = {
 };
 
 describe("Browser Use configuration", () => {
+  it("accepts an explicit Codex CLI credential cache path", () => {
+    expect(loadConfig({ ...required, CODEX_AUTH_FILE: "/run/secrets/codex-auth.json" }).CODEX_AUTH_FILE)
+      .toBe("/run/secrets/codex-auth.json");
+  });
+
   it("accepts an optional one-time upgrade baseline path", () => {
     expect(loadConfig({ ...required, UPGRADE_BASELINE_FILE: "/app/data/pi/upgrade-baseline.json" }).UPGRADE_BASELINE_FILE)
       .toBe("/app/data/pi/upgrade-baseline.json");

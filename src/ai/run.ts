@@ -2009,9 +2009,18 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
   return text && text !== "{}" ? formatCount(1, "result") : "done";
 }
 
-function toolErrorText(value: unknown): string | undefined {
-  const error = asRecord(value)?.error;
-  return typeof error === "string" && error.trim() ? error.trim() : undefined;
+export function toolErrorText(value: unknown): string | undefined {
+  const record = asRecord(value);
+  const details = asRecord(record?.details);
+  for (const candidate of [record?.error, details?.error, record?.message, details?.message]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  const content = Array.isArray(record?.content) ? record.content : [];
+  for (const part of content) {
+    const text = asRecord(part)?.text;
+    if (typeof text === "string" && text.trim()) return text.trim();
+  }
+  return undefined;
 }
 
 function isPendingToolResult(value: unknown): boolean {
