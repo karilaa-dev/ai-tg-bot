@@ -10,12 +10,12 @@ export const OFFICECLI_SKILLS = [
   {
     name: "officecli-docx",
     relativePath: "skills/officecli-docx/SKILL.md",
-    sha256: "1da56ed53a308222ab2516a2974ae98c6703b7d504fa5158348c39a18e85a4f1",
+    sha256: "e1540a821b78c6db605f8e676cd706cbba4f0f6136bc1a53a4f6df7229a104ae",
   },
   {
     name: "officecli-pptx",
     relativePath: "skills/officecli-pptx/SKILL.md",
-    sha256: "0d53192751d5770984f16f3c34f9923377651555c667150d7f96e16e8c9757b3",
+    sha256: "254306663523b4ae89e3086c7e9ed520bb3e469eb78404b2e65c333621c21a1e",
   },
 ] as const;
 

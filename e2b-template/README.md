@@ -1,34 +1,38 @@
-# ai-tg-bot E2B toolbox
+# E2B toolbox template
 
-This directory defines the reusable, private `ai-tg-bot-tools` E2B template. It is based on E2B Base, uses 2 vCPU and 2 GiB RAM, and contains the command-line toolbox used by sandbox-backed agent work. Browser work remains in Browser Use Cloud; this template intentionally has no Chromium or browser automation bundle.
+This directory defines the private `ai-tg-bot-tools` template used by thread sandboxes. It starts from E2B Base with 2 vCPU and 2 GiB RAM.
+
+The image contains the shell tools listed in `template.ts`, ImageMagick, and OfficeCLI `1.0.142`. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are deliberately absent because Browser Use Cloud handles browser work.
 
 ## Build and promote
 
-Set `E2B_API_KEY` in the ignored root `.env`, then run:
+Put `E2B_API_KEY` in the ignored root `.env`, then run:
 
 ```sh
 npm run e2b:template:build
 ```
 
-The command builds a unique immutable tag, creates a temporary validation sandbox, runs the complete contract, checks internet access and pause/resume persistence, deletes the validation sandbox, and only then moves `ai-tg-bot-tools:production` to the passing build. Bot startup never rebuilds the template.
+The command creates a unique immutable tag and starts a temporary validation sandbox. It checks the toolbox contract, outbound internet, allocated CPU and memory, and pause/resume persistence. It deletes the validation sandbox and moves `ai-tg-bot-tools:production` only after every check passes. Bot startup never builds the template.
 
-Validate the current production tag without rebuilding it:
+Check the current production tag without rebuilding:
 
 ```sh
 npm run e2b:template:check
 ```
 
-To roll back, use E2B's tag API to assign `production` to a previously validated build tag. Existing thread sandboxes keep their original filesystem and build until they are deleted; tag changes affect newly created sandboxes only. Keep the `thread_sandboxes` mappings intact during a tag change: metadata-only recovery includes the configured `template_ref`, so a missing mapping plus a changed `E2B_TEMPLATE` cannot rediscover an older sandbox and will create a new one.
+To roll back, point the `production` tag at an earlier validated build through E2B's tag API. Existing thread sandboxes keep their current build and filesystem. The new tag applies only to newly created sandboxes.
 
-The template installs the distro packages for Git, OpenSSH, curl, and the C/C++ build toolchain explicitly. E2B Base intentionally supplies the supported Python, Node.js, and npm versions; the build contract checks them before a build can be promoted, so an incompatible upstream Base change fails validation while the existing `production` tag remains untouched.
+Keep `thread_sandboxes` mappings during a tag change. Metadata recovery includes `template_ref`, so deleting a mapping while also changing `E2B_TEMPLATE` can make an older sandbox undiscoverable and cause the bot to create a replacement.
 
-## Legacy Desktop cleanup
+Pinned tool versions may trail upstream. Upgrade a pin only after updating its revision and checksums and passing the full template contract.
 
-Stop the bot first. Preview the exact cleanup scope, then execute it:
+## Remove legacy Desktop sandboxes
+
+Stop the bot first. Preview the deletion set, then run it:
 
 ```sh
 npm run e2b:sandboxes:prune-desktop
 npm run e2b:sandboxes:prune-desktop -- --execute
 ```
 
-The command only matches E2B sandboxes whose template name is `desktop` and whose metadata contains `app=ai-tg-bot`. Deleted workspace and process state cannot be recovered; Telegram-backed thread files are restored when a new toolbox sandbox is created.
+The command matches only E2B sandboxes whose template name is `desktop` and whose metadata contains `app=ai-tg-bot`. Execution permanently removes their workspace and process state. Telegram-backed files are restored when a thread creates a replacement toolbox sandbox.

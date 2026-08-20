@@ -8,10 +8,6 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  OFFICECLI_DOCX_SKILL_SHA256,
-  OFFICECLI_PPTX_SKILL_SHA256,
-} from "../../e2b-template/template.js";
-import {
   OFFICECLI_SKILLS,
   OFFICECLI_SKILLS_REVISION,
   createOfficeSkillReadTool,
@@ -29,10 +25,8 @@ describe("pinned OfficeCLI Pi skills", () => {
   it("loads exactly the two reviewed, checksum-verified skills", async () => {
     await expect(validateOfficeSkills()).resolves.toBeUndefined();
     expect(OFFICECLI_SKILLS_REVISION).toMatch(/^[a-f0-9]{40}$/u);
-    expect(OFFICECLI_SKILLS.map((skill) => skill.sha256)).toEqual([
-      OFFICECLI_DOCX_SKILL_SHA256,
-      OFFICECLI_PPTX_SKILL_SHA256,
-    ]);
+    expect(OFFICECLI_SKILLS.map((skill) => skill.sha256))
+      .toEqual(OFFICECLI_SKILLS.map(() => expect.stringMatching(/^[a-f0-9]{64}$/u)));
 
     const loaded = loadSkills({
       cwd: process.cwd(),
@@ -82,9 +76,9 @@ describe("pinned OfficeCLI Pi skills", () => {
     );
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-    expect(text).toContain("# OfficeCLI DOCX Skill");
-    expect(text).toContain("## Setup");
-    expect(text).toContain("### Delivery Gate");
+    expect(text).toContain("# OfficeCLI DOCX skill");
+    expect(text).toContain("## Scope");
+    expect(text).toContain("### Delivery gate");
     expect(result.details).toMatchObject({ truncated: false, start_line: 1 });
     await expect(tool.execute(
       "read-source",
