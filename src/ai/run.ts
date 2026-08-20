@@ -878,6 +878,7 @@ async function sendFinalVisible(
   const answerMessages = renderFinalAnswer({
     answerMd: visibleAnswer,
   });
+  let deliveredAnswer = visibleAnswer;
   const initialPersistedText = visibleAnswer.trim() ? visibleAnswer : "";
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
@@ -913,11 +914,23 @@ async function sendFinalVisible(
     piEntryId: piEntryId ?? null,
   });
   await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments);
+  const generatedAttachments = outboundAttachments.filter((attachment) =>
+    attachment.origin === "generated_image");
+  const generatedDeliveryFailed = generatedAttachments.length > 0
+    && generatedAttachments.every((attachment) =>
+      !attachment.telegramDelivery && !attachment.telegramDeliveryUnknown);
+  if (generatedDeliveryFailed) {
+    deliveredAnswer = input.t("image-delivery-failed");
+    for (const rich of renderFinalAnswer({ answerMd: deliveredAnswer })) {
+      const sent = await sendRichWithFallback(input, rich);
+      answerIds.push(...sent.map((message) => message.message_id));
+    }
+  }
   const retainedAttachments = outboundAttachments.filter((attachment) => attachment.telegramDelivery);
   const unknownAttachments = outboundAttachments.filter((attachment) =>
     !attachment.telegramDelivery && attachment.telegramDeliveryUnknown);
   const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
-  const persistedText = visibleAnswer.trim() ? visibleAnswer : attachmentPersistedText(retainedAttachments);
+  const persistedText = deliveredAnswer.trim() ? deliveredAnswer : attachmentPersistedText(retainedAttachments);
   const persistedContent: Record<string, unknown> = { text: persistedText };
   if (retainedAttachments.length) {
     persistedContent.files = retainedAttachments.map((file) => ({

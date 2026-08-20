@@ -49,6 +49,7 @@ stream-state-on = 🌊 on
 stream-state-off = 📴 off
 thinking-placeholder = 💭 Thinking...
 thinking-done = ✅ Done.
+image-delivery-failed = I couldn't send the generated image. Please try again.
 thinking-summary-running = 🧠 Thinking for { $time }
 thinking-summary-generating-image = 🖼️ Generating image for { $time }
 thinking-summary-final = 🧠 Thought for { $time }

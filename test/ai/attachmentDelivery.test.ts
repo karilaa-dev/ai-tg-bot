@@ -116,6 +116,25 @@ describe("buffered Telegram attachment delivery", () => {
       .toBeLessThan(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0]!);
   });
 
+  it("sends a failure reply only when generated-image delivery is definitively rejected", async () => {
+    const api = fakeApi();
+    api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));
+    api.sendDocument.mockRejectedValue(telegramError("Bad Request: document rejected", "sendDocument"));
+    const input = turnInput(api);
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "Generated image";
+
+    await sendFinal(input, "Image generation details", "", 1000, [attachment]);
+
+    expect(attachment.telegramDelivery).toBeUndefined();
+    expect(attachment.telegramDeliveryFailure).toBe("telegram_rejected");
+    expect(api.raw.sendRichMessage).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(api.raw.sendRichMessage.mock.calls[1])).toContain("image-delivery-failed");
+    expect(api.sendDocument.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(api.raw.sendRichMessage.mock.invocationCallOrder.at(-1)!);
+  });
+
   it("sends images over Telegram's photo limit as documents", async () => {
     const api = fakeApi();
     const input = turnInput(api);
