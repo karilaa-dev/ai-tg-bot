@@ -185,6 +185,30 @@ describe("BrowserUseRuntimeManager", () => {
     expect(officePage.locatorScreenshotCount).toBe(1);
   });
 
+  it("times out a stuck Office preview and recreates its isolated context", async () => {
+    const fixture = await runtimeFixture({ BROWSER_USE_NAVIGATION_TIMEOUT_MS: 10 });
+    await fixture.manager.beginTurn(7, 10);
+    const browser = fixture.manager.forThread(7, 10);
+    await browser.open("https://example.com");
+    const started = deferred<void>();
+    const release = deferred<void>();
+    fixture.browsers[0]!.nextOfficeEvaluateGate = { started, release };
+
+    const rendering = browser.renderOfficeHtml("<!doctype html><h1>Blocked</h1>");
+    await started.promise;
+    await expect(rendering).rejects.toSatisfy((error: BrowserUseRuntimeError) => {
+      expect(error.code).toBe("office_preview_timeout");
+      return true;
+    });
+
+    const failedContext = fixture.browsers[0]!.allContexts[1]!;
+    expect(failedContext.closed).toBe(true);
+    release.resolve();
+    await expect(browser.renderOfficeHtml("<!doctype html><h1>Recovered</h1>"))
+      .resolves.toMatchObject({ mediaType: "image/png" });
+    expect(fixture.browsers[0]!.allContexts[2]!.closed).toBe(false);
+  });
+
   it("closes Office contexts and cancels automatic cleanup timers on explicit close", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 1_000 });
@@ -374,6 +398,10 @@ class FakeBrowser {
   connected = true;
   readonly context = new FakeContext();
   readonly allContexts = [this.context];
+  nextOfficeEvaluateGate?: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
 
   contexts(): BrowserContext[] {
     return this.allContexts as unknown as BrowserContext[];
@@ -390,6 +418,8 @@ class FakeBrowser {
 
   async newContext(): Promise<BrowserContext> {
     const context = new FakeContext();
+    context.nextNewPageEvaluateGate = this.nextOfficeEvaluateGate;
+    this.nextOfficeEvaluateGate = undefined;
     this.allContexts.push(context);
     return context as unknown as BrowserContext;
   }
@@ -399,6 +429,10 @@ class FakeContext {
   readonly pageList = [new FakePage()];
   closed = false;
   storageStateUnavailable = false;
+  nextNewPageEvaluateGate?: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
 
   pages(): Page[] {
     return this.pageList as unknown as Page[];
@@ -406,6 +440,8 @@ class FakeContext {
 
   async newPage(): Promise<Page> {
     const page = new FakePage();
+    page.nextEvaluateGate = this.nextNewPageEvaluateGate;
+    this.nextNewPageEvaluateGate = undefined;
     this.pageList.push(page);
     return page as unknown as Page;
   }
@@ -431,6 +467,10 @@ class FakePage {
   lastLocatorSelector?: string;
   locatorScreenshotCount = 0;
   nextGotoGate?: {
+    started: ReturnType<typeof deferred<void>>;
+    release: ReturnType<typeof deferred<void>>;
+  };
+  nextEvaluateGate?: {
     started: ReturnType<typeof deferred<void>>;
     release: ReturnType<typeof deferred<void>>;
   };
@@ -499,6 +539,10 @@ class FakePage {
 
   async evaluate<T, Arg = unknown>(expression: string | ((arg: Arg) => T), arg?: Arg): Promise<T> {
     if (typeof expression === "function") {
+      const gate = this.nextEvaluateGate;
+      this.nextEvaluateGate = undefined;
+      gate?.started.resolve();
+      await gate?.release.promise;
       if (typeof arg === "string") this.lastInjectedHtml = arg;
       return undefined as T;
     }

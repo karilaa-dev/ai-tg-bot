@@ -578,7 +578,8 @@ function createPiStreamLoop(
       shaper.onToolResult(event.toolName, summarizeToolOutput(event.toolName, event.result));
       counts.toolResults += 1;
       if (event.toolName === "generate_image") {
-        counts.generateImageToolError = toolErrorText(event.result) ?? counts.generateImageToolError;
+        counts.generateImageToolError = toolErrorText(event.result, event.isError)
+          ?? counts.generateImageToolError;
         if (!event.isError) counts.generateImageReadyAt = Date.now();
       }
       input.logger.info("Pi tool call finished", {
@@ -2009,12 +2010,13 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
   return text && text !== "{}" ? formatCount(1, "result") : "done";
 }
 
-export function toolErrorText(value: unknown): string | undefined {
+export function toolErrorText(value: unknown, includeContentText = false): string | undefined {
   const record = asRecord(value);
   const details = asRecord(record?.details);
   for (const candidate of [record?.error, details?.error, record?.message, details?.message]) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
+  if (!includeContentText) return undefined;
   const content = Array.isArray(record?.content) ? record.content : [];
   for (const part of content) {
     const text = asRecord(part)?.text;

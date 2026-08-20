@@ -170,6 +170,16 @@ describe("StreamShaper", () => {
     expect(s.runSummary().reasoningSummaries).toEqual([s.streamingThinkingMd()]);
   });
 
+  it("keeps ordinary end-of-line bold text inline", () => {
+    const s = new StreamShaper();
+    s.onReasoningStart();
+    s.onReasoningDelta("The answer is **yes**");
+    s.onReasoningEnd();
+
+    expect(s.streamingThinkingMd()).toBe("The answer is **yes**");
+    expect(s.runSummary().reasoningSummaries).toEqual(["The answer is **yes**"]);
+  });
+
   it("keeps only streamed section titles from verbose reasoning text", () => {
     const s = new StreamShaper();
     s.onReasoningDelta([
@@ -356,6 +366,13 @@ describe("toolErrorText", () => {
       content: [{ type: "text", text: "Image request failed: Billing hard limit has been reached." }],
       details: {},
       isError: true,
-    })).toBe("Image request failed: Billing hard limit has been reached.");
+    }, true)).toBe("Image request failed: Billing hard limit has been reached.");
+  });
+
+  it("does not treat successful Pi tool-result text as an error", () => {
+    expect(toolErrorText({
+      content: [{ type: "text", text: JSON.stringify({ image_url: "data:image/png;base64,ok" }) }],
+      details: { image_url: "data:image/png;base64,ok" },
+    })).toBeUndefined();
   });
 });

@@ -26,6 +26,7 @@ const STOP_RETRIES = 3;
 const PROFILE_SAVE_TIMEOUT_MS = 5_000;
 const PROFILE_SAVE_POLL_MS = 250;
 const STORAGE_STATE_TIMEOUT_MS = 2_000;
+const OFFICE_CONTEXT_CLOSE_TIMEOUT_MS = 2_000;
 
 type BrowserUseRuntimeConfig = Pick<
   AppConfig,
@@ -594,32 +595,59 @@ export class BrowserUseRuntimeManager {
         office = { context, page: await context.newPage() };
         session.officeContexts.set(threadId, office);
       }
-      // Browser Use's remote CDP page can leave Playwright setContent() waiting
-      // forever for a lifecycle event. The HTML is already sanitized and contains
-      // no active elements or remote resources, so replace the blank document
-      // directly without depending on navigation lifecycle reporting.
-      await office.page.evaluate((markup) => {
-        document.open();
-        document.write(markup);
-        document.close();
-      }, html);
-      await office.page.evaluate("document.fonts?.ready").catch(() => undefined);
-      await office.page.waitForTimeout(250);
-      let bytes: Buffer;
-      if (options?.selector) {
-        const target = office.page.locator(options.selector).first();
-        if (await target.count() === 0) {
-          throw new BrowserUseRuntimeError(
-            "office_preview_page_not_found",
-            "OfficeCLI preview HTML did not contain the requested page or slide.",
-          );
+      try {
+        // Browser Use's remote CDP page can leave Playwright setContent() waiting
+        // forever for a lifecycle event. The HTML is already sanitized and contains
+        // no active elements or remote resources, so replace the blank document
+        // directly without depending on navigation lifecycle reporting.
+        await withinTimeout(
+          office.page.evaluate((markup) => {
+            document.open();
+            document.write(markup);
+            document.close();
+          }, html),
+          this.input.config.BROWSER_USE_NAVIGATION_TIMEOUT_MS,
+          () => new BrowserUseRuntimeError(
+            "office_preview_timeout",
+            "The remote browser timed out while loading the Office preview.",
+          ),
+        );
+        await withinTimeout(
+          office.page.evaluate("document.fonts?.ready"),
+          this.input.config.BROWSER_USE_NAVIGATION_TIMEOUT_MS,
+          () => new BrowserUseRuntimeError(
+            "office_preview_timeout",
+            "The remote browser timed out while loading the Office preview fonts.",
+          ),
+        ).catch((error) => {
+          if (error instanceof BrowserUseRuntimeError) throw error;
+          return undefined;
+        });
+        await office.page.waitForTimeout(250);
+        let bytes: Buffer;
+        if (options?.selector) {
+          const target = office.page.locator(options.selector).first();
+          if (await target.count() === 0) {
+            throw new BrowserUseRuntimeError(
+              "office_preview_page_not_found",
+              "OfficeCLI preview HTML did not contain the requested page or slide.",
+            );
+          }
+          bytes = await target.screenshot({ type: "png" });
+        } else {
+          bytes = await office.page.screenshot({ type: "png", fullPage: true });
         }
-        bytes = await target.screenshot({ type: "png" });
-      } else {
-        bytes = await office.page.screenshot({ type: "png", fullPage: true });
+        assertImageSize(bytes);
+        return { bytes, mediaType: "image/png", session_remaining_seconds: remainingSeconds(session) };
+      } catch (error) {
+        if (session.officeContexts.get(threadId) === office) session.officeContexts.delete(threadId);
+        await withinTimeout(
+          office.context.close(),
+          OFFICE_CONTEXT_CLOSE_TIMEOUT_MS,
+          () => new Error("Office preview context close timed out."),
+        ).catch(() => undefined);
+        throw error;
       }
-      assertImageSize(bytes);
-      return { bytes, mediaType: "image/png", session_remaining_seconds: remainingSeconds(session) };
     }, signal);
   }
 
@@ -1081,6 +1109,21 @@ async function browserStorageSignature(context: BrowserContext): Promise<string 
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function withinTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  timeoutError: () => Error,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(timeoutError()), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 class AsyncLock {

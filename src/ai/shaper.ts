@@ -211,7 +211,7 @@ function cleanReasoningMarkdown(text: string): string {
     // emitting a protocol boundary or even a newline. Preserve the section
     // boundary before rendering the Markdown instead of gluing the next title
     // to the previous paragraph.
-    .replace(/([^\n])(\*\*[^*\n]{1,120}\*\*(?=\n|$))/g, "$1\n\n$2")
+    .replace(/([.!?])(\*\*[^*\n]{1,120}\*\*(?=\n|$))/g, "$1\n\n$2")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }

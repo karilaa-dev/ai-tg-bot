@@ -96,9 +96,11 @@ codex login
 ```
 
 By default the cache is `~/.codex/auth.json`. Set `CODEX_AUTH_FILE` when the bot
-runs under another user or in a container. Mount that one file read-write so OAuth
-refreshes survive restarts. Existing `openai-codex` OAuth credentials in
-`PI_CODING_AGENT_DIR/auth.json` remain supported and take precedence.
+runs under another user or in a container. Mount the directory containing that file
+read-write so atomic OAuth refreshes survive restarts. Do not use a single-file bind
+mount. For example, mount a persistent directory at `/app/data/codex` and set
+`CODEX_AUTH_FILE=/app/data/codex/auth.json`. Existing `openai-codex` OAuth credentials
+in `PI_CODING_AGENT_DIR/auth.json` remain supported and take precedence.
 
 The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source, extracted text, or search chunks remain in active thread scope. Host-only records without a recoverable source are retained as diagnostic rows but excluded from agent-visible thread scope. Physical files in the old host-storage directory are not deleted automatically.
 
