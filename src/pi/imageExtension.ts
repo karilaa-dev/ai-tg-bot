@@ -50,7 +50,7 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
     name: "generate_image",
     label: "Generate image",
     description:
-      "Use only when the user explicitly asks to synthesize a new image or edit/restyle an existing image. Never use this tool to find, download, collect, save, or send existing images, or to create a collage from existing photos; retrieve those files and compose the collage in the workspace instead. Character or subject names alone do not authorize generation. Generates or edits exactly one chat-delivered image using current-thread image file ids as references. A successful call ends tool use for the turn; the bot supplies the localized confirmation automatically.",
+      "Use only when the user explicitly asks to synthesize a new image or edit/restyle an existing image. Never use this tool to find, download, collect, save, or send existing images, or to create a collage from existing photos; retrieve those files and compose the collage in the workspace instead. Character or subject names alone do not authorize generation. Generates or edits exactly one chat-delivered image using current-thread image file ids as references. A successful call ends tool use for the turn. Put the final user-facing text in caption because the bot sends the captioned image without a separate completion message.",
     parameters: Type.Object({
       prompt: Type.String({ minLength: 1, maxLength: 4000 }),
       mode: Type.Optional(Type.Union([

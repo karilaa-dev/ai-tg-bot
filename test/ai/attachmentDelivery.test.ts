@@ -70,13 +70,31 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.deleteMessage).toHaveBeenCalledWith(123, 702);
   });
 
-  it("downgrades oversized generated images before the early photo path selects them", () => {
+  it("downgrades oversized generated images before attachment delivery", () => {
     const oversized = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
     oversized.origin = "generated_image";
 
     normalizeTelegramAttachmentDeliveries([oversized]);
 
     expect(oversized.delivery).toBe("document");
+  });
+
+  it("sends final thinking before a captioned generated image without a completion reply", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "A pear with the cat's face";
+
+    await sendFinal(input, "Image generation details", "", 1000, [attachment]);
+
+    expect(api.raw.sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0])
+      .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
+    expect(api.sendPhoto).toHaveBeenCalledWith(123, expect.anything(), expect.objectContaining({
+      caption: "A pear with the cat's face",
+    }));
   });
 
   it("sends images over Telegram's photo limit as documents", async () => {

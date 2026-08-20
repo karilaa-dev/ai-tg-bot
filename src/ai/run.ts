@@ -72,7 +72,6 @@ export const runTurn: TurnRunner = async (input) => {
   });
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
-  let generatedImageDelivered = false;
   let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
   let inferenceUsage: InferenceUsageDelta | undefined;
   let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
@@ -168,7 +167,7 @@ export const runTurn: TurnRunner = async (input) => {
     if (stats.counts.generateImageToolCalls > 0 && !hasGeneratedImage) {
       throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
     }
-    const finalText = normalizeGeneratedImageFinalText(input.t, hasGeneratedImage ? "" : answer, hasGeneratedImage);
+    const finalText = normalizeGeneratedImageFinalText(hasGeneratedImage ? "" : answer, hasGeneratedImage);
     let finalAnswer = finalText.answer;
     if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
       input.logger.warn("turn produced empty final answer", {
@@ -183,22 +182,10 @@ export const runTurn: TurnRunner = async (input) => {
       runtime.bridge.publishedWebsites.map((website) => website.url),
       input.user.lang,
     );
-    if (hasGeneratedImage) {
-      const delivered = await sendGeneratedImageAttachmentsEarly(input, createdFiles);
-      generatedImageDelivered = delivered > 0;
-      input.logger.info("generated image delivered after tool completion", {
-        threadId: input.thread.id,
-        images: delivered,
-        postToolDeliveryMs: stats.counts.generateImageReadyAt
-          ? Math.max(0, Date.now() - stats.counts.generateImageReadyAt)
-          : undefined,
-      });
-    }
     let finalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
-      // Normal create_file attachments are delivered after the final text is ready.
-      // List only confirmed early deliveries so the visible summary never promises a
+      // List only confirmed deliveries so the visible summary never promises a
       // pending source that may fail its lazy reload.
       attachments: createdFiles.filter((file) => file.telegramDelivery),
       extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
@@ -214,6 +201,17 @@ export const runTurn: TurnRunner = async (input) => {
       assistantEntry?.id,
       thinkingDelivery,
     );
+    if (hasGeneratedImage) {
+      const delivered = createdFiles.filter((file) =>
+        file.origin === "generated_image" && file.telegramDelivery).length;
+      input.logger.info("generated image delivered after final thinking", {
+        threadId: input.thread.id,
+        images: delivered,
+        postToolDeliveryMs: stats.counts.generateImageReadyAt
+          ? Math.max(0, Date.now() - stats.counts.generateImageReadyAt)
+          : undefined,
+      });
+    }
     const deliveredFinalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
@@ -270,6 +268,8 @@ export const runTurn: TurnRunner = async (input) => {
       ...inferenceBackend,
       ...inferenceUsage,
     });
+    const generatedImageDelivered = activeBridge?.attachments.some((file) =>
+      file.origin === "generated_image" && file.telegramDelivery);
     if (generatedImageDelivered) {
       streamer?.stop();
       await status?.finish(shaper.toolStatusMd());
@@ -786,23 +786,16 @@ type GeneratedImageFinalText = {
   demotedReasoning?: string;
 };
 
-function normalizeGeneratedImageFinalText(t: TurnInput["t"], answer: string, hasGeneratedImage: boolean): GeneratedImageFinalText {
+function normalizeGeneratedImageFinalText(answer: string, hasGeneratedImage: boolean): GeneratedImageFinalText {
   if (!hasGeneratedImage) return { answer };
   const trimmed = answer.trim();
-  if (!trimmed) return { answer: t("image-generated-done") };
-  if (isPendingGeneratedImageAnswer(trimmed)) return { answer: generatedImageReadyText(t) };
   if (isGeneratedImageToolUsageAnswer(trimmed)) {
     return {
-      answer: generatedImageReadyText(t),
+      answer: "",
       demotedReasoning: trimmed,
     };
   }
-  return { answer };
-}
-
-function generatedImageReadyText(t: TurnInput["t"]): string {
-  const text = t("image-generated-ready");
-  return text && text !== "image-generated-ready" ? text : t("image-generated-done");
+  return { answer: "" };
 }
 
 function compactAnswerText(answer: string): string {
@@ -814,21 +807,6 @@ function compactAnswerText(answer: string): string {
 }
 
 const IMAGE_TOOL_NAME_SOURCE = "(?:imagegen|generate_image|image generation tool|image generator tool|image tool)";
-
-function isPendingGeneratedImageAnswer(answer: string): boolean {
-  const compact = compactAnswerText(answer);
-  if (!compact) return false;
-  const mentionsImage = /\b(image|photo|picture)\b/.test(compact);
-  const inProgressVerb = /\b(generating|creating|making|rendering|drawing)\b/.test(compact);
-  if (mentionsImage && /\b(is|still|currently)\b.*\bbeing (generated|created|rendered|made|drawn)\b/.test(compact)) {
-    return true;
-  }
-  if (!inProgressVerb) return false;
-  if (/^done\b/.test(compact)) return true;
-  if (mentionsImage && /\b(now|currently|still|started|starting|queued|shortly|soon)\b/.test(compact)) return true;
-  if (mentionsImage && /\bin progress\b/.test(compact)) return true;
-  return false;
-}
 
 function isGeneratedImageToolUsageAnswer(answer: string): boolean {
   const compact = compactAnswerText(answer);
@@ -861,7 +839,7 @@ export async function sendFinal(
   const hasGeneratedImageAttachment = attachments
     .slice(0, MAX_CREATED_FILES_PER_ANSWER)
     .some((attachment) => attachment.origin === "generated_image");
-  const finalText = normalizeGeneratedImageFinalText(input.t, answer, hasGeneratedImageAttachment);
+  const finalText = normalizeGeneratedImageFinalText(answer, hasGeneratedImageAttachment);
   const visibleThinking = appendGeneratedImageDemotedThinking(input.t, thinking, finalText.demotedReasoning);
   await sendFinalVisible(input, visibleThinking, finalText.answer, elapsedMs, attachments);
 }
@@ -1117,58 +1095,6 @@ export function normalizeTelegramAttachmentDeliveries(
       attachment.delivery = "document";
     }
   }
-}
-
-async function sendGeneratedImageAttachmentsEarly(
-  input: TurnInput,
-  attachments: CreatedFileAttachment[],
-): Promise<number> {
-  const generated = attachments
-    .slice(0, MAX_CREATED_FILES_PER_ANSWER)
-    .filter((attachment) =>
-      attachment.origin === "generated_image"
-      && attachment.delivery === "photo"
-      && !attachment.telegramDeliveryUnknown);
-  let delivered = generated.filter((attachment) => attachment.telegramDelivery).length;
-  const pending = generated.filter((attachment) => !attachment.telegramDelivery);
-  for (const batch of attachmentBatches(pending)) {
-    try {
-      const sent = batch.length === 1
-        ? [await sendPhotoWithThreadFallback(input, batch[0]!)]
-        : await sendPhotoMediaGroupWithThreadFallback(input, batch);
-      for (let index = 0; index < batch.length; index += 1) {
-        const attachment = batch[index]!;
-        attachment.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
-        releaseAttachmentData(attachment);
-        delivered += 1;
-        await rememberTelegramDeliverySource(input, attachment).catch((err: unknown) => {
-          input.logger.warn("failed to persist early generated image Telegram reference", {
-            threadId: input.thread.id,
-            fileId: attachment.fileId,
-            telegramMessageId: attachment.telegramDelivery?.messageId,
-            err: String(err),
-          });
-        });
-      }
-    } catch (err) {
-      const definitive = isDefinitiveTelegramRejection(err);
-      if (!definitive) {
-        for (const attachment of batch) {
-          attachment.telegramDeliveryUnknown = true;
-          releaseAttachmentData(attachment);
-        }
-      }
-      input.logger.warn(definitive
-        ? "early generated image delivery failed; retrying during final attachment delivery"
-        : "early generated image delivery outcome is unknown; not retrying", {
-        threadId: input.thread.id,
-        files: batch.length,
-        fileIds: batch.map((attachment) => attachment.fileId),
-        err: String(err),
-      });
-    }
-  }
-  return delivered;
 }
 
 interface AttachmentSendStrategy {
