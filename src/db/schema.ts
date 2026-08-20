@@ -1,8 +1,9 @@
 import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
+import type { Logger } from "../logger.js";
 
-export async function initializeSchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
+export async function initializeSchema(db: SqlExecutor, dialect: DialectName, logger?: Logger): Promise<void> {
   if (dialect === "sqlite") {
     await db.execute(sql`pragma foreign_keys = on`);
     await db.execute(sql`pragma journal_mode = wal`);
@@ -11,6 +12,9 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
     if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
     if (dialect === "sqlite") await initializeSqlite(tx);
     else await initializePostgres(tx);
+    await backfillTelegramFileRefs(tx, logger);
+    await removeLegacyThreadSandboxColumns(tx, dialect);
+    await removeLegacyFilePathColumn(tx, dialect, logger);
   });
 }
 
@@ -90,6 +94,29 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`
+    create table if not exists thread_sandboxes (
+      deployment_id text not null,
+      user_id ${intType} not null references users(tg_id),
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      sandbox_id text not null unique,
+      created_at ${intType} not null,
+      updated_at ${intType} not null,
+      primary key(deployment_id, thread_id)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists browser_use_profiles (
+      deployment_id text not null,
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      provider_user_key text not null unique,
+      profile_id text,
+      created_at ${intType} not null,
+      updated_at ${intType} not null,
+      primary key(deployment_id, user_id)
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists browser_use_profiles_profile_idx on browser_use_profiles(profile_id) where profile_id is not null`));
+  await db.execute(sql.raw(`
     create table if not exists messages (
       id ${idType},
       thread_id ${intType} not null references threads(id),
@@ -115,7 +142,6 @@ async function initializeCommonTables(
       mime_type text,
       extraction_status text not null default 'ready',
       name text not null,
-      path text,
       size integer not null,
       content_md text,
       summary text,
@@ -140,6 +166,45 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`create index if not exists file_sources_file_id_idx on file_sources(file_id)`));
   await db.execute(sql.raw(`create unique index if not exists file_sources_remote_idx on file_sources(transport, connection_key, remote_key)`));
+  await db.execute(sql.raw(`
+    create table if not exists telegram_file_refs (
+      id ${idType},
+      file_id ${intType} not null references files(id) on delete cascade,
+      telegram_file_id text not null,
+      telegram_file_unique_id text,
+      direction text not null,
+      media_kind text not null,
+      telegram_message_id ${intType},
+      width integer,
+      height integer,
+      telegram_size ${intType},
+      is_primary integer not null,
+      first_seen_at ${intType} not null,
+      last_seen_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists telegram_file_refs_file_tg_idx on telegram_file_refs(file_id, telegram_file_id)`));
+  await db.execute(sql.raw(`create index if not exists telegram_file_refs_unique_idx on telegram_file_refs(telegram_file_unique_id)`));
+  await db.execute(sql.raw(`create index if not exists telegram_file_refs_restore_idx on telegram_file_refs(file_id, is_primary, last_seen_at)`));
+  await db.execute(sql.raw(`
+    create table if not exists sandbox_file_restore_status (
+      deployment_id text not null,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      sandbox_id text not null,
+      file_id ${intType} not null references files(id) on delete cascade,
+      telegram_file_ref_id ${intType} references telegram_file_refs(id) on delete set null,
+      sandbox_name text not null,
+      status text not null,
+      restored_size ${intType},
+      restored_sha256 text,
+      error_code text,
+      error_detail text,
+      attempted_at ${intType} not null,
+      completed_at ${intType},
+      primary key(deployment_id, sandbox_id, file_id)
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists sandbox_file_restore_thread_idx on sandbox_file_restore_status(deployment_id, thread_id, attempted_at)`));
   await db.execute(sql.raw(`
     create table if not exists file_chunks (
       id ${idType},
@@ -174,4 +239,111 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
+}
+
+async function backfillTelegramFileRefs(db: SqlExecutor, logger?: Logger): Promise<void> {
+  const rows = await db.query<{
+    source_id: number;
+    file_id: number;
+    locator_json: string;
+    mime_type: string | null;
+    file_type: string;
+    message_role: string | null;
+    created_at: number;
+  }>(sql`
+    select
+      s.id as source_id,
+      s.file_id,
+      s.locator_json,
+      coalesce(s.mime_type, f.mime_type) as mime_type,
+      f.type as file_type,
+      m.role as message_role,
+      s.created_at
+    from file_sources s
+    join files f on f.id = s.file_id
+    left join messages m on m.id = f.message_id
+    where s.transport = 'telegram'
+      and not exists (
+        select 1 from telegram_file_refs r
+        where r.file_id = s.file_id
+      )
+  `);
+  let restored = 0;
+  let malformed = 0;
+  for (const row of rows) {
+    try {
+      const locator = JSON.parse(row.locator_json) as Record<string, unknown>;
+      const telegramFileId = typeof locator.file_id === "string" ? locator.file_id.trim() : "";
+      if (!telegramFileId) throw new Error("missing file_id");
+      const uniqueId = typeof locator.file_unique_id === "string" && locator.file_unique_id.trim()
+        ? locator.file_unique_id.trim()
+        : null;
+      await db.execute(sql`
+        insert into telegram_file_refs(
+          file_id, telegram_file_id, telegram_file_unique_id, direction, media_kind,
+          telegram_message_id, width, height, telegram_size, is_primary, first_seen_at, last_seen_at
+        ) values (
+          ${row.file_id}, ${telegramFileId}, ${uniqueId},
+          ${row.message_role === "assistant" ? "outbound" : "inbound"},
+          ${row.file_type === "image" && row.mime_type === "image/jpeg" ? "photo" : "document"},
+          ${null}, ${null}, ${null}, ${null}, 1, ${row.created_at}, ${row.created_at}
+        )
+        on conflict(file_id, telegram_file_id) do nothing
+      `);
+      restored += 1;
+    } catch (error) {
+      malformed += 1;
+      logger?.warn("telegram file reference backfill skipped malformed source", {
+        sourceId: row.source_id,
+        fileId: row.file_id,
+        error: String(error),
+      });
+    }
+  }
+  if (restored || malformed) {
+    logger?.info("telegram file reference backfill complete", { restored, malformed });
+  }
+}
+
+async function removeLegacyFilePathColumn(
+  db: SqlExecutor,
+  dialect: DialectName,
+  logger?: Logger,
+): Promise<void> {
+  const columns = dialect === "sqlite"
+    ? await db.query<{ name: string }>(sql.raw("pragma table_info(files)"))
+    : await db.query<{ name: string }>(sql`
+        select column_name as name
+        from information_schema.columns
+        where table_schema = current_schema() and table_name = 'files'
+      `);
+  if (!columns.some((column) => column.name === "path")) return;
+  const unavailable = await db.query<{ count: number }>(sql`
+    select count(*) as count
+    from files f
+    where f.path is not null
+      and not exists (select 1 from file_sources s where s.file_id = f.id)
+  `);
+  if ((unavailable[0]?.count ?? 0) > 0) {
+    logger?.warn("legacy host-only file records have no durable byte source", {
+      files: unavailable[0]!.count,
+    });
+  }
+  await db.execute(sql.raw("alter table files drop column path"));
+}
+
+async function removeLegacyThreadSandboxColumns(db: SqlExecutor, dialect: DialectName): Promise<void> {
+  const columns = dialect === "sqlite"
+    ? await db.query<{ name: string }>(sql.raw("pragma table_info(thread_sandboxes)"))
+    : await db.query<{ name: string }>(sql`
+        select column_name as name
+        from information_schema.columns
+        where table_schema = current_schema() and table_name = 'thread_sandboxes'
+      `);
+  const names = new Set(columns.map((column) => column.name));
+  for (const legacyName of ["template", "layout_version", "continuous_started_at"]) {
+    if (names.has(legacyName)) {
+      await db.execute(sql.raw(`alter table thread_sandboxes drop column ${legacyName}`));
+    }
+  }
 }

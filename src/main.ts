@@ -1,22 +1,24 @@
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
-import { createOpenSandboxClientProvider } from "./opensandbox/client.js";
-import { ThreadOpenSandboxRuntimeManager } from "./opensandbox/threadRuntimeManager.js";
-import { loadConfig, type AppConfig } from "./config.js";
+import { isBrowserUseConfigured, loadConfig, type AppConfig } from "./config.js";
+import { createBrowserUseClient } from "./browserUse/client.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { checkDocling } from "./files/docling.js";
-import { checkBrowserless } from "./browserless/client.js";
 import { createLogger, type Logger } from "./logger.js";
 import { createOpenRouterTextEmbedder } from "./memory/embeddings.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
+import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
+import { verifyUpgradeBaselineOnce } from "./upgrade/audit.js";
+import { assertTelegramStartupAllowed } from "./upgrade/mode.js";
 
+assertTelegramStartupAllowed();
 const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let sandboxRuntime: ThreadOpenSandboxRuntimeManager | undefined;
+let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
@@ -31,13 +33,22 @@ try {
   }
   logger.debug("initializing database");
   await db.initialize();
+  await verifyUpgradeBaselineOnce({
+    db: db.db,
+    piCodingAgentDir: config.PI_CODING_AGENT_DIR,
+    botToken: config.BOT_TOKEN,
+    e2bDeploymentId: config.E2B_DEPLOYMENT_ID,
+    browserUseDeploymentId: config.BROWSER_USE_DEPLOYMENT_ID,
+    baselineFile: config.UPGRADE_BASELINE_FILE,
+    logger,
+  });
   await checkConfiguredDocling(config, logger);
-  await checkConfiguredBrowserless(config, logger);
+  await checkConfiguredBrowserUse(config, logger);
   const repos = createRepos(db.db, db.search);
   const embedder = createOpenRouterTextEmbedder(config, logger);
-  sandboxRuntime = new ThreadOpenSandboxRuntimeManager({
+  sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
-    clientProvider: createOpenSandboxClientProvider(config),
+    repos,
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, embedder, commandRuntime: sandboxRuntime });
@@ -48,6 +59,7 @@ try {
     logger,
     repos,
     embedder,
+    commandRuntime: sandboxRuntime,
     pi,
   });
   logger.debug("registering bot commands");
@@ -72,30 +84,26 @@ try {
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;
-    logger.warn("OpenSandbox runtime disposal failed", { err: String(err) });
+    logger.warn("E2B runtime disposal failed", { err: String(err) });
   });
   logger.debug("destroying database connection");
   await db.destroy().catch((err) => logger.warn("database destroy failed", { err: String(err) }));
 }
 
-async function checkConfiguredBrowserless(
-  config: Pick<
-    AppConfig,
-    "BROWSERLESS_URL" | "BROWSERLESS_ALLOWED_ORIGINS" | "BROWSERLESS_TOKEN" | "BROWSERLESS_TIMEOUT_MS"
-  >,
+async function checkConfiguredBrowserUse(
+  config: Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_API_TIMEOUT_MS">,
   logger: Logger,
 ): Promise<void> {
-  if (!config.BROWSERLESS_URL) {
-    logger.info("browserless disabled; Office visual previews are unavailable");
+  if (!isBrowserUseConfigured(config)) {
+    logger.info("Browser Use Cloud disabled; interactive browser and Office visual previews are unavailable");
     return;
   }
-
-  logger.debug("checking browserless health");
+  logger.debug("checking Browser Use Cloud authentication");
   try {
-    await checkBrowserless(config);
-    logger.info("browserless healthcheck passed");
+    const active = await createBrowserUseClient(config).listActiveBrowsers();
+    logger.info("Browser Use Cloud authentication passed", { activeBrowsers: active.totalItems });
   } catch (err) {
-    logger.warn("browserless healthcheck failed; Office visual previews will be unavailable", {
+    logger.warn("Browser Use Cloud authentication failed; browser-backed tools may be unavailable", {
       err: String(err),
     });
   }

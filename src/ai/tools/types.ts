@@ -7,7 +7,9 @@ import type { Logger } from "../../logger.js";
 import type { TextEmbedder } from "../../memory/embeddings.js";
 import type { ResolvedChatFile } from "../../files/source.js";
 import type { CommandRuntime } from "../../sandbox/types.js";
+import type { PublishedWebsite } from "../../sandbox/types.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
+import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -18,11 +20,14 @@ export interface ToolBuildInput {
   logger?: Logger;
   embedder?: TextEmbedder;
   commandRuntime?: CommandRuntime;
+  browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   selectContextFiles?: (fileIds: number[]) => void;
   selectDurableContextFiles?: (fileIds: number[]) => void;
   createdFiles?: CreatedFileAttachment[];
   pendingCreatedFiles?: PendingCreatedFile[];
+  publishedWebsites?: PublishedWebsite[];
+  registerPublishedWebsite?: (website: PublishedWebsite) => void;
 }
 
 export interface CreatedFileAttachment {
@@ -30,7 +35,6 @@ export interface CreatedFileAttachment {
   type: StoredFileType;
   name: string;
   mimeType?: string | null;
-  path?: string;
   data?: Buffer;
   size: number;
   caption?: string | null;
@@ -38,10 +42,20 @@ export interface CreatedFileAttachment {
   card: string;
   delivery?: "document" | "photo";
   origin?: "created_file" | "generated_image";
+  telegramDeliveryUnknown?: boolean;
+  telegramDeliveryFailure?: "source_unavailable" | "telegram_rejected";
   telegramDelivery?: {
     messageId: number;
     fileId: string | null;
     fileUniqueId: string | null;
+    refs?: Array<{
+      fileId: string;
+      fileUniqueId: string | null;
+      width: number | null;
+      height: number | null;
+      size: number | null;
+      primary: boolean;
+    }>;
   };
 }
 

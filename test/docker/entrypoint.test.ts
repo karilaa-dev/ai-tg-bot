@@ -23,7 +23,6 @@ beforeEach(async () => {
     APP_UID: String(currentUid === 0 ? 1000 : currentUid),
     APP_GID: String(currentGid === 0 ? 1000 : currentGid),
     APP_DATA_ROOT: path.join(tempDir, "app-data"),
-    AGENT_SHARED_ROOT: path.join(tempDir, "shared"),
   };
 });
 
@@ -37,7 +36,6 @@ describe("container entrypoint", () => {
 
     expect(JSON.parse(result.stdout)).toEqual({ uid: process.getuid?.() });
     await expect(fs.stat(env.APP_DATA_ROOT!)).resolves.toMatchObject({});
-    await expect(fs.stat(env.AGENT_SHARED_ROOT!)).resolves.toMatchObject({});
   });
 
   it("URL-encodes the PostgreSQL password when constructing DB_URL", async () => {
@@ -49,6 +47,91 @@ describe("container entrypoint", () => {
     expect(result.stdout).toBe(
       "postgres://aibot:complex%3A%2F%3F%23%5B%5D%40!%24%26'()*%2B%2C%3B%3D%25%20password@postgres:5432/aibot",
     );
+  });
+
+  it("preserves an explicit external DB_URL even when POSTGRES_PASSWORD is present", async () => {
+    const external = "postgresql://dokploy:secret@dokploy-postgres:5432/aibot";
+    const result = await runEntrypoint(
+      { ...env, DB_URL: external, POSTGRES_PASSWORD: "compose-only" },
+      "printf '%s' \"$DB_URL\"",
+    );
+
+    expect(result.stdout).toBe(external);
+  });
+
+  it.each([
+    "sqlite:/app/data/bot.db",
+    "sqlite:./data/bot.db",
+  ])("replaces the legacy Compose SQLite URL %s", async (dbUrl) => {
+    const result = await runEntrypoint(
+      { ...env, DB_URL: dbUrl, POSTGRES_PASSWORD: "compose-password" },
+      "printf '%s' \"$DB_URL\"",
+    );
+
+    expect(result.stdout).toBe("postgres://aibot:compose-password@postgres:5432/aibot");
+  });
+
+  it("keeps import mode idle without starting the bot", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "sleep"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await runEntrypointDefault({
+      ...env,
+      PATH: `${binDir}:${env.PATH}`,
+      UPGRADE_MODE: "import",
+    });
+
+    expect(result.stdout).toBe("infinity");
+    expect(result.stderr).toContain("Telegram polling is disabled");
+  });
+
+  it("overrides the image's default bot command in import mode", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "sleep"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await execFileAsync("/bin/sh", [entrypoint, "node", "dist/src/main.js"], {
+      env: { ...env, PATH: `${binDir}:${env.PATH}`, UPGRADE_MODE: "import" },
+    });
+
+    expect(result.stdout).toBe("infinity");
+    expect(result.stderr).toContain("Telegram polling is disabled");
+  });
+
+  it("uses the normal bot command when upgrade mode is unset", async () => {
+    const binDir = path.join(tempDir, "bin");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "node"), [
+      "#!/bin/sh",
+      "printf '%s' \"$*\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const result = await runEntrypointDefault({ ...env, PATH: `${binDir}:${env.PATH}` });
+    expect(result.stdout).toBe("dist/src/main.js");
+  });
+
+  it("allows an explicit migration command in import mode", async () => {
+    const result = await runEntrypoint(
+      { ...env, UPGRADE_MODE: "import" },
+      "printf 'migration-command'",
+    );
+    expect(result.stdout).toBe("migration-command");
+  });
+
+  it("fails closed for an unknown upgrade mode", async () => {
+    await expect(runEntrypoint({ ...env, UPGRADE_MODE: "typo" })).rejects.toMatchObject({
+      stderr: expect.stringContaining("UPGRADE_MODE must be unset or 'import'"),
+    });
   });
 
   it.skipIf((process.getuid?.() ?? 1) !== 0)(
@@ -104,4 +187,8 @@ function runEntrypoint(
     "-c",
     command,
   ], { env: environment });
+}
+
+function runEntrypointDefault(environment: NodeJS.ProcessEnv) {
+  return execFileAsync("/bin/sh", [entrypoint], { env: environment });
 }

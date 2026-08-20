@@ -5,6 +5,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 
 const CURRENT_TABLES = [
+  "browser_use_profiles",
   "chunks_fts",
   "embeddings",
   "file_chunks",
@@ -13,6 +14,9 @@ const CURRENT_TABLES = [
   "message_files",
   "messages",
   "messages_fts",
+  "sandbox_file_restore_status",
+  "telegram_file_refs",
+  "thread_sandboxes",
   "threads",
   "users",
 ];
@@ -63,9 +67,134 @@ describe("SQLite schema initialization", () => {
     ]);
     await expect(columns(database, "files")).resolves.toEqual([
       "id", "user_id", "thread_id", "message_id", "type", "content_sha256", "mime_type",
-      "extraction_status", "name", "path", "size", "content_md", "summary", "outline_json",
+      "extraction_status", "name", "size", "content_md", "summary", "outline_json",
       "is_inline", "created_at",
     ]);
+    await expect(columns(database, "thread_sandboxes")).resolves.toEqual([
+      "deployment_id", "user_id", "thread_id", "sandbox_id", "created_at", "updated_at",
+    ]);
+    await expect(columns(database, "browser_use_profiles")).resolves.toEqual([
+      "deployment_id", "user_id", "provider_user_key", "profile_id", "created_at", "updated_at",
+    ]);
+    await expect(columns(database, "telegram_file_refs")).resolves.toEqual([
+      "id", "file_id", "telegram_file_id", "telegram_file_unique_id", "direction",
+      "media_kind", "telegram_message_id", "width", "height", "telegram_size",
+      "is_primary", "first_seen_at", "last_seen_at",
+    ]);
+    await expect(columns(database, "sandbox_file_restore_status")).resolves.toEqual([
+      "deployment_id", "thread_id", "sandbox_id", "file_id", "telegram_file_ref_id",
+      "sandbox_name", "status", "restored_size", "restored_sha256", "error_code",
+      "error_detail", "attempted_at", "completed_at",
+    ]);
+  });
+
+  it("backfills the current Telegram locator once while preserving future ID history", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    await database.db.execute(sql`
+      insert into users(tg_id, first_name, lang, created_at)
+      values (91, 'Backfill', 'en', 1)
+    `);
+    await database.db.execute(sql`
+      insert into threads(id, user_id, title, created_at)
+      values (91, 91, 'Backfill', 1)
+    `);
+    await database.db.execute(sql`
+      insert into messages(id, thread_id, role, kind, content_json, text_plain, created_at)
+      values (91, 91, 'assistant', 'file', '{}', '', 1)
+    `);
+    await database.db.execute(sql`
+      insert into files(id, user_id, thread_id, message_id, type, mime_type, name, size, is_inline, created_at)
+      values (91, 91, 91, 91, 'image', 'image/jpeg', 'photo.jpg', 10, 1, 1)
+    `);
+    await database.db.execute(sql`
+      insert into file_sources(file_id, transport, connection_key, remote_key, locator_json, created_at)
+      values (
+        91, 'telegram', 'default', 'unique-photo',
+        '{"file_id":"photo-id","file_unique_id":"unique-photo"}', 2
+      )
+    `);
+
+    await database.initialize();
+    await database.initialize();
+
+    await expect(database.db.query<{
+      telegram_file_id: string;
+      telegram_file_unique_id: string;
+      direction: string;
+      media_kind: string;
+      is_primary: number;
+    }>(sql`select telegram_file_id, telegram_file_unique_id, direction, media_kind, is_primary from telegram_file_refs`))
+      .resolves.toEqual([{
+        telegram_file_id: "photo-id",
+        telegram_file_unique_id: "unique-photo",
+        direction: "outbound",
+        media_kind: "photo",
+        is_primary: 1,
+      }]);
+  });
+
+  it("drops legacy host paths while retaining only recoverable files in thread scope", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    await database.db.execute(sql`alter table files add column path text`);
+    await database.db.execute(sql`
+      insert into users(tg_id, first_name, lang, created_at)
+      values (8, 'Legacy', 'en', 1)
+    `);
+    await database.db.execute(sql`
+      insert into threads(id, user_id, title, created_at)
+      values (8, 8, 'Legacy', 1)
+    `);
+    await database.db.execute(sql`
+      insert into files(id, user_id, thread_id, type, name, path, size, is_inline, created_at)
+      values
+        (80, 8, 8, 'other', 'host-only.bin', '/old/host-only.bin', 4, 0, 1),
+        (81, 8, 8, 'txt', 'telegram.txt', '/old/telegram.txt', 4, 1, 1)
+    `);
+    await database.db.execute(sql`
+      insert into file_sources(file_id, transport, connection_key, remote_key, locator_json, created_at)
+      values (81, 'telegram', 'default', 'telegram-81', '{}', 1)
+    `);
+
+    await database.initialize();
+
+    await expect(columns(database, "files")).resolves.not.toContain("path");
+    await expect(database.db.query<{ id: number }>(sql`select id from files order by id`))
+      .resolves.toEqual([{ id: 80 }, { id: 81 }]);
+    const repos = createRepos(database.db, database.search);
+    await expect(repos.files.listRecoverableIds([80, 81])).resolves.toEqual([81]);
+  });
+
+  it("drops obsolete E2B mapping metadata without losing sandbox ownership", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    await database.db.execute(sql`alter table thread_sandboxes add column template text`);
+    await database.db.execute(sql`alter table thread_sandboxes add column layout_version integer`);
+    await database.db.execute(sql`alter table thread_sandboxes add column continuous_started_at integer`);
+    await database.db.execute(sql`
+      insert into users(tg_id, first_name, lang, created_at)
+      values (71, 'E2B upgrade', 'en', 1)
+    `);
+    await database.db.execute(sql`
+      insert into threads(id, user_id, title, created_at)
+      values (71, 71, 'E2B upgrade', 1)
+    `);
+    await database.db.execute(sql`
+      insert into thread_sandboxes(
+        deployment_id, user_id, thread_id, sandbox_id, created_at, updated_at,
+        template, layout_version, continuous_started_at
+      ) values ('deployment', 71, 71, 'sandbox-71', 1, 1, 'desktop', 1, 1)
+    `);
+
+    await database.initialize();
+
+    await expect(columns(database, "thread_sandboxes")).resolves.toEqual([
+      "deployment_id", "user_id", "thread_id", "sandbox_id", "created_at", "updated_at",
+    ]);
+    const repos = createRepos(database.db, database.search);
+    await expect(repos.threadSandboxes.get("deployment", 71))
+      .resolves.toMatchObject({ sandbox_id: "sandbox-71", user_id: 71, thread_id: 71 });
   });
 
   it("enables foreign keys and applies declared delete cascades", async () => {

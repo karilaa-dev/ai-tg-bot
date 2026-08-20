@@ -1,16 +1,13 @@
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import fs from "node:fs/promises";
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
-import { botOutboxRoot, guestCreatedFilePath } from "../../sandbox/paths.js";
 import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
-import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { sha256Hex } from "../../files/hash.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
-import { persistManagedFile } from "../../files/storage.js";
+import { e2bFileSource } from "../../e2b/fileSource.js";
+import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
@@ -49,7 +46,8 @@ export function assertPhotoDeliverable(type: string | null, name: string): void 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
   const scope = await threadChainScope(input.repos, input.thread);
-  if (!file || !scope.fileIds.includes(file.id)) return undefined;
+  const isCurrentTurnAttachment = input.createdFiles?.some((attachment) => attachment.fileId === fileId) ?? false;
+  if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
   return file;
 }
 
@@ -59,14 +57,21 @@ export async function prepareCreatedFile(
   signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
   const virtualPath = normalizeBashCwd(file.virtualPath);
-  const bytes = await exportSandboxFileBytes(input, virtualPath, signal);
-  const displayName = normalizeCreatedFileName(file.name ?? path.posix.basename(virtualPath));
+  const exported = await exportSandboxFile(input, virtualPath, signal);
+  const bytes = exported.bytes;
+  const requestedName = file.name ?? path.posix.basename(virtualPath);
+  assertAllowedOutboundFile(requestedName, file.mime, bytes);
+  const displayName = normalizeCreatedFileName(requestedName);
   assertAllowedOutboundFile(displayName, file.mime, bytes);
 
-  const type = classifyFile(displayName, file.mime ?? "");
+  const classified = classifyFile(displayName, file.mime ?? "");
   const requestedDelivery = file.delivery ?? "auto";
-  if (requestedDelivery === "photo") assertPhotoDeliverable(type, displayName);
-  if (type && type !== "legacy-doc") {
+  if (requestedDelivery === "photo") assertPhotoDeliverable(classified, displayName);
+  if (classified && classified !== "legacy-doc") {
+    let ingestedFile: {
+      result: Awaited<ReturnType<typeof ingestFileBytes>>;
+      stored: FileRow;
+    } | undefined;
     try {
       const ingested = await ingestFileBytes({
         config: input.config,
@@ -79,48 +84,141 @@ export async function prepareCreatedFile(
         embeddings: input.repos.embeddings,
         embedder: input.embedder,
         logger: input.logger,
+        signal,
       });
       const stored = await input.repos.files.get(ingested.fileId);
       if (!stored) throw new Error(`created file was not stored: ${ingested.fileId}`);
-      const delivery = createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name);
+      ingestedFile = { result: ingested, stored };
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason ?? err;
+      input.logger?.warn("created file ingest failed; storing as generic attachment", {
+        threadId: input.thread.id,
+        name: displayName,
+        type: classified,
+        err: String(err),
+      });
+    }
+    if (ingestedFile) {
+      const { result: ingested, stored } = ingestedFile;
+      // Source registration is intentionally outside the ingest fallback: a source
+      // write failure must not insert a second generic row for already-ingested bytes.
+      await rememberE2BFileSource(input, stored.id, exported, file.mime);
       return {
-        fileId: ingested.fileId,
+        fileId: stored.id,
         type: ingested.type,
         name: stored.name,
         mimeType: stored.mime_type,
-        path: stored.path ?? undefined,
-        data: stored.path ? undefined : bytes,
         size: stored.size,
         caption: file.caption?.trim() || null,
         inline: ingested.inline,
         card: ingested.card,
-        delivery,
+        delivery: createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name),
+        origin: "created_file",
+      };
+    }
+  }
+
+  const stored = await storeOtherCreatedFile(input, {
+    bytes,
+    name: displayName,
+    mime: file.mime,
+    type: classified === "image" ? "image" : "other",
+  });
+  await rememberE2BFileSource(input, stored.id, exported, file.mime);
+  return {
+    fileId: stored.id,
+    type: stored.type,
+    name: displayName,
+    mimeType: stored.mime_type,
+    size: stored.size,
+    caption: file.caption?.trim() || null,
+    inline: Boolean(stored.is_inline),
+    card: `${chatFileMarker(stored.id)} File #${stored.id}: ${displayName} (${formatBytes(stored.size)}).`,
+    delivery: createdFileDeliveryFor(stored.type, requestedDelivery, displayName),
+    origin: "created_file",
+  };
+}
+
+export async function prepareDirectCreatedFile(
+  input: ToolBuildInput,
+  file: {
+    bytes: Buffer;
+    name: string;
+    mime?: string;
+    caption?: string;
+    delivery?: CreatedFileDeliveryPreference;
+    summary?: string;
+  },
+  signal?: AbortSignal,
+): Promise<CreatedFileAttachment> {
+  assertAllowedOutboundFile(file.name, file.mime, file.bytes);
+  const displayName = normalizeCreatedFileName(file.name);
+  assertAllowedOutboundFile(displayName, file.mime, file.bytes);
+  const classified = classifyFile(displayName, file.mime ?? "");
+  const requestedDelivery = file.delivery ?? "auto";
+  if (requestedDelivery === "photo") assertPhotoDeliverable(classified, displayName);
+
+  if (classified && classified !== "legacy-doc") {
+    try {
+      const ingested = await ingestFileBytes({
+        config: input.config,
+        repo: input.repos.files,
+        userId: input.user.tg_id,
+        threadId: input.thread.id,
+        bytes: file.bytes,
+        name: displayName,
+        mime: file.mime,
+        imageSummary: file.summary,
+        embeddings: input.repos.embeddings,
+        embedder: input.embedder,
+        logger: input.logger,
+        signal,
+      });
+      const stored = await input.repos.files.get(ingested.fileId);
+      if (!stored) throw new Error(`created file was not stored: ${ingested.fileId}`);
+      input.selectContextFiles?.([stored.id]);
+      return {
+        fileId: stored.id,
+        type: ingested.type,
+        name: stored.name,
+        mimeType: stored.mime_type,
+        data: file.bytes,
+        size: stored.size,
+        caption: file.caption?.trim() || null,
+        inline: ingested.inline,
+        card: ingested.card,
+        delivery: createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name),
         origin: "created_file",
       };
     } catch (err) {
-      input.logger?.warn("created file ingest failed; storing as generic attachment", {
+      if (signal?.aborted) throw signal.reason ?? err;
+      input.logger?.warn("direct created file ingest failed; storing as generic attachment", {
         threadId: input.thread.id,
         name: displayName,
-        type,
+        type: classified,
         err: String(err),
       });
     }
   }
 
-  const stored = await storeOtherCreatedFile(input, { bytes, name: displayName, mime: file.mime });
-  const delivery = createdFileDeliveryFor(stored.type, requestedDelivery, stored.name);
+  const stored = await storeOtherCreatedFile(input, {
+    bytes: file.bytes,
+    name: displayName,
+    mime: file.mime,
+    type: classified === "image" ? "image" : "other",
+  });
+  input.selectContextFiles?.([stored.id]);
   return {
     fileId: stored.id,
     type: stored.type,
-    name: stored.name,
+    name: displayName,
     mimeType: stored.mime_type,
-    path: stored.path ?? undefined,
-    data: stored.path ? undefined : bytes,
+    data: file.bytes,
     size: stored.size,
     caption: file.caption?.trim() || null,
     inline: Boolean(stored.is_inline),
-    card: `${chatFileMarker(stored.id)} File #${stored.id}: ${stored.name} (${formatBytes(stored.size)}).`,
-    delivery,
+    card: `${chatFileMarker(stored.id)} File #${stored.id}: ${displayName} (${formatBytes(stored.size)}).`,
+    delivery: createdFileDeliveryFor(stored.type, requestedDelivery, displayName),
     origin: "created_file",
   };
 }
@@ -130,72 +228,49 @@ export async function exportSandboxFileBytes(
   virtualPath: string,
   signal?: AbortSignal,
 ): Promise<Buffer> {
-  if (!input.commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
-  const outboxId = randomUUID();
-  const botDirectory = path.join(botOutboxRoot(input.config), outboxId);
-  const botPath = path.join(botDirectory, "content");
-  await fs.mkdir(botDirectory, { recursive: true, mode: 0o700 });
-  let bytes: Buffer | undefined;
-  let failure: unknown;
-  try {
-    await input.commandRuntime.exportFile({
-      userId: input.user.tg_id,
-      threadId: input.thread.id,
-      guestPath: guestCreatedFilePath(input.thread.id, virtualPath),
-      hostDestination: botPath,
-      maxBytes: MAX_FILE_BYTES,
-      signal,
-    });
-    bytes = await readExportedFile(botPath, virtualPath);
-  } catch (error) {
-    failure = error;
-  }
-
-  let cleanupError: unknown;
-  try {
-    await fs.rm(botDirectory, { recursive: true, force: true });
-  } catch (error) {
-    cleanupError = error;
-  }
-  if (failure !== undefined) {
-    if (cleanupError !== undefined) {
-      throw new AggregateError([failure, cleanupError], "file export and outbox cleanup both failed");
-    }
-    throw failure;
-  }
-  if (cleanupError !== undefined) {
-    input.logger?.warn("file export outbox cleanup failed", {
-      threadId: input.thread.id,
-      virtualPath,
-      error: String(cleanupError),
-    });
-  }
-  if (bytes === undefined) throw new Error("file export completed without bytes");
-  return bytes;
+  return (await exportSandboxFile(input, virtualPath, signal)).bytes;
 }
 
-async function readExportedFile(filePath: string, virtualPath: string): Promise<Buffer> {
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "ENOENT") {
-      throw new Error(`file not found: ${virtualPath}`);
-    }
-    if (code === "ELOOP") throw new Error("path is not a regular file");
-    throw new Error(`cannot inspect exported file ${virtualPath}: ${String(error)}`);
-  }
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw new Error("path is not a regular file");
-    if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-    const bytes = await handle.readFile();
-    if (bytes.length > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_MB} MB`);
-    return bytes;
-  } finally {
-    await handle.close();
-  }
+async function exportSandboxFile(
+  input: ToolBuildInput,
+  virtualPath: string,
+  signal?: AbortSignal,
+) {
+  if (!input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
+  const threadFiles = await resolveThreadFileDescriptors(input, signal);
+  return input.commandRuntime.readWorkspaceFile({
+    userId: input.user.tg_id,
+    threadId: input.thread.id,
+    virtualPath,
+    maxBytes: MAX_FILE_BYTES,
+    preserveSource: true,
+    threadFiles,
+    signal,
+  });
+}
+
+async function rememberE2BFileSource(
+  input: ToolBuildInput,
+  fileId: number,
+  exported: {
+    sandboxId: string;
+    sourceCanonicalPath: string | null;
+    size: number;
+    contentSha256: string;
+  },
+  mimeType?: string,
+): Promise<void> {
+  if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
+  await input.repos.files.rememberSource(fileId, e2bFileSource(input.config, {
+    fileId,
+    sandboxId: exported.sandboxId,
+    sourceCanonicalPath: exported.sourceCanonicalPath,
+    size: exported.size,
+    contentSha256: exported.contentSha256,
+    userId: input.user.tg_id,
+    threadId: input.thread.id,
+    mimeType,
+  }));
 }
 
 function createdFileDeliveryFor(
@@ -211,31 +286,25 @@ function createdFileDeliveryFor(
 
 async function storeOtherCreatedFile(
   input: ToolBuildInput,
-  file: { bytes: Buffer; name: string; mime?: string },
+  file: {
+    bytes: Buffer;
+    name: string;
+    mime?: string;
+    type?: "image" | "other";
+  },
 ): Promise<FileRow> {
   const stored = await input.repos.files.insertFile({
     userId: input.user.tg_id,
     threadId: input.thread.id,
-    type: "other",
+    type: file.type ?? "other",
     contentSha256: sha256Hex(file.bytes),
     mimeType: file.mime?.trim() || null,
     name: file.name,
-    path: null,
     size: file.bytes.length,
     summary: `Outbound file ${file.name}`,
     isInline: false,
   });
-  try {
-    const filePath = await persistManagedFile(input.config, input.repos.files, stored.id, file.bytes);
-    return { ...stored, path: filePath };
-  } catch (error) {
-    input.logger?.warn("created file snapshot persistence failed; Telegram recovery will be recorded after delivery", {
-      fileId: stored.id,
-      name: stored.name,
-      error: String(error),
-    });
-    return stored;
-  }
+  return stored;
 }
 
 function assertAllowedOutboundFile(name: string, mime: string | undefined, bytes: Buffer): void {
@@ -245,7 +314,7 @@ function assertAllowedOutboundFile(name: string, mime: string | undefined, bytes
   if (normalizedMime && BLOCKED_EXECUTABLE_MIME_TYPES.has(normalizedMime)) {
     throw new Error(`blocked executable MIME type: ${normalizedMime}`);
   }
-  const magic = executableMagic(bytes);
+  const magic = executableMagic(bytes.subarray(0, 4).toString("hex"));
   if (magic) throw new Error(`blocked compiled executable: ${magic}`);
 }
 
@@ -293,15 +362,14 @@ const BLOCKED_EXECUTABLE_MIME_TYPES = new Set([
   "application/wasm",
 ]);
 
-function executableMagic(bytes: Buffer): string | undefined {
-  if (bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46) {
+function executableMagic(headHex: string): string | undefined {
+  if (headHex === "7f454c46") {
     return "ELF binary";
   }
-  if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
+  if (headHex.startsWith("4d5a")) {
     return "Windows PE binary";
   }
-  const magic4 = bytes.length >= 4 ? bytes.subarray(0, 4).toString("hex") : "";
-  switch (magic4) {
+  switch (headHex) {
     case "feedface":
     case "feedfacf":
     case "cefaedfe":
@@ -324,10 +392,10 @@ export function formatBytes(bytes: number): string {
 }
 
 function normalizeCreatedFileName(value: string): string {
-  const normalized = value.replace(/[\r\n]/g, " ").trim();
+  const normalized = value.replace(/[\r\n\0]/g, " ").trim();
   const base = path.basename(normalized);
   if (!base || base === "." || base === "..") throw new Error("file name is empty");
-  return base;
+  return Array.from(base).slice(0, 180).join("");
 }
 
 export function normalizeBashCwd(value: string): string {
@@ -349,9 +417,9 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
   const combined = [stringField(result, "error"), stringField(result, "stderr"), stringField(result, "stdout")]
     .filter(Boolean)
     .join("\n");
-  if (timedOut) return "The OpenSandbox command timed out; retry with a smaller bounded command.";
-  if (/OpenSandbox.*(?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
-    return "The OpenSandbox command runtime is unavailable. Continue with online-only tools when possible, or report that sandbox command execution is unavailable.";
+  if (timedOut) return "The E2B command timed out; retry with a smaller bounded command.";
+  if (/E2B.*(?:not configured|unavailable)|command runtime is unavailable/i.test(combined)) {
+    return "The E2B command runtime is unavailable. Continue with online-only tools when possible, or report that sandbox command execution is unavailable.";
   }
   if (/out of memory|oom|killed|exit code 137/i.test(combined)) {
     return "The configured sandbox may have run out of memory. Retry with a smaller input or a less memory-intensive command.";
@@ -373,7 +441,7 @@ export function bashModelHint(result: Record<string, unknown>, input?: unknown):
     return "The command exited with status 1. Inspect the reported stderr and stdout, correct that specific validation or command failure, and do not retry unchanged.";
   }
   if (/could not resolve|name or service not known|failed to connect|connection (?:refused|timed out)|network is unreachable|no route to host|private|loopback|link-local|metadata/i.test(combined)) {
-    return "The destination was blocked or unreachable. Use only permitted public internet URLs; private, link-local, and cloud-metadata destinations are forbidden, while sandbox loopback is reserved for OpenSandbox internals.";
+    return "The destination was unreachable. Verify its address, service state, routing, and task relevance before retrying.";
   }
   return undefined;
 }

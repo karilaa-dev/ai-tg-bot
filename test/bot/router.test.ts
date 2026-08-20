@@ -1,6 +1,3 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { Bot } from "grammy";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BotContext } from "../../src/bot/context.js";
@@ -8,34 +5,26 @@ import { installBot } from "../../src/bot/router.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { FileByteCache } from "../../src/files/cache.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import type { ChatFileSourceAdapter } from "../../src/files/source.js";
-import { ManagedFileStore } from "../../src/files/storage.js";
 import { TELEGRAM_CONNECTION_KEY } from "../../src/files/telegramSource.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
 
 describe("bot router file adapters", () => {
   let db: AppDatabase | undefined;
-  let tempDir: string | undefined;
 
   afterEach(async () => {
     await db?.destroy();
-    if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
   it("preserves an injected resolver's Telegram adapter", async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-router-"));
-    const config = loadTestConfig({
-      FILE_CACHE_DIR: path.join(tempDir, "cache"),
-      MANAGED_FILE_ROOT: path.join(tempDir, "managed-files"),
-    });
+    const config = loadTestConfig();
     const logger = createLogger(config);
     db = createDatabase(config, logger);
     await db.initialize();
     const repos = createRepos(db.db, db.search);
-    const resolver = new FileResolver(repos.files, new FileByteCache(config), new ManagedFileStore(config));
+    const resolver = new FileResolver(repos.files);
     const custom: ChatFileSourceAdapter = {
       transport: "telegram",
       connectionKey: TELEGRAM_CONNECTION_KEY,

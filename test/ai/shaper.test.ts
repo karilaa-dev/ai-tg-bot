@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleStreamPart, normalizeStreamPart } from "../../src/ai/run.js";
+import { handleStreamPart, normalizeStreamPart, toolErrorText } from "../../src/ai/run.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
 
 describe("StreamShaper", () => {
@@ -146,6 +146,40 @@ describe("StreamShaper", () => {
     });
   });
 
+  it("separates provider-concatenated titled reasoning sections", () => {
+    const s = new StreamShaper();
+    s.onReasoningStart();
+    s.onReasoningDelta([
+      "**Planning the deck**",
+      "",
+      "I will use a simple visual system.**Designing the slides**",
+      "",
+      "I will create the layouts next.",
+    ].join("\n"));
+    s.onReasoningEnd();
+
+    expect(s.streamingThinkingMd()).toBe([
+      "**Planning the deck**",
+      "",
+      "I will use a simple visual system.",
+      "",
+      "**Designing the slides**",
+      "",
+      "I will create the layouts next.",
+    ].join("\n"));
+    expect(s.runSummary().reasoningSummaries).toEqual([s.streamingThinkingMd()]);
+  });
+
+  it("keeps ordinary end-of-line bold text inline", () => {
+    const s = new StreamShaper();
+    s.onReasoningStart();
+    s.onReasoningDelta("The answer is **yes**");
+    s.onReasoningEnd();
+
+    expect(s.streamingThinkingMd()).toBe("The answer is **yes**");
+    expect(s.runSummary().reasoningSummaries).toEqual(["The answer is **yes**"]);
+  });
+
   it("keeps only streamed section titles from verbose reasoning text", () => {
     const s = new StreamShaper();
     s.onReasoningDelta([
@@ -235,8 +269,11 @@ describe("StreamShaper", () => {
     s.onToolCall("read_file_section", { file_id: 7 }, { fileName: "book.pdf" });
     s.onToolCall("generate_image", { prompt: "small red square", reference_file_ids: [9] });
     s.onToolCall("create_file", { path: "/report.txt", name: "report.txt" });
-    s.onToolCall("render_office_preview", { path: "/slide-1.html" });
     s.onToolCall("bash", { script: "printf hello" });
+    s.onToolCall("browser_open", { url: "https://example.com" });
+    s.onToolCall("browser_snapshot", { tab_id: "tab-1" });
+    s.onToolCall("browser_close_session", {});
+    s.onToolCall("render_office_preview", { path: "/deck.pptx", page: 1 });
     const status = s.toolStatusMd();
 
     expect(status).toContain("🔎 Searching web <code>current info</code>");
@@ -247,8 +284,11 @@ describe("StreamShaper", () => {
     expect(status).toContain("📖 Reading file <code>book.pdf</code>");
     expect(status).toContain("🖼️ Generating image <code>small red square +1 ref</code>");
     expect(status).toContain("📎 Attaching file <code>report.txt</code>");
-    expect(status).toContain("🖥️ Rendering Office preview <code>/slide-1.html</code>");
     expect(status).toContain("🐚 Running bash <code>printf hello</code>");
+    expect(status).toContain("🌍 Browsing web <code>https://example.com</code>");
+    expect(status).toContain("🧭 Reading browser <code>tab-1</code>");
+    expect(status).toContain("🧹 Closing browser session");
+    expect(status).toContain("🖼️ Previewing Office file <code>/deck.pptx</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
     expect(status).not.toContain("search_thread");
@@ -257,25 +297,6 @@ describe("StreamShaper", () => {
     expect(status).not.toContain("read_file_section");
     expect(status).not.toContain("generate_image");
     expect(status).not.toContain("create_file");
-    expect(status).not.toContain("render_office_preview");
-  });
-
-  it("summarizes rendered Office previews", () => {
-    const s = new StreamShaper();
-    expect(handleStreamPart(s, {
-      type: "tool-call",
-      toolName: "render_office_preview",
-      input: { path: "/slide-1.html" },
-    })).toBe("tool-call");
-    expect(handleStreamPart(s, {
-      type: "tool-result",
-      toolName: "render_office_preview",
-      output: {
-        content: [{ type: "text", text: "Rendered Office preview /slide-1.html" }],
-        details: { rendered: true, path: "/slide-1.html", size: 123 },
-      },
-    })).toBe("tool-result");
-    expect(s.thinkingMd()).toContain("🖥️ Rendering Office preview <code>/slide-1.html</code> (1 preview)");
   });
 
   it("summarizes created file outputs as files", () => {
@@ -295,6 +316,19 @@ describe("StreamShaper", () => {
       toolCallCount: 1,
       toolCounts: [{ label: "🖼️ Generating image", count: 1 }],
     });
+  });
+
+  it("summarizes browser session closure without exposing tab URLs", () => {
+    const s = new StreamShaper();
+    handleStreamPart(s, { type: "tool-call", toolName: "browser_close_session", input: {} });
+    handleStreamPart(s, {
+      type: "tool-result",
+      toolName: "browser_close_session",
+      output: { closed: true, tabs_closed: 4, profile_preserved: true },
+    });
+
+    expect(s.thinkingMd()).toContain("🧹 Closing browser session (4 tabs)");
+    expect(s.thinkingMd()).not.toContain("http");
   });
 
   it("summarizes bash results with exit status and timeout", () => {
@@ -323,5 +357,22 @@ describe("StreamShaper", () => {
       kind: "text-final",
       text: "done",
     });
+  });
+});
+
+describe("toolErrorText", () => {
+  it("extracts direct Pi tool-result text when details are empty", () => {
+    expect(toolErrorText({
+      content: [{ type: "text", text: "Image request failed: Billing hard limit has been reached." }],
+      details: {},
+      isError: true,
+    }, true)).toBe("Image request failed: Billing hard limit has been reached.");
+  });
+
+  it("does not treat successful Pi tool-result text as an error", () => {
+    expect(toolErrorText({
+      content: [{ type: "text", text: JSON.stringify({ image_url: "data:image/png;base64,ok" }) }],
+      details: { image_url: "data:image/png;base64,ok" },
+    })).toBeUndefined();
   });
 });

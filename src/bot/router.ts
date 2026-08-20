@@ -32,10 +32,9 @@ import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } fro
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { initializeUserAndThread, isStopCommand, privateOnly } from "./auth.js";
 import { sendWelcome, timezoneConversation } from "./onboarding.js";
-import { FileByteCache } from "../files/cache.js";
 import { FileResolver } from "../files/resolver.js";
 import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/telegramSource.js";
-import { ManagedFileStore } from "../files/storage.js";
+import { E2BFileSourceAdapter } from "../e2b/fileSource.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 
@@ -82,8 +81,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
   const fileResolver = options.fileResolver ?? new FileResolver(
     repos.files,
-    new FileByteCache(options.config),
-    new ManagedFileStore(options.config),
   );
   if (!fileResolver.registry.get({ transport: "telegram", connectionKey: TELEGRAM_CONNECTION_KEY })) {
     fileResolver.registry.register(new TelegramFileSourceAdapter({
@@ -92,6 +89,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       download: downloadFile,
     }));
   }
+  if (
+    options.commandRuntime
+    && !fileResolver.registry.get({
+      transport: "e2b",
+      connectionKey: options.config.E2B_DEPLOYMENT_ID,
+    })
+  ) {
+    fileResolver.registry.register(new E2BFileSourceAdapter(options.config, options.commandRuntime));
+  }
   const services: BotServices = {
     config: options.config,
     db: options.db,
@@ -99,6 +105,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logger: options.logger,
     turnRunner: options.turnRunner ?? runTurn,
     fileResolver,
+    commandRuntime: options.commandRuntime,
     embedder: options.embedder,
     pi,
     threadTitles: new ThreadTitleCoordinator({ repos, pi, logger: options.logger }),
@@ -270,8 +277,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       mime: doc.mime_type,
       caption: ctx.message.caption,
       type,
+      mediaKind: "document",
       size: doc.file_size,
       mediaGroupId: ctx.message.media_group_id,
+      telegramRefs: [{
+        fileId: doc.file_id,
+        fileUniqueId: doc.file_unique_id,
+        size: doc.file_size,
+        primary: true,
+      }],
     });
   });
   bot.on("message:photo", async (ctx) => {
@@ -294,8 +308,17 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       mime: "image/jpeg",
       caption: ctx.message.caption,
       type: "image",
+      mediaKind: "photo",
       size: photo.file_size,
       mediaGroupId: ctx.message.media_group_id,
+      telegramRefs: ctx.message.photo.map((size) => ({
+        fileId: size.file_id,
+        fileUniqueId: size.file_unique_id,
+        width: size.width,
+        height: size.height,
+        size: size.file_size,
+        primary: size.file_id === photo.file_id,
+      })),
     });
   });
   bot.on("message:text", async (ctx) => {

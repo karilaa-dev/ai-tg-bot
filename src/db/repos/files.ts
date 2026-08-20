@@ -1,7 +1,13 @@
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import { createTextSearch, type TextSearch } from "../search.js";
-import type { FileChunkRow, FileRow, FileSourceRow, StoredFileType } from "../types.js";
+import type {
+  FileChunkRow,
+  FileRow,
+  FileSourceRow,
+  StoredFileType,
+  TelegramFileRefRow,
+} from "../types.js";
 import type { ChatFileSource } from "../../files/source.js";
 import { vectorToBuffer } from "./embeddings.js";
 
@@ -20,7 +26,6 @@ export class FilesRepo {
     mimeType?: string | null;
     extractionStatus?: FileRow["extraction_status"];
     name: string;
-    path?: string | null;
     size: number;
     contentMd?: string | null;
     summary?: string | null;
@@ -30,7 +35,7 @@ export class FilesRepo {
     return insertReturning<FileRow>(
       this.db,
       sql`
-        insert into files(user_id, thread_id, message_id, type, content_sha256, mime_type, extraction_status, name, path, size, content_md, summary, outline_json, is_inline, created_at)
+        insert into files(user_id, thread_id, message_id, type, content_sha256, mime_type, extraction_status, name, size, content_md, summary, outline_json, is_inline, created_at)
         values (
           ${input.userId},
           ${input.threadId},
@@ -40,7 +45,6 @@ export class FilesRepo {
           ${input.mimeType ?? null},
           ${input.extractionStatus ?? "ready"},
           ${input.name},
-          ${input.path ?? null},
           ${input.size},
           ${input.contentMd ?? null},
           ${input.summary ?? null},
@@ -124,6 +128,35 @@ export class FilesRepo {
   listByIds(fileIds: number[]): Promise<FileRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
+  }
+
+  async listRecoverableIds(fileIds: number[]): Promise<number[]> {
+    if (!fileIds.length) return [];
+    const rows = await this.db.query<{ id: number }>(sql`
+      select f.id
+      from files f
+      where f.id in (${valueList(fileIds)})
+        and (
+          f.content_md is not null
+          or exists (select 1 from file_chunks fc where fc.file_id = f.id)
+          or exists (select 1 from file_sources fs where fs.file_id = f.id)
+        )
+      order by f.id asc
+    `);
+    return rows.map((row) => row.id);
+  }
+
+  listByIdsWithSource(fileIds: number[], transport: string, connectionKey: string): Promise<FileRow[]> {
+    if (!fileIds.length) return Promise.resolve([]);
+    return this.db.query<FileRow>(sql`
+      select distinct f.*
+      from files f
+      join file_sources s on s.file_id = f.id
+      where f.id in (${valueList(fileIds)})
+        and s.transport = ${transport}
+        and s.connection_key = ${connectionKey}
+      order by f.id asc
+    `);
   }
 
   async setMessageId(
@@ -275,24 +308,102 @@ export class FilesRepo {
     `);
   }
 
+  async rememberTelegramFileRefs(
+    fileId: number,
+    input: TelegramFileObservation,
+  ): Promise<TelegramFileRefRow[]> {
+    return this.db.transaction(async (tx) => {
+      return rememberTelegramRefs(tx, fileId, input, Date.now());
+    });
+  }
+
+  async rememberTelegramObservation(
+    fileId: number,
+    source: ChatFileSource,
+    input: TelegramFileObservation,
+  ): Promise<{ source: FileSourceRow; refs: TelegramFileRefRow[] }> {
+    return this.db.transaction(async (tx) => {
+      const now = Date.now();
+      const storedSource = await insertReturning<FileSourceRow>(tx, sql`
+        insert into file_sources(
+          file_id, transport, connection_key, remote_key, locator_json, mime_type, last_verified_at, created_at
+        ) values (
+          ${fileId},
+          ${source.transport},
+          ${source.connectionKey},
+          ${source.remoteKey},
+          ${JSON.stringify(source.locator)},
+          ${source.mimeType ?? null},
+          ${now},
+          ${now}
+        )
+        on conflict(transport, connection_key, remote_key) do update set
+          locator_json = excluded.locator_json,
+          mime_type = coalesce(excluded.mime_type, file_sources.mime_type),
+          last_verified_at = excluded.last_verified_at
+        returning *
+      `);
+      const refs = await rememberTelegramRefs(tx, storedSource.file_id, input, now);
+      return { source: storedSource, refs };
+    });
+  }
+
+  listTelegramFileRefs(fileIds: number[]): Promise<TelegramFileRefRow[]> {
+    if (!fileIds.length) return Promise.resolve([]);
+    return this.db.query<TelegramFileRefRow>(sql`
+      select * from telegram_file_refs
+      where file_id in (${valueList(fileIds)})
+      order by file_id asc, is_primary desc, last_seen_at desc, id desc
+    `);
+  }
+
   listSources(fileId: number): Promise<FileSourceRow[]> {
     return this.db.query<FileSourceRow>(sql`
       select * from file_sources
       where file_id = ${fileId}
-      order by case when last_verified_at is null then 1 else 0 end, last_verified_at desc, id desc
+      order by
+        case transport when 'e2b' then 0 when 'telegram' then 1 else 2 end,
+        case when last_verified_at is null then 1 else 0 end,
+        last_verified_at desc,
+        id desc
     `);
+  }
+
+  async deleteE2BSourcesForSandbox(connectionKey: string, sandboxId: string): Promise<number> {
+    const prefix = `${sandboxId}:`;
+    const deleted = await this.db.query<{ id: number }>(sql`
+      delete from file_sources
+      where transport = 'e2b'
+        and connection_key = ${connectionKey}
+        and substr(remote_key, 1, ${prefix.length}) = ${prefix}
+      returning id
+    `);
+    return deleted.length;
+  }
+
+  listE2BSourcesForSandbox(connectionKey: string, sandboxId: string): Promise<FileSourceRow[]> {
+    const prefix = `${sandboxId}:`;
+    return this.db.query<FileSourceRow>(sql`
+      select * from file_sources
+      where transport = 'e2b'
+        and connection_key = ${connectionKey}
+        and substr(remote_key, 1, ${prefix.length}) = ${prefix}
+      order by id asc
+    `);
+  }
+
+  async deleteSourcesByIds(sourceIds: number[]): Promise<number> {
+    if (!sourceIds.length) return 0;
+    const deleted = await this.db.query<{ id: number }>(sql`
+      delete from file_sources
+      where id in (${valueList(sourceIds)})
+      returning id
+    `);
+    return deleted.length;
   }
 
   async markSourceVerified(sourceId: number): Promise<void> {
     await this.db.execute(sql`update file_sources set last_verified_at = ${Date.now()} where id = ${sourceId}`);
-  }
-
-  async clearPath(fileId: number): Promise<void> {
-    await this.db.execute(sql`update files set path = null where id = ${fileId}`);
-  }
-
-  async setPath(fileId: number, filePath: string): Promise<void> {
-    await this.db.execute(sql`update files set path = ${filePath} where id = ${fileId}`);
   }
 
   async setOutline(fileId: number, outline: unknown): Promise<void> {
@@ -335,4 +446,54 @@ export class FilesRepo {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileChunkRow>(sql`select * from file_chunks where file_id in (${valueList(fileIds)}) order by file_id asc, idx asc`);
   }
+}
+
+type TelegramFileObservation = {
+  direction: TelegramFileRefRow["direction"];
+  mediaKind: TelegramFileRefRow["media_kind"];
+  telegramMessageId?: number | null;
+  refs: Array<{
+    fileId: string;
+    fileUniqueId?: string | null;
+    width?: number | null;
+    height?: number | null;
+    size?: number | null;
+    primary: boolean;
+  }>;
+};
+
+async function rememberTelegramRefs(
+  db: SqlExecutor,
+  fileId: number,
+  input: TelegramFileObservation,
+  now: number,
+): Promise<TelegramFileRefRow[]> {
+  for (const ref of input.refs) {
+    const telegramFileId = ref.fileId.trim();
+    if (!telegramFileId) continue;
+    const uniqueId = ref.fileUniqueId?.trim() || null;
+    await db.execute(sql`
+      insert into telegram_file_refs(
+        file_id, telegram_file_id, telegram_file_unique_id, direction, media_kind,
+        telegram_message_id, width, height, telegram_size, is_primary, first_seen_at, last_seen_at
+      ) values (
+        ${fileId}, ${telegramFileId}, ${uniqueId}, ${input.direction}, ${input.mediaKind},
+        ${input.telegramMessageId ?? null}, ${ref.width ?? null}, ${ref.height ?? null},
+        ${ref.size ?? null}, ${ref.primary ? 1 : 0}, ${now}, ${now}
+      )
+      on conflict(file_id, telegram_file_id) do update set
+        telegram_file_unique_id = coalesce(excluded.telegram_file_unique_id, telegram_file_refs.telegram_file_unique_id),
+        telegram_message_id = coalesce(excluded.telegram_message_id, telegram_file_refs.telegram_message_id),
+        width = coalesce(excluded.width, telegram_file_refs.width),
+        height = coalesce(excluded.height, telegram_file_refs.height),
+        telegram_size = coalesce(excluded.telegram_size, telegram_file_refs.telegram_size),
+        is_primary = case when excluded.is_primary = 1 then 1 else telegram_file_refs.is_primary end,
+        last_seen_at = excluded.last_seen_at
+    `);
+  }
+  return db.query<TelegramFileRefRow>(sql`
+    select * from telegram_file_refs
+    where file_id = ${fileId}
+    order by is_primary desc, last_seen_at desc, id desc
+  `);
 }

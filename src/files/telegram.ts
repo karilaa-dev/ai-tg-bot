@@ -15,7 +15,10 @@ export type TelegramFileDownloader = (input: {
 }) => Promise<DownloadedTelegramFile>;
 
 export const downloadTelegramFile: TelegramFileDownloader = async (input) => {
-  const file = await input.api.getFile(input.fileId);
+  const file = await input.api.getFile(
+    input.fileId,
+    input.signal as Parameters<Api["getFile"]>[1],
+  );
   if (!file.file_path) throw new Error("Telegram did not return file_path");
   throwIfAborted(input.signal);
   const url = `https://api.telegram.org/file/bot${input.config.BOT_TOKEN}/${file.file_path}`;

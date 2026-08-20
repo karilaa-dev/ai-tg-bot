@@ -3,8 +3,7 @@ import { loadConfig } from "../src/config.js";
 import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
-import { createOpenSandboxClientProvider } from "../src/opensandbox/client.js";
-import { ThreadOpenSandboxRuntimeManager } from "../src/opensandbox/threadRuntimeManager.js";
+import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
 import { PiRuntimeManager } from "../src/pi/runtime.js";
 
 const baseConfig = loadConfig();
@@ -12,16 +11,16 @@ const config = { ...baseConfig, DB_URL: "sqlite::memory:" };
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
-let commandRuntime: ThreadOpenSandboxRuntimeManager | undefined;
+let commandRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 
 try {
   await db.initialize();
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9_999_001, firstName: "Pi smoke", lang: "en" });
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi smoke" });
-  commandRuntime = new ThreadOpenSandboxRuntimeManager({
+  commandRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
-    clientProvider: createOpenSandboxClientProvider(config),
+    repos,
     logger,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime });

@@ -8,14 +8,14 @@ import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes } from "../../src/files/ingest.js";
 
-let managedRoot: string;
+let tempRoot: string;
 
 describe("file ingestion", () => {
   let db: AppDatabase;
   let repos: Repos;
 
   beforeEach(async () => {
-    managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-ingest-test-"));
+    tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-ingest-test-"));
     const config = testConfig();
     db = createDatabase(config, createLogger(config));
     await db.initialize();
@@ -25,7 +25,7 @@ describe("file ingestion", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db.destroy();
-    await fs.rm(managedRoot, { recursive: true, force: true });
+    await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
   it("classifies text/csv as csv before generic text", () => {
@@ -34,7 +34,7 @@ describe("file ingestion", () => {
     expect(classifyFile("notes.txt", "text/plain")).toBe("txt");
   });
 
-  it("persists attachment bytes in the managed chat-file store", async () => {
+  it("persists attachment metadata without a host filesystem snapshot", async () => {
     const user = await repos.users.ensure({ tgId: 220, firstName: "Image", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const result = await ingestFileBytes({
@@ -53,10 +53,7 @@ describe("file ingestion", () => {
     expect(stored).toMatchObject({
       mime_type: "image/png",
     });
-    expect(stored?.path).toBe(path.join(managedRoot, String(result.fileId), "content"));
-    await expect(fs.readFile(stored!.path!)).resolves.toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    expect((await fs.stat(path.dirname(stored!.path!))).mode & 0o777).toBe(0o700);
-    expect((await fs.stat(stored!.path!)).mode & 0o777).toBe(0o600);
+    expect(await repos.files.listSources(result.fileId)).toEqual([]);
   });
 
   it("ingests csv files with trailing blank lines", async () => {
@@ -284,7 +281,7 @@ describe("file ingestion", () => {
 });
 
 function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig({ MANAGED_FILE_ROOT: managedRoot, ...overrides });
+  return loadTestConfig(overrides);
 }
 
 function makePdf(text: string): Buffer {

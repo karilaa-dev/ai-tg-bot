@@ -9,17 +9,21 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "upgrade:audit": "node dist/scripts/upgrade-audit.js",
+    "upgrade:migrate": "node dist/scripts/upgrade-migrate.js",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
+    "live:pi-image-check": "tsx scripts/live-pi-image-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
-    "live:telegram-restore": "tsx scripts/live-telegram-restore.ts",
-    "live:opensandbox-check": "node --import tsx scripts/live-opensandbox-check.ts",
-    "live:opensandbox-turn-check": "node --import tsx scripts/live-opensandbox-turn-check.ts"
+    "live:e2b-check": "tsx scripts/live-e2b-check.ts",
+    "live:browser-use-check": "tsx scripts/live-browser-use-check.ts",
+    "e2b:template:build": "tsx e2b-template/build.ts",
+    "e2b:template:check": "tsx e2b-template/check.ts",
+    "e2b:sandboxes:prune-desktop": "tsx scripts/prune-e2b-desktop-sandboxes.ts"
   },
   "engines": {
     "node": ">=24.18.0"
   },
   "dependencies": {
-    "@alibaba-group/opensandbox": "0.1.11",
     "@earendil-works/pi-agent-core": "0.82.1",
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
@@ -32,11 +36,13 @@
     "csv-parse": "^7.0.1",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
+    "e2b": "2.36.1",
     "fflate": "^0.8.3",
     "grammy": "^1.45.1",
     "parse5": "8.0.1",
     "pg": "^8.22.0",
-    "playwright-core": "1.57.0",
+    "playwright-core": "1.62.1",
+    "undici": "^8.9.0",
     "unpdf": "^1.8.0",
     "zod": "^4.4.3"
   },

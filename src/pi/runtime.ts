@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Api } from "grammy";
@@ -8,6 +9,7 @@ import {
   DefaultResourceLoader,
   ModelRegistry,
   ModelRuntime,
+  readStoredCredential,
   SessionManager,
   SettingsManager,
   type AgentSession,
@@ -17,7 +19,7 @@ import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
-import { renderThreadSystemPrompt } from "../ai/prompt.js";
+import { renderSystemPrompt, renderThreadSessionContext } from "../ai/prompt.js";
 import type { CreatedFileAttachment, PendingCreatedFile, ToolBuildInput } from "../ai/tools/types.js";
 import type { TextEmbedder } from "../memory/embeddings.js";
 import type { Logger } from "../logger.js";
@@ -26,7 +28,7 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtensio
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
-import type { CommandRuntime, SandboxActivityLease } from "../sandbox/types.js";
+import type { CommandRuntime, PublishedWebsite, SandboxActivityLease } from "../sandbox/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
@@ -35,6 +37,21 @@ import {
   THREAD_TITLE_SYSTEM_PROMPT,
   type ThreadTitlePromptInput,
 } from "./threadTitle.js";
+import { isBrowserUseConfigured } from "../config.js";
+import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
+import {
+  OFFICECLI_SKILLS,
+  createOfficeSkillReadTool,
+  officeSkillPaths,
+  validateOfficeSkills,
+} from "./officeSkills.js";
+import { createTurnPromptContextExtension, type TurnPromptContextSource } from "./turnContext.js";
+import {
+  CODEX_PROVIDER_ID,
+  discoverCodexCliCredentials,
+  isOAuthCredential,
+  resolveCodexAuthFile,
+} from "./codexCliCredentials.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -68,6 +85,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
   private readonly runtimes = new Map<number, PiThreadRuntime>();
+  private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
 
   constructor(private readonly input: {
@@ -80,6 +98,13 @@ export class PiRuntimeManager implements PiRuntimeService {
     providerStreams?: PiProviderStreamOverrides;
   }) {
     this.agentDir = path.resolve(input.config.PI_CODING_AGENT_DIR);
+    if (isBrowserUseConfigured(input.config)) {
+      this.browserRuntime = new BrowserUseRuntimeManager({
+        config: input.config,
+        repos: input.repos,
+        logger: input.logger,
+      });
+    }
   }
 
   async initialize(): Promise<void> {
@@ -88,8 +113,22 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   private async initializeModelRuntime(): Promise<void> {
+    await validateOfficeSkills();
+    const piAuthPath = path.join(this.agentDir, "auth.json");
+    const piCodexCredential = readStoredCredential(CODEX_PROVIDER_ID, piAuthPath);
+    const cliCredentials = isOAuthCredential(piCodexCredential)
+      ? undefined
+      : await discoverCodexCliCredentials({
+          authFile: resolveCodexAuthFile(this.input.config),
+          onPersistenceError: (errorCode) => {
+            this.input.logger.warn(
+              "Codex OAuth refresh could not be persisted; continuing with the refreshed in-memory credential",
+              { errorCode },
+            );
+          },
+        });
     this.modelRuntime = await ModelRuntime.create({
-      authPath: path.join(this.agentDir, "auth.json"),
+      ...(cliCredentials?.store ? { credentials: cliCredentials.store } : { authPath: piAuthPath }),
       modelsPath: path.join(this.agentDir, "models.json"),
     });
     await this.modelRuntime.setRuntimeApiKey(
@@ -97,6 +136,22 @@ export class PiRuntimeManager implements PiRuntimeService {
       this.input.config.OPENROUTER_API_KEY,
       { allowNetwork: false },
     );
+    const codexConfigured = this.modelRuntime.hasConfiguredAuth(CODEX_PROVIDER_ID);
+    this.input.logger.info("Pi inference providers initialized", {
+      primary: "codex",
+      fallback: "openrouter",
+      codexConfigured,
+      codexCredentialSource: isOAuthCredential(piCodexCredential)
+        ? "pi"
+        : cliCredentials?.status === "available"
+          ? "codex-cli"
+          : "none",
+    });
+    if (!codexConfigured) {
+      this.input.logger.warn("Codex OAuth is unavailable; Pi inference will use OpenRouter until Codex is configured", {
+        codexCredentialStatus: cliCredentials?.status ?? "missing",
+      });
+    }
     this.modelRegistry = new ModelRegistry(this.modelRuntime);
     this.providerRouter = registerPiProviderRouter({
       config: this.input.config,
@@ -115,9 +170,13 @@ export class PiRuntimeManager implements PiRuntimeService {
       cached.lastUsedAt = Date.now();
       return cached;
     }
-    const systemPrompt = await renderThreadSystemPrompt({ repos: this.input.repos, user, thread });
+    const systemPrompt = await renderSystemPrompt({
+      user,
+      config: this.input.config,
+    });
     const bridge = new ThreadBridge({
       ...this.input,
+      browserRuntime: this.browserRuntime,
       user,
       thread,
       modelRegistry: this.modelRegistry,
@@ -133,7 +192,11 @@ export class PiRuntimeManager implements PiRuntimeService {
       cwd: process.cwd(),
       agentDir: this.agentDir,
       settingsManager,
-      extensionFactories: [createChatFileContextExtension(bridge)],
+      extensionFactories: [
+        createTurnPromptContextExtension(bridge),
+        createChatFileContextExtension(bridge),
+      ],
+      additionalSkillPaths: officeSkillPaths(),
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -141,8 +204,18 @@ export class PiRuntimeManager implements PiRuntimeService {
       systemPrompt,
     });
     await resourceLoader.reload();
+    const loadedSkills = resourceLoader.getSkills();
+    if (loadedSkills.diagnostics.length) {
+      throw new Error(`OfficeCLI skill loading failed: ${JSON.stringify(loadedSkills.diagnostics)}`);
+    }
+    const expectedSkillNames = OFFICECLI_SKILLS.map((skill) => skill.name).sort();
+    const loadedSkillNames = loadedSkills.skills.map((skill) => skill.name).sort();
+    if (JSON.stringify(loadedSkillNames) !== JSON.stringify(expectedSkillNames)) {
+      throw new Error(`Unexpected Pi skills: expected ${expectedSkillNames.join(", ")}; loaded ${loadedSkillNames.join(", ") || "none"}.`);
+    }
     const sessionManager = await this.openSessionManager(thread);
     const customTools = [
+      createOfficeSkillReadTool(),
       ...createPiToolAdapters(bridge),
       createGenerateImagePiTool(bridge),
     ];
@@ -168,6 +241,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       threadId: thread.id,
       sessionId: session.sessionId,
       resumed: Boolean(thread.pi_session_file),
+      skills: loadedSkillNames,
     });
     return runtime;
   }
@@ -226,10 +300,11 @@ export class PiRuntimeManager implements PiRuntimeService {
 
   async dispose(): Promise<void> {
     for (const runtime of this.runtimes.values()) {
-      runtime.bridge.endTurn();
+      await runtime.bridge.endTurn();
       runtime.session.dispose();
     }
     this.runtimes.clear();
+    await this.browserRuntime?.dispose();
   }
 
   private async runIsolatedHelper(input: {
@@ -308,14 +383,14 @@ export class PiRuntimeManager implements PiRuntimeService {
         .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt);
       const victim = candidates[0];
       if (!victim) return;
-      victim[1].bridge.endTurn();
+      await victim[1].bridge.endTurn();
       victim[1].session.dispose();
       this.runtimes.delete(victim[0]);
     }
   }
 }
 
-export class ThreadBridge implements PiToolBridge, ChatImageBridge {
+export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptContextSource {
   user: UserRow;
   thread: ThreadRow;
   readonly config: AppConfig;
@@ -328,11 +403,16 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   readonly providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[] = [];
   pendingCreatedFiles: PendingCreatedFile[] = [];
+  publishedWebsites: PublishedWebsite[] = [];
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
   private readonly durableContextFileIds = new Set<number>();
   private commandActivityLease?: SandboxActivityLease;
+  private turnActive = false;
+  private turnSystemPrompt?: string;
+  private turnSessionContext?: string;
+  private readonly browserRuntime?: BrowserUseRuntimeManager;
 
   constructor(input: {
     config: AppConfig;
@@ -345,6 +425,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     thread: ThreadRow;
     modelRegistry: ModelRegistry;
     providerRouter: PiProviderRouter;
+    browserRuntime?: BrowserUseRuntimeManager;
   }) {
     Object.assign(this, input);
     this.user = input.user;
@@ -357,13 +438,23 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.commandRuntime = input.commandRuntime;
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
+    this.browserRuntime = input.browserRuntime;
   }
 
-  beginTurn(input: PiTurnTransport): void {
-    this.endTurn();
+  async beginTurn(input: PiTurnTransport): Promise<void> {
+    if (this.turnActive) await this.endTurn();
+    const [turnSystemPrompt, turnSessionContext] = await Promise.all([
+      renderSystemPrompt({ user: this.user, config: this.config }),
+      renderThreadSessionContext({ repos: this.repos, user: this.user, thread: this.thread }),
+    ]);
+    await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
+    this.turnActive = true;
+    this.turnSystemPrompt = turnSystemPrompt;
+    this.turnSessionContext = turnSessionContext;
     this.transport = input;
     this.attachments = [];
     this.pendingCreatedFiles = [];
+    this.publishedWebsites = [];
     this.turnFileCache.clear();
     this.contextFileIds.clear();
     this.durableContextFileIds.clear();
@@ -375,10 +466,24 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
     this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
   }
 
-  endTurn(): void {
+  async endTurn(): Promise<void> {
     const lease = this.commandActivityLease;
     this.commandActivityLease = undefined;
     lease?.release();
+    const wasActive = this.turnActive;
+    this.turnActive = false;
+    this.turnSystemPrompt = undefined;
+    this.turnSessionContext = undefined;
+    this.transport = undefined;
+    if (wasActive) await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
+  }
+
+  currentTurnSystemPrompt(): string | undefined {
+    return this.turnSystemPrompt;
+  }
+
+  currentTurnSessionContext(): string | undefined {
+    return this.turnSessionContext;
   }
 
   buildInput(): ToolBuildInput {
@@ -391,17 +496,44 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
       logger: this.logger,
       embedder: this.embedder,
       commandRuntime: this.commandRuntime,
+      browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),
       createdFiles: this.attachments,
       pendingCreatedFiles: this.pendingCreatedFiles,
+      publishedWebsites: this.publishedWebsites,
+      registerPublishedWebsite: (website) => {
+        if (!this.publishedWebsites.some((existing) => existing.url === website.url)) {
+          this.publishedWebsites.push(website);
+        }
+      },
     };
   }
 
   async resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile> {
     const cached = this.turnFileCache.get(file.id);
     if (cached) return cached;
+    const currentAttachment = this.attachments.find((attachment) =>
+      attachment.fileId === file.id && attachment.data);
+    if (currentAttachment?.data) {
+      const bytes = Buffer.from(currentAttachment.data);
+      const resolved: ResolvedChatFile = {
+        bytes,
+        mimeType: currentAttachment.mimeType ?? file.mime_type,
+        size: bytes.length,
+        contentSha256: file.content_sha256 ?? createHash("sha256").update(bytes).digest("hex"),
+        source: {
+          transport: "memory",
+          connectionKey: "current-turn",
+          remoteKey: String(file.id),
+          locator: {},
+          mimeType: currentAttachment.mimeType ?? file.mime_type,
+        },
+      };
+      this.turnFileCache.set(file.id, resolved);
+      return resolved;
+    }
     if (!this.transport) throw new Error(`File #${file.id} has no active chat transport resolver.`);
     const loaded = await this.transport.resolveFile(file, signal);
     const resolved: ResolvedChatFile = {
@@ -439,14 +571,17 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge {
   }
 }
 
-function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
+export function createChatFileContextExtension(bridge: ThreadBridge): InlineExtension {
   return {
     name: "chat-file-context",
     factory: (pi) => {
       pi.on("context", async (event) => {
         const messages = event.messages.map((message) => cloneMessage(message));
         const scope = await threadChainScope(bridge.repos, bridge.thread);
-        const allowedIds = new Set(scope.fileIds);
+        const allowedIds = new Set([
+          ...scope.fileIds,
+          ...bridge.attachments.map((attachment) => attachment.fileId),
+        ]);
         let changed = false;
         const injectedIds = new Set<number>();
         for (let index = messages.length - 1; index >= 0; index -= 1) {

@@ -1,26 +1,10 @@
-import fs from "node:fs/promises";
 import { z } from "zod";
-import {
-  stageChatFiles,
-  type ChatFileStagingInput,
-  type StagedAttachments,
-  type StagedInputFile,
-} from "../../sandbox/attachments.js";
-import { formatSandboxError } from "../../opensandbox/client.js";
-import { botSharedRoot, botThreadWorkspace, guestCwd } from "../../sandbox/paths.js";
+import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
+import { sandboxWorkingDirectory } from "../../e2b/paths.js";
+import type { SandboxThreadFileSyncResult } from "../../sandbox/types.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
-
-const MAX_BASH_INPUT_FILES = 5;
-
-type BashCommand = {
-  script: string;
-  cwd: string;
-  stdin: string;
-  args: string[];
-  inputFileIds: number[];
-};
 
 type BashToolResult = {
   stdout: string;
@@ -30,131 +14,105 @@ type BashToolResult = {
   stdout_truncated: boolean;
   stderr_truncated: boolean;
   cwd: string;
-  input_files: StagedInputFile[];
+  thread_files: SandboxThreadFileSyncResult;
   error?: string;
+};
+
+const EMPTY_THREAD_FILES: SandboxThreadFileSyncResult = {
+  directory: "/home/user/telegram-files",
+  available: 0,
 };
 
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run a real Bash script in this user-and-thread's persistent OpenSandbox environment. Omit cwd and use relative paths for normal work. Logical cwd / means this thread's workspace, not the Linux filesystem root; this mapping is expected and does not need investigation. Inside commands the physical workspace may appear under /data/threads/<thread-id>/workspace. Only the current workspace, read-only staged attachments, and /data/shared are mounted; sibling thread directories are inaccessible. Never pass the bot host path or probe /home/agent or /workspace to locate files. Use /data/shared only for files intentionally shared with the user's other threads. The runner includes Bash and common Alpine/Linux utilities; Python, Node.js, ImageMagick 7 (`magick`), OfficeCLI, ZIP and common archive tools, Git/SSH, curl/wget, jq, ripgrep/fd, SQLite, and common file/text/process tools. Check the system prompt's runner inventory and use `command -v` or a tool's help before assuming a tool is absent. Chat attachments are not mounted automatically: pass up to five authorized file ids in input_file_ids to stage read-only copies for this call at the returned paths and through CHAT_FILE_<id>. The sandbox starts lazily, pauses after its idle timeout, and is released after its longer idle lifetime. The mounted current-workspace and shared files persist after release; container-layer state and packages installed elsewhere do not. Outbound networking depends on the deployment's firewall policy and must not be treated as a private-network security boundary.",
+      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace, while synchronized Telegram files under /home/user/telegram-files are read-only. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Bind local or diagnostic services to 127.0.0.1; bind to 0.0.0.0 only for a user-requested website whose next action is publish_website. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
       stdin: z.string().max(100_000).default(""),
       args: z.array(z.string().max(4096)).max(32).default([]),
-      input_file_ids: z.array(z.number().int().positive()).max(MAX_BASH_INPUT_FILES).default([]),
     }),
-    execute: async ({ script, cwd = "/", stdin = "", args = [], input_file_ids = [] }, signal) => {
+    execute: async ({ script, cwd = "/", stdin = "", args = [] }, signal) => {
+      const logicalCwd = normalizeLogicalCwd(cwd);
       input.logger?.info("tool bash starting", {
         threadId: input.thread.id,
         scriptChars: script.length,
         stdinChars: stdin.length,
         args: args.length,
-        inputFileIds: input_file_ids,
       });
-      const result = await runBashTool(input, { script, cwd, stdin, args, inputFileIds: input_file_ids }, signal);
+      let result: BashToolResult;
+      try {
+        if (!input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
+        const threadFiles = await resolveThreadFileDescriptors(input, signal);
+        const executed = await input.commandRuntime.execute({
+          userId: input.user.tg_id,
+          threadId: input.thread.id,
+          command: "bash",
+          args: ["-c", script, "bash", ...args],
+          env: { TZ: "UTC" },
+          stdin,
+          workingDir: sandboxWorkingDirectory(logicalCwd),
+          timeoutMs: input.config.BASH_TIMEOUT_MS,
+          maxOutputChars: input.config.BASH_MAX_OUTPUT_CHARS,
+          threadFiles,
+          signal,
+        });
+        result = {
+          stdout: executed.stdout,
+          stderr: executed.stderr,
+          exit_code: executed.exitCode,
+          timed_out: executed.timedOut,
+          stdout_truncated: executed.stdoutTruncated,
+          stderr_truncated: executed.stderrTruncated,
+          cwd: logicalCwd,
+          thread_files: executed.threadFiles,
+          ...(executed.error ? { error: executed.error } : {}),
+        };
+      } catch (error) {
+        result = {
+          stdout: "",
+          stderr: "",
+          exit_code: null,
+          timed_out: false,
+          stdout_truncated: false,
+          stderr_truncated: false,
+          cwd: logicalCwd,
+          thread_files: EMPTY_THREAD_FILES,
+          error: String(error),
+        };
+      }
       input.logger?.info("tool bash complete", {
         threadId: input.thread.id,
         exitCode: result.exit_code,
         timedOut: result.timed_out,
         stdoutChars: result.stdout.length,
         stderrChars: result.stderr.length,
+        synchronizedFiles: result.thread_files.available,
         error: result.error,
       });
       return result;
     },
-    toModelOutput: ({ input, output }) => {
+    toModelOutput: ({ input: toolInput, output }) => {
       const result = asRecord(output);
       if (!result) return { type: "json", value: output };
-      const hint = bashModelHint(result, input);
-      return { type: "json", value: hint ? { ...result, model_hint: hint } : result };
+      const hint = bashModelHint(result, toolInput);
+      const readOnlyReminder =
+        "Telegram files are read-only in /home/user/telegram-files; copy them to /home/user/workspace before editing.";
+      return {
+        type: "json",
+        value: {
+          ...result,
+          read_only_files_notice: readOnlyReminder,
+          ...(hint ? { model_hint: hint } : {}),
+        },
+      };
     },
   });
 }
 
-async function runBashTool(
-  input: ToolBuildInput,
-  command: BashCommand,
-  signal?: AbortSignal,
-): Promise<BashToolResult> {
-  const { commandRuntime, config, logger, repos, resolveFile, thread, user } = input;
-  const stagingInput: ChatFileStagingInput = { config, repos, resolveFile, thread, user };
-  const requestedCwd = normalizeBashCwd(command.cwd);
-  const logicalCwd = requestedCwd === normalizeBashCwd(process.cwd()) ? "/" : requestedCwd;
-  const workingDir = guestCwd(thread.id, logicalCwd);
-  let stagedFiles: StagedAttachments = {
-    files: [],
-    env: {},
-    async cleanup() {},
-  };
-  let cleanupError: string | undefined;
-  let toolResult: BashToolResult;
-  try {
-    if (!commandRuntime) throw new Error("OpenSandbox command runtime is unavailable.");
-    const result = await commandRuntime.execute({
-      userId: user.tg_id,
-      threadId: thread.id,
-      command: "bash",
-      args: ["-c", command.script, "bash", ...command.args],
-      env: { TZ: "UTC" },
-      stdin: command.stdin,
-      workingDir,
-      timeoutMs: config.BASH_TIMEOUT_MS,
-      maxOutputChars: config.BASH_MAX_OUTPUT_CHARS,
-      signal,
-    }, {
-      async beforeExecute() {
-        await Promise.all([
-          fs.mkdir(botThreadWorkspace(config, user.tg_id, thread.id), { recursive: true }),
-          fs.mkdir(botSharedRoot(config, user.tg_id), { recursive: true }),
-        ]);
-        stagedFiles = await stageChatFiles(stagingInput, command.inputFileIds, signal);
-        return { env: stagedFiles.env };
-      },
-      async afterExecute() {
-        try {
-          await stagedFiles.cleanup();
-        } catch (error) {
-          cleanupError = formatSandboxError(error);
-          logger?.warn("sandbox attachment cleanup failed", {
-            threadId: thread.id,
-            error: cleanupError,
-          });
-        }
-      },
-    });
-    toolResult = {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exit_code: result.exitCode,
-      timed_out: result.timedOut,
-      stdout_truncated: result.stdoutTruncated,
-      stderr_truncated: result.stderrTruncated,
-      cwd: logicalCwd,
-      input_files: stagedFiles.files,
-      ...(result.error ? { error: result.error } : {}),
-    };
-  } catch (error) {
-    toolResult = {
-      stdout: "",
-      stderr: "",
-      exit_code: null,
-      timed_out: false,
-      stdout_truncated: false,
-      stderr_truncated: false,
-      cwd: logicalCwd,
-      input_files: stagedFiles.files,
-      error: formatSandboxError(error),
-    };
-  }
-
-  if (cleanupError) {
-    toolResult = {
-      ...toolResult,
-      error: [toolResult.error, `attachment cleanup failed: ${cleanupError}`].filter(Boolean).join("; "),
-    };
-  }
-  return toolResult;
+function normalizeLogicalCwd(value: string): string {
+  const requested = normalizeBashCwd(value);
+  return requested === normalizeBashCwd(process.cwd()) ? "/" : requested;
 }

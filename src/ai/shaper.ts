@@ -207,6 +207,11 @@ function cleanReasoningMarkdown(text: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]*<!--(?:[\s\S]*?-->|[\s\S]*$)[ \t]*/g, "\n\n")
     .replace(/<(?:!|!-)?$/, "")
+    // Some providers concatenate consecutive titled reasoning sections without
+    // emitting a protocol boundary or even a newline. Preserve the section
+    // boundary before rendering the Markdown instead of gluing the next title
+    // to the previous paragraph.
+    .replace(/([.!?])(\*\*[^*\n]{1,120}\*\*(?=\n|$))/g, "$1\n\n$2")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -221,6 +226,32 @@ function toolLabel(name: string): string {
       return "🔎 Searching web";
     case "web_extract":
       return "🌐 Reading page";
+    case "browser_open":
+    case "browser_navigate":
+      return "🌍 Browsing web";
+    case "browser_snapshot":
+      return "🧭 Reading browser";
+    case "browser_click":
+    case "browser_type":
+    case "browser_press":
+    case "browser_scroll":
+      return "🖱️ Using browser";
+    case "browser_screenshot":
+      return "📸 Capturing page";
+    case "browser_list_downloads":
+      return "📥 Listing browser downloads";
+    case "browser_send_file":
+      return "📎 Attaching browser download";
+    case "browser_list_tabs":
+      return "🗂️ Listing browser tabs";
+    case "browser_close_tab":
+      return "🧹 Closing browser tab";
+    case "browser_extend_session":
+      return "⏱️ Extending browser session";
+    case "browser_close_session":
+      return "🧹 Closing browser session";
+    case "render_office_preview":
+      return "🖼️ Previewing Office file";
     case "search_thread":
       return "💬 Searching chat";
     case "load_message":
@@ -233,8 +264,6 @@ function toolLabel(name: string): string {
       return "🖼️ Generating image";
     case "create_file":
       return "📎 Attaching file";
-    case "render_office_preview":
-      return "🖥️ Rendering Office preview";
     case "bash":
       return "🐚 Running bash";
     default:
@@ -261,6 +290,26 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return truncateSubject(stringField(record, "query"), 64);
     case "web_extract":
       return urlsSubject(record);
+    case "browser_open":
+      return truncateSubject(stringField(record, "url"), 64);
+    case "browser_navigate":
+      return truncateSubject(stringField(record, "url"), 64);
+    case "browser_snapshot":
+    case "browser_click":
+    case "browser_type":
+    case "browser_press":
+    case "browser_scroll":
+    case "browser_screenshot":
+    case "browser_list_downloads":
+    case "browser_send_file":
+    case "browser_close_tab":
+      return truncateSubject(stringField(record, "tab_id"), 64);
+    case "browser_extend_session": {
+      const minutes = numberField(record, "timeout_minutes");
+      return minutes === undefined ? undefined : `${minutes}m`;
+    }
+    case "render_office_preview":
+      return truncateSubject(stringField(record, "path"), 64);
     case "search_in_file":
     case "read_file_section":
       return metadata.fileName ?? fileIdSubject(record);
@@ -268,8 +317,6 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return generateImageSubject(record);
     case "create_file":
       return truncateSubject(stringField(record, "name") ?? stringField(record, "path"), 64);
-    case "render_office_preview":
-      return truncateSubject(stringField(record, "path"), 64);
     case "load_message": {
       const messageId = numberField(record, "message_id");
       return messageId === undefined ? undefined : `#${messageId}`;

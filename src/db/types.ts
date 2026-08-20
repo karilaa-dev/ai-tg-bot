@@ -59,13 +59,30 @@ export interface FilesTable {
   mime_type: string | null;
   extraction_status: "pending" | "ready" | "failed";
   name: string;
-  path: string | null;
   size: number;
   content_md: string | null;
   summary: string | null;
   outline_json: string | null;
   is_inline: number;
   created_at: number;
+}
+
+export interface ThreadSandboxesTable {
+  deployment_id: string;
+  user_id: number;
+  thread_id: number;
+  sandbox_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface BrowserUseProfilesTable {
+  deployment_id: string;
+  user_id: number;
+  provider_user_key: string;
+  profile_id: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface FileSourcesTable {
@@ -78,6 +95,38 @@ export interface FileSourcesTable {
   mime_type: string | null;
   last_verified_at: number | null;
   created_at: number;
+}
+
+export interface TelegramFileRefsTable {
+  id: number;
+  file_id: number;
+  telegram_file_id: string;
+  telegram_file_unique_id: string | null;
+  direction: "inbound" | "outbound";
+  media_kind: "document" | "photo";
+  telegram_message_id: number | null;
+  width: number | null;
+  height: number | null;
+  telegram_size: number | null;
+  is_primary: number;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+export interface SandboxFileRestoreStatusTable {
+  deployment_id: string;
+  thread_id: number;
+  sandbox_id: string;
+  file_id: number;
+  telegram_file_ref_id: number | null;
+  sandbox_name: string;
+  status: "available" | "error";
+  restored_size: number | null;
+  restored_sha256: string | null;
+  error_code: string | null;
+  error_detail: string | null;
+  attempted_at: number;
+  completed_at: number | null;
 }
 
 export interface FileChunksTable {
@@ -111,6 +160,10 @@ export type UserRow = UsersTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type FileRow = FilesTable;
+export type ThreadSandboxRow = ThreadSandboxesTable;
+export type BrowserUseProfileRow = BrowserUseProfilesTable;
 export type FileSourceRow = FileSourcesTable;
+export type TelegramFileRefRow = TelegramFileRefsTable;
+export type SandboxFileRestoreStatusRow = SandboxFileRestoreStatusTable;
 export type FileChunkRow = FileChunksTable;
 export type EmbeddingRow = EmbeddingsTable;

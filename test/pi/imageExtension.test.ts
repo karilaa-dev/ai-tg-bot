@@ -11,20 +11,20 @@ import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/im
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
 
-let managedRoot: string;
+let tempRoot: string;
 
 describe("Pi generate_image extension", () => {
   let db: AppDatabase | undefined;
 
   beforeEach(async () => {
-    managedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
+    tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
   });
 
   afterEach(async () => {
     vi.unstubAllGlobals();
     await db?.destroy();
     db = undefined;
-    await fs.rm(managedRoot, { recursive: true, force: true });
+    await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
   it("uses Telegram-backed references and persists the generated original without putting bytes in Pi results", async () => {
@@ -39,7 +39,6 @@ describe("Pi generate_image extension", () => {
       threadId: thread.id,
       type: "image",
       name: "telegram-reference.png",
-      path: null,
       size: 8,
       mimeType: "image/png",
       summary: "a Telegram reference",
@@ -85,7 +84,6 @@ describe("Pi generate_image extension", () => {
       } satisfies PiProviderRouter,
       resolveImage: async (file) => {
         expect(file.id).toBe(reference.id);
-        expect(file.path).toBeNull();
         return { bytes: Buffer.from("reference-bytes"), mimeType: "image/png" };
       },
     };
@@ -114,8 +112,6 @@ describe("Pi generate_image extension", () => {
     expect(result.terminate).toBe(true);
     expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
     const generated = await repos.files.get(bridge.attachments[0]!.fileId);
-    expect(generated?.path).toBe(path.join(managedRoot, String(generated?.id), "content"));
-    await expect(fs.readFile(generated!.path!)).resolves.toEqual(outputBytes);
     await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
     const persisted = JSON.stringify({ generated, result });
     expect(persisted).not.toContain(outputBytes.toString("base64"));
@@ -230,6 +226,55 @@ describe("Pi generate_image extension", () => {
     expect(stored?.mime_type).toBe("image/jpeg");
   });
 
+  it("accepts the latest partial when the hosted stream completes without a completed image item", async () => {
+    const config = testConfig();
+    db = createDatabase(config);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 821, firstName: "CodexCompletedStream" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex completed stream" });
+    const partial = Buffer.from("latest-hosted-codex-partial").toString("base64");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response([
+      `data: ${JSON.stringify({
+        type: "response.output_item.added",
+        item: { type: "image_generation_call", id: "ig_hosted", status: "in_progress", result: null },
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.image_generation_call.partial_image",
+        partial_image_index: 0,
+        partial_image_b64: partial,
+        output_format: "png",
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "image_generation_call", id: "ig_hosted", status: "generating", result: null },
+      })}\n\n`,
+      `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}`,
+    ].join(""), { headers: { "content-type": "text/event-stream" } })));
+    const model = backendModel();
+    const bridge: ChatImageBridge = {
+      config,
+      repos,
+      user,
+      thread,
+      attachments: [],
+      modelRegistry: {
+        hasConfiguredAuth: () => true,
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-completed-stream") }),
+      } as unknown as ModelRegistry,
+      providerRouter: providerRouter(model),
+      resolveImage: async () => { throw new Error("no reference expected"); },
+    };
+
+    await createGenerateImagePiTool(bridge).execute("tool-call", {
+      prompt: "stream a hosted codex image",
+      output_format: "png",
+    }, undefined, undefined, {} as never);
+
+    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("latest-hosted-codex-partial"));
+    expect(bridge.providerRouter.circuit.state().open).toBe(false);
+  });
+
   it("falls back when a Codex image stream ends after a partial without completion", async () => {
     const config = testConfig();
     db = createDatabase(config);
@@ -330,7 +375,12 @@ describe("Pi generate_image extension", () => {
     const circuit = new CodexCircuitBreaker(() => now);
     circuit.recordFailure();
     now += 30 * 60_000;
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("invalid", { status: 400 })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      error: {
+        message: "Billing hard limit has been reached.",
+        metadata: { provider_name: "OpenAI", ignored: "do not expose this object" },
+      },
+    }, { status: 400 })));
     const model = backendModel();
     const router = { ...providerRouter(model), circuit };
     const bridge: ChatImageBridge = {
@@ -349,7 +399,9 @@ describe("Pi generate_image extension", () => {
 
     await expect(createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "policy-rejected image",
-    }, undefined, undefined, {} as never)).rejects.toThrow("400");
+    }, undefined, undefined, {} as never)).rejects.toThrow(
+      "Image request failed (400): Billing hard limit has been reached.",
+    );
 
     expect(circuit.state().open).toBe(false);
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -357,7 +409,7 @@ describe("Pi generate_image extension", () => {
 });
 
 function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig({ MANAGED_FILE_ROOT: managedRoot, ...overrides });
+  return loadTestConfig(overrides);
 }
 
 function backendModel(): Model<Api> {

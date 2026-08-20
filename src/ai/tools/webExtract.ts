@@ -1,13 +1,16 @@
 import { z } from "zod";
-import { tavily, type TavilyExtractOptions } from "@tavily/core";
 import { asRecord } from "../../util/records.js";
 import { normalizeTavilyExtractResponse, toToolError, webExtractModelHint } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
+const TAVILY_EXTRACT_URL = "https://api.tavily.com/extract";
+const DEFAULT_TAVILY_EXTRACT_TIMEOUT_SECONDS = 30;
+const TAVILY_CLIENT_TIMEOUT_MARGIN_SECONDS = 5;
+
 export function createWebExtractTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Extract readable article/page content from known web page URLs after discovery or when the URL is already known. Use current-turn extracted content before claiming a web page verifies an answer. Do not use for raw JSON/API endpoints, text data files, or exact raw-data/PDF verification; prefer bash with curl -fsSL for those.",
+      "Perform one stateless Tavily extraction of readable content from known web page URLs. If the task needs screenshots, clicks, forms, login, downloads, scrolling, visual verification, or continued page actions, switch to the browser_* tools instead of chaining extraction as browser automation.",
     inputSchema: z.object({
       urls: z.array(z.string().url()).min(1).max(5),
       query: z.string().optional(),
@@ -29,19 +32,20 @@ export function createWebExtractTool(input: ToolBuildInput) {
       include_favicon,
       timeout,
       max_chars_per_url,
-    }) => {
+    }, signal) => {
       try {
         const trimmedQuery = query?.trim();
-        const options: TavilyExtractOptions = {
-          extractDepth: extract_depth,
+        const requestBody: Record<string, unknown> = {
+          urls,
+          extract_depth,
           format,
-          includeImages: include_images,
-          includeFavicon: include_favicon,
+          include_images,
+          include_favicon,
         };
-        if (timeout !== undefined) options.timeout = timeout;
+        if (timeout !== undefined) requestBody.timeout = timeout;
         if (trimmedQuery) {
-          options.query = trimmedQuery;
-          options.chunksPerSource = chunks_per_source;
+          requestBody.query = trimmedQuery;
+          requestBody.chunks_per_source = chunks_per_source;
         }
 
         input.logger?.info("tool web_extract starting", {
@@ -49,15 +53,35 @@ export function createWebExtractTool(input: ToolBuildInput) {
           queryChars: trimmedQuery?.length ?? 0,
           extractDepth: extract_depth,
         });
-        const client = tavily({ apiKey: input.config.TAVILY_API_KEY });
-        const res = await client.extract(urls, options);
+        const requestTimeout = AbortSignal.timeout(
+          (
+            (timeout ?? DEFAULT_TAVILY_EXTRACT_TIMEOUT_SECONDS)
+            + TAVILY_CLIENT_TIMEOUT_MARGIN_SECONDS
+          ) * 1_000,
+        );
+        const requestSignal = signal
+          ? AbortSignal.any([signal, requestTimeout])
+          : requestTimeout;
+        const response = await fetch(TAVILY_EXTRACT_URL, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${input.config.TAVILY_API_KEY}`,
+            "content-type": "application/json",
+            "x-client-source": "ai-tg-bot",
+          },
+          body: JSON.stringify(requestBody),
+          signal: requestSignal,
+        });
+        if (!response.ok) throw new Error(`Tavily extract failed with HTTP ${response.status}.`);
+        const res: unknown = await response.json();
         const normalized = normalizeTavilyExtractResponse(res, max_chars_per_url);
         input.logger?.info("tool web_extract complete", {
           results: normalized.results.length,
           failedResults: normalized.failed_results.length,
         });
-        return normalized;
+        return { provider: "tavily" as const, ...normalized };
       } catch (err) {
+        if (signal?.aborted) throw signal.reason ?? err;
         return toToolError(input, "web_extract", err, { urls: urls.length });
       }
     },

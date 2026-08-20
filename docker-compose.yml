@@ -7,38 +7,23 @@ services:
     environment:
       NODE_ENV: production
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
-      AGENT_SHARED_ROOT: /data
-      MANAGED_FILE_ROOT: /data/.chat-files
-      OPEN_SANDBOX_DOMAIN: ${OPEN_SANDBOX_DOMAIN:-opensandbox-server:8080}
-      OPEN_SANDBOX_PROTOCOL: ${OPEN_SANDBOX_PROTOCOL:-http}
-      OPEN_SANDBOX_API_KEY: ${OPEN_SANDBOX_API_KEY:?set OPEN_SANDBOX_API_KEY}
-      OPEN_SANDBOX_USE_SERVER_PROXY: ${OPEN_SANDBOX_USE_SERVER_PROXY:-true}
-      OPEN_SANDBOX_SHARED_HOST_ROOT: ${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}
-      OPEN_SANDBOX_IMAGE: ${OPEN_SANDBOX_IMAGE:-ghcr.io/karilaa-dev/ai-agent-box:latest}
-      OPEN_SANDBOX_USER: ${OPEN_SANDBOX_USER:-agent}
-      OPEN_SANDBOX_GROUP: ${OPEN_SANDBOX_GROUP:-agent}
-      OPEN_SANDBOX_UID: ${OPEN_SANDBOX_UID:-1000}
-      OPEN_SANDBOX_GID: ${OPEN_SANDBOX_GID:-1000}
+      E2B_API_KEY: ${E2B_API_KEY:?set E2B_API_KEY}
+      E2B_TEMPLATE: ${E2B_TEMPLATE:-ai-tg-bot-tools:production}
+      E2B_DEPLOYMENT_ID: ${E2B_DEPLOYMENT_ID:-ai-tg-bot}
+      E2B_FILE_SOURCE_MAX_BYTES: ${E2B_FILE_SOURCE_MAX_BYTES:-2147483648}
+      TELEGRAM_FILE_RESTORE_TIMEOUT_MS: ${TELEGRAM_FILE_RESTORE_TIMEOUT_MS:-300000}
+      TELEGRAM_FILE_RESTORE_CONCURRENCY: ${TELEGRAM_FILE_RESTORE_CONCURRENCY:-4}
       APP_UID: ${APP_UID:-1000}
       APP_GID: ${APP_GID:-1000}
       PI_CODING_AGENT_DIR: /app/data/pi
-      BROWSERLESS_URL: "${BROWSERLESS_URL:-}"
-      BROWSERLESS_ALLOWED_ORIGINS: "${BROWSERLESS_ALLOWED_ORIGINS:-}"
-      BROWSERLESS_TOKEN: "${BROWSERLESS_TOKEN:-}"
-      BROWSERLESS_TIMEOUT_MS: "${BROWSERLESS_TIMEOUT_MS:-30000}"
     volumes:
       - bot-data:/app/data
-      - type: bind
-        source: ${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}
-        target: /data
-        bind:
-          create_host_path: false
       - pi-home:/app/data/pi
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - opensandbox
+      - egress
       - database
     stop_grace_period: 60s
     restart: unless-stopped
@@ -67,8 +52,6 @@ volumes:
   pg-data:
 
 networks:
-  opensandbox:
-    name: ${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}
-    external: true
+  egress:
   database:
     internal: true

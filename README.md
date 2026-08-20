@@ -1,259 +1,193 @@
 # ai-tg-bot
 
-A private Telegram agent built on persistent [Pi](https://github.com/earendil-works/pi) sessions. Pi owns inference, tool loops, conversation persistence, branching, cancellation, retries, and compaction. Codex OAuth is preferred; OpenRouter is the automatic fallback and vector-embedding backend.
+A private Telegram agent built on persistent Pi sessions and persistent custom E2B Base sandboxes.
 
-Telegram controls who can reach the bot. The bot accepts private-chat senders delivered by Telegram and rejects groups and supergroups; there is no separate application allowlist.
+## Sandbox model
 
-## Architecture
+- A sandbox is created lazily the first time a thread calls a shell-backed tool.
+- Each Telegram thread owns exactly one E2B sandbox. Sandbox IDs are stored in the database and recovered by deployment/thread metadata after a restart.
+- `/home/user/workspace` is the thread's writable, persistent working directory.
+- Every Telegram-backed file visible through the thread/fork chain can be downloaded by the bot and copied through the E2B SDK into `/home/user/telegram-files`. That directory and its files are root-owned and read-only to agent commands. Files must be copied into the workspace before editing.
+- On upgrade, the obsolete host `files.path` column is dropped. Legacy rows, extracted text, search chunks, and diagnostics remain available, while host-only rows with no text, chunks, or durable Telegram/E2B source are retained for diagnostics but excluded from model and sandbox file scope.
+- There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Generated files remain in the sandbox. Telegram file bodies pass through the bot process during ingestion, sandbox restoration, and outbound delivery.
+- Sandboxes auto-pause after 3 minutes once a shell-backed turn is finished. An explicit successful `publish_website` call changes that turn's delay to 15 minutes, and the final Telegram answer states the public URL and pause timing.
+- E2B Base sandboxes have a one-hour continuous runtime window. The runtime manager proactively pauses and reconnects before that limit during long work, preserving filesystem and memory state while resetting the window.
+- Auto-resume from public traffic is disabled. A later explicit bot operation reconnects and resumes the sandbox.
 
-```text
-Telegram / Pi bot container (non-root)
-        |\
-        | \ optional Office HTML preview -> External Browserless service
-        |
-        +-- OpenSandbox HTTP API + API key
-            v
-OpenSandbox lifecycle server (trusted Docker-socket service)
-        |
-        | Docker API
-        v
-One persistent runner container per active Telegram thread
-        |
-        | three scoped host binds
-        v
-<shared-root>/users/<userId>/threads/<threadId>/workspace    ->  /data/threads/<threadId>/workspace    (rw)
-<shared-root>/users/<userId>/threads/<threadId>/attachments  ->  /data/threads/<threadId>/attachments  (ro)
-<shared-root>/users/<userId>/shared                         ->  /data/shared                           (rw)
+E2B documents the relevant behavior in [Sandbox lifecycle](https://e2b.dev/docs/sandbox), [persistence](https://e2b.dev/docs/sandbox/persistence), [file upload](https://e2b.dev/docs/filesystem/upload), and [filesystem isolation](https://e2b.dev/docs/filesystem).
+
+## Custom template and tools
+
+`E2B_TEMPLATE=ai-tg-bot-tools:production` selects the reusable private template defined in [`e2b-template`](e2b-template/README.md). It is based on E2B Base and built explicitly with 2 vCPU and 2 GiB RAM; bot startup and sandbox creation never install or rebuild it. The toolbox includes OfficeCLI, ImageMagick 7, ZIP and other archive utilities, Python, Node.js, Git/SSH, SQLite, compilers, and common shell/search/network diagnostics. Chromium and browser automation bundles are intentionally absent because browser work is provided by Browser Use Cloud.
+
+`sandbox_file_restore_status` is an intentionally retained operational audit keyed by sandbox generation and file. Deleting or replacing a sandbox removes its active `thread_sandboxes` mapping but keeps these historical restore results for diagnostics, as it does for messages, files, and Telegram references. Operators who need finite retention should archive and prune this audit table under their own data-retention policy rather than coupling history deletion to sandbox cleanup.
+
+Sandbox-created attachment buffers are released after indexing and reloaded from their durable E2B source only for the Telegram batch currently being sent. Browser and generated-image payloads remain in memory only until their send attempt completes. The bot installs grammY's `autoRetry()` transformer, which handles Telegram flood waits, HTTP failures, and 5xx responses before delivery code sees a terminal error.
+
+Partial Telegram-file restoration is cached per sandbox revision. Failed entries retry after an exponential backoff from five minutes to one hour, while a changed file descriptor or recreated sandbox triggers immediate reconciliation. Ambiguous Telegram send outcomes are stored separately from confirmed deliveries and are not advertised as delivered files.
+
+Each sandbox-created file version initially has an immutable, content-addressed source under `/home/user/.ai-tg-bot/file-sources`. Unshared versions remain there while database file records depend on them, up to the configured aggregate byte limit; least-recently-verified snapshots are evicted first when that limit is exceeded. Orphan snapshots are removed automatically. After every record sharing the same snapshot has a durable Telegram source, a later sandbox operation removes the redundant snapshot and its E2B source locators; the normal workspace copy is unaffected. Deleting the sandbox reclaims any remaining snapshots. If an outbound source cannot be reloaded, the bot records and logs that partial recovery failure, continues with other readable attachments, and does not add an unsolicited warning to the Telegram response.
+
+Build and validate a version, then atomically promote it to `production`:
+
+```bash
+npm run e2b:template:build
+npm run e2b:template:check
 ```
 
-- Each Telegram thread maps to one persistent Pi JSONL session under `PI_CODING_AGENT_DIR`.
-- Pi receives only the bot's scoped tools: `bash`, `create_file`, `render_office_preview`, `web_search`, `web_extract`, `search_thread`, `load_message`, `search_in_file`, `read_file_section`, and `generate_image`.
-- OpenSandbox provides one persistent command environment per Telegram user-and-thread pair. Commands are serialized within that thread; different threads can execute concurrently in separate sandboxes.
-- Every thread starts in `/data/threads/<threadId>/workspace`; `/data/shared` is the supported location for intentional sharing across that user's threads. A runner mounts only its current workspace, a read-only attachment-staging directory, and that user's shared directory, so sibling thread directories are absent from its mount namespace.
-- The first sandbox-backed operation lazily connects to OpenSandbox and creates or resumes the thread's environment. Idle environments pause after five minutes and expire after fifteen minutes by default. The mounted workspace and `/data/shared` survive expiration; container-layer state survives only while the same sandbox is retained.
-- Chat attachments are copied into an immutable per-call staging directory only when Pi passes their exact IDs. Canonical chat files live outside `users/` and are never mounted into a sandbox.
-- Online conversation, retrieval, web, image, and ingestion turns do not require OpenSandbox. If the service is unavailable, only sandbox-backed tools fail, and later calls retry initialization.
+Before the first cutover from Desktop, stop the bot, preview the guarded deletion scope, and execute it. Only `desktop` sandboxes with `app=ai-tg-bot` metadata match:
 
-## Provider routing
+```bash
+npm run e2b:sandboxes:prune-desktop
+npm run e2b:sandboxes:prune-desktop -- --execute
+```
 
-The internal `telegram-auto/main` and `telegram-auto/helper` models route through Pi's existing providers:
+This permanently removes unshared Desktop workspace/process state. Telegram-backed files remain durable and are restored when a thread next creates its toolbox sandbox. Moving the `production` tag later affects only new sandboxes; existing thread sandboxes retain their original build and filesystem.
 
-1. Use Pi's `openai-codex` OAuth credentials when configured.
-2. Use OpenRouter when Codex is not configured.
-3. Before output begins, fall back for quota/429, OAuth refresh, network, timeout, and retryable 5xx failures.
-4. Do not fall back after partial output or for context overflow, policy, invalid-request, or tool errors.
+Shared Telegram files are downloaded with the Bot API and written into the
+thread sandbox through E2B's SDK. Files created in the sandbox are read through
+the SDK and sent to Telegram by the bot.
 
-Main, helper, and image calls share one Codex circuit breaker. While it is open, requests use OpenRouter and only one half-open Codex probe is allowed at a time.
+OfficeCLI is pinned in the toolbox and available through `bash`. The reviewed DOCX and PPTX instruction skills are also vendored under [`skills`](skills/README.md), checksum-verified at startup, and advertised through Pi on every normal turn. Pi's host-side `read` tool is restricted to those two skill directories; it cannot read bot source, credentials, Telegram files, or the E2B workspace. Skill setup/update commands are intentionally overridden by the bot's preinstalled-tool policy.
 
-## Files, images, and retrieval
+When Browser Use Cloud is configured, OfficeCLI generates static HTML inside E2B, then the bot sanitizes it and renders it in a cookie-isolated Browser Use context. The resulting PNG is model-only visual QA; it is not sent to Telegram, and the bot does not install missing tools.
 
-- `generate_image` creates or edits one PNG, JPEG, or WebP with up to five current-thread image references. Generated originals are saved under `MANAGED_FILE_ROOT/<file_id>/content` and delivered immediately.
-- Original inbound attachments and `create_file` outputs are also persisted under `MANAGED_FILE_ROOT`. Pi JSONL and database rows contain metadata, not raw bytes or base64.
-- `[[chat-file:<id>]]` markers are durable Pi references. `search_thread` and metadata-only `load_message` discover older files; selecting exact IDs restores only those files.
-- Large documents use full-text plus vector chunk search. Searchable PDFs have native extraction; DOCX, scanned PDFs, and PDFs without usable native text require an optional external Docling service.
-- Sandbox exports are copied through a private outbox using no-follow file opens, descriptor-path validation, regular-file and byte-limit checks, exclusive mode-`0600` destinations, and partial-output cleanup.
-- The runner has pinned OfficeCLI PPTX/DOCX skills but intentionally no Chromium or local Playwright browser. OfficeCLI emits page HTML, and the optional bot-side Browserless integration renders model-only PNG previews for visual QA without persisting screenshot base64 or sending previews to Telegram.
+## Prompt and inference caching
+
+Normal turns keep the core system prompt, Office skill index, tool schemas, and prior Pi conversation stable as a reusable inference prefix. Fresh time, timezone, user, thread-title, and inherited-file metadata is rendered once at turn start into a bounded `<session_context>` block. Pi prepends that untrusted metadata ephemerally to the latest user message for each provider call; it is not written into persistent conversation history or compaction summaries. Attachment materialization remains closer to the current request, and a turn reuses one fixed metadata snapshot throughout its tool loop.
+
+OpenRouter receives Pi's opaque session UUID as its sticky-routing affinity value. No Telegram identifier or descriptive metadata is used for affinity, and cache retention remains at the provider default. Long-lived prompt retention, explicit model cache-control blocks, and response caching are intentionally disabled.
+
+Existing completion, cancellation, and failure logs include the final inference provider/model plus per-turn input, output, cache-read, cache-write, total-token, and cache-read-ratio fields when usage is available. A zero cache-read ratio can be normal for a first request, a short prefix, an expired cache, or an unsupported route.
+
+## Files and retrieval
+
+- Telegram remains the durable source for inbound and successfully delivered outbound file bytes. Intake downloads accepted files, records every Telegram file identifier, captions images, and extracts/indexes supported documents.
+- `[[chat-file:<id>]]` markers are durable Pi references.
+- `load_message` can load selected attachment bytes into transient model context. The same files are restored into the read-only Telegram directory before sandbox operations.
+- Files created by the agent receive an E2B source locator and are read through the SDK before the bot sends them. Photos that exceed Telegram's photo limit or are rejected as photos are sent as documents without suppressing other attachments.
 
 ## Requirements
 
-- Node.js 24.18 or newer for source development.
-- Telegram bot token.
-- OpenRouter API key.
-- Tavily API key.
-- OpenSandbox API key shared with the lifecycle server.
-- A reachable OpenSandbox server using the pinned Docker server/execd releases.
-- One absolute host folder visible under the same path to the bot deployment, OpenSandbox server, host Docker daemon, and runner bind mounts.
-- Optional Codex OAuth login through Pi.
-- Optional external Docling server.
-- Optional external Browserless service reachable from the bot container for Office visual previews.
-
-The bot container itself does **not** need `/dev/kvm`, `/var/run/docker.sock`, privileged mode, writable/private cgroups, or unconfined security profiles.
+- Node.js 24.18 or newer
+- Telegram bot token
+- E2B API key
+- OpenRouter API key
+- Tavily API key
+- Optional Browser Use Cloud API key for interactive browsing and Office visual QA
+- Codex CLI OAuth login (primary inference provider)
+- Optional external Docling service
 
 ## Source setup
 
-Start the OpenSandbox server first. On Linux with Docker:
-
 ```bash
 cp .env.example .env
-# Edit API keys and set BOT_SHARED_HOST_PATH to a real absolute host path.
-. ./.env
-mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
-
-docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
-docker compose \
-  -f docker-compose.opensandbox.yml \
-  -f docker-compose.opensandbox.dev.yml \
-  up -d
-```
-
-The checked-in example server configuration permits host binds only below:
-
-```text
-/mnt/user/ai-tg-bot-shared/users
-```
-
-If `BOT_SHARED_HOST_PATH` differs, copy `docker/opensandbox/config.example.toml`, change `allowed_host_paths` to `<your-root>/users`, and set `OPEN_SANDBOX_CONFIG_FILE` to that copy. Do not allow the entire filesystem or the shared root's `.chat-files` and `.outbox` directories.
-
-The development override publishes the authenticated lifecycle API only on `127.0.0.1:8080`, allowing the host-run bot configuration below to use `localhost:8080`. Do not include this override in the normal two-container deployment.
-
-Run the bot from source:
-
-```bash
+# Fill in BOT_TOKEN, E2B_API_KEY, OPENROUTER_API_KEY, and TAVILY_API_KEY.
 npm install
 npm run dev
 ```
 
-The bot initializes the current schema at startup. Use an empty SQLite database or PostgreSQL schema for this release; databases created by other releases are unsupported and are not transformed or cleaned automatically.
-
-For source execution, the bot-visible and server-visible shared roots can be the same absolute local directory:
-
-```dotenv
-AGENT_SHARED_ROOT=/absolute/path/to/ai-tg-bot-shared
-MANAGED_FILE_ROOT=/absolute/path/to/ai-tg-bot-shared/.chat-files
-OPEN_SANDBOX_SHARED_HOST_ROOT=/absolute/path/to/ai-tg-bot-shared
-OPEN_SANDBOX_DOMAIN=localhost:8080
-OPEN_SANDBOX_PROTOCOL=http
-OPEN_SANDBOX_API_KEY=<same-secret-as-server>
-```
-
-`MANAGED_FILE_ROOT` must remain outside `AGENT_SHARED_ROOT/users`.
-
-Optional Office visual preview configuration stays on the bot side:
-
-```dotenv
-BROWSERLESS_URL=ws://browserless:3000/chromium/playwright
-BROWSERLESS_ALLOWED_ORIGINS=ws://browserless:3000
-BROWSERLESS_TIMEOUT_MS=30000
-# BROWSERLESS_TOKEN=
-```
-
-WebSocket URLs must end in `/playwright`; tokenless endpoints are supported. `BROWSERLESS_ALLOWED_ORIGINS` is a comma-separated exact allowlist and must include the configured URL's origin (scheme, hostname, and port). HTTP(S) base URLs use Browserless's `/active` and `/screenshot` REST endpoints. The bot container must be able to reach Browserless, but the OpenSandbox runner must not receive Browserless configuration or network access.
-
-REST requests send `BROWSERLESS_TOKEN` in an `Authorization: Bearer` header. Browserless requires the token as a query parameter for native Playwright WebSocket connections, so use a narrowly scoped, rotatable token and configure Browserless, proxies, and tracing systems to redact WebSocket query strings.
-
-To configure Codex OAuth in the same Pi directory used by the bot:
+Sign in once with the official Codex CLI. The bot reads and refreshes the standard
+owner-only Codex credential cache in place; OpenRouter is used only when Codex is
+unavailable or a Codex request fails before producing output.
 
 ```bash
-PI_CODING_AGENT_DIR=./data/pi npx pi
+codex login
 ```
 
-Enter `/login` and choose OpenAI Codex. Without Codex credentials, the bot operates through OpenRouter.
+By default the cache is `~/.codex/auth.json`. Set `CODEX_AUTH_FILE` when the bot
+runs under another user or in a container. Mount the directory containing that file
+read-write so atomic OAuth refreshes survive restarts. Do not use a single-file bind
+mount. For example, mount a persistent directory at `/app/data/codex` and set
+`CODEX_AUTH_FILE=/app/data/codex/auth.json`. Existing `openai-codex` OAuth credentials
+in `PI_CODING_AGENT_DIR/auth.json` remain supported and take precedence.
 
-## OpenSandbox configuration
+The default database is SQLite. Set `DB_URL` to use PostgreSQL. On upgrade, the current release removes the obsolete host-file `path` column. Records with a Telegram or E2B source, extracted text, or search chunks remain in active thread scope. Host-only records without a recoverable source are retained as diagnostic rows but excluded from agent-visible thread scope. Physical files in the old host-storage directory are not deleted automatically.
 
-Important settings are documented in [`.env.example`](./.env.example):
-
-```dotenv
-OPEN_SANDBOX_DOMAIN=opensandbox-server:8080
-OPEN_SANDBOX_PROTOCOL=http
-OPEN_SANDBOX_API_KEY=<long-random-secret>
-OPEN_SANDBOX_USE_SERVER_PROXY=true
-OPEN_SANDBOX_SHARED_HOST_ROOT=/mnt/user/ai-tg-bot-shared
-OPEN_SANDBOX_DEPLOYMENT_ID=ai-tg-bot
-OPEN_SANDBOX_IMAGE=ghcr.io/karilaa-dev/ai-agent-box:sha-<commit>
-OPEN_SANDBOX_CPU=2
-OPEN_SANDBOX_MEMORY=512Mi
-OPEN_SANDBOX_USER=agent
-OPEN_SANDBOX_GROUP=agent
-OPEN_SANDBOX_UID=1000
-OPEN_SANDBOX_GID=1000
-OPEN_SANDBOX_IDLE_PAUSE_MS=300000
-OPEN_SANDBOX_IDLE_RELEASE_MS=900000
-```
-
-The image reference, resources, username/group, UID/GID, shared root, idle-release timeout, and layout/network markers form the provisioning fingerprint. `OPEN_SANDBOX_USER` and `OPEN_SANDBOX_GROUP` must exist in the runner image and resolve to the configured numeric identity so private mode-`0600` command input is readable. `OPEN_SANDBOX_UID` and `OPEN_SANDBOX_GID` must both be nonzero, and the runner UID should remain aligned with the bot's `APP_UID` so bind-mounted files remain readable for export. `OPEN_SANDBOX_IDLE_RELEASE_MS` must be greater than `OPEN_SANDBOX_IDLE_PAUSE_MS`. A changed fingerprint replaces obsolete managed sandboxes on their next use while preserving the bind-mounted thread and shared trees.
-
-The default lightweight Alpine runner includes Bash, Python, Node.js, `curl`, archives, Git, SQLite, ImageMagick 7 through `magick`, common utilities, and pinned OfficeCLI PPTX/DOCX skills. Chromium is intentionally absent; the bot renders OfficeCLI HTML through external Browserless. The separate `dev-sha-...` variant adds compilers and full diagnostics. See [`docker/ai-agent-box/README.md`](./docker/ai-agent-box/README.md). Pin an immutable `sha-...` or `dev-sha-...` tag in production rather than relying on mutable tags.
-
-The server example pins the stock `opensandbox/server:v0.2.2` lifecycle image and `opensandbox/egress:v1.1.5` sidecar in `dns+nft` mode. The sidecar inherits the normal Docker resolver configuration and redirects sandbox DNS through its internal `127.0.0.1:15353` proxy. The bot therefore leaves sandbox loopback available while denying routed private, Docker/LAN, CGNAT, link-local/metadata, reserved, multicast, and documentation ranges. Unmatched public internet traffic remains allowed.
-
-Do not configure per-sandbox DNS upstream variables or use a patched OpenSandbox server. A Docker daemon-level DNS override is also unnecessary when ordinary Docker containers can resolve public hostnames. If an override was added while troubleshooting, remove it after the live verification below succeeds and after confirming no other containers depend on it. Fix host or Docker resolver configuration if ordinary bridge containers cannot resolve names; the bot does not rewrite runner `/etc/resolv.conf`.
-
-For stronger runtime isolation, install and register Kata on the Docker host, then enable the commented `[secure_runtime]` block in the server config. Kata requires supported virtualization and `/dev/kvm` on the trusted OpenSandbox host; the bot container remains unprivileged. gVisor is another OpenSandbox option, but server v0.2.2 cannot combine gVisor with the `networkPolicy` enforcement used here, so do not enable `runsc` without redesigning egress enforcement.
+For an OpenSandbox-era deployment, stop the old bot before upgrading and detach its former managed-file root from the new deployment. The E2B release never reads that directory, so every physical file below it is unreferenced after the database migration. It can remain on the old host as rollback material. Legacy generated files that were never delivered through Telegram cannot be imported automatically.
 
 ## Docker Compose
 
-Create the shared directory and private network, then start the trusted lifecycle service and bot:
-
 ```bash
 cp .env.example .env
-# Edit API keys and BOT_SHARED_HOST_PATH.
-. ./.env
-mkdir -p "${BOT_SHARED_HOST_PATH:?set BOT_SHARED_HOST_PATH to the shared host folder}/users"
-docker network create "${OPEN_SANDBOX_NETWORK:-ai-tg-bot-opensandbox}" 2>/dev/null || true
-
-docker compose -f docker-compose.opensandbox.yml up -d
+# Fill in credentials and POSTGRES_PASSWORD.
 docker compose up --build -d
 ```
 
-- `docker-compose.opensandbox.yml` uses the pinned stock server image, mounts `/var/run/docker.sock` only into `opensandbox-server`, persists lifecycle state, mounts the shared folder under the identical absolute host path, and maps `host.docker.internal` to the Docker host gateway for runner readiness checks.
-- `docker-compose.yml` runs the bot with PostgreSQL 17.10, mounts the shared folder at `/data`, and passes the original host path through `OPEN_SANDBOX_SHARED_HOST_ROOT` for runner provisioning.
-- Browserless configuration is passed only to the bot. Put Browserless on a bot-reachable network or use a reachable URL; do not expose it to runner sandboxes.
-- Both services join `ai-tg-bot-opensandbox` by default. Do not publish port 8080 unless another trusted client needs it; if it is published, restrict it with host firewall rules.
-- The bot starts as root only long enough to prepare owned persistent directories, then executes Node through `setpriv` as `APP_UID:APP_GID` with groups and capabilities cleared and `no-new-privs` enabled.
-- PostgreSQL is available only to the bot on an internal Compose network and is not published on a host port. Set `POSTGRES_PASSWORD` in `.env` to a long random value; the container entrypoint safely URL-encodes it when constructing `DB_URL`.
+The bot container has normal outbound access for E2B/provider APIs and a second internal-only network for PostgreSQL. It does not need a Docker socket, host workspace mount, privileged mode, or a local sandbox service.
 
-## Unraid deployment
+## Unraid to Dokploy migration
 
-This deployment uses two templates:
+Follow the standalone [Unraid to Dokploy migration guide](MIGRATION.md). It covers the export
+wizard, Dokploy setup, import, smoke tests, and rollback.
 
-1. [`templates/opensandbox-server.xml`](./templates/opensandbox-server.xml) — trusted lifecycle service with Docker-socket access.
-2. [`templates/ai-tg-bot.xml`](./templates/ai-tg-bot.xml) — unprivileged Telegram bot.
+## E2B configuration
 
-Setup:
+```dotenv
+E2B_API_KEY=<secret>
+E2B_TEMPLATE=ai-tg-bot-tools:production
+E2B_DEPLOYMENT_ID=ai-tg-bot
+E2B_REQUEST_TIMEOUT_MS=30000
+E2B_FILE_SOURCE_MAX_BYTES=2147483648
+TELEGRAM_FILE_RESTORE_TIMEOUT_MS=300000
+TELEGRAM_FILE_RESTORE_CONCURRENCY=4
+```
 
-1. Create a custom Docker network:
+Use a distinct `E2B_DEPLOYMENT_ID` for each deployment sharing an E2B account. Do not change it casually: it is part of sandbox ownership and recovery.
+`E2B_REQUEST_TIMEOUT_MS` applies to short control-plane operations. `E2B_FILE_SOURCE_MAX_BYTES` bounds immutable snapshots that still lack Telegram recovery; least-recently-verified snapshots are evicted first after the limit is crossed. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` is also the data-plane request budget for large E2B file uploads and downloads, so the default five-minute restore window is not shortened by the control timeout.
 
-   ```bash
-   docker network create ai-tg-bot-opensandbox
-   ```
+The bot creates secured sandboxes with public port traffic and internet access enabled, timeout action `pause`, memory preservation enabled, and automatic resume disabled. E2B's public-traffic setting is selected at sandbox creation and remains enabled so a persistent thread sandbox can later publish a requested site without destructive recreation. Agent guidance requires ordinary local services to bind to `127.0.0.1`; only an explicitly requested website may bind to `0.0.0.0` and proceed through `publish_website`.
 
-2. Create `/mnt/user/ai-tg-bot-shared/users` and ensure UID/GID `1000:1000` can write it.
-3. Copy `docker/opensandbox/config.example.toml` to `/mnt/user/appdata/opensandbox/config.toml`.
-4. Verify the TOML allowlist contains only `/mnt/user/ai-tg-bot-shared/users`, retain the pinned `dns+nft` egress image, and retain `[docker] host_ip = "host.docker.internal"`.
-5. Install and start `opensandbox-server` on `ai-tg-bot-opensandbox`. Set a long random API key and retain the template's `--add-host=host.docker.internal:host-gateway` extra parameter.
-6. Install `ai-tg-bot` on the same network, use the identical API key, and keep:
-   - Agent Shared Data: `/mnt/user/ai-tg-bot-shared` -> `/data`
-   - OpenSandbox Shared Host Root: `/mnt/user/ai-tg-bot-shared`
-   - OpenSandbox Domain: `opensandbox-server:8080`
-   - Runner username/group set to `agent:agent` and UID/GID values aligned at `1000:1000`
-7. Leave Docling URL empty unless a separately operated service is available. Configure Browserless URL/token only when a separately operated Browserless service is reachable from the bot.
+## Browser Use Cloud configuration
 
-If the shared location changes, update all four places together: bot bind source, `OPEN_SANDBOX_SHARED_HOST_ROOT`, server bind source/target, and the TOML `allowed_host_paths`. The path string passed to Docker must be the actual Unraid host path, not `/data` and not an SMB URL.
+```dotenv
+BROWSER_USE_API_KEY=<secret>
+BROWSER_USE_DEPLOYMENT_ID=ai-tg-bot
+BROWSER_USE_DEFAULT_TIMEOUT_MINUTES=5
+BROWSER_USE_IDLE_TIMEOUT_MS=300000
+BROWSER_USE_API_TIMEOUT_MS=30000
+BROWSER_USE_NAVIGATION_TIMEOUT_MS=45000
+```
 
-### Upgrading an existing OpenSandbox installation
+`web_search` and the one-shot, stateless `web_extract` tool always use Tavily. Screenshots, clicks, forms, login, downloads, scrolling, visual verification, and continued page work use the sequential `browser_*` tools.
 
-1. Update the server TOML with `[docker] host_ip = "host.docker.internal"`.
-2. Select the stock `docker.io/opensandbox/server:v0.2.2` image, add `--add-host=host.docker.internal:host-gateway` to the server container, and recreate it.
-3. Retain `opensandbox/egress:v1.1.5` in the TOML, then update and recreate `ai-tg-bot`. The `public-internet-v3` fingerprint replaces obsolete managed sandboxes on their next use.
-4. Run `npm run live:opensandbox-check` from a configured checkout or execute equivalent hostname, public HTTPS, and private-address checks from a bot-managed sandbox.
-5. Confirm public DNS/HTTPS succeeds and a known reachable LAN service remains unreachable from the sandbox. Egress logs should show normal DNS outbound events without custom upstream or nameserver-exemption settings.
-6. After verification succeeds, remove any Docker daemon DNS override added solely for OpenSandbox and restart Docker at a suitable maintenance time.
+The bot stores one opaque Browser Use profile mapping per Telegram user. Cookies and persistent browser storage follow that user across their Telegram threads, while tabs and element refs stay private to the thread that created them. Browser creation requires `proxyCountryCode: null`, never supplies a custom proxy, and disables recordings. If Browser Use nevertheless reports non-zero proxy usage or cost, the runtime fails closed and blocks further sessions until restart. Telegram identifiers, usernames, and names are never used as provider profile identifiers.
 
-## Security boundary
+Normal screenshots use an adaptive regular-desktop viewport and are sent as Telegram photos. Full-page capture is reserved for explicit full/whole-page requests; document delivery is reserved for explicit “as a file/document” requests. Screenshots and browser files are attached directly without E2B. Browser files are size-bounded, checked against executable-file restrictions, and refused when their URL or any redirect resolves to a local/private address.
 
-OpenSandbox's default Docker runtime isolates workloads with Linux containers. Treat untrusted commands accordingly.
+Cloud sessions use `BROWSER_USE_DEFAULT_TIMEOUT_MINUTES` (5 in the example above). `browser_open` can request 5–240 minutes for a new session. `browser_extend_session` explicitly stops and recreates the browser with the same profile, restoring owned URLs, scroll positions, and tab IDs while warning that transient page state is lost. Idle cleanup uses `BROWSER_USE_IDLE_TIMEOUT_MS` or stops shortly before provider expiry. The agent can call `browser_close_tab` for one thread-owned tab or `browser_close_session` after all browser work is complete; explicit session closure stops billing promptly and saves profile state without deleting the profile.
 
-- The OpenSandbox server's Docker socket is root-equivalent host authority. Restrict who can reach or configure it.
-- Keep API-key authentication enabled and use a private Docker network or strict firewall rules.
-- Give each runner exactly three scoped binds: its workspace read-write at `/data/threads/<threadId>/workspace`, its attachment staging read-only at `/data/threads/<threadId>/attachments`, and its user-shared directory read-write at `/data/shared`. Sibling threads are not mounted. Canonical `.chat-files`, `.outbox`, database files, Pi credentials, and bot secrets remain outside runner mounts.
-- Do not inject Telegram, OpenRouter, Tavily, Codex, Browserless, or OpenSandbox credentials into runner commands.
-- The default `dns+nft` policy denies routed RFC1918/LAN, carrier-grade NAT, link-local/cloud metadata, multicast, reserved, and documentation/benchmark ranges for IPv4 and IPv6 before allowing unmatched public traffic. Sandbox loopback is intentionally available because the stock egress DNS proxy uses it; it is inside the shared runner/sidecar network namespace and is not a route to the Docker host or LAN. Treat loopback as reserved for OpenSandbox internals. Retain host/network firewall enforcement as defense in depth, especially for host public addresses and deployment-specific routes, and test literal IP plus DNS-rebinding cases separately.
-- No guest ports are intentionally published. `OPEN_SANDBOX_USE_SERVER_PROXY=true` keeps command/file traffic routed through the authenticated lifecycle endpoint.
+Keep the access key only in `.env`. It is redacted from client errors and never injected into E2B commands. Browser Use agent tasks, arbitrary page evaluation, cookie import, proxies, and recordings are not exposed.
+
+## Public websites
+
+The agent creates a dedicated site subdirectory, starts an HTTP server from that exact directory with `bash`, binds it to `0.0.0.0`, and detaches all inherited input/output so command capture can finish, for example:
+
+```bash
+mkdir -p /home/user/workspace/site
+cd /home/user/workspace/site
+nohup python3 -m http.server 3000 --bind 0.0.0.0 </dev/null >server.log 2>&1 &
+```
+
+It then calls:
+
+```json
+{"port": 3000, "site_dir": "/site", "path": "/"}
+```
+
+through `publish_website`. The bot rejects workspace-root or Telegram-file publication, verifies that the listening process is running from the declared site directory, and verifies the E2B HTTPS URL before returning it. The URL is public and unauthenticated. A request to create, start, host, or publish a website authorizes only its intended site contents; private attachments, unrelated workspace data, and credentials must not be added unless the user explicitly requested that material on the public site. A public URL is unavailable while its sandbox is paused; a later shell-backed bot request resumes the sandbox and its preserved process state.
 
 ## Telegram commands
 
 - `/lang` — change language
 - `/timezone` — set timezone
 - `/stream` — toggle draft streaming
-- `/stop` — cancel the active Pi turn or file ingest
+- `/stop` — cancel the active Pi turn
 - `/fork` — branch the current Pi session into a Telegram topic
 - `/compact` — invoke Pi compaction
 - `/help` — show command help
 
 ## Verification
-
-Automated checks:
 
 ```bash
 npm run typecheck
@@ -261,26 +195,26 @@ npm test
 npm run build
 ```
 
-Provider checks use configured credentials:
+Provider checks:
 
 ```bash
 npm run live:pi-check
 npm run live:pi-fallback
 ```
 
-With a real OpenSandbox server and shared host path configured:
+With E2B configured:
 
 ```bash
-npm run live:opensandbox-check
-npm run live:opensandbox-check   # repeat to exercise reconciliation
+npm run live:e2b-check
 ```
 
-The runtime check covers real command execution, shared-path visibility, interruption/recovery, export, pause/resume, and manager recreation. It cleans up only its uniquely identified test resources.
-
-The end-to-end benchmark uses the real Pi tool loop and provider credentials while replacing Telegram transmission with a capture adapter:
+With Browser Use Cloud configured:
 
 ```bash
-npm run live:opensandbox-turn-check
+npm run live:browser-use-check
 ```
 
-It asks the agent to download exactly ten safe-for-work Hatsune Miku artworks from Wikimedia Commons, record source/creator/license/hash metadata, build and test a ZIP with the `zip` command, and deliver it through `create_file`. The harness independently verifies archive paths, count, image signatures, unique hashes, Wikimedia source metadata, approved licenses, size, persistence, tool-call/failure budgets, and one captured document delivery. It inherits the configured production idle-pause duration rather than shortening it; after the turn it explicitly pauses the uniquely tagged sandbox and proves that the same sandbox resumes with the archive intact. Failed runs retain a sanitized diagnostic bundle and transcript after copied Pi authentication is removed.
+The live check creates a randomized disposable profile, verifies a snapshot and PNG screenshot, explicitly closes the session, reopens with the same profile to verify cookie persistence, explicitly closes again, and deletes only that disposable profile before exiting.
+
+Set `LIVE_TELEGRAM_FILE_ID` to exercise bot-mediated restoration, read-only
+permissions, the custom toolbox contract, and ZIP creation during the live check.

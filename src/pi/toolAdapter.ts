@@ -6,16 +6,34 @@ import type { ToolBuildInput } from "../ai/tools/types.js";
 import { raceWithAbort } from "../files/cancel.js";
 import { asRecord, safeJson } from "../util/records.js";
 
-const BOT_TOOL_NAMES = [
+const BASE_BOT_TOOL_NAMES = [
   "search_thread",
   "load_message",
   "search_in_file",
   "read_file_section",
   "create_file",
-  "render_office_preview",
+  "publish_website",
   "bash",
   "web_search",
   "web_extract",
+] as const;
+
+const BROWSER_TOOL_NAMES = [
+  "render_office_preview",
+  "browser_open",
+  "browser_list_tabs",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_press",
+  "browser_scroll",
+  "browser_screenshot",
+  "browser_list_downloads",
+  "browser_send_file",
+  "browser_close_tab",
+  "browser_extend_session",
+  "browser_close_session",
 ] as const;
 
 export interface PiToolBridge {
@@ -24,17 +42,25 @@ export interface PiToolBridge {
 }
 
 export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
-  const initial = buildToolRegistry(bridge.buildInput());
-  return BOT_TOOL_NAMES.map((name) => {
+  const initialInput = bridge.buildInput();
+  const initial = buildToolRegistry(initialInput);
+  const names = [
+    ...BASE_BOT_TOOL_NAMES,
+    ...BROWSER_TOOL_NAMES.filter((name) => Boolean(initial[name])),
+  ];
+  return names.map((name) => {
     const definition = initial[name];
     if (!definition) throw new Error(`Missing bot tool ${name}`);
     return {
       name,
       label: toolLabel(name),
       description: definition.description,
-      promptSnippet: toolSnippet(name),
       parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
-      executionMode: name === "bash" || name === "create_file" || name === "render_office_preview"
+      executionMode: name === "bash"
+        || name === "create_file"
+        || name === "publish_website"
+        || name === "render_office_preview"
+        || name.startsWith("browser_")
         ? "sequential"
         : undefined,
       async execute(toolCallId, rawInput, signal) {
@@ -108,19 +134,4 @@ function piContentFromModelOutput(modelOutput: unknown): Array<TextContent | Ima
 
 function toolLabel(name: string): string {
   return name.split("_").map((part) => part[0]!.toUpperCase() + part.slice(1)).join(" ");
-}
-
-function toolSnippet(name: string): string {
-  switch (name) {
-    case "bash": return "Run real Bash in the current user-and-thread OpenSandbox environment. Omit cwd and use relative paths: logical / is the current thread workspace, not filesystem root. Only the current workspace, read-only staged attachments, and /data/shared are mounted; sibling threads are inaccessible. Never pass the bot host cwd or probe /home/agent or /workspace. Use /data/shared only for intentional cross-thread files and pass exact attachment ids in input_file_ids.";
-    case "search_thread": return "Search prior chat messages lexically and attached document chunks lexically and semantically.";
-    case "load_message": return "Load prior-message metadata, optionally restoring only selected file_ids into transient Pi context.";
-    case "search_in_file": return "Search indexed file chunks semantically and lexically.";
-    case "read_file_section": return "Read exact indexed sections from an uploaded file.";
-    case "create_file": return "Attach an existing sandbox file through the active chat.";
-    case "render_office_preview": return "Render an OfficeCLI-generated HTML page through the bot's Browserless service and return the image for visual QA. Browserless is not accessible from bash.";
-    case "web_search": return "Search the web through Tavily.";
-    case "web_extract": return "Extract content from web pages through Tavily.";
-    default: return name;
-  }
 }

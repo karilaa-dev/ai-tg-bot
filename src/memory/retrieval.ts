@@ -103,7 +103,7 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
   const messageIdSet = new Set(messageIds);
   const attachedFiles = await repos.files.listForMessages(messageIds);
   const threadFiles = await repos.files.listForThreads(threadIds);
-  const fileIds = [
+  const candidateFileIds = [
     ...new Set([
       ...attachedFiles.map((file) => file.id),
       ...threadFiles
@@ -111,6 +111,8 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise
         .map((file) => file.id),
     ]),
   ];
+  const recoverableIds = new Set(await repos.files.listRecoverableIds(candidateFileIds));
+  const fileIds = candidateFileIds.filter((fileId) => recoverableIds.has(fileId));
   return { threadIds, messageIds, fileIds };
 }
 
