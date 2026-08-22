@@ -70,13 +70,69 @@ describe("buffered Telegram attachment delivery", () => {
     expect(api.deleteMessage).toHaveBeenCalledWith(123, 702);
   });
 
-  it("downgrades oversized generated images before the early photo path selects them", () => {
+  it("downgrades oversized generated images before attachment delivery", () => {
     const oversized = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
     oversized.origin = "generated_image";
 
     normalizeTelegramAttachmentDeliveries([oversized]);
 
     expect(oversized.delivery).toBe("document");
+  });
+
+  it("sends final thinking before a captioned generated image without a completion reply", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "A pear with the cat's face";
+
+    await sendFinal(input, "Image generation details", "", 1000, [attachment]);
+
+    expect(api.raw.sendRichMessage).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0])
+      .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
+    expect(api.sendPhoto).toHaveBeenCalledWith(123, expect.anything(), expect.objectContaining({
+      caption: "A pear with the cat's face",
+    }));
+  });
+
+  it("delivers a generated image before assistant persistence can fail", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    vi.mocked(input.repos.messages.insert).mockRejectedValueOnce(new Error("database unavailable"));
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "Generated image";
+
+    await expect(sendFinal(input, "Image generation details", "", 1000, [attachment]))
+      .rejects.toThrow("database unavailable");
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(attachment.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
+    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0])
+      .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
+    expect(api.sendPhoto.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0]!);
+  });
+
+  it("sends a failure reply only when generated-image delivery is definitively rejected", async () => {
+    const api = fakeApi();
+    api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));
+    api.sendDocument.mockRejectedValue(telegramError("Bad Request: document rejected", "sendDocument"));
+    const input = turnInput(api);
+    const attachment = imageAttachment(1, "generated.jpg", 100);
+    attachment.origin = "generated_image";
+    attachment.caption = "Generated image";
+
+    await sendFinal(input, "Image generation details", "", 1000, [attachment]);
+
+    expect(attachment.telegramDelivery).toBeUndefined();
+    expect(attachment.telegramDeliveryFailure).toBe("telegram_rejected");
+    expect(api.raw.sendRichMessage).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(api.raw.sendRichMessage.mock.calls[1])).toContain("image-delivery-failed");
+    expect(api.sendDocument.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(api.raw.sendRichMessage.mock.invocationCallOrder.at(-1)!);
   });
 
   it("sends images over Telegram's photo limit as documents", async () => {
