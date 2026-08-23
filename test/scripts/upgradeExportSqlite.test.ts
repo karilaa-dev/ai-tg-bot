@@ -28,12 +28,32 @@ describe("SQLite migration export", () => {
     await fs.mkdir(sourceDirectory);
     await fs.mkdir(outputDirectory);
 
-    const source = new Database(sourceFile);
-    source.pragma("journal_mode = WAL");
-    source.exec("create table sample(value text not null)");
-    source.prepare("insert into sample values (?)").run("preserved");
-    source.close();
-    await fs.chmod(sourceFile, 0o444);
+    await execFileAsync(process.execPath, ["-e", `
+      const Database = require("better-sqlite3");
+      const source = new Database(process.argv[1]);
+      source.pragma("journal_mode = WAL");
+      source.pragma("wal_autocheckpoint = 0");
+      source.exec("create table sample(value text not null)");
+      source.prepare("insert into sample values (?)").run("preserved");
+      process.exit(0);
+    `, sourceFile]);
+
+    const walFile = `${sourceFile}-wal`;
+    expect((await fs.stat(walFile)).size).toBeGreaterThan(0);
+    const mainOnlyFile = path.join(tempDir, "main-only.db");
+    await fs.copyFile(sourceFile, mainOnlyFile);
+    const mainOnly = new Database(mainOnlyFile);
+    try {
+      expect(() => mainOnly.prepare("select value from sample").all()).toThrow(/no such table/);
+    } finally {
+      mainOnly.close();
+    }
+
+    await Promise.all([sourceFile, walFile, `${sourceFile}-shm`].map(async (file) => {
+      await fs.chmod(file, 0o444).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }));
     await fs.chmod(sourceDirectory, 0o555);
 
     await expect(execFileAsync(exporter, [script, "--out", outputFile], {
