@@ -26,7 +26,7 @@ configure_postgres_url() {
 prepare_directories() {
     mkdir -p "${APP_DATA_ROOT}" "${PI_CODING_AGENT_DIR}"
     if [ "$(id -u)" = "0" ]; then
-        chown -R "${APP_UID}:${APP_GID}" "${APP_DATA_ROOT}"
+        chown -R "${APP_UID}:${APP_GID}" "${APP_DATA_ROOT}" "${PI_CODING_AGENT_DIR}"
     else
         probe="${APP_DATA_ROOT}/.write-test.$$"
         : >"${probe}"

@@ -40,6 +40,37 @@ describe("container entrypoint", () => {
     await expect(fs.stat(env.PI_CODING_AGENT_DIR!)).resolves.toMatchObject({});
   });
 
+  it("assigns a custom Pi directory to the application identity", async () => {
+    const binDir = path.join(tempDir, "identity-bin");
+    const chownLog = path.join(tempDir, "chown.args");
+    const piDirectory = path.join(tempDir, "custom-pi");
+    await fs.mkdir(binDir);
+    await fs.writeFile(path.join(binDir, "id"), [
+      "#!/bin/sh",
+      "if [ \"${1:-}\" = \"-u\" ]; then printf '0'; else exec /usr/bin/id \"$@\"; fi",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    await fs.writeFile(path.join(binDir, "chown"), [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" > ${quoteShellToken(chownLog)}`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    await runEntrypoint({
+      ...env,
+      PATH: `${binDir}:${env.PATH}`,
+      PI_CODING_AGENT_DIR: piDirectory,
+    });
+
+    expect(await fs.readFile(chownLog, "utf8")).toBe([
+      "-R",
+      `${env.APP_UID}:${env.APP_GID}`,
+      env.APP_DATA_ROOT,
+      piDirectory,
+      "",
+    ].join("\n"));
+  });
+
   it("URL-encodes the PostgreSQL password when constructing DB_URL", async () => {
     const result = await runEntrypoint(
       { ...env, POSTGRES_PASSWORD: "complex:/?#[]@!$&'()*+,;=% password" },

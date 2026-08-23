@@ -63,7 +63,7 @@ describe("Unraid migration wizard", () => {
     expect((await fs.readFile(path.join(exportDir, "SHA256SUMS"), "utf8"))).toContain("app-data.tgz");
 
     const log = await fs.readFile(dockerLog, "utf8");
-    expect(log).not.toMatch(/(?:^|\s)(?:stop|start|restart|rm)(?:\s|$)/u);
+    expect(log).not.toMatch(/^(?:stop|start|restart|rm)(?:\s|$)/mu);
     expect(log).not.toContain("telegram-secret-token");
     expect(log).not.toContain("/mnt/user/ai-bot,target=/source");
     expect(log).toContain(`source=${appdataSource},target=/source,readonly`);
@@ -127,7 +127,7 @@ describe("Unraid migration wizard", () => {
       expect(result.code).not.toBe(0);
       expect(await fs.readdir(exportParent)).toEqual([]);
       const log = await fs.readFile(dockerLog, "utf8");
-      expect(log).not.toMatch(/(?:^|\s)(?:stop|start|restart|rm)(?:\s|$)/u);
+      expect(log).not.toMatch(/^(?:stop|start|restart|rm)(?:\s|$)/mu);
     },
   );
 });
@@ -213,6 +213,7 @@ function fakeDockerScript(): string {
     "      esac",
     "    done",
     "    if [[ \"$joined\" == *'mkdir -p /backup/app-data/pi'* ]]; then mkdir -p \"$backup/app-data/pi\"; exit 0; fi",
+    "    if [[ \"$joined\" == *'rm -rf -- /backup/app-data'* ]]; then rm -rf -- \"$backup/app-data\"; exit 0; fi",
     "    if [[ \"$joined\" == *'upgrade-audit.js snapshot'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != audit-failure ]] || exit 1; printf '{}\\n' > \"$backup/.baseline.json\"; exit 0; fi",
     "    if [[ \"$joined\" == *'upgrade-export-sqlite.js'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != sqlite-backup-failure ]] || exit 1; printf 'sqlite-backup\\n' > \"$backup/app-data/bot.db\"; exit 0; fi",
     "    if [[ \"$joined\" == *'archive=/backup/.pi-copy.tgz'* && \"$FAKE_DOCKER_SCENARIO\" == archive-failure ]]; then exit 1; fi",

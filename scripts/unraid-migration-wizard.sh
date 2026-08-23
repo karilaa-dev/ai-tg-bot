@@ -209,6 +209,14 @@ migration_banner() {
   pause "Ready to start?"
 }
 
+remove_staging_app_data() {
+  [[ -n "$EXPORT_DIR" && -d "$EXPORT_DIR/app-data" ]] || return 0
+  docker run --rm \
+    --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
+    "$ARCHIVE_IMAGE" \
+    sh -eu -c 'rm -rf -- /backup/app-data'
+}
+
 cleanup() {
   local status=$?
   if [[ -n "$SECRET_DIR" && -d "$SECRET_DIR" ]]; then
@@ -224,7 +232,9 @@ cleanup() {
       "$EXPORT_DIR/.SHA256SUMS.partial" \
       "$EXPORT_DIR/app-data.tgz" \
       "$EXPORT_DIR/SHA256SUMS"
-    rm -rf -- "$EXPORT_DIR/app-data"
+    if ! remove_staging_app_data; then
+      printf 'WARNING: could not remove the temporary app-data staging directory.\n' >&2
+    fi
     rmdir -- "$EXPORT_DIR" 2>/dev/null || true
   fi
   if [[ "$status" -ne 0 ]]; then
@@ -584,7 +594,7 @@ mv "$EXPORT_DIR/.app-data.tgz.partial" "$EXPORT_DIR/app-data.tgz"
 )
 
 rm -f -- "$EXPORT_DIR/.baseline.json"
-rm -rf -- "$EXPORT_DIR/app-data"
+remove_staging_app_data
 
 docker run --rm \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
