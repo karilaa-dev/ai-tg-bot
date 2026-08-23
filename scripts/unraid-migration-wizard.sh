@@ -374,6 +374,26 @@ case "$PI_CODING_AGENT_DIR" in
   *) fail "The selected bot must keep Pi state at /app/data/pi, but PI_CODING_AGENT_DIR is configured differently." ;;
 esac
 
+PI_MOUNT_LINE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data/pi"}}{{printf "%s|%s|%s" .Type .Name .Source}}{{end}}{{end}}' "$BOT_CONTAINER")
+PI_MOUNT_TYPE=""
+PI_MOUNT_SOURCE=""
+PI_SOURCE_PATH=""
+if [[ -n "$PI_MOUNT_LINE" ]]; then
+  PI_MOUNT_DELIMITERS=${PI_MOUNT_LINE//[^|]/}
+  (( ${#PI_MOUNT_DELIMITERS} == 2 )) \
+    || fail "The selected Pi mount source contains an unsupported pipe character."
+  IFS='|' read -r PI_MOUNT_TYPE PI_VOLUME_NAME PI_SOURCE_PATH <<< "$PI_MOUNT_LINE"
+  case "$PI_MOUNT_TYPE" in
+    volume) PI_MOUNT_SOURCE="$PI_VOLUME_NAME" ;;
+    bind)
+      [[ -d "$PI_SOURCE_PATH" ]] || fail "The selected Pi bind mount source is not a directory."
+      PI_MOUNT_SOURCE="$PI_SOURCE_PATH"
+      ;;
+    *) fail "The Pi mount must be a Docker volume or bind mount, not $PI_MOUNT_TYPE." ;;
+  esac
+  [[ -n "$PI_MOUNT_SOURCE" ]] || fail "The selected Pi mount has no usable source."
+fi
+
 APP_UID=$(container_env_value "$BOT_CONTAINER" APP_UID || true)
 APP_GID=$(container_env_value "$BOT_CONTAINER" APP_GID || true)
 E2B_DEPLOYMENT_ID=$(container_env_value "$BOT_CONTAINER" E2B_DEPLOYMENT_ID || true)
@@ -398,17 +418,32 @@ if [[ -n "$APPDATA_COMPARE_PATH" && -d "$APPDATA_COMPARE_PATH" ]]; then
   path_overlaps "$EXPORT_DIR" "$APPDATA_COMPARE_PATH" \
     && fail "The export folder must not overlap the source appdata mount."
 fi
+if [[ "$PI_MOUNT_TYPE" == "bind" ]]; then
+  PI_COMPARE_PATH=$(CDPATH='' cd -- "$PI_SOURCE_PATH" && pwd -P)
+  path_overlaps "$EXPORT_DIR" "$PI_COMPARE_PATH" \
+    && fail "The export folder must not overlap the source Pi mount."
+fi
 
 APPDATA_READONLY_MOUNT=$(mount_spec "$APPDATA_MOUNT_TYPE" "$APPDATA_MOUNT_SOURCE" /source ",readonly")
+SOURCE_READONLY_MOUNTS=(--mount "$APPDATA_READONLY_MOUNT")
+SOURCE_PI_PATH=/source/pi
+if [[ -n "$PI_MOUNT_SOURCE" ]]; then
+  SOURCE_PI_PATH=/source-pi
+  PI_READONLY_MOUNT=$(mount_spec "$PI_MOUNT_TYPE" "$PI_MOUNT_SOURCE" "$SOURCE_PI_PATH" ",readonly")
+  SOURCE_READONLY_MOUNTS+=(--mount "$PI_READONLY_MOUNT")
+fi
 if ! docker run --rm \
-  --mount "$APPDATA_READONLY_MOUNT" \
+  "${SOURCE_READONLY_MOUNTS[@]}" \
   "$ARCHIVE_IMAGE" \
-  sh -eu -c 'test -f /source/bot.db && test ! -L /source/bot.db && test -d /source/pi && test ! -L /source/pi'; then
-  fail "The appdata mount must contain the regular source paths bot.db and pi/."
+  sh -eu -c 'test -f /source/bot.db && test ! -L /source/bot.db && test -d "$1" && test ! -L "$1"' sh "$SOURCE_PI_PATH"; then
+  fail "The selected source mounts must contain the regular paths bot.db and pi/."
 fi
 
 LEGACY_DATA_LINE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data/files"}}{{printf "%s|%s|%s" .Type .Name .Source}}{{end}}{{end}}' "$BOT_CONTAINER")
 say "Appdata source: $APPDATA_MOUNT_TYPE $APPDATA_MOUNT_SOURCE"
+if [[ -n "$PI_MOUNT_SOURCE" ]]; then
+  say "Pi source: $PI_MOUNT_TYPE $PI_MOUNT_SOURCE"
+fi
 if [[ -n "$LEGACY_DATA_LINE" ]]; then
   LEGACY_DATA_SOURCE=${LEGACY_DATA_LINE##*|}
   say "Legacy managed-file source excluded from export: $LEGACY_DATA_SOURCE"
@@ -450,7 +485,7 @@ docker run --rm \
 
 docker run --rm \
   --user "$APP_UID:$APP_GID" \
-  --mount "$APPDATA_READONLY_MOUNT" \
+  "${SOURCE_READONLY_MOUNTS[@]}" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   -e DB_URL=sqlite:/source/bot.db \
   --entrypoint node \
@@ -459,10 +494,10 @@ docker run --rm \
 
 docker run --rm \
   --user "$APP_UID:$APP_GID" \
-  --mount "$APPDATA_READONLY_MOUNT" \
+  "${SOURCE_READONLY_MOUNTS[@]}" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
-  tar -C /source/pi -czpf /backup/.pi-copy.tgz .
+  tar -C "$SOURCE_PI_PATH" -czpf /backup/.pi-copy.tgz .
 
 if ! docker run --rm \
   --user "$APP_UID:$APP_GID" \

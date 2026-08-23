@@ -33,7 +33,7 @@ Run the wizard from the repository:
 bash scripts/unraid-migration-wizard.sh
 ```
 
-Choose the stopped bot container when prompted. The wizard:
+Choose the stopped bot container when prompted. The wizard follows a separate `/app/data/pi` mount when the old container has one, otherwise it reads `pi/` from the `/app/data` source. It then:
 
 1. audits the source database, Pi sessions, and Telegram file references;
 2. creates a consistent SQLite backup without changing the source;

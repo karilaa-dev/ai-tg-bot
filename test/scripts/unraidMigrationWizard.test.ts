@@ -69,6 +69,18 @@ describe("Unraid migration wizard", () => {
     expect(log).toContain(`source=${appdataSource},target=/source,readonly`);
   });
 
+  it("mounts a separate Pi volume instead of reading the hidden parent path", async () => {
+    const result = await runWizard({
+      ...baseEnvironment,
+      FAKE_DOCKER_SCENARIO: "nested-pi",
+    });
+
+    expect(result.code).toBe(0);
+    const log = await fs.readFile(dockerLog, "utf8");
+    expect(log).toContain("source=appdata-volume,target=/source,readonly");
+    expect(log).toContain("source=pi-home-volume,target=/source-pi,readonly");
+  });
+
   it("prompts for missing secrets without printing or passing them to Docker", async () => {
     const token = "hidden-telegram-secret";
     const result = await runWizard(
@@ -167,7 +179,15 @@ function fakeDockerScript(): string {
     "        fi",
     "        ;;",
     "      *'printf \"%s|%s|%s\"'*)",
-    "        if [[ \"$format\" == *'/app/data/files'* ]]; then printf 'bind||/mnt/user/ai-bot'; elif [[ \"$FAKE_APPDATA_TYPE\" == volume ]]; then printf 'volume|%s|/var/lib/docker/volumes/%s/_data' \"$FAKE_APPDATA_SOURCE\" \"$FAKE_APPDATA_SOURCE\"; else printf 'bind||%s' \"$FAKE_APPDATA_SOURCE\"; fi",
+    "        if [[ \"$format\" == *'/app/data/files'* ]]; then",
+    "          printf 'bind||/mnt/user/ai-bot'",
+    "        elif [[ \"$format\" == *'/app/data/pi'* ]]; then",
+    "          if [[ \"$FAKE_DOCKER_SCENARIO\" == nested-pi ]]; then printf 'volume|pi-home-volume|/var/lib/docker/volumes/pi-home-volume/_data'; fi",
+    "        elif [[ \"$FAKE_APPDATA_TYPE\" == volume ]]; then",
+    "          printf 'volume|%s|/var/lib/docker/volumes/%s/_data' \"$FAKE_APPDATA_SOURCE\" \"$FAKE_APPDATA_SOURCE\"",
+    "        else",
+    "          printf 'bind||%s' \"$FAKE_APPDATA_SOURCE\"",
+    "        fi",
     "        ;;",
     "      *'eq .Destination'*)",
     "        if [[ \"$container\" == old-bot && \"$FAKE_DOCKER_SCENARIO\" != missing-appdata ]]; then printf yes; fi",
