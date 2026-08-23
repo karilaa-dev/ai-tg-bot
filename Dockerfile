@@ -29,6 +29,8 @@ LABEL org.opencontainers.image.source="https://github.com/karilaa-dev/ai-tg-bot"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        gzip \
+        tar \
         tini \
         util-linux \
     && rm -rf /var/lib/apt/lists/*

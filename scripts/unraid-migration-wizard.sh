@@ -184,11 +184,10 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=5
+TOTAL_STAGES=4
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 ENV_FILE=/dev/null
-POSTGRES_CLIENT_IMAGE="${POSTGRES_CLIENT_IMAGE:-postgres:17.10-bookworm}"
 ARCHIVE_IMAGE="${ARCHIVE_IMAGE:-alpine:3.22}"
 AUDIT_IMAGE="ai-tg-bot-upgrade-audit:export-$$"
 SECRET_DIR=""
@@ -205,8 +204,8 @@ migration_banner() {
   _clear
   printf '\n%s%s  %s%s\n' "$BOLD" "$BLUE" "Unraid to Dokploy migration export" "$RESET"
   printf '%s  %s stages%s\n\n' "$DIM" "$TOTAL_STAGES" "$RESET"
-  printf '  This wizard reads the stopped bot configuration, writes one audit baseline,\n'
-  printf '  and creates three verified upload files. It never starts or stops a container.\n'
+  printf '  This wizard reads the stopped bot data and creates one verified, ready-to-run\n'
+  printf '  app-data archive. It never starts or stops a container.\n'
   pause "Ready to start?"
 }
 
@@ -214,19 +213,18 @@ cleanup() {
   local status=$?
   if [[ -n "$SECRET_DIR" && -d "$SECRET_DIR" ]]; then
     rm -f -- \
-      "$SECRET_DIR/db-url" \
-      "$SECRET_DIR/bot-token" \
-      "$SECRET_DIR/pg-service.conf"
+      "$SECRET_DIR/bot-token"
     rmdir -- "$SECRET_DIR" 2>/dev/null || true
   fi
   if [[ "$EXPORT_SUCCEEDED" != "1" && -n "$EXPORT_DIR" && -d "$EXPORT_DIR" ]]; then
     rm -f -- \
-      "$EXPORT_DIR/.aibot.dump.partial" \
-      "$EXPORT_DIR/.pi-home.tgz.partial" \
+      "$EXPORT_DIR/.baseline.json" \
+      "$EXPORT_DIR/.pi-copy.tgz" \
+      "$EXPORT_DIR/.app-data.tgz.partial" \
       "$EXPORT_DIR/.SHA256SUMS.partial" \
-      "$EXPORT_DIR/aibot.dump" \
-      "$EXPORT_DIR/pi-home.tgz" \
+      "$EXPORT_DIR/app-data.tgz" \
       "$EXPORT_DIR/SHA256SUMS"
+    rm -rf -- "$EXPORT_DIR/app-data"
     rmdir -- "$EXPORT_DIR" 2>/dev/null || true
   fi
   if [[ "$status" -ne 0 ]]; then
@@ -286,7 +284,7 @@ path_overlaps() {
 mount_spec() {
   local type="$1" source="$2" target="$3" mode="${4:-}"
   [[ "$source" != *","* && "$source" != *$'\n'* ]] \
-    || fail "The selected Pi mount source contains a character Docker --mount cannot represent safely."
+    || fail "The selected mount source contains a character Docker --mount cannot represent safely."
   printf 'type=%s,source=%s,target=%s%s' "$type" "$source" "$target" "$mode"
 }
 
@@ -298,7 +296,7 @@ fi
 migration_banner
 
 stage "Check the Unraid host"
-say "The old bot must already be stopped. PostgreSQL must stay running."
+say "The old bot must already be stopped. This export reads its SQLite database and Pi directory."
 require_command docker
 require_command sha256sum
 docker info >/dev/null 2>&1 || fail "Docker is unavailable. Run this from an Unraid terminal with Docker access."
@@ -320,19 +318,13 @@ stage "Select the old containers"
 mapfile -t ALL_CONTAINERS < <(docker ps -a --format '{{.Names}}')
 (( ${#ALL_CONTAINERS[@]} > 0 )) || fail "Docker has no containers to inspect."
 BOT_CANDIDATES=()
-POSTGRES_CANDIDATES=()
 for container in "${ALL_CONTAINERS[@]}"; do
-  if [[ "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data/pi"}}yes{{end}}{{end}}' "$container")" == *yes* ]]; then
+  if [[ "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}yes{{end}}{{end}}' "$container")" == *yes* ]]; then
     BOT_CANDIDATES+=("$container")
-  fi
-  image=$(docker inspect --format '{{.Config.Image}}' "$container")
-  if [[ "${image,,}" == *postgres* ]]; then
-    POSTGRES_CANDIDATES+=("$container")
   fi
 done
 (( ${#BOT_CANDIDATES[@]} > 0 )) \
-  || fail "No container has an exact /app/data/pi mount. Parent /app/data mounts are intentionally excluded."
-(( ${#POSTGRES_CANDIDATES[@]} > 0 )) || fail "No PostgreSQL container was found."
+  || fail "No container has the expected /app/data appdata mount."
 
 BOT_CHOICES=()
 for container in "${BOT_CANDIDATES[@]}"; do BOT_CHOICES+=("$(container_summary "$container")"); done
@@ -342,62 +334,45 @@ for index in "${!BOT_CHOICES[@]}"; do
   [[ "${BOT_CHOICES[$index]}" == "$BOT_CHOICE" ]] && BOT_CONTAINER="${BOT_CANDIDATES[$index]}"
 done
 
-POSTGRES_CHOICES=()
-for container in "${POSTGRES_CANDIDATES[@]}"; do POSTGRES_CHOICES+=("$(container_summary "$container")"); done
-choose_value "Choose the running PostgreSQL container used by this bot:" "${POSTGRES_CHOICES[@]}"
-POSTGRES_CHOICE="$SELECTED_VALUE"
-for index in "${!POSTGRES_CHOICES[@]}"; do
-  [[ "${POSTGRES_CHOICES[$index]}" == "$POSTGRES_CHOICE" ]] && POSTGRES_CONTAINER="${POSTGRES_CANDIDATES[$index]}"
-done
-
 [[ "$(docker inspect --format '{{.State.Running}}' "$BOT_CONTAINER")" == "false" ]] \
   || fail "The selected bot is still running. Stop it in the Unraid UI, then rerun the wizard."
-[[ "$(docker inspect --format '{{.State.Running}}' "$POSTGRES_CONTAINER")" == "true" ]] \
-  || fail "The selected PostgreSQL container is not running."
-POSTGRES_HEALTH=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$POSTGRES_CONTAINER")
-[[ "$POSTGRES_HEALTH" == "none" || "$POSTGRES_HEALTH" == "healthy" ]] \
-  || fail "The selected PostgreSQL container reports health status: $POSTGRES_HEALTH"
-say "Source bot is stopped. PostgreSQL is available."
+say "Source bot is stopped."
 
 stage "Inspect source data and identities"
-PI_MOUNT_LINE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data/pi"}}{{printf "%s|%s|%s" .Type .Name .Source}}{{end}}{{end}}' "$BOT_CONTAINER")
-[[ -n "$PI_MOUNT_LINE" ]] || fail "The selected bot no longer has an exact /app/data/pi mount."
-PI_MOUNT_DELIMITERS=${PI_MOUNT_LINE//[^|]/}
-(( ${#PI_MOUNT_DELIMITERS} == 2 )) \
-  || fail "The selected Pi mount source contains an unsupported pipe character."
-IFS='|' read -r PI_MOUNT_TYPE PI_VOLUME_NAME PI_SOURCE_PATH <<< "$PI_MOUNT_LINE"
-case "$PI_MOUNT_TYPE" in
-  volume) PI_MOUNT_SOURCE="$PI_VOLUME_NAME" ;;
+APPDATA_MOUNT_LINE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{printf "%s|%s|%s" .Type .Name .Source}}{{end}}{{end}}' "$BOT_CONTAINER")
+[[ -n "$APPDATA_MOUNT_LINE" ]] || fail "The selected bot no longer has an exact /app/data mount."
+APPDATA_MOUNT_DELIMITERS=${APPDATA_MOUNT_LINE//[^|]/}
+(( ${#APPDATA_MOUNT_DELIMITERS} == 2 )) \
+  || fail "The selected appdata mount source contains an unsupported pipe character."
+IFS='|' read -r APPDATA_MOUNT_TYPE APPDATA_VOLUME_NAME APPDATA_SOURCE_PATH <<< "$APPDATA_MOUNT_LINE"
+case "$APPDATA_MOUNT_TYPE" in
+  volume) APPDATA_MOUNT_SOURCE="$APPDATA_VOLUME_NAME" ;;
   bind)
-    [[ -d "$PI_SOURCE_PATH" ]] || fail "The selected Pi bind mount source is not a directory."
-    PI_MOUNT_SOURCE="$PI_SOURCE_PATH"
+    [[ -d "$APPDATA_SOURCE_PATH" ]] || fail "The selected appdata bind mount source is not a directory."
+    APPDATA_MOUNT_SOURCE="$APPDATA_SOURCE_PATH"
     ;;
-  *) fail "The Pi mount must be a Docker volume or bind mount, not $PI_MOUNT_TYPE." ;;
+  *) fail "The appdata mount must be a Docker volume or bind mount, not $APPDATA_MOUNT_TYPE." ;;
 esac
-[[ -n "$PI_MOUNT_SOURCE" ]] || fail "The selected Pi mount has no usable source."
-
-mapfile -t BOT_NETWORKS < <(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$BOT_CONTAINER" | sed '/^$/d')
-mapfile -t POSTGRES_NETWORKS < <(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$POSTGRES_CONTAINER" | sed '/^$/d')
-SHARED_NETWORKS=()
-for bot_network in "${BOT_NETWORKS[@]}"; do
-  for postgres_network in "${POSTGRES_NETWORKS[@]}"; do
-    [[ "$bot_network" == "$postgres_network" ]] && SHARED_NETWORKS+=("$bot_network")
-  done
-done
-(( ${#SHARED_NETWORKS[@]} > 0 )) || fail "The selected bot and PostgreSQL containers do not share a Docker network."
-choose_value "Choose the shared database network:" "${SHARED_NETWORKS[@]}"
-SOURCE_NETWORK="$SELECTED_VALUE"
+[[ -n "$APPDATA_MOUNT_SOURCE" ]] || fail "The selected appdata mount has no usable source."
 
 DB_URL=$(container_env_value "$BOT_CONTAINER" DB_URL || true)
 BOT_TOKEN=$(container_env_value "$BOT_CONTAINER" BOT_TOKEN || true)
-if [[ -z "$DB_URL" ]]; then
-  ask_secret DB_URL "Paste the old bot's PostgreSQL DB_URL:"
-fi
+: "${DB_URL:=sqlite:/app/data/bot.db}"
+case "$DB_URL" in
+  sqlite:/app/data/bot.db|sqlite:./data/bot.db) DB_URL=sqlite:/app/data/bot.db ;;
+  *) fail "The selected bot must use SQLite at /app/data/bot.db, but DB_URL is configured differently." ;;
+esac
 if [[ -z "$BOT_TOKEN" ]]; then
   ask_secret BOT_TOKEN "Paste the old bot's BOT_TOKEN:"
 fi
-[[ -n "$DB_URL" ]] || fail "DB_URL is required."
 [[ -n "$BOT_TOKEN" ]] || fail "BOT_TOKEN is required."
+
+PI_CODING_AGENT_DIR=$(container_env_value "$BOT_CONTAINER" PI_CODING_AGENT_DIR || true)
+: "${PI_CODING_AGENT_DIR:=/app/data/pi}"
+case "$PI_CODING_AGENT_DIR" in
+  /app/data/pi|./data/pi) PI_CODING_AGENT_DIR=/app/data/pi ;;
+  *) fail "The selected bot must keep Pi state at /app/data/pi, but PI_CODING_AGENT_DIR is configured differently." ;;
+esac
 
 APP_UID=$(container_env_value "$BOT_CONTAINER" APP_UID || true)
 APP_GID=$(container_env_value "$BOT_CONTAINER" APP_GID || true)
@@ -417,37 +392,37 @@ BROWSER_USE_DEPLOYMENT_ID=$(container_env_value "$BOT_CONTAINER" BROWSER_USE_DEP
 [[ "$BROWSER_USE_DEPLOYMENT_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
   || fail "The source Browser Use deployment identity is invalid."
 
-PI_COMPARE_PATH="$PI_SOURCE_PATH"
-if [[ -n "$PI_COMPARE_PATH" && -d "$PI_COMPARE_PATH" ]]; then
-  PI_COMPARE_PATH=$(CDPATH='' cd -- "$PI_COMPARE_PATH" && pwd -P)
-  path_overlaps "$EXPORT_DIR" "$PI_COMPARE_PATH" \
-    && fail "The export folder must not overlap the source Pi mount."
+APPDATA_COMPARE_PATH="$APPDATA_SOURCE_PATH"
+if [[ -n "$APPDATA_COMPARE_PATH" && -d "$APPDATA_COMPARE_PATH" ]]; then
+  APPDATA_COMPARE_PATH=$(CDPATH='' cd -- "$APPDATA_COMPARE_PATH" && pwd -P)
+  path_overlaps "$EXPORT_DIR" "$APPDATA_COMPARE_PATH" \
+    && fail "The export folder must not overlap the source appdata mount."
 fi
 
-PI_AUDIT_MOUNT=$(mount_spec "$PI_MOUNT_TYPE" "$PI_MOUNT_SOURCE" /app/data/pi)
-PI_ARCHIVE_MOUNT=$(mount_spec "$PI_MOUNT_TYPE" "$PI_MOUNT_SOURCE" /source ",readonly")
-say "Pi source: $PI_MOUNT_TYPE $PI_MOUNT_SOURCE"
-say "Database network: $SOURCE_NETWORK"
+APPDATA_READONLY_MOUNT=$(mount_spec "$APPDATA_MOUNT_TYPE" "$APPDATA_MOUNT_SOURCE" /source ",readonly")
+if ! docker run --rm \
+  --mount "$APPDATA_READONLY_MOUNT" \
+  "$ARCHIVE_IMAGE" \
+  sh -eu -c 'test -f /source/bot.db && test ! -L /source/bot.db && test -d /source/pi && test ! -L /source/pi'; then
+  fail "The appdata mount must contain the regular source paths bot.db and pi/."
+fi
+
+LEGACY_DATA_LINE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data/files"}}{{printf "%s|%s|%s" .Type .Name .Source}}{{end}}{{end}}' "$BOT_CONTAINER")
+say "Appdata source: $APPDATA_MOUNT_TYPE $APPDATA_MOUNT_SOURCE"
+if [[ -n "$LEGACY_DATA_LINE" ]]; then
+  LEGACY_DATA_SOURCE=${LEGACY_DATA_LINE##*|}
+  say "Legacy managed-file source excluded from export: $LEGACY_DATA_SOURCE"
+fi
 say "Application identity: UID $APP_UID, GID $APP_GID"
 
-stage "Create and verify the three files"
+stage "Create ready-to-run app data"
 say "This can take several minutes. The source bot will remain stopped."
 docker build --tag "$AUDIT_IMAGE" "$REPO_ROOT"
-
-if ! docker run --rm \
-  --mount "$PI_ARCHIVE_MOUNT" \
-  --entrypoint sh \
-  "$AUDIT_IMAGE" \
-  -eu -c 'test ! -e /source/upgrade-baseline.json.verified'; then
-  fail "The source Pi volume contains upgrade-baseline.json.verified. Refusing to export an already verified target."
-fi
 
 SECRET_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ai-tg-bot-export-secrets.XXXXXX")
 chmod 700 "$SECRET_DIR"
 umask 077
-printf '%s' "$DB_URL" > "$SECRET_DIR/db-url"
 printf '%s' "$BOT_TOKEN" > "$SECRET_DIR/bot-token"
-: > "$SECRET_DIR/pg-service.conf"
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 
@@ -457,131 +432,153 @@ docker run --rm \
   sh -eu -c '
     chown "$1:$2" /run/secrets
     chmod 750 /run/secrets
-    chown "$1:$2" /run/secrets/db-url /run/secrets/bot-token
-    chmod 440 /run/secrets/db-url /run/secrets/bot-token
-    chown "$3:$2" /run/secrets/pg-service.conf
-    chmod 600 /run/secrets/pg-service.conf
+    chown "$3:$2" /run/secrets/bot-token
+    chmod 440 /run/secrets/bot-token
   ' sh "$HOST_UID" "$APP_GID" "$APP_UID"
-
-docker run --rm \
-  --user "$APP_UID:$APP_GID" \
-  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets" \
-  -e DB_URL_FILE=/run/secrets/db-url \
-  --entrypoint node \
-  "$AUDIT_IMAGE" \
-  dist/scripts/upgrade-export-connection.js --out /run/secrets/pg-service.conf
-
-SERVER_VERSION_NUM=$(docker run --rm \
-  --user "$APP_UID:$APP_GID" \
-  --network "$SOURCE_NETWORK" \
-  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
-  -e PGSERVICEFILE=/run/secrets/pg-service.conf \
-  "$POSTGRES_CLIENT_IMAGE" \
-  psql --dbname=service=upgrade --no-password --tuples-only --no-align \
-    --set=ON_ERROR_STOP=1 --command 'show server_version_num')
-SERVER_VERSION_NUM=${SERVER_VERSION_NUM//[[:space:]]/}
-[[ "$SERVER_VERSION_NUM" =~ ^[0-9]+$ ]] || fail "PostgreSQL returned an invalid server version."
-(( SERVER_VERSION_NUM / 10000 <= 17 )) \
-  || fail "The source PostgreSQL server is newer than the pinned version 17 export client."
-
-docker run --rm \
-  --user "$APP_UID:$APP_GID" \
-  --network "$SOURCE_NETWORK" \
-  --mount "$PI_AUDIT_MOUNT" \
-  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
-  -e DB_URL_FILE=/run/secrets/db-url \
-  -e BOT_TOKEN_FILE=/run/secrets/bot-token \
-  -e "E2B_DEPLOYMENT_ID=$E2B_DEPLOYMENT_ID" \
-  -e "BROWSER_USE_DEPLOYMENT_ID=$BROWSER_USE_DEPLOYMENT_ID" \
-  -e PI_CODING_AGENT_DIR=/app/data/pi \
-  --entrypoint node \
-  "$AUDIT_IMAGE" \
-  dist/scripts/upgrade-audit.js snapshot --out /app/data/pi/upgrade-baseline.json
 
 mkdir "$EXPORT_DIR"
 docker run --rm \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
-  sh -eu -c 'chown "$1:$2" /backup && chmod 770 /backup' sh "$HOST_UID" "$APP_GID"
+  sh -eu -c '
+    chown "$1:$2" /backup
+    chmod 770 /backup
+    mkdir -p /backup/app-data/pi
+    chown -R "$3:$2" /backup/app-data
+    chmod 700 /backup/app-data /backup/app-data/pi
+  ' sh "$HOST_UID" "$APP_GID" "$APP_UID"
 
 docker run --rm \
   --user "$APP_UID:$APP_GID" \
-  --network "$SOURCE_NETWORK" \
-  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
+  --mount "$APPDATA_READONLY_MOUNT" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
-  -e PGSERVICEFILE=/run/secrets/pg-service.conf \
-  "$POSTGRES_CLIENT_IMAGE" \
-  pg_dump --dbname=service=upgrade --format=custom --no-owner --no-acl \
-    --file=/backup/.aibot.dump.partial
+  -e DB_URL=sqlite:/source/bot.db \
+  --entrypoint node \
+  "$AUDIT_IMAGE" \
+  dist/scripts/upgrade-export-sqlite.js --out /backup/app-data/bot.db
 
 docker run --rm \
   --user "$APP_UID:$APP_GID" \
-  --mount "type=bind,source=$EXPORT_DIR,target=/backup,readonly" \
-  "$POSTGRES_CLIENT_IMAGE" \
-  pg_restore --list /backup/.aibot.dump.partial >/dev/null
-
-docker run --rm \
-  --user "$APP_UID:$APP_GID" \
-  --mount "$PI_ARCHIVE_MOUNT" \
+  --mount "$APPDATA_READONLY_MOUNT" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
-  tar -C /source -czpf /backup/.pi-home.tgz.partial .
+  tar -C /source/pi -czpf /backup/.pi-copy.tgz .
 
 if ! docker run --rm \
   --user "$APP_UID:$APP_GID" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup,readonly" \
   "$ARCHIVE_IMAGE" \
   sh -eu -c '
-    archive=/backup/.pi-home.tgz.partial
+    archive=/backup/.pi-copy.tgz
     tar -tzf "$archive" >/dev/null
     tar -tzvf "$archive" | awk '\''{ type=substr($0,1,1); if (type != "-" && type != "d") exit 1 }'\''
-    tar -tzf "$archive" | grep -Fx "./upgrade-baseline.json" >/dev/null
-    if tar -tzf "$archive" | grep -Fx "./upgrade-baseline.json.verified" >/dev/null; then exit 1; fi
   '; then
-  fail "The Pi archive is unreadable, unsafe, missing its baseline, or contains a stale verification marker."
+  fail "The Pi directory contains an unreadable file, symbolic link, or unsupported entry."
 fi
 
-mv "$EXPORT_DIR/.aibot.dump.partial" "$EXPORT_DIR/aibot.dump"
-mv "$EXPORT_DIR/.pi-home.tgz.partial" "$EXPORT_DIR/pi-home.tgz"
+docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
+  "$ARCHIVE_IMAGE" \
+  tar -C /backup/app-data/pi -xzpf /backup/.pi-copy.tgz
+rm -f -- "$EXPORT_DIR/.pi-copy.tgz"
+
+TARGET_APPDATA_MOUNT="type=bind,source=$EXPORT_DIR/app-data,target=/app/data"
+docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "$TARGET_APPDATA_MOUNT" \
+  --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
+  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
+  -e DB_URL=sqlite:/app/data/bot.db \
+  -e BOT_TOKEN_FILE=/run/secrets/bot-token \
+  -e "E2B_DEPLOYMENT_ID=$E2B_DEPLOYMENT_ID" \
+  -e "BROWSER_USE_DEPLOYMENT_ID=$BROWSER_USE_DEPLOYMENT_ID" \
+  -e PI_CODING_AGENT_DIR=/app/data/pi \
+  --entrypoint node \
+  "$AUDIT_IMAGE" \
+  dist/scripts/upgrade-audit.js snapshot --out /backup/.baseline.json
+
+docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "$TARGET_APPDATA_MOUNT" \
+  --entrypoint node \
+  "$AUDIT_IMAGE" \
+  dist/scripts/prepare-migration-data.js --data /app/data
+
+docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "$TARGET_APPDATA_MOUNT" \
+  --mount "type=bind,source=$EXPORT_DIR,target=/audit,readonly" \
+  --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
+  -e DB_URL=sqlite:/app/data/bot.db \
+  -e BOT_TOKEN_FILE=/run/secrets/bot-token \
+  -e "E2B_DEPLOYMENT_ID=$E2B_DEPLOYMENT_ID" \
+  -e "BROWSER_USE_DEPLOYMENT_ID=$BROWSER_USE_DEPLOYMENT_ID" \
+  -e PI_CODING_AGENT_DIR=/app/data/pi \
+  --entrypoint node \
+  "$AUDIT_IMAGE" \
+  dist/scripts/upgrade-audit.js verify --against /audit/.baseline.json
+
+docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
+  "$ARCHIVE_IMAGE" \
+  tar -C /backup/app-data -czpf /backup/.app-data.tgz.partial .
+
+if ! docker run --rm \
+  --user "$APP_UID:$APP_GID" \
+  --mount "type=bind,source=$EXPORT_DIR,target=/backup,readonly" \
+  "$ARCHIVE_IMAGE" \
+  sh -eu -c '
+    archive=/backup/.app-data.tgz.partial
+    tar -tzf "$archive" >/dev/null
+    tar -tzvf "$archive" | awk '\''{ type=substr($0,1,1); if (type != "-" && type != "d") exit 1 }'\''
+    tar -tzf "$archive" | grep -Fx "./bot.db" >/dev/null
+    tar -tzf "$archive" | grep -Fx "./pi/" >/dev/null
+    if tar -tzf "$archive" | grep -E "^\\./bot\\.db-(wal|shm)$" >/dev/null; then exit 1; fi
+  '; then
+  fail "The prepared app-data archive is unreadable, unsafe, or incomplete."
+fi
+
+mv "$EXPORT_DIR/.app-data.tgz.partial" "$EXPORT_DIR/app-data.tgz"
 (
   cd "$EXPORT_DIR"
-  sha256sum aibot.dump pi-home.tgz > .SHA256SUMS.partial
+  sha256sum app-data.tgz > .SHA256SUMS.partial
   sha256sum --check .SHA256SUMS.partial
   mv .SHA256SUMS.partial SHA256SUMS
 )
+
+rm -f -- "$EXPORT_DIR/.baseline.json"
+rm -rf -- "$EXPORT_DIR/app-data"
 
 docker run --rm \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
   sh -eu -c '
-    chown "$1:$2" /backup/aibot.dump /backup/pi-home.tgz /backup/SHA256SUMS
-    chmod 600 /backup/aibot.dump /backup/pi-home.tgz /backup/SHA256SUMS
+    chown "$1:$2" /backup/app-data.tgz /backup/SHA256SUMS
+    chmod 600 /backup/app-data.tgz /backup/SHA256SUMS
     chmod 700 /backup
   ' sh "$HOST_UID" "$HOST_GID"
 EXPORT_SUCCEEDED=1
-say "Verified: aibot.dump"
-say "Verified: pi-home.tgz"
+say "Verified: app-data.tgz"
 say "Verified: SHA256SUMS"
 
 stage "Keep the source stopped"
-say "Upload only these three files from:"
+say "Upload the prepared archive from:"
 say "$EXPORT_DIR"
 printf '\n'
-printf '  UPGRADE_MODE=import\n'
 printf '  BOT_TOKEN=<same token as the old bot>\n'
-printf '  DB_URL=<new Dokploy PostgreSQL URL>\n'
+printf '  DB_URL=sqlite:/app/data/bot.db\n'
 printf '  PI_CODING_AGENT_DIR=/app/data/pi\n'
-printf '  UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json\n'
 printf '  E2B_DEPLOYMENT_ID=%s\n' "$E2B_DEPLOYMENT_ID"
 printf '  BROWSER_USE_DEPLOYMENT_ID=%s\n' "$BROWSER_USE_DEPLOYMENT_ID"
 printf '  APP_UID=%s\n' "$APP_UID"
 printf '  APP_GID=%s\n' "$APP_GID"
 printf '\n'
-say "After uploading, run this in Dokploy Advanced → Run Command:"
-say "./docker/import-migration.sh"
+say "Unpack app-data.tgz into the empty /app/data volume, then start the bot normally."
 warn "Do not restart the old bot while the Dokploy bot is running with the same token."
 pause "Press Enter to finish."
 
 finish
 printf 'Migration export ready:\n  %s\n\n' "$EXPORT_DIR"
-printf 'Next: upload aibot.dump, pi-home.tgz, and SHA256SUMS to /app/data/import in Dokploy.\n'
+printf 'Next: restore app-data.tgz into the empty /app/data volume, then start the Dokploy bot.\n'

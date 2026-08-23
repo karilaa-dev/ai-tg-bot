@@ -34,8 +34,8 @@ beforeEach(async () => {
     TMPDIR: path.join(tempDir, "tmp"),
     FAKE_DOCKER_LOG: dockerLog,
     FAKE_DOCKER_SCENARIO: "success",
-    FAKE_PI_TYPE: "volume",
-    FAKE_PI_SOURCE: "pi-volume",
+    FAKE_APPDATA_TYPE: "volume",
+    FAKE_APPDATA_SOURCE: "appdata-volume",
     FAKE_APP_UID: String(process.getuid?.() || 1000),
     FAKE_APP_GID: String(process.getgid?.() || 1000),
   };
@@ -46,55 +46,47 @@ afterEach(async () => {
 });
 
 describe("Unraid migration wizard", () => {
-  it.each(["volume", "bind"])("creates the exact three files from a %s Pi mount", async (mountType) => {
-    const piSource = mountType === "bind" ? path.join(tempDir, "pi-source") : "pi-volume";
-    if (mountType === "bind") await fs.mkdir(piSource);
+  it.each(["volume", "bind"])("creates the exact two files from a %s appdata mount", async (mountType) => {
+    const appdataSource = mountType === "bind" ? path.join(tempDir, "appdata-source") : "appdata-volume";
+    if (mountType === "bind") await fs.mkdir(appdataSource);
 
     const result = await runWizard({
       ...baseEnvironment,
-      FAKE_PI_TYPE: mountType,
-      FAKE_PI_SOURCE: piSource,
+      FAKE_APPDATA_TYPE: mountType,
+      FAKE_APPDATA_SOURCE: appdataSource,
     });
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Migration export ready");
     const [exportDir] = (await fs.readdir(exportParent)).map((entry) => path.join(exportParent, entry));
-    expect(await fs.readdir(exportDir)).toEqual(["SHA256SUMS", "aibot.dump", "pi-home.tgz"]);
-    expect((await fs.readFile(path.join(exportDir, "SHA256SUMS"), "utf8"))).toContain("aibot.dump");
+    expect(await fs.readdir(exportDir)).toEqual(["SHA256SUMS", "app-data.tgz"]);
+    expect((await fs.readFile(path.join(exportDir, "SHA256SUMS"), "utf8"))).toContain("app-data.tgz");
 
     const log = await fs.readFile(dockerLog, "utf8");
     expect(log).not.toMatch(/(?:^|\s)(?:stop|start|restart|rm)(?:\s|$)/u);
     expect(log).not.toContain("telegram-secret-token");
-    expect(log).not.toContain("postgresql://aibot:database-secret");
-    expect(log).not.toContain("bot-data");
-    expect(log).toContain(`source=${piSource},target=/source,readonly`);
+    expect(log).not.toContain("/mnt/user/ai-bot,target=/source");
+    expect(log).toContain(`source=${appdataSource},target=/source,readonly`);
   });
 
   it("prompts for missing secrets without printing or passing them to Docker", async () => {
-    const dbUrl = "postgresql://aibot:hidden-db-secret@postgres/aibot";
     const token = "hidden-telegram-secret";
     const result = await runWizard(
       { ...baseEnvironment, FAKE_DOCKER_SCENARIO: "missing-secrets" },
-      `${baseInput(false)}${dbUrl}\n${token}\n\n`,
+      `${baseInput(false)}${token}\n\n`,
     );
 
     expect(result.code).toBe(0);
-    expect(result.stdout).not.toContain(dbUrl);
     expect(result.stdout).not.toContain(token);
-    expect(result.stderr).not.toContain(dbUrl);
     expect(await fs.readFile(dockerLog, "utf8")).not.toContain(token);
     expect(await fs.readdir(path.join(tempDir, "tmp"))).toEqual([]);
   });
 
   it.each([
     ["running-bot", "still running"],
-    ["stopped-postgres", "PostgreSQL container is not running"],
-    ["unhealthy-postgres", "health status"],
-    ["no-network", "do not share a Docker network"],
-    ["missing-pi", "exact /app/data/pi mount"],
-    ["sqlite", "PostgreSQL connection validation failed"],
-    ["postgres-18", "newer than the pinned version 17"],
-    ["stale-marker", "already verified target"],
+    ["missing-appdata", "expected /app/data appdata mount"],
+    ["postgres", "must use SQLite"],
+    ["prepare-failure", "Export stopped"],
   ])("refuses unsafe source state: %s", async (scenario, message) => {
     const result = await runWizard({ ...baseEnvironment, FAKE_DOCKER_SCENARIO: scenario });
 
@@ -103,19 +95,19 @@ describe("Unraid migration wizard", () => {
     expect(await fs.readdir(exportParent)).toEqual([]);
   });
 
-  it("rejects an output folder inside a bind-mounted Pi source", async () => {
+  it("rejects an output folder inside a bind-mounted appdata source", async () => {
     const result = await runWizard({
       ...baseEnvironment,
-      FAKE_PI_TYPE: "bind",
-      FAKE_PI_SOURCE: exportParent,
+      FAKE_APPDATA_TYPE: "bind",
+      FAKE_APPDATA_SOURCE: exportParent,
     });
 
     expect(result.code).not.toBe(0);
-    expect(`${result.stdout}\n${result.stderr}`).toContain("must not overlap the source Pi mount");
+    expect(`${result.stdout}\n${result.stderr}`).toContain("must not overlap the source appdata mount");
     expect(await fs.readdir(exportParent)).toEqual([]);
   });
 
-  it.each(["pg-restore-failure", "archive-failure", "checksum-failure"])(
+  it.each(["sqlite-backup-failure", "audit-failure", "archive-failure", "verify-failure", "checksum-failure"])(
     "removes partial artifacts after %s",
     async (scenario) => {
       const result = await runWizard({ ...baseEnvironment, FAKE_DOCKER_SCENARIO: scenario });
@@ -129,7 +121,7 @@ describe("Unraid migration wizard", () => {
 });
 
 function baseInput(includeFinalPause = true): string {
-  return `\n${exportParent}\n1\n1\n1\n${includeFinalPause ? "\n" : ""}`;
+  return `\n${exportParent}\n1\n${includeFinalPause ? "\n" : ""}`;
 }
 
 async function runWizard(
@@ -160,7 +152,7 @@ function fakeDockerScript(): string {
     "case \"$command_name\" in",
     "  info|build) exit 0 ;;",
     "  ps)",
-    "    printf '%s\\n' old-bot old-postgres",
+    "    printf '%s\\n' old-bot",
     "    exit 0",
     "    ;;",
     "  inspect)",
@@ -169,32 +161,22 @@ function fakeDockerScript(): string {
     "    case \"$format\" in",
     "      *'.Config.Env'*)",
     "        if [[ \"$container\" == old-bot ]]; then",
-    "          if [[ \"$FAKE_DOCKER_SCENARIO\" != missing-secrets ]]; then",
-    "            printf '%s\\n' 'DB_URL=postgresql://aibot:database-secret@postgres/aibot' 'BOT_TOKEN=telegram-secret-token'",
-    "          fi",
-    "          printf '%s\\n' \"APP_UID=$FAKE_APP_UID\" \"APP_GID=$FAKE_APP_GID\" 'E2B_DEPLOYMENT_ID=source-e2b' 'BROWSER_USE_DEPLOYMENT_ID=source-browser'",
+    "          [[ \"$FAKE_DOCKER_SCENARIO\" == missing-secrets ]] || printf '%s\\n' 'BOT_TOKEN=telegram-secret-token'",
+    "          if [[ \"$FAKE_DOCKER_SCENARIO\" == postgres ]]; then printf '%s\\n' 'DB_URL=postgresql://aibot:secret@postgres/aibot'; else printf '%s\\n' 'DB_URL=sqlite:/app/data/bot.db'; fi",
+    "          printf '%s\\n' 'PI_CODING_AGENT_DIR=/app/data/pi' \"APP_UID=$FAKE_APP_UID\" \"APP_GID=$FAKE_APP_GID\" 'E2B_DEPLOYMENT_ID=source-e2b' 'BROWSER_USE_DEPLOYMENT_ID=source-browser'",
     "        fi",
     "        ;;",
     "      *'printf \"%s|%s|%s\"'*)",
-    "        if [[ \"$FAKE_PI_TYPE\" == volume ]]; then printf 'volume|%s|/var/lib/docker/volumes/%s/_data' \"$FAKE_PI_SOURCE\" \"$FAKE_PI_SOURCE\"; else printf 'bind||%s' \"$FAKE_PI_SOURCE\"; fi",
+    "        if [[ \"$format\" == *'/app/data/files'* ]]; then printf 'bind||/mnt/user/ai-bot'; elif [[ \"$FAKE_APPDATA_TYPE\" == volume ]]; then printf 'volume|%s|/var/lib/docker/volumes/%s/_data' \"$FAKE_APPDATA_SOURCE\" \"$FAKE_APPDATA_SOURCE\"; else printf 'bind||%s' \"$FAKE_APPDATA_SOURCE\"; fi",
     "        ;;",
     "      *'eq .Destination'*)",
-    "        if [[ \"$container\" == old-bot && \"$FAKE_DOCKER_SCENARIO\" != missing-pi ]]; then printf yes; fi",
-    "        ;;",
-    "      '{{.Config.Image}}')",
-    "        [[ \"$container\" == old-postgres ]] && printf 'postgres:17' || printf 'ai-tg-bot:old'",
+    "        if [[ \"$container\" == old-bot && \"$FAKE_DOCKER_SCENARIO\" != missing-appdata ]]; then printf yes; fi",
     "        ;;",
     "      *'{{.Name}}'*)",
-    "        if [[ \"$container\" == old-postgres ]]; then printf '/old-postgres | postgres:17 | running'; else printf '/old-bot | ai-tg-bot:old | exited'; fi",
+    "        printf '/old-bot | ai-tg-bot:old | exited'",
     "        ;;",
     "      '{{.State.Running}}')",
-    "        if [[ \"$container\" == old-postgres ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" == stopped-postgres ]] && printf false || printf true; elif [[ \"$FAKE_DOCKER_SCENARIO\" == running-bot ]]; then printf true; else printf false; fi",
-    "        ;;",
-    "      *'.State.Health'*)",
-    "        [[ \"$FAKE_DOCKER_SCENARIO\" == unhealthy-postgres ]] && printf unhealthy || printf healthy",
-    "        ;;",
-    "      *'NetworkSettings.Networks'*)",
-    "        if [[ \"$FAKE_DOCKER_SCENARIO\" == no-network && \"$container\" == old-postgres ]]; then printf 'other-network\\n'; else printf 'database-network\\n'; fi",
+    "        [[ \"$FAKE_DOCKER_SCENARIO\" == running-bot ]] && printf true || printf false",
     "        ;;",
     "      *) printf 'unsupported inspect format: %s\\n' \"$format\" >&2; exit 90 ;;",
     "    esac",
@@ -207,22 +189,17 @@ function fakeDockerScript(): string {
     "    for argument in \"$@\"; do",
     "      case \"$argument\" in",
     "        type=bind,source=*,target=/backup*) backup=${argument#type=bind,source=}; backup=${backup%%,target=/backup*} ;;",
-    "        psql|pg_dump|pg_restore|tar) tool=$argument ;;",
+    "        tar) tool=$argument ;;",
     "      esac",
     "    done",
-    "    if [[ \"$joined\" == *'upgrade-export-connection.js'* ]]; then",
-    "      if [[ \"$FAKE_DOCKER_SCENARIO\" == sqlite ]]; then printf 'PostgreSQL connection validation failed\\n' >&2; exit 1; fi",
-    "      exit 0",
-    "    fi",
-    "    if [[ \"$joined\" == *'test ! -e /source/upgrade-baseline.json.verified'* && \"$FAKE_DOCKER_SCENARIO\" == stale-marker ]]; then exit 1; fi",
-    "    if [[ \"$tool\" == psql ]]; then",
-    "      [[ \"$FAKE_DOCKER_SCENARIO\" == postgres-18 ]] && printf '180000\\n' || printf '170010\\n'",
-    "      exit 0",
-    "    fi",
-    "    if [[ \"$tool\" == pg_dump ]]; then printf 'dump\\n' > \"$backup/.aibot.dump.partial\"; exit 0; fi",
-    "    if [[ \"$tool\" == pg_restore ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != pg-restore-failure ]]; exit; fi",
-    "    if [[ \"$tool\" == tar ]]; then printf 'archive\\n' > \"$backup/.pi-home.tgz.partial\"; exit 0; fi",
-    "    if [[ \"$joined\" == *'archive=/backup/.pi-home.tgz.partial'* && \"$FAKE_DOCKER_SCENARIO\" == archive-failure ]]; then exit 1; fi",
+    "    if [[ \"$joined\" == *'mkdir -p /backup/app-data/pi'* ]]; then mkdir -p \"$backup/app-data/pi\"; exit 0; fi",
+    "    if [[ \"$joined\" == *'upgrade-audit.js snapshot'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != audit-failure ]] || exit 1; printf '{}\\n' > \"$backup/.baseline.json\"; exit 0; fi",
+    "    if [[ \"$joined\" == *'upgrade-export-sqlite.js'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != sqlite-backup-failure ]] || exit 1; printf 'sqlite-backup\\n' > \"$backup/app-data/bot.db\"; exit 0; fi",
+    "    if [[ \"$joined\" == *'archive=/backup/.pi-copy.tgz'* && \"$FAKE_DOCKER_SCENARIO\" == archive-failure ]]; then exit 1; fi",
+    "    if [[ \"$joined\" == *'/backup/.pi-copy.tgz'* && \"$tool\" == tar ]]; then printf 'pi-archive\\n' > \"$backup/.pi-copy.tgz\"; exit 0; fi",
+    "    if [[ \"$joined\" == *'prepare-migration-data.js'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != prepare-failure ]]; exit; fi",
+    "    if [[ \"$joined\" == *'upgrade-audit.js verify'* ]]; then [[ \"$FAKE_DOCKER_SCENARIO\" != verify-failure ]]; exit; fi",
+    "    if [[ \"$joined\" == *'/backup/.app-data.tgz.partial'* && \"$tool\" == tar ]]; then printf 'app-data-archive\\n' > \"$backup/.app-data.tgz.partial\"; exit 0; fi",
     "    exit 0",
     "    ;;",
     "esac",

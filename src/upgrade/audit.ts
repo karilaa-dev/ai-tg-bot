@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import type { Logger } from "../logger.js";
 import type { SqlExecutor } from "../db/sql.js";
 import { isPathWithin } from "../util/paths.js";
 
@@ -71,12 +70,6 @@ export const UpgradeAuditManifestSchema = z.object({
   }).refine((state) => state.count === state.files.length, {
     message: "Pi state count does not match file count",
   }),
-});
-
-const VerificationMarkerSchema = z.object({
-  version: z.literal(MANIFEST_VERSION),
-  manifestSha256: z.string().regex(SHA256_PATTERN),
-  verifiedAt: z.string().datetime(),
 });
 
 export type UpgradeAuditManifest = z.infer<typeof UpgradeAuditManifestSchema>;
@@ -326,85 +319,6 @@ export async function verifyUpgradeAuditManifest(
   );
   await verifyPiStateFiles(piCodingAgentDir, manifest.piState.files, hasher);
   return summarize(manifest, sha256(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)));
-}
-
-export async function verifyUpgradeBaselineOnce(input: {
-  db: SqlExecutor;
-  piCodingAgentDir: string;
-  botToken: string;
-  e2bDeploymentId: string;
-  browserUseDeploymentId: string;
-  baselineFile?: string;
-  logger?: Logger;
-}): Promise<{ skipped: boolean; summary?: UpgradeAuditSummary }> {
-  if (!input.baselineFile?.trim()) return { skipped: true };
-  const baselineFile = path.resolve(input.baselineFile);
-  const piRoot = path.resolve(input.piCodingAgentDir);
-  if (!isPathWithin(piRoot, baselineFile)) {
-    throw new Error("UPGRADE_BASELINE_FILE must be inside PI_CODING_AGENT_DIR.");
-  }
-  const realPiRoot = await fs.realpath(piRoot);
-  const resolvedBaseline = await resolveRegularFileWithin(realPiRoot, baselineFile);
-  if (!resolvedBaseline) {
-    throw new Error("UPGRADE_BASELINE_FILE must be a regular file inside PI_CODING_AGENT_DIR.");
-  }
-  const markerFile = `${baselineFile}.verified`;
-  const markerParent = await fs.realpath(path.dirname(markerFile));
-  if (!isPathWithin(realPiRoot, markerParent)) {
-    throw new Error("Upgrade verification marker must be inside PI_CODING_AGENT_DIR.");
-  }
-  const markerStat = await fs.lstat(markerFile).catch(() => undefined);
-  if (markerStat?.isSymbolicLink()) {
-    throw new Error("Upgrade verification marker must not be a symbolic link.");
-  }
-  const loaded = await readUpgradeAuditManifest(resolvedBaseline.realPath);
-  const hasher = createAuditHasher(input.botToken);
-  verifyTelegramBotIdentity(input.botToken, loaded.manifest.telegramBotIdentitySha256, hasher);
-  verifyE2bDeploymentIdentity(
-    input.e2bDeploymentId,
-    loaded.manifest.e2bDeploymentIdentitySha256,
-    hasher,
-  );
-  verifyBrowserUseDeploymentIdentity(
-    input.browserUseDeploymentId,
-    loaded.manifest.browserUseDeploymentIdentitySha256,
-    hasher,
-  );
-  const marker = await readVerificationMarker(markerFile);
-  if (marker?.manifestSha256 === loaded.manifestSha256) {
-    input.logger?.info("upgrade preservation baseline already verified", {
-      manifestSha256: loaded.manifestSha256,
-      markerFile,
-    });
-    return { skipped: true, summary: summarize(loaded.manifest, loaded.manifestSha256) };
-  }
-
-  const summary = await verifyUpgradeAuditManifest(
-    input.db,
-    input.piCodingAgentDir,
-    loaded.manifest,
-    {
-      botToken: input.botToken,
-      e2bDeploymentId: input.e2bDeploymentId,
-      browserUseDeploymentId: input.browserUseDeploymentId,
-      requireExactDatasets: true,
-      requireExactPiSessions: true,
-    },
-  );
-  summary.manifestSha256 = loaded.manifestSha256;
-  await writeAtomic(markerFile, Buffer.from(`${JSON.stringify({
-    version: MANIFEST_VERSION,
-    manifestSha256: loaded.manifestSha256,
-    verifiedAt: new Date().toISOString(),
-  }, null, 2)}\n`));
-  input.logger?.info("upgrade preservation baseline verified", {
-    manifestSha256: loaded.manifestSha256,
-    markerFile,
-    datasets: summary.datasets,
-    piSessions: summary.piSessions,
-    piStateFiles: summary.piStateFiles,
-  });
-  return { skipped: false, summary };
 }
 
 async function collectDatasets(
@@ -988,19 +902,6 @@ async function hmacSha256FilePrefix(filePath: string, size: number, key: Buffer)
     await handle.close();
   }
   return hash.digest("hex");
-}
-
-async function readVerificationMarker(filePath: string): Promise<z.infer<typeof VerificationMarkerSchema> | undefined> {
-  const text = await fs.readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (text === undefined) return undefined;
-  try {
-    return VerificationMarkerSchema.parse(JSON.parse(text));
-  } catch {
-    return undefined;
-  }
 }
 
 async function writeAtomic(filePath: string, bytes: Buffer): Promise<void> {
