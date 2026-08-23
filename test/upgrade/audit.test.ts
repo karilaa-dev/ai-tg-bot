@@ -8,8 +8,6 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import {
   createUpgradeAuditManifest as createUpgradeAuditManifestImpl,
   verifyUpgradeAuditManifest as verifyUpgradeAuditManifestImpl,
-  verifyUpgradeBaselineOnce,
-  writeUpgradeAuditManifest,
 } from "../../src/upgrade/audit.js";
 
 const CHAT_SECRET = "private migration conversation";
@@ -340,117 +338,6 @@ describe("upgrade preservation audit", () => {
       .rejects.toThrow("Preserved Pi session is missing or unsafe");
   });
 
-  it("writes a hash-bound marker and skips only the already verified manifest", async () => {
-    const manifest = await createUpgradeAuditManifest(database.db, piDir);
-    const baselineFile = path.join(piDir, "upgrade-baseline.json");
-    const manifestSha256 = await writeUpgradeAuditManifest(baselineFile, manifest);
-    await database.initialize();
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).resolves.toMatchObject({ skipped: false, summary: { manifestSha256 } });
-    const marker = JSON.parse(await fs.readFile(`${baselineFile}.verified`, "utf8"));
-    expect(marker.manifestSha256).toBe(manifestSha256);
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: "998877:different-bot-token",
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).rejects.toThrow("Telegram bot identity does not match");
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: "different-e2b-deployment",
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).rejects.toThrow("E2B deployment identity does not match");
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: "different-browser-deployment",
-      baselineFile,
-    })).rejects.toThrow("Browser Use deployment identity does not match");
-
-    await database.db.execute(sql`delete from telegram_file_refs`);
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).resolves.toMatchObject({ skipped: true });
-  });
-
-  it("refuses appended Pi session data during the one-time startup check", async () => {
-    const manifest = await createUpgradeAuditManifest(database.db, piDir);
-    const baselineFile = path.join(piDir, "upgrade-baseline.json");
-    await writeUpgradeAuditManifest(baselineFile, manifest);
-    await database.initialize();
-    await fs.appendFile(sessionFile, `${JSON.stringify({ role: "assistant", content: "foreign" })}\n`);
-
-    await expect(verifyUpgradeAuditManifest(database.db, piDir, manifest)).resolves.toBeDefined();
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).rejects.toThrow("Pi session contains data beyond the baseline");
-    await expect(fs.access(`${baselineFile}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("refuses to mark a reused destination database as verified", async () => {
-    const manifest = await createUpgradeAuditManifest(database.db, piDir);
-    const baselineFile = path.join(piDir, "upgrade-baseline.json");
-    await writeUpgradeAuditManifest(baselineFile, manifest);
-    await database.initialize();
-    await database.db.execute(sql`
-      insert into users(tg_id, first_name, username, lang, stream_mode, created_at)
-      values (123456789, 'foreign', 'foreign', 'en', 1, 3)
-    `);
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile,
-    })).rejects.toThrow("users membership differs from the baseline");
-    await expect(fs.access(`${baselineFile}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("refuses a startup baseline outside the Pi data root", async () => {
-    const manifest = await createUpgradeAuditManifest(database.db, piDir);
-    const outsideBaseline = path.join(tempDir, "outside-baseline.json");
-    await writeUpgradeAuditManifest(outsideBaseline, manifest);
-    await database.initialize();
-
-    await expect(verifyUpgradeBaselineOnce({
-      db: database.db,
-      piCodingAgentDir: piDir,
-      botToken: BOT_TOKEN,
-      e2bDeploymentId: E2B_DEPLOYMENT_ID,
-      browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-      baselineFile: outsideBaseline,
-    })).rejects.toThrow("must be inside PI_CODING_AGENT_DIR");
-    await expect(fs.access(`${outsideBaseline}.verified`)).rejects.toMatchObject({ code: "ENOENT" });
-  });
 });
 
 async function createLatestMainSchema(database: AppDatabase, piSessionFile: string): Promise<void> {

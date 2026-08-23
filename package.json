@@ -9,8 +9,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "upgrade:audit": "node dist/scripts/upgrade-audit.js",
-    "upgrade:migrate": "node dist/scripts/upgrade-migrate.js",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-image-check": "tsx scripts/live-pi-image-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",

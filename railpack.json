@@ -18,17 +18,7 @@
   },
   "deploy": {
     "startCommand": "tini -- ./docker/entrypoint.sh",
-    "aptPackages": ["ca-certificates", "gzip", "postgresql-client", "tar", "tini", "util-linux"],
-    "inputs": [
-      "...",
-      {
-        "image": "postgres:17.10-bookworm",
-        "include": [
-          "/usr/lib/postgresql/17/bin/pg_restore"
-        ]
-      }
-    ],
-    "paths": ["...", "/usr/lib/postgresql/17/bin"],
+    "aptPackages": ["ca-certificates", "gzip", "tar", "tini", "util-linux"],
     "variables": {
       "NODE_ENV": "production",
       "APP_DATA_ROOT": "/app/data",

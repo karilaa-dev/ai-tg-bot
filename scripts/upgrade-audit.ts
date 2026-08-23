@@ -48,7 +48,13 @@ try {
       database.db,
       piCodingAgentDir,
       loaded.manifest,
-      { botToken, e2bDeploymentId, browserUseDeploymentId },
+      {
+        botToken,
+        e2bDeploymentId,
+        browserUseDeploymentId,
+        requireExactDatasets: true,
+        requireExactPiSessions: true,
+      },
     );
     process.stdout.write(`${JSON.stringify({
       status: "verified",
@@ -72,8 +78,8 @@ function parseCommand(args: string[]): Command {
 function usage(): never {
   process.stderr.write([
     "Usage:",
-    "  npm run upgrade:audit -- snapshot --out <manifest.json>",
-    "  npm run upgrade:audit -- verify --against <manifest.json>",
+    "  node dist/scripts/upgrade-audit.js snapshot --out <manifest.json>",
+    "  node dist/scripts/upgrade-audit.js verify --against <manifest.json>",
     "",
     "DB_URL, PI_CODING_AGENT_DIR, BOT_TOKEN, E2B_DEPLOYMENT_ID, and BROWSER_USE_DEPLOYMENT_ID select the preserved deployment state.",
     "The command never initializes or migrates the database schema.",

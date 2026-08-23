@@ -1,139 +1,147 @@
-# Migrate from Unraid to Dokploy
+# Migrate the Unraid SQLite deployment to Dokploy
 
-This is an offline cutover. Export usually takes 5 to 15 minutes. Upload and import time depends on the archive size and network.
+The migration is an offline conversion. The Unraid wizard creates one `app-data.tgz` archive in the format expected by the current bot. After that archive is unpacked into `/app/data`, the new bot starts normally. The bot has no migration mode or one-time startup hook.
 
-> Never run the Unraid and Dokploy bots at the same time. They share a Telegram token and will compete for updates.
+> Never run the Unraid and Dokploy bots at the same time. They use the same Telegram token and will compete for updates.
 
-## Before you start
+## Source layout
 
-- [ ] Check out the migration branch on Unraid.
-- [ ] Confirm that the old bot and PostgreSQL run in separate Docker UI containers.
-- [ ] Use Dokploy `0.29.3` or newer. Versions through `0.29.2` do not validate the destination path used by container upload. The check first appears in [the `v0.29.3` upload implementation](https://github.com/Dokploy/dokploy/blob/v0.29.3/packages/server/src/services/docker.ts#L658-L676). See [CVE-2026-45663](https://github.com/Dokploy/dokploy/security/advisories/GHSA-9m66-74x3-5mwr) for the reported command-injection flaw.
-- [ ] Have the old `BOT_TOKEN` ready.
-- [ ] Be able to create an empty PostgreSQL 17 service in Dokploy.
+This guide matches the Unraid layout shown below.
 
-The export contains PostgreSQL chat state and the complete `/app/data/pi` volume. It excludes `bot-data`, shared roots, outbox data, OpenSandbox workspaces, and sandbox containers.
+| Unraid path | Container path | Contents | Migrated |
+| --- | --- | --- | --- |
+| `/mnt/user/appdata/ai-tg-bot` | `/app/data` | `bot.db` and `pi/` | Yes |
+| `/mnt/user/ai-bot` | `/app/data/files` | `.outbox/`, `chats/`, and `users/` | No |
 
-Keep the same `BOT_TOKEN`. Telegram file IDs belong to the bot that received them.
+The converted archive preserves:
 
-## 1. Stop the bot and export from Unraid
+- users, threads, messages, and file metadata from `bot.db`;
+- Telegram file IDs used to retrieve files shared through Telegram;
+- Pi sessions, settings, models, and authentication state from `pi/`.
 
-Stop the old bot in the Unraid UI. Leave PostgreSQL running.
+Agent-generated data that existed only in an old sandbox or under `/mnt/user/ai-bot` is not copied. Keep the same `BOT_TOKEN`: Telegram file IDs are scoped to the bot that received or sent the files.
 
-From a terminal in this repository, run:
+The Dokploy deployment continues to use SQLite at `/app/data/bot.db`. It does not need PostgreSQL.
+
+## 1. Create the converted archive on Unraid
+
+Check out this version of the repository on Unraid, then stop the old bot in the Unraid UI. Leave it stopped for the whole cutover.
+
+Run the wizard from the repository:
 
 ```bash
 bash scripts/unraid-migration-wizard.sh
 ```
 
-Choose the stopped bot container and the running PostgreSQL container. Press Enter when the wizard offers the only valid container as its default. If the old container does not expose `BOT_TOKEN` or `DB_URL`, enter the missing value at the hidden prompt.
+Choose the stopped bot container when prompted. The wizard follows a separate `/app/data/pi` mount when the old container has one, otherwise it reads `pi/` from the `/app/data` source. It then:
 
-The wizard does not stop, start, or remove either source container. Its only source-data write is `/app/data/pi/upgrade-baseline.json`.
+1. audits the source database, Pi sessions, and Telegram file references;
+2. creates a consistent SQLite backup without changing the source;
+3. upgrades that copied database to the current schema;
+4. copies `pi/` and verifies the converted data against the source audit;
+5. creates and checks the final archive.
 
-Wait for:
-
-```text
-Migration export ready:
-```
-
-The printed directory must contain exactly:
+Wait for `Migration export ready`. The printed private directory contains exactly:
 
 ```text
-aibot.dump
-pi-home.tgz
+app-data.tgz
 SHA256SUMS
 ```
 
-Keep the directory private. `pi-home.tgz` may contain provider credentials from `auth.json`.
+Confirm the archive before uploading it:
 
-## 2. Prepare an empty Dokploy destination
+```bash
+cd /path/printed/by/the/wizard
+sha256sum --check SHA256SUMS
+```
 
-Create an empty PostgreSQL 17 service and a Railpack application with one replica.
+`app-data.tgz` contains `bot.db` and `pi/`. Treat it as a secret because Pi authentication data may be present.
 
-Add two empty named-volume mounts in Dokploy's [advanced application settings](https://docs.dokploy.com/docs/core/applications/advanced):
+## 2. Create a holding Dokploy container
 
-| Volume | Container path | Keep after migration |
-| --- | --- | --- |
-| Pi data | `/app/data/pi` | Yes |
-| Import files | `/app/data/import` | No |
+Create a Railpack application with one replica. Under **Advanced > Mounts**, create one Docker named volume mounted at `/app/data`. Dokploy documents named application volumes in its [mount settings](https://docs.dokploy.com/docs/core/applications/advanced#volumesmounts).
 
-Set these variables. Use the identity and UID/GID values printed by the export wizard.
+Set the normal application identity and data variables printed by the wizard:
 
 ```dotenv
-UPGRADE_MODE=import
 BOT_TOKEN=<same token as the old bot>
-DB_URL=postgresql://<user>:<password>@<dokploy-postgres-host>:5432/<database>
+DB_URL=sqlite:/app/data/bot.db
 PI_CODING_AGENT_DIR=/app/data/pi
-UPGRADE_BASELINE_FILE=/app/data/pi/upgrade-baseline.json
 E2B_DEPLOYMENT_ID=<value printed by the wizard>
 BROWSER_USE_DEPLOYMENT_ID=<value printed by the wizard>
 APP_UID=<value printed by the wizard>
 APP_GID=<value printed by the wizard>
 ```
 
-Deploy the application. Import mode starts a staging container without Telegram polling. Its logs must contain:
+Do not set `POSTGRES_PASSWORD` or any `UPGRADE_*` variables.
 
-```text
-offline import staging mode; Telegram polling is disabled
+For the first deployment only, add this Railpack start-command override:
+
+```dotenv
+RAILPACK_START_CMD=sleep infinity
 ```
 
-Stop if the logs contain `bot started`.
+[Dokploy supports `RAILPACK_START_CMD`](https://docs.dokploy.com/docs/core/applications/build-type#railpack-new) as the container start command for Railpack applications. Deploy once. This creates the empty named volume and keeps the container alive without starting Telegram polling. The logs must not contain `bot started`.
 
-## 3. Upload and import
+## 3. Seed `/app/data`
 
-Use Dokploy's authenticated [container upload API](https://docs.dokploy.com/docs/api/docker) to upload each file to the exact path shown here:
+Upload both exported files to the holding container:
 
-| Exported file | Destination |
+| File | Container path |
 | --- | --- |
-| `aibot.dump` | `/app/data/import/aibot.dump` |
-| `pi-home.tgz` | `/app/data/import/pi-home.tgz` |
-| `SHA256SUMS` | `/app/data/import/SHA256SUMS` |
+| `app-data.tgz` | `/tmp/app-data.tgz` |
+| `SHA256SUMS` | `/tmp/SHA256SUMS` |
 
-Do not rename or unpack the files.
-
-Open **Advanced > Run Command** and run:
+You can use Dokploy's authenticated [container upload API](https://docs.dokploy.com/docs/api/docker#docker-upload-file-to-container). For example:
 
 ```bash
-./docker/import-migration.sh
+curl --fail --show-error \
+  -H "x-api-key: $DOKPLOY_API_KEY" \
+  -F "containerId=$CONTAINER_ID" \
+  -F "file=@app-data.tgz" \
+  -F "destinationPath=/tmp/app-data.tgz" \
+  "$DOKPLOY_URL/api/docker.uploadFileToContainer"
+
+curl --fail --show-error \
+  -H "x-api-key: $DOKPLOY_API_KEY" \
+  -F "containerId=$CONTAINER_ID" \
+  -F "file=@SHA256SUMS" \
+  -F "destinationPath=/tmp/SHA256SUMS" \
+  "$DOKPLOY_URL/api/docker.uploadFileToContainer"
 ```
 
-The importer checks the files, destination database, and Pi volume before it restores anything. Leave import mode enabled until the command finishes.
+Use Dokploy `0.29.3` or newer when using this API. Older releases have a reported destination-path command-injection issue; see [CVE-2026-45663](https://github.com/Dokploy/dokploy/security/advisories/GHSA-9m66-74x3-5mwr).
 
-A successful run prints these lines in order:
+In **Advanced > Run Command**, execute:
 
-```text
-upgrade import artifacts verified
-upgrade import destinations verified empty
-upgrade import PostgreSQL dump restored
-upgrade import Pi archive restored
-upgrade import schema migrated
-upgrade import verification complete
+```bash
+set -eu
+cd /tmp
+sha256sum --check SHA256SUMS
+test -z "$(find /app/data -mindepth 1 -maxdepth 1 -print -quit)"
+tar -xzf app-data.tgz -C /app/data --no-same-owner --no-same-permissions
+test -s /app/data/bot.db
+test -d /app/data/pi
+test ! -e /app/data/bot.db-wal
+test ! -e /app/data/bot.db-shm
+rm -f /tmp/app-data.tgz /tmp/SHA256SUMS
 ```
 
-Do not start the bot if the last line is missing.
+The empty-volume check makes this step fail instead of merging the archive into existing data. If it fails after extraction starts, recreate the named volume and repeat this section with a fresh empty volume.
 
-## 4. Start the new bot
+## 4. Start the bot normally
 
-After a successful import:
+Remove `RAILPACK_START_CMD`, add the normal OpenRouter, Tavily, E2B, and optional Browser Use or Codex credentials, then redeploy with one replica.
 
-1. Remove `UPGRADE_MODE`.
-2. Detach `/app/data/import`. Keep its volume for now.
-3. Add the normal OpenRouter, Tavily, E2B, and optional Browser Use or Codex credentials.
-4. Redeploy with one replica.
-5. Confirm that the logs contain `upgrade preservation baseline already verified`, `database initialized`, and `bot started`.
-
-Run these smoke tests:
+The bot now starts through its ordinary entrypoint. Confirm that the logs contain `database initialized` and `bot started`, then run these smoke tests:
 
 - [ ] Continue an existing conversation.
 - [ ] Find an old message with `search_thread`.
 - [ ] Restore an old Telegram attachment into a new E2B sandbox.
 - [ ] Send and process a new file.
 
-When all four pass, remove `UPGRADE_BASELINE_FILE`, redeploy once, and delete the temporary import volume. Keep the Unraid export and stopped source deployment until you are comfortable with the new system.
+Keep the old Unraid bot stopped, and retain the export plus `/mnt/user/ai-bot`, until these checks pass.
 
-## Recovery and rollback
+## Rollback
 
-- If export fails, leave the old bot stopped, fix the reported problem, and rerun the wizard.
-- If import fails before changing either destination, replace the bad upload and rerun `./docker/import-migration.sh`.
-- If import fails after PostgreSQL or Pi restoration starts, recreate the Dokploy PostgreSQL database, Pi volume, and import volume. Upload all three files again and retry.
-- To roll back, stop the Dokploy application first. Then restart the old Unraid bot.
+Stop the Dokploy bot before restarting the Unraid bot. Never let both deployments poll Telegram with the same token.
