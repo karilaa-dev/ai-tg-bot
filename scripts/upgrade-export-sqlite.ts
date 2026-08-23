@@ -12,8 +12,13 @@ await assertMissing(outputFile);
 if (databaseFile === outputFile) throw new Error("SQLite source and backup destination must be different files.");
 
 let source: Database.Database | undefined;
+let stagedDirectory: string | undefined;
 try {
-  source = new Database(databaseFile, { readonly: true, fileMustExist: true });
+  stagedDirectory = await fs.mkdtemp(path.join(path.dirname(outputFile), ".sqlite-source-"));
+  await fs.chmod(stagedDirectory, 0o700);
+  const stagedDatabaseFile = path.join(stagedDirectory, "bot.db");
+  await copySourceDatabase(databaseFile, stagedDatabaseFile);
+  source = new Database(stagedDatabaseFile, { fileMustExist: true });
   await source.backup(outputFile);
   await fs.chmod(outputFile, 0o600);
   await normalizeAndVerify(outputFile);
@@ -26,6 +31,7 @@ try {
   throw error;
 } finally {
   source?.close();
+  if (stagedDirectory) await fs.rm(stagedDirectory, { recursive: true, force: true });
 }
 
 process.stdout.write(`${JSON.stringify({
@@ -69,6 +75,25 @@ async function normalizeAndVerify(file: string): Promise<void> {
     fs.rm(`${file}-wal`, { force: true }),
     fs.rm(`${file}-shm`, { force: true }),
   ]);
+}
+
+async function copySourceDatabase(sourceFile: string, destinationFile: string): Promise<void> {
+  await fs.copyFile(sourceFile, destinationFile);
+  await fs.chmod(destinationFile, 0o600);
+  for (const suffix of ["-wal", "-journal"] as const) {
+    const sourceSidecar = `${sourceFile}${suffix}`;
+    const stat = await fs.lstat(sourceSidecar).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!stat) continue;
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`source SQLite ${suffix.slice(1)} sidecar must be a regular file.`);
+    }
+    const destinationSidecar = `${destinationFile}${suffix}`;
+    await fs.copyFile(sourceSidecar, destinationSidecar);
+    await fs.chmod(destinationSidecar, 0o600);
+  }
 }
 
 async function assertRegularFile(file: string, label: string): Promise<void> {
