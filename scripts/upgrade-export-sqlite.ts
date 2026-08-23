@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { readUpgradeAuditEnvironmentOrFile } from "../src/upgrade/environment.js";
@@ -14,7 +15,7 @@ if (databaseFile === outputFile) throw new Error("SQLite source and backup desti
 let source: Database.Database | undefined;
 let stagedDirectory: string | undefined;
 try {
-  stagedDirectory = await fs.mkdtemp(path.join(path.dirname(outputFile), ".sqlite-source-"));
+  stagedDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-sqlite-source-"));
   await fs.chmod(stagedDirectory, 0o700);
   const stagedDatabaseFile = path.join(stagedDirectory, "bot.db");
   await copySourceDatabase(databaseFile, stagedDatabaseFile);
@@ -31,7 +32,7 @@ try {
   throw error;
 } finally {
   source?.close();
-  if (stagedDirectory) await fs.rm(stagedDirectory, { recursive: true, force: true });
+  if (stagedDirectory) await fs.rm(stagedDirectory, { recursive: true, force: true }).catch(() => undefined);
 }
 
 process.stdout.write(`${JSON.stringify({
