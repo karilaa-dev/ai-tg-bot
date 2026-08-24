@@ -48,12 +48,19 @@ export class TurnFinalizer {
   }): Promise<void> {
     this.deliveryStarted = true;
     this.resultMessageId = result.assistantMessageId;
-    await this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
+    const transitioned = await this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
       resultMessageId: result.assistantMessageId,
       provider: result.provider,
       model: result.model,
       usage: result.usage,
     }, this.input.ownerId);
+    if (!transitioned) {
+      // A remote /stop and this delivery transition compete on the same row.
+      // If cancellation won, no Telegram delivery may start.
+      this.deliveryStarted = false;
+      this.cancelRequested = true;
+      throw new Error("Turn cancellation won the delivery transition.");
+    }
   }
 
   async confirmDelivery(assistantMessageId: number): Promise<void> {

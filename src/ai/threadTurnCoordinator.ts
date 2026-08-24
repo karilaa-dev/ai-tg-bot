@@ -136,6 +136,9 @@ export class ThreadTurnCoordinator {
         });
       }
       if (threadId !== undefined && await this.input.repos.turnRuns.hasUnfinished(threadId)) {
+        if (!this.draining.has(threadId) && await this.input.repos.turnRuns.nextQueued(threadId)) {
+          this.schedule(threadId);
+        }
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
         continue;
       }

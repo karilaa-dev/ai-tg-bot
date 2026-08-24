@@ -450,6 +450,56 @@ describe("ThreadTurnCoordinator", () => {
     await owner.shutdown();
   });
 
+  it("rejects the delivery transition when persisted cancellation wins the race", async () => {
+    const { userId, threadId } = await ownership(repos, 819);
+    const deliveryStarting = deferred<void>();
+    const releaseDelivery = deferred<void>();
+    const owner = createCoordinator(db, repos, async (input) => {
+      expect(input.onDeliveryStarting?.()).toBe(true);
+      deliveryStarting.resolve();
+      await releaseDelivery.promise;
+      await input.onAwaitingDelivery?.({ assistantMessageId: input.userMessageId! });
+    });
+    await owner.accept(request(userId, threadId, 19_001, "cancel before delivery"));
+    await deliveryStarting.promise;
+    const receiver = createCoordinator(db, repos, async () => undefined);
+
+    await expect(receiver.cancelActive(threadId)).resolves.toBe(true);
+    releaseDelivery.resolve();
+    await owner.waitForIdle();
+
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({
+        status: "cancelled",
+        delivery_status: "pending",
+        cancel_requested_at: expect.any(Number),
+      }),
+    ]);
+    await receiver.shutdown();
+    await owner.shutdown();
+  });
+
+  it("schedules a queued successor exposed while waiting for idle", async () => {
+    const { userId, threadId } = await ownership(repos, 820);
+    const empty = await ownership(repos, 821);
+    const active = await repos.turnRuns.accept(request(userId, threadId, 20_001, "external owner"));
+    await repos.turnRuns.claimRunning(active.turnRun.id, "other-process", Date.now() + 50);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+    await coordinator.waitForIdle(empty.threadId);
+    await repos.turnRuns.accept(request(userId, threadId, 20_002, "take over queued work"));
+
+    await coordinator.waitForIdle(threadId);
+
+    expect(executed).toEqual(["take over queued work"]);
+    expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
+      .toEqual(["interrupted", "succeeded"]);
+    await coordinator.shutdown();
+  });
+
   it("retries FTS indexing before claiming a durably queued turn", async () => {
     const { userId, threadId } = await ownership(repos, 813);
     const originalIndex = db.search.indexMessage.bind(db.search);

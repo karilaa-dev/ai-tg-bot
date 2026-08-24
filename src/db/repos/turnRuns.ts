@@ -301,19 +301,31 @@ export class TurnRunsRepo {
     await this.search.indexMessage(message.id, message.thread_id, message.text_plain);
   }
 
-  markAwaitingDelivery(id: number, input: {
+  async markAwaitingDelivery(id: number, input: {
     resultMessageId?: number | null;
     provider?: string | null;
     model?: string | null;
     usage?: unknown;
-  } = {}, ownerId?: string): Promise<void> {
-    return this.updateLifecycle(id, "awaiting_delivery", {
-      deliveryStatus: "pending",
-      resultMessageId: input.resultMessageId,
-      provider: input.provider,
-      model: input.model,
-      usage: input.usage,
-    }, ownerId);
+  } = {}, ownerId?: string): Promise<boolean> {
+    const now = Date.now();
+    const transitioned = await queryOne<{ id: number }>(this.db, sql`
+      update turn_runs set
+        status = 'awaiting_delivery',
+        delivery_status = 'pending',
+        result_message_id = coalesce(${input.resultMessageId ?? null}, result_message_id),
+        provider = coalesce(${input.provider ?? null}, provider),
+        model = coalesce(${input.model ?? null}, model),
+        usage_json = coalesce(${input.usage === undefined ? null : JSON.stringify(input.usage)}, usage_json),
+        failure_code = null,
+        finished_at = null,
+        updated_at = ${now}
+      where id = ${id}
+        and status = 'running'
+        and cancel_requested_at is null
+        and (${ownerId === undefined ? 0 : 1} = 0 or owner_id = ${ownerId ?? ""})
+      returning id
+    `);
+    return Boolean(transitioned);
   }
 
   markSucceeded(id: number, resultMessageId?: number | null, ownerId?: string): Promise<void> {
@@ -359,7 +371,7 @@ export class TurnRunsRepo {
         finished_at = ${input.finished ? now : null},
         updated_at = ${now}
       where id = ${id}
-        and (${ownerId ?? null} is null or owner_id = ${ownerId ?? null})
+        and (${ownerId === undefined ? 0 : 1} = 0 or owner_id = ${ownerId ?? ""})
     `);
   }
 }
