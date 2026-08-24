@@ -9,10 +9,6 @@ describe("Railpack deployment configuration", () => {
       $schema: "https://schema.railpack.com",
       deploy: {
         startCommand: "node dist/src/main.js",
-        variables: {
-          DB_URL: "sqlite:/app/data/bot.db",
-          PI_CODING_AGENT_DIR: "/app/data/pi",
-        },
       },
     });
   });
