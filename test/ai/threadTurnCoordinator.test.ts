@@ -107,6 +107,28 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("discovers turns accepted by another coordinator after startup", async () => {
+    vi.useFakeTimers();
+    const target = await ownership(repos, 830);
+    const idle = await ownership(repos, 831);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+    await coordinator.waitForIdle(idle.threadId);
+
+    await repos.turnRuns.accept(request(target.userId, target.threadId, 30_001, "accepted by peer"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await coordinator.waitForIdle(target.threadId);
+
+    expect(executed).toEqual(["accepted by peer"]);
+    expect(await repos.turnRuns.listForThread(target.threadId)).toEqual([
+      expect.objectContaining({ status: "succeeded" }),
+    ]);
+    await coordinator.shutdown();
+  });
+
   it("records ambiguous Telegram delivery without replaying the accepted turn", async () => {
     const { userId, threadId } = await ownership(repos, 804);
     let executions = 0;
@@ -214,6 +236,37 @@ describe("ThreadTurnCoordinator", () => {
     )).resolves.toMatchObject({ status: "running", owner_id: "new-process" });
     expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
       .toEqual(["interrupted", "running"]);
+  });
+
+  it("preserves a pre-lease owner when the turn timeout is disabled", async () => {
+    vi.useFakeTimers();
+    const target = await ownership(repos, 832);
+    const idle = await ownership(repos, 833);
+    const first = await repos.turnRuns.accept(request(target.userId, target.threadId, 32_001, "legacy unlimited"));
+    await repos.turnRuns.accept(request(target.userId, target.threadId, 32_002, "queued successor"));
+    await repos.turnRuns.claimRunning(first.turnRun.id, "old-process", Date.now() + 60_000);
+    await db.db.execute(sql`
+      update turn_runs set owner_id = null, lease_expires_at = null, updated_at = 100
+      where id = ${first.turnRun.id}
+    `);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    }, vi.fn(async () => false), { PI_TURN_TIMEOUT_MS: 0 });
+    await coordinator.waitForIdle(idle.threadId);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(executed).toEqual([]);
+    expect((await repos.turnRuns.listForThread(target.threadId)).map((run) => run.status))
+      .toEqual(["running", "queued"]);
+
+    await repos.turnRuns.markSucceeded(first.turnRun.id);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await coordinator.waitForIdle(target.threadId);
+    expect(executed).toEqual(["queued successor"]);
+    await coordinator.shutdown();
   });
 
   it("fences terminal writes from an owner whose lease expired", async () => {
@@ -731,8 +784,9 @@ function createCoordinator(
   repos: Repos,
   runner: (input: TurnInput) => Promise<void>,
   abort = vi.fn(async () => false),
+  configOverrides: Parameters<typeof loadTestConfig>[0] = {},
 ): ThreadTurnCoordinator {
-  const config = loadTestConfig();
+  const config = loadTestConfig(configOverrides);
   return new ThreadTurnCoordinator({
     api: {} as never,
     config,

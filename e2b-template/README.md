@@ -12,15 +12,25 @@ Put `E2B_API_KEY` in the ignored root `.env`. Publish and validate the sandbox-f
 npm run e2b:template:build:sandbox-files-v2
 ```
 
-The build validates `ai-tg-bot-tools:sandbox-files-v2` before assigning the production tag. For later upgrades, use a fresh tag or run the timestamped builder:
+The build validates `ai-tg-bot-tools:sandbox-files-v2` without changing the production tag. Run the full live runtime smoke against that immutable tag:
+
+```sh
+npm run live:e2b-sandbox-files-v2
+```
+
+Promote only after the live smoke passes:
+
+```sh
+npm run e2b:template:promote:sandbox-files-v2
+```
+
+For later upgrades, use a fresh explicit tag or run the timestamped builder:
 
 ```sh
 npm run e2b:template:build
 ```
 
-Run the full live runtime smoke test against the immutable tag with `npm run live:e2b-sandbox-files-v2`.
-
-The command creates a unique immutable tag and starts a temporary validation sandbox. It checks the toolbox contract, outbound internet, allocated CPU and memory, and pause/resume persistence. It deletes the validation sandbox and moves `ai-tg-bot-tools:production` only after every check passes. Bot startup never builds the template.
+The build command creates an immutable tag and starts a temporary validation sandbox. The live smoke separately checks the toolbox contract, outbound internet, allocated CPU and memory, and pause/resume persistence. The promotion command revalidates the immutable tag immediately before moving `ai-tg-bot-tools:production`. Bot startup never builds or promotes the template.
 
 Check the current production tag without rebuilding:
 

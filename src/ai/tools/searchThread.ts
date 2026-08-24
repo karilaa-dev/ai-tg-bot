@@ -19,6 +19,7 @@ export function createSearchThreadTool(input: ToolBuildInput) {
         search: input.db.search,
         repos: input.repos,
         threadIds: scope.threadIds,
+        messageScopes: scope.messageScopes,
         messageIds: scope.messageIds,
         fileIds: scope.fileIds,
         query,

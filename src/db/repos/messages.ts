@@ -1,6 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
-import type { TextSearch } from "../search.js";
+import type { MessageSearchScope, TextSearch } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
 
 export class MessagesRepo {
@@ -109,4 +109,21 @@ export class MessagesRepo {
   get(id: number): Promise<MessageRow | undefined> {
     return queryOne<MessageRow>(this.db, sql`select * from messages where id = ${id}`);
   }
+}
+
+export function messageSearchScopesForChain(
+  threads: ThreadRow[],
+  maxMessageId?: number,
+): MessageSearchScope[] {
+  return threads.map((thread, index) => {
+    const child = threads[index + 1];
+    const bounds = [
+      maxMessageId,
+      child?.parent_thread_id === thread.id ? child.fork_point_message_id ?? undefined : undefined,
+    ].filter((value): value is number => value !== undefined);
+    return {
+      threadId: thread.id,
+      ...(bounds.length ? { maxMessageId: Math.min(...bounds) } : {}),
+    };
+  });
 }

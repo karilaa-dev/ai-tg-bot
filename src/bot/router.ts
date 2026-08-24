@@ -254,27 +254,47 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       return;
     }
     const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId, signal) => {
-      signal.throwIfAborted();
-      const topic = await ctx.api.raw.createForumTopic({
-        chat_id: chat.id,
-        name: `Fork: ${thread.title}`,
-      });
-      signal.throwIfAborted();
-      const latest = snapshotMessageId === null
-        ? undefined
-        : await ctx.services.repos.messages.get(snapshotMessageId);
-      signal.throwIfAborted();
-      const created = await ctx.services.repos.threads.create({
-        userId: user.tg_id,
-        topicId: topic.message_thread_id ?? null,
-        title: `Fork: ${thread.title}`,
-        parentThreadId: thread.id,
-        forkPointMessageId: snapshotMessageId,
-      });
-      signal.throwIfAborted();
-      await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id, signal);
-      signal.throwIfAborted();
-      return created;
+      let topicId: number | undefined;
+      let created: ThreadRow | undefined;
+      try {
+        signal.throwIfAborted();
+        const topic = await ctx.api.raw.createForumTopic({
+          chat_id: chat.id,
+          name: `Fork: ${thread.title}`,
+        });
+        topicId = topic.message_thread_id;
+        signal.throwIfAborted();
+        const latest = snapshotMessageId === null
+          ? undefined
+          : await ctx.services.repos.messages.get(snapshotMessageId);
+        signal.throwIfAborted();
+        created = await ctx.services.repos.threads.create({
+          userId: user.tg_id,
+          topicId,
+          title: `Fork: ${thread.title}`,
+          parentThreadId: thread.id,
+          forkPointMessageId: snapshotMessageId,
+        });
+        signal.throwIfAborted();
+        await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id, signal);
+        signal.throwIfAborted();
+        return created;
+      } catch (error) {
+        const cleanup = await Promise.allSettled([
+          created ? ctx.services.repos.threads.archive(created.id) : Promise.resolve(),
+          topicId === undefined
+            ? Promise.resolve()
+            : ctx.api.raw.deleteForumTopic({ chat_id: chat.id, message_thread_id: topicId }),
+        ]);
+        const cleanupFailures = cleanup.filter((result) => result.status === "rejected");
+        ctx.services.logger.warn("partial thread fork rolled back", ctxLogMeta(ctx, {
+          forkThreadId: created?.id,
+          topicId,
+          cleanupFailures: cleanupFailures.length,
+          error: String(error),
+        }));
+        throw error;
+      }
     });
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
       forkThreadId: fork.id,

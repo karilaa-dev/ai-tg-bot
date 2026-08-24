@@ -3,7 +3,6 @@ import { Template, defaultBuildLogger } from "e2b";
 import {
   E2B_TOOLBOX_CPU_COUNT,
   E2B_TOOLBOX_MEMORY_MB,
-  E2B_TOOLBOX_PRODUCTION_TAG,
   E2B_TOOLBOX_TEMPLATE_NAME,
   e2bToolboxBuildRef,
   e2bToolboxTemplate,
@@ -22,17 +21,13 @@ const buildInfo = await Template.build(e2bToolboxTemplate, E2B_TOOLBOX_TEMPLATE_
 });
 
 await validateE2BToolboxTemplate(exactRef, apiKey);
-await Template.assignTags(
-  exactRef,
-  E2B_TOOLBOX_PRODUCTION_TAG,
-  { apiKey },
-);
 
 process.stdout.write(`${JSON.stringify({
   ok: true,
   template: E2B_TOOLBOX_TEMPLATE_NAME,
   versionTag: buildTag,
-  productionRef: `${E2B_TOOLBOX_TEMPLATE_NAME}:${E2B_TOOLBOX_PRODUCTION_TAG}`,
+  immutableRef: exactRef,
+  promoted: false,
   templateId: buildInfo.templateId,
   buildId: buildInfo.buildId,
   cpuCount: E2B_TOOLBOX_CPU_COUNT,

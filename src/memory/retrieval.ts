@@ -1,5 +1,7 @@
 import type { Repos } from "../db/repos/index.js";
 import type { TextSearch } from "../db/search.js";
+import { messageSearchScopesForChain } from "../db/repos/messages.js";
+import type { MessageSearchScope } from "../db/search.js";
 import type { ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 
@@ -13,6 +15,7 @@ export async function hybridSearch(input: {
   search: TextSearch;
   repos: Repos;
   threadIds: number[];
+  messageScopes?: MessageSearchScope[];
   messageIds?: number[];
   fileIds: number[];
   query: string;
@@ -37,7 +40,7 @@ export async function hybridSearch(input: {
   };
 
   const [messages, chunks] = await Promise.all([
-    input.search.searchMessages(input.threadIds, input.query, input.k, input.messageIds),
+    input.search.searchMessages(input.threadIds, input.query, input.k, input.messageScopes),
     input.fileIds.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
   ]);
   input.logger?.debug("hybrid lexical search complete", {
@@ -57,15 +60,17 @@ export async function hybridSearch(input: {
 
 export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<{
   threadIds: number[];
+  messageScopes: MessageSearchScope[];
   messageIds: number[];
   fileIds: number[];
 }> {
   const chain = await repos.threads.chain(thread);
   const threadIds = chain.map((row) => row.id);
+  const messageScopes = messageSearchScopesForChain(chain, maxMessageId);
   const messages = await repos.messages.listForThreadChainSearchScope(chain, maxMessageId);
   const messageIds = messages.map((row) => row.id);
   const messageIdSet = new Set(messageIds);
-  const attachedFiles = await repos.files.listForMessages(messageIds);
+  const attachedFiles = await repos.files.listForMessageScopes(messageScopes);
   const threadFiles = await repos.files.listForThreads(threadIds);
   const unattachedInboundIds = new Set(maxMessageId === undefined
     ? []
@@ -84,7 +89,7 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessa
   ];
   const recoverableIds = new Set(await repos.files.listRecoverableIds(candidateFileIds));
   const fileIds = candidateFileIds.filter((fileId) => recoverableIds.has(fileId));
-  return { threadIds, messageIds, fileIds };
+  return { threadIds, messageScopes, messageIds, fileIds };
 }
 
 export function clearRetrievalVectorCacheForTests(): void {

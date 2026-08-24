@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
-import { createTextSearch, type TextSearch } from "../search.js";
+import { createTextSearch, type MessageSearchScope, type TextSearch } from "../search.js";
 import type {
   FileChunkRow,
   FileRow,
@@ -120,6 +120,24 @@ export class FilesRepo {
       left join message_files mf on mf.file_id = f.id
       where mf.message_id in (${valueList(messageIds)})
          or f.message_id in (${valueList(messageIds)})
+      order by f.id asc
+    `);
+  }
+
+  listForMessageScopes(scopes: MessageSearchScope[]): Promise<FileRow[]> {
+    if (!scopes.length) return Promise.resolve([]);
+    const visibleMessage = sql`(${sql.join(scopes.map((scope) => scope.maxMessageId === undefined
+      ? sql`(m.thread_id = ${scope.threadId})`
+      : sql`(m.thread_id = ${scope.threadId} and m.id <= ${scope.maxMessageId})`), sql` or `)})`;
+    return this.db.query<FileRow>(sql`
+      select distinct f.*
+      from files f
+      left join message_files mf on mf.file_id = f.id
+      where exists (
+        select 1 from messages m
+        where (m.id = mf.message_id or m.id = f.message_id)
+          and ${visibleMessage}
+      )
       order by f.id asc
     `);
   }

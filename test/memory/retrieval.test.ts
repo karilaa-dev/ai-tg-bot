@@ -45,6 +45,7 @@ describe("Pi retrieval tools backend", () => {
       search: db.search,
       repos,
       threadIds: scope.threadIds,
+      messageScopes: scope.messageScopes,
       messageIds: scope.messageIds,
       fileIds: scope.fileIds,
       query: "orchid",
@@ -135,6 +136,7 @@ describe("Pi retrieval tools backend", () => {
       search: db.search,
       repos,
       threadIds: scope.threadIds,
+      messageScopes: scope.messageScopes,
       messageIds: scope.messageIds,
       fileIds: scope.fileIds,
       query: "sentinel",
@@ -143,7 +145,7 @@ describe("Pi retrieval tools backend", () => {
     expect(hits.some((hit) => hit.kind === "message" && hit.ref_id === after.id)).toBe(false);
   });
 
-  it("applies allowed message IDs before the FTS limit", async () => {
+  it("applies message boundaries before the FTS limit", async () => {
     const user = await repos.users.ensure({ tgId: 305, firstName: "Bounded FTS" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const allowed = await repos.messages.insert({
@@ -163,7 +165,7 @@ describe("Pi retrieval tools backend", () => {
       [thread.id],
       "boundaryneedle",
       1,
-      [allowed.id],
+      [{ threadId: thread.id, maxMessageId: allowed.id }],
     )).resolves.toEqual([expect.objectContaining({ id: allowed.id })]);
   });
 

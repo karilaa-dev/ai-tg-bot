@@ -233,7 +233,7 @@ export class TurnRunsRepo {
     threadId?: number;
   } = {}): Promise<number> {
     const now = input.now ?? Date.now();
-    const legacyStaleBefore = input.legacyStaleBefore ?? now;
+    const legacyStaleBefore = input.legacyStaleBefore;
     const rows = await this.db.query<{ id: number }>(sql`
       update turn_runs
       set status = 'interrupted', failure_code = 'process_interrupted',
@@ -243,7 +243,8 @@ export class TurnRunsRepo {
         and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? 0})
         and (
           (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
-          or (owner_id is null and updated_at <= ${legacyStaleBefore})
+          or (${legacyStaleBefore === undefined ? 0 : 1} = 1
+            and owner_id is null and updated_at <= ${legacyStaleBefore ?? 0})
         )
       returning id
     `);

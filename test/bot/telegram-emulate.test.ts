@@ -258,6 +258,27 @@ describe("Telegram bot with grammy-emulate", () => {
     });
   });
 
+  it("archives the child and removes the topic when Pi fork creation fails", async () => {
+    await env.dispose();
+    env = await createGrammyEmulator({
+      privateTopics: true,
+      pi: {
+        ...piWithTitleGenerator(async () => "Unused"),
+        fork: async () => { throw new Error("forced fork failure"); },
+      },
+    });
+    await startBot();
+    const parent = await env.repos.threads.activeForUserTopic(env.user.id, null);
+
+    await env.bot.sendCommand(env.user, env.chat, "/fork").catch(() => undefined);
+
+    const [child] = await env.db.db.query<ThreadRow>(sql`
+      select * from threads where parent_thread_id = ${parent.id} order by id desc limit 1
+    `);
+    expect(child).toMatchObject({ archived: 1, topic_id: 2 });
+    expect(env.bot.server.chatState.get(env.chat.id)?.forumTopics.has(2)).toBe(false);
+  });
+
   it("waits for the thread to become idle before compacting Pi history", async () => {
     await startBot();
     const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();

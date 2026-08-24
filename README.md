@@ -74,14 +74,15 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 `E2B_TEMPLATE=ai-tg-bot-tools:production` selects the private template in [`e2b-template`](e2b-template/README.md). It uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
-Build, validate, and promote a new immutable version:
+Build and validate an immutable version, smoke-test that exact tag, then promote it:
 
 ```bash
 npm run e2b:template:build
-npm run e2b:template:check
+E2B_TEMPLATE=ai-tg-bot-tools:<version-tag> npm run live:e2b-check
+E2B_PROMOTE_TAG=<version-tag> npm run e2b:template:promote
 ```
 
-The build command promotes `production` only after the contract, internet access, and pause/resume checks pass. Moving the tag affects new sandboxes only.
+The build command never changes `production`. Promotion revalidates the immutable build and moves the tag only after the separate live runtime smoke succeeds. Moving the tag affects new sandboxes only.
 
 ### E2B settings
 

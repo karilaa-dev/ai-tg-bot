@@ -57,7 +57,7 @@ describe("E2B toolbox template definition", () => {
     expect(contract).toContain("officecli view contract.docx text");
   });
 
-  it("validates and promotes the same version-tagged build reference", async () => {
+  it("keeps immutable builds separate from production promotion", async () => {
     expect(e2bToolboxBuildRef("build-20260803-020000"))
       .toBe("ai-tg-bot-tools:build-20260803-020000");
     expect(() => e2bToolboxBuildRef("production:unexpected")).toThrow("contain no colon");
@@ -67,6 +67,12 @@ describe("E2B toolbox template definition", () => {
     expect(source.indexOf("const exactRef = e2bToolboxBuildRef(buildTag)"))
       .toBeLessThan(source.indexOf("Template.build"));
     expect(source).toContain("process.env.E2B_BUILD_TAG");
+    expect(source).not.toContain("Template.assignTags");
     expect(source).not.toContain("buildInfo.buildId}`");
+
+    const promotion = await fs.readFile("e2b-template/promote.ts", "utf8");
+    expect(promotion).toContain("process.env.E2B_PROMOTE_TAG");
+    expect(promotion.indexOf("validateE2BToolboxTemplate"))
+      .toBeLessThan(promotion.indexOf("Template.assignTags"));
   });
 });

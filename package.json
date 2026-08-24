@@ -17,6 +17,8 @@
     "live:browser-use-check": "tsx scripts/live-browser-use-check.ts",
     "e2b:template:build": "tsx e2b-template/build.ts",
     "e2b:template:build:sandbox-files-v2": "E2B_BUILD_TAG=sandbox-files-v2 tsx e2b-template/build.ts",
+    "e2b:template:promote": "tsx e2b-template/promote.ts",
+    "e2b:template:promote:sandbox-files-v2": "E2B_PROMOTE_TAG=sandbox-files-v2 tsx e2b-template/promote.ts",
     "e2b:template:check": "tsx e2b-template/check.ts"
   },
   "engines": {

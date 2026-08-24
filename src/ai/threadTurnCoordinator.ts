@@ -33,6 +33,8 @@ export class ThreadTurnCoordinator {
   private readonly recovery: Promise<number[]>;
   private readonly ownerId = randomUUID();
   private readonly lifecycle = new AbortController();
+  private recoveryPollTimer: NodeJS.Timeout | undefined;
+  private recoveryScan: Promise<void> | undefined;
   private accepting = true;
 
   private static readonly CLAIM_RETRY_MS = 1_000;
@@ -44,6 +46,7 @@ export class ThreadTurnCoordinator {
   private static readonly BARRIER_RELEASE_ATTEMPTS = 5;
   private static readonly BARRIER_RELEASE_RETRY_MS = 100;
   private static readonly CANCELLATION_POLL_MS = 500;
+  private static readonly RECOVERY_POLL_MS = 5_000;
 
   constructor(private readonly input: {
     api: Api;
@@ -61,6 +64,7 @@ export class ThreadTurnCoordinator {
     this.recovery = this.recoverUntilReady();
     void this.recovery.then((threadIds) => {
       for (const threadId of threadIds) this.schedule(threadId);
+      this.armRecoveryPoll();
     }).catch((error) => {
       this.input.logger.error("turn coordinator recovery failed", { error: String(error) });
     });
@@ -259,6 +263,8 @@ export class ThreadTurnCoordinator {
   async shutdown(timeoutMs = 5_000): Promise<void> {
     this.accepting = false;
     this.lifecycle.abort();
+    if (this.recoveryPollTimer) clearTimeout(this.recoveryPollTimer);
+    this.recoveryPollTimer = undefined;
     await this.recovery.catch(() => undefined);
     await Promise.all([...this.active.keys()].map((threadId) => this.cancelActive(threadId)));
     let timer: NodeJS.Timeout | undefined;
@@ -302,11 +308,39 @@ export class ThreadTurnCoordinator {
       legacyStaleBefore: this.legacyStaleBefore(now),
     });
     const threadIds = await this.input.repos.turnRuns.queuedThreadIds();
-    this.input.logger.info("turn coordinator recovered", {
-      interruptedTurns: interrupted,
-      queuedThreads: threadIds.length,
-    });
+    const metadata = { interruptedTurns: interrupted, queuedThreads: threadIds.length };
+    if (interrupted || threadIds.length) {
+      this.input.logger.info("turn coordinator discovered durable work", metadata);
+    } else {
+      this.input.logger.debug("turn coordinator recovery scan complete", metadata);
+    }
     return threadIds;
+  }
+
+  private armRecoveryPoll(): void {
+    if (!this.accepting || this.recoveryPollTimer || this.recoveryScan) return;
+    this.recoveryPollTimer = setTimeout(() => {
+      this.recoveryPollTimer = undefined;
+      const scan = this.scanForDurableWork();
+      this.recoveryScan = scan;
+      void scan.finally(() => {
+        if (this.recoveryScan === scan) this.recoveryScan = undefined;
+        this.armRecoveryPoll();
+      });
+    }, ThreadTurnCoordinator.RECOVERY_POLL_MS);
+    this.recoveryPollTimer.unref();
+  }
+
+  private async scanForDurableWork(): Promise<void> {
+    try {
+      const threadIds = await this.recover();
+      if (!this.accepting) return;
+      for (const threadId of threadIds) this.schedule(threadId);
+    } catch (error) {
+      this.input.logger.warn("turn coordinator periodic recovery failed", {
+        error: String(error),
+      });
+    }
   }
 
   private schedule(threadId: number): void {
@@ -541,7 +575,8 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private legacyStaleBefore(now: number): number {
+  private legacyStaleBefore(now: number): number | undefined {
+    if (this.input.config.PI_TURN_TIMEOUT_MS === 0) return undefined;
     return now - Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) - 60_000;
   }
 
