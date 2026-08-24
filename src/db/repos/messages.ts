@@ -1,6 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
-import type { MessageSearchScope, TextSearch } from "../search.js";
+import { createTextSearch, type MessageSearchScope, type TextSearch } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
 
 export class MessagesRepo {
@@ -19,26 +19,32 @@ export class MessagesRepo {
     tgMessageId?: number | null;
     piEntryId?: string | null;
   }): Promise<MessageRow> {
-    const inserted = await insertReturning<MessageRow>(
-      this.db,
-      sql`
-        insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, pi_entry_id, created_at)
-        values (
-          ${input.threadId},
-          ${input.role},
-          ${input.kind ?? "text"},
-          ${JSON.stringify(input.content)},
-          ${input.textPlain},
-          ${input.thinking ?? null},
-          ${input.tgMessageId ?? null},
-          ${input.piEntryId ?? null},
-          ${Date.now()}
-        )
-        returning *
-      `,
-    );
-    await this.search.indexMessage(inserted.id, inserted.thread_id, inserted.text_plain);
-    return inserted;
+    return this.db.transaction(async (tx) => {
+      const inserted = await insertReturning<MessageRow>(
+        tx,
+        sql`
+          insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, pi_entry_id, created_at)
+          values (
+            ${input.threadId},
+            ${input.role},
+            ${input.kind ?? "text"},
+            ${JSON.stringify(input.content)},
+            ${input.textPlain},
+            ${input.thinking ?? null},
+            ${input.tgMessageId ?? null},
+            ${input.piEntryId ?? null},
+            ${Date.now()}
+          )
+          returning *
+        `,
+      );
+      await createTextSearch(tx, tx.dialect).indexMessage(
+        inserted.id,
+        inserted.thread_id,
+        inserted.text_plain,
+      );
+      return inserted;
+    });
   }
 
   async setPiEntryId(messageId: number, entryId: string): Promise<void> {

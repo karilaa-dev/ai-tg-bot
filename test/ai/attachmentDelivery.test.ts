@@ -328,7 +328,7 @@ describe("buffered Telegram attachment delivery", () => {
     expect(third.telegramDelivery).toBeDefined();
   });
 
-  it("records a source-load failure without persisting the file as delivered", async () => {
+  it("sends a visible failure when a caption-only turn cannot load its only file", async () => {
     const api = fakeApi();
     const input = turnInput(api);
     const missing = imageAttachment(2, "missing.jpg", 100);
@@ -341,11 +341,13 @@ describe("buffered Telegram attachment delivery", () => {
     expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledWith(expect.objectContaining({
       messageId: 99,
       content: {
-        text: "",
+        text: "file-delivery-failed",
         attachment_failures: [{ file_id: 2, status: "source_unavailable" }],
       },
     }));
     expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(api.raw.sendRichMessage).toHaveBeenCalledOnce();
+    expect(JSON.stringify(api.raw.sendRichMessage.mock.calls[0])).toContain("file-delivery-failed");
   });
 
   it("continues pending delivery when bookkeeping for an earlier photo fails", async () => {

@@ -50,6 +50,7 @@ stream-state-off = 📴 выкл
 thinking-placeholder = 💭 Думаю...
 thinking-done = ✅ Готово.
 image-delivery-failed = Не удалось отправить созданное изображение. Попробуйте ещё раз.
+file-delivery-failed = Не удалось отправить созданный файл. Попробуйте ещё раз.
 thinking-summary-running = 🧠 Думаю уже { $time }
 thinking-summary-generating-image = 🖼️ Генерирую изображение уже { $time }
 thinking-summary-final = 🧠 Думал { $time }

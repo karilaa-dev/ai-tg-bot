@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -58,6 +59,25 @@ describe("repository round-trip on sqlite", () => {
       // The already known Telegram message remains authoritative.
       tg_message_id: 1234,
     });
+  });
+
+  it("rolls back a message insert when its FTS index write fails", async () => {
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
+    db = createDatabase(config, createLogger(config));
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 77_012, firstName: "Atomic", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    await db.db.execute(sql`drop table messages_fts`);
+
+    await expect(repos.messages.insert({
+      threadId: thread.id,
+      role: "assistant",
+      content: { text: "must roll back" },
+      textPlain: "must roll back",
+    })).rejects.toThrow();
+
+    await expect(repos.messages.listThread(thread.id)).resolves.toEqual([]);
   });
 
   it("persists one opaque Browser Use profile key per deployment user", async () => {

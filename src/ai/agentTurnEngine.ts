@@ -1008,6 +1008,10 @@ async function sendFinalVisible(
   }
   const generatedAttachments = outboundAttachments.filter((attachment) =>
     attachment.origin === "generated_image");
+  const retainedAttachments = outboundAttachments.filter((attachment) => attachment.telegramDelivery);
+  const unknownAttachments = outboundAttachments.filter((attachment) =>
+    !attachment.telegramDelivery && attachment.telegramDeliveryUnknown);
+  const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
   const generatedDeliveryFailed = generatedAttachments.length > 0
     && generatedAttachments.every((attachment) =>
       !attachment.telegramDelivery && !attachment.telegramDeliveryUnknown);
@@ -1033,10 +1037,33 @@ async function sendFinalVisible(
       throw error;
     }
   }
-  const retainedAttachments = outboundAttachments.filter((attachment) => attachment.telegramDelivery);
-  const unknownAttachments = outboundAttachments.filter((attachment) =>
-    !attachment.telegramDelivery && attachment.telegramDeliveryUnknown);
-  const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
+  const everyRegularAttachmentFailed = !deliveredAnswer.trim()
+    && outboundAttachments.length > 0
+    && retainedAttachments.length === 0
+    && unknownAttachments.length === 0
+    && attachmentFailures.length === outboundAttachments.length;
+  if (everyRegularAttachmentFailed) {
+    deliveredAnswer = input.t("file-delivery-failed");
+    try {
+      for (const rich of renderFinalAnswer({ answerMd: deliveredAnswer })) {
+        const sent = await sendRichWithFallback(input, rich);
+        answerIds.push(...sent.map((message) => message.message_id));
+      }
+    } catch (error) {
+      if (isDefinitiveTelegramRejection(error)) {
+        await input.onDeliveryFailed?.({
+          assistantMessageId: assistantMessage.id,
+          failureCode: "telegram_delivery_rejected",
+        });
+      } else {
+        await input.onDeliveryUnknown?.({
+          assistantMessageId: assistantMessage.id,
+          failureCode: "telegram_delivery_unknown",
+        });
+      }
+      throw error;
+    }
+  }
   const persistedText = deliveredAnswer.trim() ? deliveredAnswer : attachmentPersistedText(retainedAttachments);
   const persistedContent: Record<string, unknown> = { text: persistedText };
   if (retainedAttachments.length) {
