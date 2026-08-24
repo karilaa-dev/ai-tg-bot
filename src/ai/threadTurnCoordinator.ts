@@ -111,15 +111,18 @@ export class ThreadTurnCoordinator {
     if (active && !active.finalizer.canCancel()) return false;
     const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
     if (!requested) return false;
+    if (requested.status === "cancelled") this.schedule(threadId);
     if (active) {
       if (active.finalizer.requestCancellation()) {
         active.controller.abort(new Error("Turn cancelled by user."));
         await this.input.pi.abort(threadId);
       }
     }
-    this.input.logger.info(active
-      ? "active turn cancellation requested"
-      : "remote turn cancellation requested", {
+    this.input.logger.info(requested.status === "cancelled"
+      ? "queued head turn cancelled"
+      : active
+        ? "active turn cancellation requested"
+        : "remote turn cancellation requested", {
       turnRunId: requested.id,
       threadId,
     });

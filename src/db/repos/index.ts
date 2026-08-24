@@ -24,7 +24,7 @@ export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
   return {
     users: new UsersRepo(db),
     threads: new ThreadsRepo(db),
-    messages: new MessagesRepo(db, search),
+    messages: new MessagesRepo(db),
     files: new FilesRepo(db, search),
     threadSandboxes: new ThreadSandboxesRepo(db),
     sandboxFileRestores: new SandboxFileRestoresRepo(db),

@@ -1092,24 +1092,16 @@ async function sendFinalVisible(
   const attachmentMessageId = retainedAttachments
     .map((attachment) => attachment.telegramDelivery?.messageId)
     .find((id) => typeof id === "number" && id > 0);
-  await input.repos.messages.setDeliveryContent({
-    messageId: assistantMessage.id,
-    content: persistedContent,
-    textPlain: persistedText,
-    tgMessageId: answerIds.find((id) => id > 0)
-      ?? thinkingIds.find((id) => id > 0)
-      ?? attachmentMessageId
-      ?? null,
-  }).catch((error) => {
-    input.logger.warn("failed to persist finalized attachment delivery content", {
-      threadId: input.thread.id,
+  await retryFinalizedAssistantContentWrite(input, assistantMessage.id, () =>
+    input.repos.messages.setDeliveryContent({
       messageId: assistantMessage.id,
-      retainedFiles: retainedAttachments.length,
-      unknownFiles: unknownAttachments.length,
-      failedFiles: attachmentFailures.length,
-      err: String(error),
-    });
-  });
+      content: persistedContent,
+      textPlain: persistedText,
+      tgMessageId: answerIds.find((id) => id > 0)
+        ?? thinkingIds.find((id) => id > 0)
+        ?? attachmentMessageId
+        ?? null,
+    }));
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -1686,6 +1678,33 @@ async function retryTelegramDeliveryMetadataWrite(
           telegramMessageId: attachment.telegramDelivery?.messageId,
           err: String(error),
         });
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function retryFinalizedAssistantContentWrite(
+  input: TurnInput,
+  messageId: number,
+  write: () => Promise<void>,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await write();
+      return;
+    } catch (error) {
+      lastError = error;
+      input.logger.warn("finalized assistant content write failed", {
+        threadId: input.thread.id,
+        messageId,
+        attempt,
+        retrying: attempt < 3,
+        err: String(error),
+      });
+      if (attempt < 3) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50 * 2 ** (attempt - 1)));
       }
     }
   }

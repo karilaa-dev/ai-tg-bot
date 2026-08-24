@@ -80,6 +80,34 @@ describe("repository round-trip on sqlite", () => {
     await expect(repos.messages.listThread(thread.id)).resolves.toEqual([]);
   });
 
+  it("rolls back finalized message content when its FTS update fails", async () => {
+    const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
+    db = createDatabase(config, createLogger(config));
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 77_013, firstName: "Atomic", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const message = await repos.messages.insert({
+      threadId: thread.id,
+      role: "assistant",
+      content: { text: "initial" },
+      textPlain: "initial",
+    });
+    await db.db.execute(sql`drop table messages_fts`);
+
+    await expect(repos.messages.setDeliveryContent({
+      messageId: message.id,
+      content: { text: "finalized" },
+      textPlain: "finalized",
+      tgMessageId: 456,
+    })).rejects.toThrow();
+
+    await expect(repos.messages.get(message.id)).resolves.toMatchObject({
+      text_plain: "initial",
+      tg_message_id: null,
+    });
+  });
+
   it("persists one opaque Browser Use profile key per deployment user", async () => {
     const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
     db = createDatabase(config, createLogger(config));

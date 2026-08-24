@@ -274,15 +274,38 @@ export class TurnRunsRepo {
     `));
   }
 
-  async requestCancellation(threadId: number): Promise<Pick<TurnRunRow, "id" | "owner_id"> | undefined> {
+  async requestCancellation(
+    threadId: number,
+  ): Promise<Pick<TurnRunRow, "id" | "owner_id" | "status"> | undefined> {
     const now = Date.now();
-    return queryOne<Pick<TurnRunRow, "id" | "owner_id">>(this.db, sql`
-      update turn_runs
-      set cancel_requested_at = coalesce(cancel_requested_at, ${now}), updated_at = ${now}
-      where thread_id = ${threadId}
-        and status = 'running'
-      returning id, owner_id
-    `);
+    return this.db.transaction(async (tx) => {
+      await lockThreadTransaction(tx, threadId);
+      const running = await queryOne<Pick<TurnRunRow, "id" | "owner_id" | "status">>(tx, sql`
+        update turn_runs
+        set cancel_requested_at = coalesce(cancel_requested_at, ${now}), updated_at = ${now}
+        where thread_id = ${threadId}
+          and status = 'running'
+        returning id, owner_id, status
+      `);
+      if (running) return running;
+      const delivery = await queryOne<{ present: number }>(tx, sql`
+        select 1 as present from turn_runs
+        where thread_id = ${threadId} and status = 'awaiting_delivery'
+        limit 1
+      `);
+      if (delivery) return undefined;
+      return queryOne<Pick<TurnRunRow, "id" | "owner_id" | "status">>(tx, sql`
+        update turn_runs
+        set status = 'cancelled', cancel_requested_at = ${now}, failure_code = 'user_cancelled',
+            finished_at = ${now}, updated_at = ${now}
+        where id = (
+          select id from turn_runs
+          where thread_id = ${threadId} and status = 'queued'
+          order by id asc limit 1
+        )
+        returning id, owner_id, status
+      `);
+    });
   }
 
   async cancellationRequested(id: number, ownerId: string): Promise<boolean> {

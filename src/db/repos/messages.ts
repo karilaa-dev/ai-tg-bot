@@ -1,13 +1,10 @@
 import { sql, type SQL } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
-import { createTextSearch, type MessageSearchScope, type TextSearch } from "../search.js";
+import { createTextSearch, type MessageSearchScope } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
 
 export class MessagesRepo {
-  constructor(
-    private readonly db: SqlExecutor,
-    private readonly search: TextSearch,
-  ) {}
+  constructor(private readonly db: SqlExecutor) {}
 
   async insert(input: {
     threadId: number;
@@ -57,16 +54,18 @@ export class MessagesRepo {
     textPlain: string;
     tgMessageId: number | null;
   }): Promise<void> {
-    const message = await this.get(input.messageId);
-    if (!message) throw new Error(`Message #${input.messageId} no longer exists.`);
-    await this.db.execute(sql`
-      update messages
-      set content_json = ${JSON.stringify(input.content)},
-          text_plain = ${input.textPlain},
-          tg_message_id = ${input.tgMessageId}
-      where id = ${input.messageId}
-    `);
-    await this.search.indexMessage(message.id, message.thread_id, input.textPlain);
+    await this.db.transaction(async (tx) => {
+      const message = await queryOne<MessageRow>(tx, sql`select * from messages where id = ${input.messageId}`);
+      if (!message) throw new Error(`Message #${input.messageId} no longer exists.`);
+      await tx.execute(sql`
+        update messages
+        set content_json = ${JSON.stringify(input.content)},
+            text_plain = ${input.textPlain},
+            tg_message_id = ${input.tgMessageId}
+        where id = ${input.messageId}
+      `);
+      await createTextSearch(tx, tx.dialect).indexMessage(message.id, message.thread_id, input.textPlain);
+    });
   }
 
   async setThinking(messageId: number, thinking: string, tgMessageId?: number): Promise<void> {

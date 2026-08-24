@@ -87,6 +87,43 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("cancels the queued head when stop wins the indexing-to-claim race", async () => {
+    const { userId, threadId } = await ownership(repos, 834);
+    const indexingStarted = deferred<void>();
+    const releaseIndexing = deferred<void>();
+    const originalIndex = db.search.indexMessage.bind(db.search);
+    let indexCalls = 0;
+    vi.spyOn(db.search, "indexMessage").mockImplementation(async (...args) => {
+      indexCalls += 1;
+      if (indexCalls === 2) {
+        indexingStarted.resolve();
+        await releaseIndexing.promise;
+      }
+      return originalIndex(...args);
+    });
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+
+    await coordinator.accept(request(userId, threadId, 34_001, "cancel before claim"));
+    await indexingStarted.promise;
+    await expect(coordinator.cancelActive(threadId)).resolves.toBe(true);
+    releaseIndexing.resolve();
+    await coordinator.waitForIdle(threadId);
+
+    expect(executed).toEqual([]);
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({
+        status: "cancelled",
+        failure_code: "user_cancelled",
+        cancel_requested_at: expect.any(Number),
+      }),
+    ]);
+    await coordinator.shutdown();
+  });
+
   it("marks stale running work interrupted and resumes only queued work", async () => {
     const { userId, threadId } = await ownership(repos, 803);
     const stale = await repos.turnRuns.accept(request(userId, threadId, 3001, "stale"));

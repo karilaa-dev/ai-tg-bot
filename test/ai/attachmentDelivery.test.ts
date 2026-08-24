@@ -132,6 +132,35 @@ describe("buffered Telegram attachment delivery", () => {
     }));
   });
 
+  it("retries finalized assistant content before confirming delivery", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryConfirmed = vi.fn(async () => undefined);
+    vi.mocked(input.repos.messages.setDeliveryContent)
+      .mockRejectedValueOnce(new Error("database temporarily unavailable"));
+
+    await sendFinal(input, "", "Persist after retry");
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledTimes(2);
+    expect(input.onDeliveryConfirmed).toHaveBeenCalledOnce();
+    expect(vi.mocked(input.repos.messages.setDeliveryContent).mock.invocationCallOrder.at(-1))
+      .toBeLessThan(vi.mocked(input.onDeliveryConfirmed).mock.invocationCallOrder[0]!);
+  });
+
+  it("does not confirm delivery when finalized assistant content exhausts retries", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryConfirmed = vi.fn(async () => undefined);
+    vi.mocked(input.repos.messages.setDeliveryContent)
+      .mockRejectedValue(new Error("database unavailable"));
+
+    await expect(sendFinal(input, "", "Cannot finalize"))
+      .rejects.toThrow("database unavailable");
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledTimes(3);
+    expect(input.onDeliveryConfirmed).not.toHaveBeenCalled();
+  });
+
   it("does not persist or send a final answer after cancellation wins the delivery barrier", async () => {
     const api = fakeApi();
     const input = turnInput(api);
