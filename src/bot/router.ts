@@ -226,6 +226,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logCommand(ctx, "compact");
     if (!ctx.thread) return;
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(ctx.thread));
+    await ctx.services.turnCoordinator.waitForIdle(ctx.thread.id);
     const count = await runCompaction(ctx, ctx.thread);
     await ctx.api
       .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))

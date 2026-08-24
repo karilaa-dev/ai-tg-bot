@@ -19,7 +19,8 @@ export class TurnFinalizer {
   }) {}
 
   canCancel(): boolean {
-    return !this.deliveryStarted
+    return !this.cancelRequested
+      && !this.deliveryStarted
       && !this.deliveryConfirmed
       && !this.deliveryUnknown
       && !this.deliveryFailed;

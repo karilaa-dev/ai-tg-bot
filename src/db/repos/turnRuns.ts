@@ -57,10 +57,12 @@ export class TurnRunsRepo {
     const sources = uniqueSources(input.sources);
     const attachments = uniqueAttachments(input.attachments ?? []);
     if (!sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
+    const observedOwnedUpdateIds = new Set<number>();
     let accepted: AcceptedTurnRun;
     try {
       accepted = await this.db.transaction(async (tx) => {
         const mappings = await existingSourceMappings(tx, sources.map((source) => source.updateId));
+        for (const mapping of mappings) observedOwnedUpdateIds.add(mapping.telegram_update_id);
         const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
         const acceptedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
         if (!acceptedSources.length) {
@@ -122,6 +124,7 @@ export class TurnRunsRepo {
       // after our initial read. Resolve that durable winner instead of surfacing
       // an error that would invite Telegram to retry the update.
       const mappings = await existingSourceMappings(this.db, sources.map((source) => source.updateId));
+      if (!mappings.some((mapping) => !observedOwnedUpdateIds.has(mapping.telegram_update_id))) throw error;
       const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
       const unownedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
       if (unownedSources.length) {
@@ -227,6 +230,7 @@ export class TurnRunsRepo {
   async interruptStaleRunning(input: {
     now?: number;
     legacyStaleBefore?: number;
+    threadId?: number;
   } = {}): Promise<number> {
     const now = input.now ?? Date.now();
     const legacyStaleBefore = input.legacyStaleBefore ?? now;
@@ -234,6 +238,7 @@ export class TurnRunsRepo {
       update turn_runs
       set status = 'interrupted', failure_code = 'process_interrupted', finished_at = ${now}, updated_at = ${now}
       where status in ('running', 'awaiting_delivery')
+        and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? 0})
         and (
           (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
           or (owner_id is null and updated_at <= ${legacyStaleBefore})
@@ -262,6 +267,28 @@ export class TurnRunsRepo {
       select 1 as present from turn_runs
       where thread_id = ${threadId}
         and status in ('queued', 'running', 'awaiting_delivery')
+      limit 1
+    `));
+  }
+
+  async requestCancellation(threadId: number): Promise<Pick<TurnRunRow, "id" | "owner_id"> | undefined> {
+    const now = Date.now();
+    return queryOne<Pick<TurnRunRow, "id" | "owner_id">>(this.db, sql`
+      update turn_runs
+      set cancel_requested_at = coalesce(cancel_requested_at, ${now}), updated_at = ${now}
+      where thread_id = ${threadId}
+        and status = 'running'
+      returning id, owner_id
+    `);
+  }
+
+  async cancellationRequested(id: number, ownerId: string): Promise<boolean> {
+    return Boolean(await queryOne<{ present: number }>(this.db, sql`
+      select 1 as present from turn_runs
+      where id = ${id}
+        and owner_id = ${ownerId}
+        and status = 'running'
+        and cancel_requested_at is not null
       limit 1
     `));
   }

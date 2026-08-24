@@ -70,8 +70,8 @@ describe("SQLite schema initialization", () => {
     await expect(columns(database, "turn_runs")).resolves.toEqual([
       "id", "user_id", "thread_id", "user_message_id", "chat_id", "message_thread_id",
       "locale", "status", "delivery_status", "result_message_id", "provider", "model",
-      "usage_json", "failure_code", "owner_id", "lease_expires_at", "accepted_at",
-      "started_at", "finished_at", "updated_at",
+      "usage_json", "failure_code", "owner_id", "lease_expires_at", "cancel_requested_at",
+      "accepted_at", "started_at", "finished_at", "updated_at",
     ]);
     await expect(columns(database, "turn_run_sources")).resolves.toEqual([
       "turn_run_id", "telegram_update_id", "telegram_message_id", "created_at",

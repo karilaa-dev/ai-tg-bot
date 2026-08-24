@@ -240,6 +240,18 @@ describe("Telegram bot with grammy-emulate", () => {
     });
   });
 
+  it("waits for the thread to become idle before compacting Pi history", async () => {
+    await startBot();
+    const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();
+    const compact = vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
+
+    await env.bot.sendCommand(env.user, env.chat, "/compact");
+
+    expect(waitForIdle).toHaveBeenCalledWith(expect.any(Number));
+    expect(compact).toHaveBeenCalledOnce();
+    expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
+  });
+
   it("treats a Telegram-created topic as a clean thread", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });

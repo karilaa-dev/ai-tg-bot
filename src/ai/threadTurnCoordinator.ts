@@ -32,12 +32,14 @@ export class ThreadTurnCoordinator {
   private readonly active = new Map<number, ActiveTurn>();
   private readonly recovery: Promise<number[]>;
   private readonly ownerId = randomUUID();
+  private readonly lifecycle = new AbortController();
   private accepting = true;
 
   private static readonly CLAIM_RETRY_MS = 1_000;
   private static readonly FAILURE_RETRY_MAX_MS = 30_000;
   private static readonly OWNER_LEASE_MS = 60_000;
   private static readonly OWNER_RENEW_MS = 10_000;
+  private static readonly CANCELLATION_POLL_MS = 500;
 
   constructor(private readonly input: {
     api: Api;
@@ -52,7 +54,7 @@ export class ThreadTurnCoordinator {
     scheduleThreadTitle?(input: { threadId: number; chatId: number }): void;
     awaitProcessingOnAccept?: boolean;
   }) {
-    this.recovery = this.recover();
+    this.recovery = this.recoverUntilReady();
     void this.recovery.then((threadIds) => {
       for (const threadId of threadIds) this.schedule(threadId);
     }).catch((error) => {
@@ -98,11 +100,18 @@ export class ThreadTurnCoordinator {
   async cancelActive(threadId: number): Promise<boolean> {
     await this.recovery;
     const active = this.active.get(threadId);
-    if (!active || !active.finalizer.requestCancellation()) return false;
-    active.controller.abort(new Error("Turn cancelled by user."));
-    await this.input.pi.abort(threadId);
-    this.input.logger.info("active turn cancellation requested", {
-      turnRunId: active.run.id,
+    if (active && !active.finalizer.canCancel()) return false;
+    const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
+    if (!requested) return false;
+    if (active) {
+      if (!active.finalizer.requestCancellation()) return false;
+      active.controller.abort(new Error("Turn cancelled by user."));
+      await this.input.pi.abort(threadId);
+    }
+    this.input.logger.info(active
+      ? "active turn cancellation requested"
+      : "remote turn cancellation requested", {
+      turnRunId: requested.id,
       threadId,
     });
     return true;
@@ -118,6 +127,14 @@ export class ThreadTurnCoordinator {
         await Promise.allSettled(tasks);
         continue;
       }
+      if (threadId !== undefined) {
+        const now = Date.now();
+        await this.input.repos.turnRuns.interruptStaleRunning({
+          now,
+          legacyStaleBefore: this.legacyStaleBefore(now),
+          threadId,
+        });
+      }
       if (threadId !== undefined && await this.input.repos.turnRuns.hasUnfinished(threadId)) {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
         continue;
@@ -128,6 +145,7 @@ export class ThreadTurnCoordinator {
 
   async shutdown(timeoutMs = 5_000): Promise<void> {
     this.accepting = false;
+    this.lifecycle.abort();
     await this.recovery.catch(() => undefined);
     await Promise.all([...this.active.keys()].map((threadId) => this.cancelActive(threadId)));
     let timer: NodeJS.Timeout | undefined;
@@ -138,6 +156,28 @@ export class ThreadTurnCoordinator {
       }),
     ]);
     if (timer) clearTimeout(timer);
+  }
+
+  private async recoverUntilReady(): Promise<number[]> {
+    let consecutiveFailures = 0;
+    while (this.accepting) {
+      try {
+        return await this.recover();
+      } catch (error) {
+        consecutiveFailures += 1;
+        const retryMs = Math.min(
+          ThreadTurnCoordinator.FAILURE_RETRY_MAX_MS,
+          ThreadTurnCoordinator.CLAIM_RETRY_MS * 2 ** Math.min(5, consecutiveFailures - 1),
+        );
+        this.input.logger.error("turn coordinator recovery failed; retrying", {
+          consecutiveFailures,
+          retryMs,
+          error: String(error),
+        });
+        await delay(retryMs, this.lifecycle.signal);
+      }
+    }
+    return [];
   }
 
   private async recover(): Promise<number[]> {
@@ -278,6 +318,30 @@ export class ThreadTurnCoordinator {
       });
     }, ThreadTurnCoordinator.OWNER_RENEW_MS);
     leaseTimer.unref();
+    let pollingCancellation = false;
+    const cancellationTimer = setInterval(() => {
+      if (pollingCancellation || finalizer.cancelRequested) return;
+      pollingCancellation = true;
+      void this.input.repos.turnRuns.cancellationRequested(run.id, this.ownerId).then((requested) => {
+        if (!requested || !leaseMonitoring || !finalizer.requestCancellation()) return;
+        this.input.logger.info("remote turn cancellation received", {
+          turnRunId: run.id,
+          threadId: run.thread_id,
+        });
+        controller.abort(new Error("Turn cancelled by user."));
+        void this.input.pi.abort(run.thread_id);
+      }).catch((error) => {
+        if (!leaseMonitoring) return;
+        this.input.logger.warn("turn cancellation polling failed", {
+          turnRunId: run.id,
+          threadId: run.thread_id,
+          error: String(error),
+        });
+      }).finally(() => {
+        pollingCancellation = false;
+      });
+    }, ThreadTurnCoordinator.CANCELLATION_POLL_MS);
+    cancellationTimer.unref();
     const queueWaitMs = Math.max(0, (run.started_at ?? Date.now()) - run.accepted_at);
     const startedAt = Date.now();
     this.input.logger.info("queued turn execution starting", {
@@ -338,6 +402,7 @@ export class ThreadTurnCoordinator {
     } finally {
       leaseMonitoring = false;
       clearInterval(leaseTimer);
+      clearInterval(cancellationTimer);
       this.active.delete(run.thread_id);
       this.input.logger.info("queued turn execution finished", {
         turnRunId: run.id,
@@ -354,6 +419,15 @@ export class ThreadTurnCoordinator {
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }

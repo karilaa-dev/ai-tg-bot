@@ -165,6 +165,24 @@ describe("ThreadTurnCoordinator", () => {
     ]);
   });
 
+  it("does not recurse on a non-race failure in a mixed existing-source batch", async () => {
+    const { userId, threadId } = await ownership(repos, 815);
+    await repos.turnRuns.accept(request(userId, threadId, 15_001, "already accepted"));
+    const transaction = vi.spyOn(db.db, "transaction");
+
+    await expect(repos.turnRuns.accept({
+      ...request(userId, threadId, 15_002, "already accepted\n\nmissing attachment"),
+      sources: [
+        { updateId: 15_001, messageId: 25_001 },
+        { updateId: 15_002, messageId: 25_002 },
+      ],
+      attachments: [{ fileId: 999_999, telegramMessageId: 25_002 }],
+    })).rejects.toThrow("does not exist");
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(await repos.turnRuns.listForThread(threadId)).toHaveLength(1);
+  });
+
   it("does not claim a later or concurrent turn while a thread owner is active", async () => {
     const { userId, threadId } = await ownership(repos, 806);
     const first = await repos.turnRuns.accept(request(userId, threadId, 6001, "first"));
@@ -341,6 +359,26 @@ describe("ThreadTurnCoordinator", () => {
     expect(await repos.turnRuns.listForThread(threadId)).toEqual([]);
   });
 
+  it("retries transient startup recovery failures", async () => {
+    const { userId, threadId } = await ownership(repos, 816);
+    const recover = repos.turnRuns.interruptStaleRunning.bind(repos.turnRuns);
+    const recovery = vi.spyOn(repos.turnRuns, "interruptStaleRunning")
+      .mockRejectedValueOnce(new Error("temporary recovery outage"))
+      .mockImplementation(recover);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+
+    await coordinator.accept(request(userId, threadId, 16_001, "accepted after recovery"));
+    await coordinator.waitForIdle();
+
+    expect(recovery.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(executed).toEqual(["accepted after recovery"]);
+    await coordinator.shutdown();
+  });
+
   it("preserves a live turn owned by an overlapping coordinator", async () => {
     const { userId, threadId } = await ownership(repos, 811);
     const active = await repos.turnRuns.accept(request(userId, threadId, 11_001, "active elsewhere"));
@@ -373,6 +411,43 @@ describe("ThreadTurnCoordinator", () => {
     await waiting;
     expect(settled).toBe(true);
     await coordinator.shutdown();
+  });
+
+  it("reaps an expired external owner while waiting for a thread to become idle", async () => {
+    const { userId, threadId } = await ownership(repos, 817);
+    const active = await repos.turnRuns.accept(request(userId, threadId, 17_001, "owner will disappear"));
+    await repos.turnRuns.claimRunning(active.turnRun.id, "other-process", Date.now() + 50);
+    const coordinator = createCoordinator(db, repos, async () => undefined);
+
+    await coordinator.waitForIdle(threadId);
+
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "interrupted" }),
+    ]);
+    await coordinator.shutdown();
+  });
+
+  it("routes cancellation to the coordinator that owns the turn", async () => {
+    const { userId, threadId } = await ownership(repos, 818);
+    const started = deferred<void>();
+    const abort = vi.fn(async () => true);
+    const owner = createCoordinator(db, repos, async (input) => {
+      started.resolve();
+      await waitForAbort(input.signal!);
+    }, abort);
+    await owner.accept(request(userId, threadId, 18_001, "cancel across processes"));
+    await started.promise;
+    const receiver = createCoordinator(db, repos, async () => undefined);
+
+    await expect(receiver.cancelActive(threadId)).resolves.toBe(true);
+    await owner.waitForIdle();
+
+    expect(abort).toHaveBeenCalledWith(threadId);
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "cancelled", cancel_requested_at: expect.any(Number) }),
+    ]);
+    await receiver.shutdown();
+    await owner.shutdown();
   });
 
   it("retries FTS indexing before claiming a durably queued turn", async () => {
