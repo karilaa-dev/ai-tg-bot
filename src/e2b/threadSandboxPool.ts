@@ -62,6 +62,7 @@ type RuntimeState = {
   connection?: E2BSandbox;
   sandboxId?: string;
   continuousStartedAt?: number;
+  toolboxValidatedSandboxId?: string;
   renewTimer?: NodeJS.Timeout;
 };
 
@@ -422,6 +423,7 @@ export class ThreadSandboxPool {
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
     await sandbox.setTimeout(effectiveWindowMs, signal);
+    await this.ensureSandboxToolbox(state, scope, sandbox, signal);
     await this.ensureLayout(sandbox, signal);
     const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
     await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
@@ -744,6 +746,52 @@ export class ThreadSandboxPool {
       `chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
     ].join(" && ");
     await runControl(sandbox, command, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+  }
+
+  private async ensureSandboxToolbox(
+    state: RuntimeState,
+    scope: SandboxScope,
+    sandbox: E2BSandbox,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (state.toolboxValidatedSandboxId === sandbox.id) return;
+    const script = [
+      "set -euo pipefail",
+      "ready() {",
+      "  command -v pdf-inspector >/dev/null",
+      "  [ \"$(pdf-inspector --version)\" = '1.17.0' ]",
+      "  command -v pdfinfo >/dev/null",
+      "  command -v pdftoppm >/dev/null",
+      "  command -v magick >/dev/null",
+      "  command -v officecli >/dev/null",
+      "}",
+      "if ready; then printf 'ready'; exit 0; fi",
+      "(",
+      "  flock -x 9",
+      "  if ready; then printf 'ready'; exit 0; fi",
+      "  export DEBIAN_FRONTEND=noninteractive",
+      "  apt-get update -qq",
+      "  apt-get install -y --no-install-recommends poppler-utils",
+      "  npm install -g --omit=dev --no-audit --no-fund '@firecrawl/pdf-inspector@1.17.0'",
+      "  ready",
+      "  printf 'upgraded'",
+      ") 9>/tmp/ai-tg-bot-toolbox-upgrade.lock",
+    ].join("\n");
+    const result = await runCommandResult(
+      sandbox,
+      shellJoin(["bash", "-c", script]),
+      this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+      signal,
+      "root",
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr.trim() || "Existing E2B sandbox toolbox upgrade failed.");
+    }
+    state.toolboxValidatedSandboxId = sandbox.id;
+    this.input.logger?.info(
+      result.stdout.includes("upgraded") ? "upgraded existing E2B sandbox toolbox" : "validated E2B sandbox toolbox",
+      { ...scope, sandboxId: sandbox.id },
+    );
   }
 
   private async syncThreadFiles(
@@ -1342,6 +1390,7 @@ export class ThreadSandboxPool {
     continuousStartedAt?: number,
   ): void {
     if (state.sandboxId !== sandbox.id) {
+      state.toolboxValidatedSandboxId = undefined;
       state.websiteSandboxId = undefined;
       state.websiteIdleUntil = undefined;
       state.websitePublishedPending = false;

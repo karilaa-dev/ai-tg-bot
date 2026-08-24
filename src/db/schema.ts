@@ -143,6 +143,8 @@ async function initializeCommonTables(
       model text,
       usage_json text,
       failure_code text,
+      owner_id text,
+      lease_expires_at ${intType},
       accepted_at ${intType} not null,
       started_at ${intType},
       finished_at ${intType},

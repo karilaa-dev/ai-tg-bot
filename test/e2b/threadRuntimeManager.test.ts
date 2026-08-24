@@ -129,6 +129,16 @@ describe("thread E2B runtime manager", () => {
       .toBe(true);
   });
 
+  it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    await runtime.execute(commandRequest(userId, threadId));
+
+    const toolboxChecks = client.onlySandbox().controlCommands.filter((command) =>
+      command.includes("@firecrawl/pdf-inspector@1.17.0")
+      && command.includes("command -v pdftoppm"));
+    expect(toolboxChecks).toHaveLength(1);
+  });
+
   it("materializes requested files selectively and preserves earlier restorations additively", async () => {
     client.telegramFiles.set("tg-first", Buffer.from("first"));
     client.telegramFiles.set("tg-second", Buffer.from("second"));

@@ -20,7 +20,7 @@ export async function enqueueUserText(ctx: BotContext, text: string): Promise<vo
     clearTimeout(existing.timer);
     existing.ctx = ctx;
     existing.texts.push(text);
-    existing.sources.push(telegramTurnSource(ctx));
+    existing.sources.push(textTurnSource(ctx, text));
     existing.timer = scheduleTextBurstFlush(key, ctx);
     ctx.services.logger.debug("text burst appended", ctxLogMeta(ctx, {
       parts: existing.texts.length,
@@ -38,7 +38,7 @@ export async function enqueueUserText(ctx: BotContext, text: string): Promise<vo
   pendingTextBursts.set(key, {
     ctx,
     texts: [text],
-    sources: [telegramTurnSource(ctx)],
+    sources: [textTurnSource(ctx, text)],
     timer: scheduleTextBurstFlush(key, ctx),
   });
   ctx.services.logger.debug("text burst queued", ctxLogMeta(ctx, { chars: text.length }));
@@ -93,7 +93,7 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<P
   if (existing) {
     clearTimeout(existing.timer);
     existing.ctx = ctx;
-    existing.items.push({ ...item, source: telegramTurnSource(ctx) });
+    existing.items.push({ ...item, source: mediaTurnSource(ctx, item) });
     ctx.services.logger.debug("media group item appended", ctxLogMeta(ctx, {
       groupId,
       items: existing.items.length,
@@ -104,7 +104,7 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<P
 
   const pending: PendingMediaGroup = {
     ctx,
-    items: [{ ...item, source: telegramTurnSource(ctx) }],
+    items: [{ ...item, source: mediaTurnSource(ctx, item) }],
     timer: scheduleMediaGroupFlush(key, ctx, groupId),
   };
   pendingMediaGroups.set(key, pending);
@@ -162,4 +162,29 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
     result.push(trimmed);
   }
   return result;
+}
+
+function textTurnSource(ctx: BotContext, text: string) {
+  return telegramTurnSource(ctx, {
+    kind: "text",
+    content: { text },
+    textPlain: text,
+  });
+}
+
+function mediaTurnSource(
+  ctx: BotContext,
+  item: Omit<PendingMediaGroupItem, "source">,
+) {
+  const captions = uniqueNonEmpty([item.caption]);
+  const text = [...captions, item.card].join("\n\n");
+  return telegramTurnSource(ctx, {
+    kind: item.file.type === "image" ? "image" : "file",
+    textPlain: text,
+    content: {
+      text,
+      captions,
+      files: [item.file],
+    },
+  });
 }

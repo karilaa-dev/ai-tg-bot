@@ -17,6 +17,8 @@ export async function handleUserText(
 ): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
   const startedAt = Date.now();
+  const kind = options.userMessageKind ?? "text";
+  const content = options.userMessageContent ?? { text };
   ctx.services.logger.info("turn durable acceptance starting", ctxLogMeta(ctx, {
     kind: options.userMessageKind ?? "text",
     textChars: text.length,
@@ -27,10 +29,10 @@ export async function handleUserText(
     chatId: ctx.chat.id,
     messageThreadId: ctx.thread.topic_id,
     locale: ctx.user.lang,
-    kind: options.userMessageKind ?? "text",
-    content: options.userMessageContent ?? { text },
+    kind,
+    content,
     textPlain: text,
-    sources: options.sources ?? [telegramTurnSource(ctx)],
+    sources: options.sources ?? [telegramTurnSource(ctx, { kind, content, textPlain: text })],
     attachments: options.attachments,
   });
   if (accepted.created && accepted.queuedBehind) {
@@ -45,9 +47,13 @@ export async function handleUserText(
   }));
 }
 
-export function telegramTurnSource(ctx: BotContext): TelegramTurnSource {
+export function telegramTurnSource(
+  ctx: BotContext,
+  payload?: TelegramTurnSource["payload"],
+): TelegramTurnSource {
   return {
     updateId: ctx.update.update_id,
     messageId: ctx.message?.message_id ?? null,
+    payload,
   };
 }

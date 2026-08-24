@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
@@ -30,10 +31,13 @@ export class ThreadTurnCoordinator {
   private readonly draining = new Map<number, Promise<void>>();
   private readonly active = new Map<number, ActiveTurn>();
   private readonly recovery: Promise<number[]>;
+  private readonly ownerId = randomUUID();
   private accepting = true;
 
   private static readonly CLAIM_RETRY_MS = 1_000;
   private static readonly FAILURE_RETRY_MAX_MS = 30_000;
+  private static readonly OWNER_LEASE_MS = 60_000;
+  private static readonly OWNER_RENEW_MS = 10_000;
 
   constructor(private readonly input: {
     api: Api;
@@ -110,8 +114,15 @@ export class ThreadTurnCoordinator {
       const tasks = threadId === undefined
         ? [...this.draining.values()]
         : [this.draining.get(threadId)].filter((task): task is Promise<void> => Boolean(task));
-      if (!tasks.length) return;
-      await Promise.allSettled(tasks);
+      if (tasks.length) {
+        await Promise.allSettled(tasks);
+        continue;
+      }
+      if (threadId !== undefined && await this.input.repos.turnRuns.hasUnfinished(threadId)) {
+        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
+        continue;
+      }
+      return;
     }
   }
 
@@ -130,7 +141,13 @@ export class ThreadTurnCoordinator {
   }
 
   private async recover(): Promise<number[]> {
-    const interrupted = await this.input.repos.turnRuns.interruptStaleRunning();
+    const now = Date.now();
+    const interrupted = await this.input.repos.turnRuns.interruptStaleRunning({
+      now,
+      // Pre-lease deployments cannot heartbeat. Preserve their possible live
+      // work for at least the maximum turn window during a rolling rollout.
+      legacyStaleBefore: this.legacyStaleBefore(now),
+    });
     const threadIds = await this.input.repos.turnRuns.queuedThreadIds();
     this.input.logger.info("turn coordinator recovered", {
       interruptedTurns: interrupted,
@@ -168,7 +185,14 @@ export class ThreadTurnCoordinator {
       try {
         const queued = await this.input.repos.turnRuns.nextQueued(threadId);
         if (!queued) return;
-        const run = await this.input.repos.turnRuns.claimRunning(queued.id);
+        await this.input.repos.turnRuns.indexMessageForRun(queued);
+        const now = Date.now();
+        const run = await this.input.repos.turnRuns.claimRunning(
+          queued.id,
+          this.ownerId,
+          now + ThreadTurnCoordinator.OWNER_LEASE_MS,
+          this.legacyStaleBefore(now),
+        );
         if (!run) {
           // Another process owns this thread or is ahead of us in the FIFO.
           await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
@@ -217,6 +241,7 @@ export class ThreadTurnCoordinator {
       logger: this.input.logger,
       turnRunId: run.id,
       threadId: run.thread_id,
+      ownerId: this.ownerId,
     });
     const active: ActiveTurn = {
       run,
@@ -224,6 +249,35 @@ export class ThreadTurnCoordinator {
       finalizer,
     };
     this.active.set(run.thread_id, active);
+    let renewingLease = false;
+    let leaseMonitoring = true;
+    const leaseTimer = setInterval(() => {
+      if (renewingLease) return;
+      renewingLease = true;
+      void this.input.repos.turnRuns.renewLease(
+        run.id,
+        this.ownerId,
+        Date.now() + ThreadTurnCoordinator.OWNER_LEASE_MS,
+      ).then((renewed) => {
+        if (renewed || !leaseMonitoring) return;
+        this.input.logger.error("turn owner lease was lost; aborting local execution", {
+          turnRunId: run.id,
+          threadId: run.thread_id,
+        });
+        controller.abort(new Error("Turn owner lease was lost."));
+        void this.input.pi.abort(run.thread_id);
+      }).catch((error) => {
+        if (!leaseMonitoring) return;
+        this.input.logger.warn("turn owner lease renewal failed", {
+          turnRunId: run.id,
+          threadId: run.thread_id,
+          error: String(error),
+        });
+      }).finally(() => {
+        renewingLease = false;
+      });
+    }, ThreadTurnCoordinator.OWNER_RENEW_MS);
+    leaseTimer.unref();
     const queueWaitMs = Math.max(0, (run.started_at ?? Date.now()) - run.accepted_at);
     const startedAt = Date.now();
     this.input.logger.info("queued turn execution starting", {
@@ -282,6 +336,8 @@ export class ThreadTurnCoordinator {
         error: String(error),
       });
     } finally {
+      leaseMonitoring = false;
+      clearInterval(leaseTimer);
       this.active.delete(run.thread_id);
       this.input.logger.info("queued turn execution finished", {
         turnRunId: run.id,
@@ -291,6 +347,10 @@ export class ThreadTurnCoordinator {
         deliveryUnknown: finalizer.deliveryUnknown || undefined,
       });
     }
+  }
+
+  private legacyStaleBefore(now: number): number {
+    return now - Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) - 60_000;
   }
 }
 

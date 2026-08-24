@@ -75,6 +75,8 @@ interface TurnRunsTable {
   model: string | null;
   usage_json: string | null;
   failure_code: string | null;
+  owner_id: string | null;
+  lease_expires_at: number | null;
   accepted_at: number;
   started_at: number | null;
   finished_at: number | null;

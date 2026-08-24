@@ -90,7 +90,7 @@ describe("ThreadTurnCoordinator", () => {
     const { userId, threadId } = await ownership(repos, 803);
     const stale = await repos.turnRuns.accept(request(userId, threadId, 3001, "stale"));
     const queued = await repos.turnRuns.accept(request(userId, threadId, 3002, "resume"));
-    await repos.turnRuns.claimRunning(stale.turnRun.id);
+    await repos.turnRuns.claimRunning(stale.turnRun.id, "expired-owner", Date.now() - 1);
     const executed: string[] = [];
     const coordinator = createCoordinator(db, repos, async (input) => {
       executed.push(input.text);
@@ -177,6 +177,26 @@ describe("ThreadTurnCoordinator", () => {
     await expect(repos.turnRuns.claimRunning(second.turnRun.id)).resolves.toMatchObject({ status: "running" });
   });
 
+  it("interrupts a crashed pre-lease owner after the rolling-deploy grace period", async () => {
+    const { userId, threadId } = await ownership(repos, 814);
+    const first = await repos.turnRuns.accept(request(userId, threadId, 14_001, "legacy active"));
+    const second = await repos.turnRuns.accept(request(userId, threadId, 14_002, "resume after grace"));
+    await repos.turnRuns.claimRunning(first.turnRun.id, "old-process", Date.now() + 60_000);
+    await db.db.execute(sql`
+      update turn_runs set owner_id = null, lease_expires_at = null, updated_at = 100
+      where id = ${first.turnRun.id}
+    `);
+
+    await expect(repos.turnRuns.claimRunning(
+      second.turnRun.id,
+      "new-process",
+      Date.now() + 60_000,
+      101,
+    )).resolves.toMatchObject({ status: "running", owner_id: "new-process" });
+    expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
+      .toEqual(["interrupted", "running"]);
+  });
+
   it("rejects late cancellation once final delivery has acquired its barrier", async () => {
     const { userId, threadId } = await ownership(repos, 807);
     const deliveryStarted = deferred<void>();
@@ -255,8 +275,24 @@ describe("ThreadTurnCoordinator", () => {
     const mixed = await repos.turnRuns.accept({
       ...request(userId, threadId, 9002, "first\n\nsecond"),
       sources: [
-        { updateId: 9001, messageId: 19_001 },
-        { updateId: 9002, messageId: 19_002 },
+        {
+          updateId: 9001,
+          messageId: 19_001,
+          payload: {
+            kind: "file",
+            textPlain: "first",
+            content: { text: "first", captions: [], files: [{ id: firstFile.id }] },
+          },
+        },
+        {
+          updateId: 9002,
+          messageId: 19_002,
+          payload: {
+            kind: "file",
+            textPlain: "second",
+            content: { text: "second", captions: [], files: [{ id: secondFile.id }] },
+          },
+        },
       ],
       attachments: [
         { fileId: firstFile.id, telegramMessageId: 19_001 },
@@ -267,6 +303,12 @@ describe("ThreadTurnCoordinator", () => {
     expect(first.created).toBe(true);
     expect(mixed.created).toBe(true);
     expect(mixed.turnRun.id).not.toBe(first.turnRun.id);
+    expect(mixed.userMessage.text_plain).toBe("second");
+    expect(JSON.parse(mixed.userMessage.content_json)).toEqual({
+      text: "second",
+      captions: [],
+      files: [{ id: secondFile.id }],
+    });
     expect(await repos.files.listForMessage(mixed.userMessage.id)).toEqual([
       expect.objectContaining({ id: secondFile.id }),
     ]);
@@ -297,6 +339,67 @@ describe("ThreadTurnCoordinator", () => {
     await expect(accepting).rejects.toThrow("shutting down");
     await shuttingDown;
     expect(await repos.turnRuns.listForThread(threadId)).toEqual([]);
+  });
+
+  it("preserves a live turn owned by an overlapping coordinator", async () => {
+    const { userId, threadId } = await ownership(repos, 811);
+    const active = await repos.turnRuns.accept(request(userId, threadId, 11_001, "active elsewhere"));
+    await repos.turnRuns.accept(request(userId, threadId, 11_002, "queued here"));
+    await repos.turnRuns.claimRunning(active.turnRun.id, "other-process", Date.now() + 60_000);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(executed).toEqual([]);
+    expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
+      .toEqual(["running", "queued"]);
+    await coordinator.shutdown();
+  });
+
+  it("waits for an externally owned turn before reporting a thread idle", async () => {
+    const { userId, threadId } = await ownership(repos, 812);
+    const active = await repos.turnRuns.accept(request(userId, threadId, 12_001, "external"));
+    await repos.turnRuns.claimRunning(active.turnRun.id, "other-process", Date.now() + 60_000);
+    const coordinator = createCoordinator(db, repos, async () => undefined);
+    let settled = false;
+    const waiting = coordinator.waitForIdle(threadId).then(() => { settled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    await repos.turnRuns.markSucceeded(active.turnRun.id);
+    await waiting;
+    expect(settled).toBe(true);
+    await coordinator.shutdown();
+  });
+
+  it("retries FTS indexing before claiming a durably queued turn", async () => {
+    const { userId, threadId } = await ownership(repos, 813);
+    const originalIndex = db.search.indexMessage.bind(db.search);
+    let failuresRemaining = 2;
+    const index = vi.spyOn(db.search, "indexMessage").mockImplementation(async (...args) => {
+      if (failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        throw new Error("temporary FTS outage");
+      }
+      return originalIndex(...args);
+    });
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await confirmDelivery(input);
+    });
+
+    const accepted = await coordinator.accept(request(userId, threadId, 13_001, "searchable after retry"));
+    await coordinator.waitForIdle();
+
+    expect(index.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "succeeded" }),
+    ]);
+    await expect(db.search.searchMessages([threadId], "searchable", 5))
+      .resolves.toEqual([expect.objectContaining({ id: accepted.userMessage.id })]);
+    await coordinator.shutdown();
   });
 });
 

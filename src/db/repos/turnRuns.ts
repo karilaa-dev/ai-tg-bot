@@ -13,6 +13,11 @@ import type {
 export interface TelegramTurnSource {
   updateId: number;
   messageId: number | null;
+  payload?: {
+    kind: MessageKind;
+    content: unknown;
+    textPlain: string;
+  };
 }
 
 export interface DurableTurnAttachment {
@@ -29,24 +34,26 @@ export interface AcceptedTurnRun {
   queuedBehind: boolean;
 }
 
+export interface TurnAcceptanceInput {
+  userId: number;
+  threadId: number;
+  chatId: number;
+  messageThreadId: number | null;
+  locale: Locale;
+  kind: MessageKind;
+  content: unknown;
+  textPlain: string;
+  sources: TelegramTurnSource[];
+  attachments?: DurableTurnAttachment[];
+}
+
 export class TurnRunsRepo {
   constructor(
     private readonly db: SqlExecutor,
     private readonly search: TextSearch,
   ) {}
 
-  async accept(input: {
-    userId: number;
-    threadId: number;
-    chatId: number;
-    messageThreadId: number | null;
-    locale: Locale;
-    kind: MessageKind;
-    content: unknown;
-    textPlain: string;
-    sources: TelegramTurnSource[];
-    attachments?: DurableTurnAttachment[];
-  }): Promise<AcceptedTurnRun> {
+  async accept(input: TurnAcceptanceInput): Promise<AcceptedTurnRun> {
     const sources = uniqueSources(input.sources);
     const attachments = uniqueAttachments(input.attachments ?? []);
     if (!sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
@@ -71,10 +78,14 @@ export class TurnRunsRepo {
           return { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
         }
 
+        const acceptedPayload = turnPayloadForSources(input, acceptedSources);
         const now = Date.now();
         const userMessage = await insertReturning<MessageRow>(tx, sql`
           insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, pi_entry_id, created_at)
-          values (${input.threadId}, 'user', ${input.kind}, ${JSON.stringify(input.content)}, ${input.textPlain}, null, null, null, ${now})
+          values (
+            ${input.threadId}, 'user', ${acceptedPayload.kind}, ${JSON.stringify(acceptedPayload.content)},
+            ${acceptedPayload.textPlain}, null, null, null, ${now}
+          )
           returning *
         `);
         const turnRun = await insertReturning<TurnRunRow>(tx, sql`
@@ -114,7 +125,11 @@ export class TurnRunsRepo {
       const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
       const unownedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
       if (unownedSources.length) {
-        return this.accept({ ...input, sources: unownedSources });
+        return this.accept({
+          ...input,
+          ...turnPayloadForSources(input, unownedSources),
+          sources: unownedSources,
+        });
       }
       const duplicate = await existingTurnForMappings(this.db, mappings);
       if (!duplicate) throw error;
@@ -129,13 +144,7 @@ export class TurnRunsRepo {
       }
       accepted = { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
     }
-    if (accepted.created) {
-      await this.search.indexMessage(
-        accepted.userMessage.id,
-        accepted.userMessage.thread_id,
-        accepted.userMessage.text_plain,
-      ).catch(() => undefined);
-    }
+    await this.indexMessageForRun(accepted.turnRun).catch(() => undefined);
     return accepted;
   }
 
@@ -160,7 +169,12 @@ export class TurnRunsRepo {
     return rows.map((row) => row.thread_id);
   }
 
-  claimRunning(id: number): Promise<TurnRunRow | undefined> {
+  claimRunning(
+    id: number,
+    ownerId = "unowned",
+    leaseExpiresAt = Date.now() + 60_000,
+    legacyStaleBefore?: number,
+  ): Promise<TurnRunRow | undefined> {
     return this.db.transaction(async (tx) => {
       const candidate = await queryOne<{ thread_id: number }>(tx, sql`
         select thread_id from turn_runs where id = ${id} and status = 'queued'
@@ -179,9 +193,21 @@ export class TurnRunsRepo {
         `);
       }
       const now = Date.now();
+      await tx.execute(sql`
+        update turn_runs
+        set status = 'interrupted', failure_code = 'owner_lease_expired',
+            finished_at = ${now}, updated_at = ${now}
+        where thread_id = ${candidate.thread_id}
+          and status in ('running', 'awaiting_delivery')
+          and (
+            (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
+            or (${legacyStaleBefore === undefined ? 0 : 1} = 1 and owner_id is null and updated_at <= ${legacyStaleBefore ?? 0})
+          )
+      `);
       return queryOne<TurnRunRow>(tx, sql`
         update turn_runs as target
-        set status = 'running', started_at = ${now}, updated_at = ${now}
+        set status = 'running', started_at = ${now}, updated_at = ${now},
+            owner_id = ${ownerId}, lease_expires_at = ${leaseExpiresAt}
         where target.id = ${id}
           and target.status = 'queued'
           and not exists (
@@ -198,15 +224,54 @@ export class TurnRunsRepo {
     });
   }
 
-  async interruptStaleRunning(): Promise<number> {
-    const now = Date.now();
+  async interruptStaleRunning(input: {
+    now?: number;
+    legacyStaleBefore?: number;
+  } = {}): Promise<number> {
+    const now = input.now ?? Date.now();
+    const legacyStaleBefore = input.legacyStaleBefore ?? now;
     const rows = await this.db.query<{ id: number }>(sql`
       update turn_runs
       set status = 'interrupted', failure_code = 'process_interrupted', finished_at = ${now}, updated_at = ${now}
       where status in ('running', 'awaiting_delivery')
+        and (
+          (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
+          or (owner_id is null and updated_at <= ${legacyStaleBefore})
+        )
       returning id
     `);
     return rows.length;
+  }
+
+  async renewLease(id: number, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    const now = Date.now();
+    const renewed = await queryOne<{ id: number }>(this.db, sql`
+      update turn_runs
+      set lease_expires_at = ${leaseExpiresAt}, updated_at = ${now}
+      where id = ${id}
+        and owner_id = ${ownerId}
+        and lease_expires_at > ${now}
+        and status in ('running', 'awaiting_delivery')
+      returning id
+    `);
+    return Boolean(renewed);
+  }
+
+  async hasUnfinished(threadId: number): Promise<boolean> {
+    return Boolean(await queryOne<{ present: number }>(this.db, sql`
+      select 1 as present from turn_runs
+      where thread_id = ${threadId}
+        and status in ('queued', 'running', 'awaiting_delivery')
+      limit 1
+    `));
+  }
+
+  async indexMessageForRun(run: Pick<TurnRunRow, "user_message_id">): Promise<void> {
+    const message = await queryOne<MessageRow>(this.db, sql`
+      select * from messages where id = ${run.user_message_id}
+    `);
+    if (!message) throw new Error(`Turn message #${run.user_message_id} is unavailable for indexing.`);
+    await this.search.indexMessage(message.id, message.thread_id, message.text_plain);
   }
 
   markAwaitingDelivery(id: number, input: {
@@ -214,30 +279,35 @@ export class TurnRunsRepo {
     provider?: string | null;
     model?: string | null;
     usage?: unknown;
-  } = {}): Promise<void> {
+  } = {}, ownerId?: string): Promise<void> {
     return this.updateLifecycle(id, "awaiting_delivery", {
       deliveryStatus: "pending",
       resultMessageId: input.resultMessageId,
       provider: input.provider,
       model: input.model,
       usage: input.usage,
-    });
+    }, ownerId);
   }
 
-  markSucceeded(id: number, resultMessageId?: number | null): Promise<void> {
+  markSucceeded(id: number, resultMessageId?: number | null, ownerId?: string): Promise<void> {
     return this.updateLifecycle(id, "succeeded", {
       deliveryStatus: "delivered",
       resultMessageId,
       finished: true,
-    });
+    }, ownerId);
   }
 
-  markFailed(id: number, failureCode: string, deliveryStatus: TurnDeliveryStatus = "failed"): Promise<void> {
-    return this.updateLifecycle(id, "failed", { deliveryStatus, failureCode, finished: true });
+  markFailed(
+    id: number,
+    failureCode: string,
+    deliveryStatus: TurnDeliveryStatus = "failed",
+    ownerId?: string,
+  ): Promise<void> {
+    return this.updateLifecycle(id, "failed", { deliveryStatus, failureCode, finished: true }, ownerId);
   }
 
-  markCancelled(id: number): Promise<void> {
-    return this.updateLifecycle(id, "cancelled", { failureCode: "user_cancelled", finished: true });
+  markCancelled(id: number, ownerId?: string): Promise<void> {
+    return this.updateLifecycle(id, "cancelled", { failureCode: "user_cancelled", finished: true }, ownerId);
   }
 
   private async updateLifecycle(id: number, status: TurnRunStatus, input: {
@@ -248,7 +318,7 @@ export class TurnRunsRepo {
     usage?: unknown;
     failureCode?: string | null;
     finished?: boolean;
-  }): Promise<void> {
+  }, ownerId?: string): Promise<void> {
     const now = Date.now();
     await this.db.execute(sql`
       update turn_runs set
@@ -262,6 +332,7 @@ export class TurnRunsRepo {
         finished_at = ${input.finished ? now : null},
         updated_at = ${now}
       where id = ${id}
+        and (${ownerId ?? null} is null or owner_id = ${ownerId ?? null})
     `);
   }
 }
@@ -318,6 +389,39 @@ function attachmentsForSources(
     attachment.telegramMessageId === null
     || attachment.telegramMessageId === undefined
     || messageIds.has(attachment.telegramMessageId));
+}
+
+function turnPayloadForSources(
+  fallback: Pick<TurnAcceptanceInput, "kind" | "content" | "textPlain">,
+  sources: TelegramTurnSource[],
+): Pick<TurnAcceptanceInput, "kind" | "content" | "textPlain"> {
+  const payloads = sources.map((source) => source.payload);
+  if (payloads.some((payload) => !payload)) return fallback;
+  const complete = payloads.filter((payload): payload is NonNullable<TelegramTurnSource["payload"]> => Boolean(payload));
+  // Preserve source text byte-for-byte when rebuilding an accepted subset.
+  // Telegram split-text batching may contain meaningful leading newlines.
+  const textPlain = complete.map((payload) => payload.textPlain).filter(Boolean).join("\n\n");
+  const kind: MessageKind = complete.some((payload) => payload.kind === "file")
+    ? "file"
+    : complete.some((payload) => payload.kind === "image")
+      ? "image"
+      : "text";
+  if (kind === "text") return { kind, content: { text: textPlain }, textPlain };
+
+  const records = complete.flatMap((payload) =>
+    payload.content && typeof payload.content === "object" && !Array.isArray(payload.content)
+      ? [payload.content as Record<string, unknown>]
+      : []);
+  const captions = [...new Set(records.flatMap((record) =>
+    Array.isArray(record.captions)
+      ? record.captions.filter((caption): caption is string => typeof caption === "string" && Boolean(caption.trim()))
+      : typeof record.caption === "string" && record.caption.trim() ? [record.caption] : []))];
+  const files = records.flatMap((record) => Array.isArray(record.files) ? record.files : []);
+  return {
+    kind,
+    textPlain,
+    content: { text: textPlain, captions, files },
+  };
 }
 
 async function attachFilesToAcceptedMessage(

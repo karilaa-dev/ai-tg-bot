@@ -239,6 +239,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(ctx.thread));
       return;
     }
+    await ctx.services.turnCoordinator.waitForIdle(ctx.thread.id);
     const topic = await ctx.api.raw.createForumTopic({
       chat_id: ctx.chat.id,
       name: `Fork: ${ctx.thread.title}`,

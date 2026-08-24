@@ -15,6 +15,7 @@ export class TurnFinalizer {
     logger: Logger;
     turnRunId: number;
     threadId: number;
+    ownerId?: string;
   }) {}
 
   canCancel(): boolean {
@@ -51,7 +52,7 @@ export class TurnFinalizer {
       provider: result.provider,
       model: result.model,
       usage: result.usage,
-    });
+    }, this.input.ownerId);
   }
 
   async confirmDelivery(assistantMessageId: number): Promise<void> {
@@ -60,22 +61,27 @@ export class TurnFinalizer {
     // concurrent /stop cannot overwrite an already confirmed Telegram send.
     this.deliveryConfirmed = true;
     if (this.executionFailed) {
-      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "agent_execution_failed", "delivered");
+      await this.input.repos.turnRuns.markFailed(
+        this.input.turnRunId,
+        "agent_execution_failed",
+        "delivered",
+        this.input.ownerId,
+      );
     } else {
-      await this.input.repos.turnRuns.markSucceeded(this.input.turnRunId, assistantMessageId);
+      await this.input.repos.turnRuns.markSucceeded(this.input.turnRunId, assistantMessageId, this.input.ownerId);
     }
   }
 
   async unknownDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
     this.resultMessageId = assistantMessageId;
     this.deliveryUnknown = true;
-    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown");
+    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown", this.input.ownerId);
   }
 
   async rejectDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
     this.resultMessageId = assistantMessageId;
     this.deliveryFailed = true;
-    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed");
+    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed", this.input.ownerId);
   }
 
   recordExecutionFailure(): void {
@@ -87,13 +93,13 @@ export class TurnFinalizer {
       return { deliveredSuccessfully: !this.executionFailed };
     }
     if (this.cancelRequested) {
-      await this.input.repos.turnRuns.markCancelled(this.input.turnRunId);
+      await this.input.repos.turnRuns.markCancelled(this.input.turnRunId, this.input.ownerId);
     } else if (this.deliveryUnknown || this.deliveryFailed) {
       // Delivery callbacks already persisted their authoritative outcomes.
     } else if (this.executionFailed) {
-      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "agent_execution_failed");
+      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "agent_execution_failed", "failed", this.input.ownerId);
     } else {
-      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "turn_finished_without_delivery");
+      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "turn_finished_without_delivery", "failed", this.input.ownerId);
     }
     return { deliveredSuccessfully: false };
   }
@@ -101,8 +107,17 @@ export class TurnFinalizer {
   async finishException(): Promise<void> {
     if (this.deliveryConfirmed) {
       await (this.executionFailed
-        ? this.input.repos.turnRuns.markFailed(this.input.turnRunId, "agent_execution_failed", "delivered")
-        : this.input.repos.turnRuns.markSucceeded(this.input.turnRunId, this.resultMessageId)
+        ? this.input.repos.turnRuns.markFailed(
+            this.input.turnRunId,
+            "agent_execution_failed",
+            "delivered",
+            this.input.ownerId,
+          )
+        : this.input.repos.turnRuns.markSucceeded(
+            this.input.turnRunId,
+            this.resultMessageId,
+            this.input.ownerId,
+          )
       ).catch((error) => {
         this.input.logger.error("confirmed turn outcome could not be persisted", {
           turnRunId: this.input.turnRunId,
@@ -111,9 +126,14 @@ export class TurnFinalizer {
         });
       });
     } else if (this.cancelRequested) {
-      await this.input.repos.turnRuns.markCancelled(this.input.turnRunId);
+      await this.input.repos.turnRuns.markCancelled(this.input.turnRunId, this.input.ownerId);
     } else if (!this.deliveryUnknown && !this.deliveryFailed) {
-      await this.input.repos.turnRuns.markFailed(this.input.turnRunId, "turn_execution_failed");
+      await this.input.repos.turnRuns.markFailed(
+        this.input.turnRunId,
+        "turn_execution_failed",
+        "failed",
+        this.input.ownerId,
+      );
     }
   }
 }
