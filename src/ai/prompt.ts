@@ -26,9 +26,10 @@ export async function renderThreadSessionContext(input: {
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
+  maxMessageId?: number;
   now?: Date;
 }): Promise<string> {
-  const scope = await threadChainScope(input.repos, input.thread);
+  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
   const files = await input.repos.files.listByIds(scope.fileIds);
   const promptFiles: PromptFileContext[] = files.map((file) => ({
     id: file.id,

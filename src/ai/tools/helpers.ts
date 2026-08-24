@@ -42,7 +42,7 @@ function assertPhotoDeliverable(type: string | null, name: string): void {
 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
-  const scope = await threadChainScope(input.repos, input.thread);
+  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
   const isCurrentTurnAttachment = input.createdFiles?.some((attachment) => attachment.fileId === fileId) ?? false;
   if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
   return file;

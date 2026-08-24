@@ -57,14 +57,14 @@ export async function hybridSearch(input: {
   return results;
 }
 
-export async function threadChainScope(repos: Repos, thread: ThreadRow): Promise<{
+export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<{
   threadIds: number[];
   messageIds: number[];
   fileIds: number[];
 }> {
   const chain = await repos.threads.chain(thread);
   const threadIds = chain.map((row) => row.id);
-  const messages = await repos.messages.listForThreadChainSearchScope(chain);
+  const messages = await repos.messages.listForThreadChainSearchScope(chain, maxMessageId);
   const messageIds = messages.map((row) => row.id);
   const messageIdSet = new Set(messageIds);
   const attachedFiles = await repos.files.listForMessages(messageIds);

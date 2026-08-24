@@ -143,18 +143,11 @@ async function flushMediaGroup(flushCtx: BotContext, key: string): Promise<void>
       files: items.map((item) => item.file),
     },
     sources: items.map((item) => item.source),
-    onUserMessagePersisted: async (message) => {
-      for (const item of items) {
-        await ctx.services.repos.files.setMessageId(item.file.id, message.id, {
-          displayName: item.file.name,
-          caption: item.caption ?? null,
-        });
-      }
-      ctx.services.logger.info("media group file message persisted", ctxLogMeta(ctx, {
-        messageId: message.id,
-        files: items.length,
-      }));
-    },
+    attachments: items.map((item) => ({
+      fileId: item.file.id,
+      displayName: item.file.name,
+      caption: item.caption ?? null,
+    })),
   });
 }
 

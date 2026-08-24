@@ -1,8 +1,9 @@
-import type { MessageKind, MessageRow } from "../db/types.js";
+import type { MessageKind } from "../db/types.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
+import type { DurableTurnAttachment } from "../db/repos/turnRuns.js";
 
 export async function handleUserText(
   ctx: BotContext,
@@ -10,7 +11,7 @@ export async function handleUserText(
   options: {
     userMessageKind?: MessageKind;
     userMessageContent?: unknown;
-    onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
+    attachments?: DurableTurnAttachment[];
     sources?: TelegramTurnSource[];
   } = {},
 ): Promise<void> {
@@ -30,7 +31,7 @@ export async function handleUserText(
     content: options.userMessageContent ?? { text },
     textPlain: text,
     sources: options.sources ?? [telegramTurnSource(ctx)],
-    onUserMessagePersisted: options.onUserMessagePersisted,
+    attachments: options.attachments,
   });
   if (accepted.created && accepted.queuedBehind) {
     await replyWithThreadFallback(ctx, ctx.t("busy"), threadExtra(ctx.thread));

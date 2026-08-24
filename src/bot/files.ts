@@ -484,11 +484,10 @@ async function handlePreparedTelegramFile(
       caption: input.caption ?? null,
       files: [{ id: prepared.fileId, type: prepared.type, name: input.name, inline: prepared.inline }],
     },
-    onUserMessagePersisted: async (message) => {
-      await ctx.services.repos.files.setMessageId(prepared.fileId, message.id, {
-        displayName: input.name,
-        caption: input.caption ?? null,
-      });
-    },
+    attachments: [{
+      fileId: prepared.fileId,
+      displayName: input.name,
+      caption: input.caption ?? null,
+    }],
   });
 }

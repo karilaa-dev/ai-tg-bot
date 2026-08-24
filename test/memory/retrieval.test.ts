@@ -141,4 +141,57 @@ describe("Pi retrieval tools backend", () => {
     });
     expect(hits.some((hit) => hit.kind === "message" && hit.ref_id === after.id)).toBe(false);
   });
+
+  it("hides later queued messages and their attachments behind the active message boundary", async () => {
+    const user = await repos.users.ensure({ tgId: 304, firstName: "FIFO" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const activeFile = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "active.txt",
+      size: 6,
+      contentMd: "active",
+      isInline: true,
+    });
+    const queuedFile = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "queued.txt",
+      size: 6,
+      contentMd: "queued",
+      isInline: true,
+    });
+    const active = await repos.turnRuns.accept({
+      userId: user.tg_id,
+      threadId: thread.id,
+      chatId: user.tg_id,
+      messageThreadId: null,
+      locale: "en",
+      kind: "file",
+      content: { text: "active" },
+      textPlain: "active",
+      sources: [{ updateId: 3041, messageId: 1 }],
+      attachments: [{ fileId: activeFile.id }],
+    });
+    const queued = await repos.turnRuns.accept({
+      userId: user.tg_id,
+      threadId: thread.id,
+      chatId: user.tg_id,
+      messageThreadId: null,
+      locale: "en",
+      kind: "file",
+      content: { text: "queued" },
+      textPlain: "queued",
+      sources: [{ updateId: 3042, messageId: 2 }],
+      attachments: [{ fileId: queuedFile.id }],
+    });
+
+    const scope = await threadChainScope(repos, thread, active.userMessage.id);
+    expect(scope.messageIds).toContain(active.userMessage.id);
+    expect(scope.messageIds).not.toContain(queued.userMessage.id);
+    expect(scope.fileIds).toContain(activeFile.id);
+    expect(scope.fileIds).not.toContain(queuedFile.id);
+  });
 });

@@ -2,8 +2,8 @@ import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
-import type { AcceptedTurnRun, TelegramTurnSource } from "../db/repos/turnRuns.js";
-import type { Locale, MessageKind, MessageRow, TurnRunRow } from "../db/types.js";
+import type { AcceptedTurnRun, DurableTurnAttachment, TelegramTurnSource } from "../db/repos/turnRuns.js";
+import type { Locale, MessageKind, TurnRunRow } from "../db/types.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
@@ -31,6 +31,9 @@ export class ThreadTurnCoordinator {
   private readonly active = new Map<number, ActiveTurn>();
   private readonly recovery: Promise<number[]>;
   private accepting = true;
+
+  private static readonly CLAIM_RETRY_MS = 1_000;
+  private static readonly FAILURE_RETRY_MAX_MS = 30_000;
 
   constructor(private readonly input: {
     api: Api;
@@ -63,19 +66,12 @@ export class ThreadTurnCoordinator {
     content: unknown;
     textPlain: string;
     sources: TelegramTurnSource[];
-    onUserMessagePersisted?: AcceptedTurnCallback;
+    attachments?: DurableTurnAttachment[];
   }): Promise<AcceptedTurnRun> {
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     await this.recovery;
     const accepted = await this.input.repos.turnRuns.accept(input);
     if (accepted.created) {
-      await input.onUserMessagePersisted?.(accepted.userMessage).catch((error) => {
-        this.input.logger.warn("accepted turn attachment association failed", {
-          turnRunId: accepted.turnRun.id,
-          threadId: accepted.turnRun.thread_id,
-          error: String(error),
-        });
-      });
       this.input.logger.info("turn accepted", {
         turnRunId: accepted.turnRun.id,
         threadId: accepted.turnRun.thread_id,
@@ -144,20 +140,72 @@ export class ThreadTurnCoordinator {
 
   private schedule(threadId: number): void {
     if (this.draining.has(threadId)) return;
-    const task = this.drainThread(threadId).finally(async () => {
-      this.draining.delete(threadId);
-      if (this.accepting && await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
-    });
+    const task = this.drainThread(threadId);
     this.draining.set(threadId, task);
+    void task.then(
+      () => this.finishDrain(threadId),
+      (error) => {
+        // drainThread is defensive and should not reject. Keep this terminal
+        // guard so a future regression still cannot become an unhandled rejection.
+        this.input.logger.error("turn drain escaped its supervisor", { threadId, error: String(error) });
+        return this.finishDrain(threadId, true);
+      },
+    ).catch((error) => {
+      this.input.logger.error("turn drain completion handler failed", {
+        threadId,
+        error: String(error),
+      });
+      setTimeout(() => {
+        if (this.accepting) this.schedule(threadId);
+      }, ThreadTurnCoordinator.CLAIM_RETRY_MS).unref();
+    });
   }
 
   private async drainThread(threadId: number): Promise<void> {
+    let consecutiveFailures = 0;
     while (this.accepting) {
-      const queued = await this.input.repos.turnRuns.nextQueued(threadId);
-      if (!queued) return;
-      const run = await this.input.repos.turnRuns.claimRunning(queued.id);
-      if (!run) continue;
-      await this.execute(run);
+      try {
+        const queued = await this.input.repos.turnRuns.nextQueued(threadId);
+        if (!queued) return;
+        const run = await this.input.repos.turnRuns.claimRunning(queued.id);
+        if (!run) {
+          // Another process owns this thread or is ahead of us in the FIFO.
+          await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
+          continue;
+        }
+        consecutiveFailures = 0;
+        await this.execute(run);
+      } catch (error) {
+        consecutiveFailures += 1;
+        const retryMs = Math.min(
+          ThreadTurnCoordinator.FAILURE_RETRY_MAX_MS,
+          ThreadTurnCoordinator.CLAIM_RETRY_MS * 2 ** Math.min(5, consecutiveFailures - 1),
+        );
+        this.input.logger.error("turn drain operation failed; retrying", {
+          threadId,
+          consecutiveFailures,
+          retryMs,
+          error: String(error),
+        });
+        await delay(retryMs);
+      }
+    }
+  }
+
+  private async finishDrain(threadId: number, retry = false): Promise<void> {
+    this.draining.delete(threadId);
+    if (!this.accepting) return;
+    try {
+      if (retry || await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
+    } catch (error) {
+      this.input.logger.error("failed to verify turn queue after drain; rescheduling", {
+        threadId,
+        retryMs: ThreadTurnCoordinator.CLAIM_RETRY_MS,
+        error: String(error),
+      });
+      setTimeout(() => {
+        if (this.accepting) this.schedule(threadId);
+      }, ThreadTurnCoordinator.CLAIM_RETRY_MS).unref();
     }
   }
 
@@ -215,6 +263,7 @@ export class ThreadTurnCoordinator {
         pi: this.input.pi,
         t: (key, params) => this.input.t(run.locale, key, params),
         onAwaitingDelivery: (result) => finalizer.awaitingDelivery(result),
+        onDeliveryStarting: () => finalizer.beginDelivery(),
         onDeliveryConfirmed: (result) => finalizer.confirmDelivery(result.assistantMessageId),
         onDeliveryUnknown: (result) => finalizer.unknownDelivery(result.assistantMessageId, result.failureCode),
         onDeliveryFailed: (result) => finalizer.rejectDelivery(result.assistantMessageId, result.failureCode),
@@ -244,4 +293,6 @@ export class ThreadTurnCoordinator {
   }
 }
 
-type AcceptedTurnCallback = (message: MessageRow) => Promise<void>;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

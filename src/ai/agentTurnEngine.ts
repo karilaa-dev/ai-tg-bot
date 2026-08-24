@@ -65,6 +65,7 @@ export interface TurnInput {
     model?: string;
     usage?: InferenceUsageDelta;
   }) => Promise<void>;
+  onDeliveryStarting?: () => boolean;
   onDeliveryConfirmed?: (result: { assistantMessageId: number }) => Promise<void>;
   onDeliveryUnknown?: (result: { assistantMessageId: number; failureCode: string }) => Promise<void>;
   onDeliveryFailed?: (result: { assistantMessageId: number; failureCode: string }) => Promise<void>;
@@ -111,6 +112,7 @@ export const runTurn: TurnRunner = async (input) => {
         return input.resolveFile(file, signal);
       },
       currentFileIds: currentFiles.map((file) => file.id),
+      userMessageId: userMessage?.id,
     });
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
     input.logger.info("Pi turn starting", {
@@ -169,7 +171,9 @@ export const runTurn: TurnRunner = async (input) => {
       toolCalls: stats.counts.toolCalls,
       toolResults: stats.counts.toolResults,
     });
+    input.signal?.throwIfAborted();
     const pendingFileError = await waitForPendingCreatedFiles(input, runtime.bridge.pendingCreatedFiles);
+    input.signal?.throwIfAborted();
     const generateImageToolError = pendingFileError ?? stats.counts.generateImageToolError;
     const assistantResult = currentTurnAssistantResult(currentTurnMessages);
     let answer = assistantResult.text || shaper.finalAnswer();
@@ -217,7 +221,9 @@ export const runTurn: TurnRunner = async (input) => {
       attachments: createdFiles.filter((file) => file.telegramDelivery),
       extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
     });
+    input.signal?.throwIfAborted();
     const thinkingDelivery = await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
+    input.signal?.throwIfAborted();
     const assistantEntry = [...piEntries].reverse().find((entry) => entry.role === "assistant");
     const finalDelivery = await sendFinalVisible(
       input,
@@ -909,6 +915,10 @@ async function sendFinalVisible(
   inference?: { provider?: string; model?: string; usage?: InferenceUsageDelta },
   onPersisted?: () => void,
 ): Promise<FinalVisibleDelivery> {
+  input.signal?.throwIfAborted();
+  if (input.onDeliveryStarting && !input.onDeliveryStarting()) {
+    throw input.signal?.reason ?? new Error("Turn cancellation won the delivery race.");
+  }
   const outboundAttachments = attachments.slice(0, MAX_CREATED_FILES_PER_ANSWER);
   normalizeTelegramAttachmentDeliveries(outboundAttachments);
   if (attachments.length > outboundAttachments.length) {

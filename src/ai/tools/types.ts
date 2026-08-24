@@ -16,6 +16,7 @@ export interface ToolBuildInput {
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
+  maxMessageId?: number;
   logger?: Logger;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;

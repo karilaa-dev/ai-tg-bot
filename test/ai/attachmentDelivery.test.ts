@@ -132,6 +132,18 @@ describe("buffered Telegram attachment delivery", () => {
     }));
   });
 
+  it("does not persist or send a final answer after cancellation wins the delivery barrier", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryStarting = vi.fn(() => false);
+
+    await expect(sendFinal(input, "", "cancelled"))
+      .rejects.toThrow("Turn cancellation won the delivery race");
+
+    expect(input.repos.messages.insert).not.toHaveBeenCalled();
+    expect(api.raw.sendRichMessage).not.toHaveBeenCalled();
+  });
+
   it("sends a failure reply only when generated-image delivery is definitively rejected", async () => {
     const api = fakeApi();
     api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));

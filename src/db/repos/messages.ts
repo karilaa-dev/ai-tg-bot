@@ -80,18 +80,20 @@ export class MessagesRepo {
     return this.listForThreadChainRows(threads);
   }
 
-  async listForThreadChainSearchScope(threads: ThreadRow[]): Promise<MessageRow[]> {
-    return this.listForThreadChainRows(threads);
+  async listForThreadChainSearchScope(threads: ThreadRow[], maxMessageId?: number): Promise<MessageRow[]> {
+    return this.listForThreadChainRows(threads, maxMessageId);
   }
 
   private async listForThreadChainRows(
     threads: ThreadRow[],
+    maxMessageId?: number,
   ): Promise<MessageRow[]> {
     const rows: MessageRow[] = [];
     for (let i = 0; i < threads.length; i += 1) {
       const thread = threads[i]!;
       const child = threads[i + 1];
       const filters: SQL[] = [sql`thread_id = ${thread.id}`];
+      if (maxMessageId !== undefined) filters.push(sql`id <= ${maxMessageId}`);
       if (child?.parent_thread_id === thread.id && child.fork_point_message_id !== null) {
         filters.push(sql`id <= ${child.fork_point_message_id}`);
       }

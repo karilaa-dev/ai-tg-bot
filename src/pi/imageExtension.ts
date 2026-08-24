@@ -26,6 +26,7 @@ export interface ChatImageBridge {
   modelRegistry: ModelRegistry;
   providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[];
+  activeMessageId?: number;
   resolveImage(file: FileRow, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType: string }>;
 }
 
@@ -151,7 +152,7 @@ async function loadReferences(
 ): Promise<ImageContent[]> {
   if (!referenceIds.length) return [];
   const allowedFiles = new Set([
-    ...(await threadChainScope(bridge.repos, bridge.thread)).fileIds,
+    ...(await threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId)).fileIds,
     ...bridge.attachments.map((attachment) => attachment.fileId),
   ]);
   const rows = await bridge.repos.files.listByIds(referenceIds);

@@ -15,6 +15,12 @@ export interface TelegramTurnSource {
   messageId: number | null;
 }
 
+export interface DurableTurnAttachment {
+  fileId: number;
+  displayName?: string | null;
+  caption?: string | null;
+}
+
 export interface AcceptedTurnRun {
   turnRun: TurnRunRow;
   userMessage: MessageRow;
@@ -38,8 +44,10 @@ export class TurnRunsRepo {
     content: unknown;
     textPlain: string;
     sources: TelegramTurnSource[];
+    attachments?: DurableTurnAttachment[];
   }): Promise<AcceptedTurnRun> {
     const sources = uniqueSources(input.sources);
+    const attachments = uniqueAttachments(input.attachments ?? []);
     if (!sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
     let accepted: AcceptedTurnRun;
     try {
@@ -48,6 +56,7 @@ export class TurnRunsRepo {
         if (duplicate) {
           const userMessage = await queryOne<MessageRow>(tx, sql`select * from messages where id = ${duplicate.user_message_id}`);
           if (!userMessage) throw new Error(`Turn #${duplicate.id} references a missing user message.`);
+          await attachFilesToAcceptedMessage(tx, userMessage.id, attachments);
           return { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
         }
 
@@ -66,6 +75,7 @@ export class TurnRunsRepo {
             'queued', 'pending', ${now}, ${now}
           ) returning *
         `);
+        await attachFilesToAcceptedMessage(tx, userMessage.id, attachments);
         for (const source of sources) {
           await tx.execute(sql`
             insert into turn_run_sources(turn_run_id, telegram_update_id, telegram_message_id, created_at)
@@ -89,6 +99,10 @@ export class TurnRunsRepo {
       if (!duplicate) throw error;
       const userMessage = await queryOne<MessageRow>(this.db, sql`select * from messages where id = ${duplicate.user_message_id}`);
       if (!userMessage) throw error;
+      if (attachments.length) {
+        await this.db.transaction((tx) =>
+          attachFilesToAcceptedMessage(tx, userMessage.id, attachments));
+      }
       accepted = { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
     }
     if (accepted.created) {
@@ -123,12 +137,41 @@ export class TurnRunsRepo {
   }
 
   claimRunning(id: number): Promise<TurnRunRow | undefined> {
-    const now = Date.now();
-    return queryOne<TurnRunRow>(this.db, sql`
-      update turn_runs set status = 'running', started_at = ${now}, updated_at = ${now}
-      where id = ${id} and status = 'queued'
-      returning *
-    `);
+    return this.db.transaction(async (tx) => {
+      const candidate = await queryOne<{ thread_id: number }>(tx, sql`
+        select thread_id from turn_runs where id = ${id} and status = 'queued'
+      `);
+      if (!candidate) return undefined;
+      if (tx.dialect === "postgres") {
+        // Claims are short transactions. A per-thread transaction lock makes
+        // overlapping deployments observe the same FIFO owner before either
+        // process advances to a later queued row.
+        await tx.execute(sql`
+          select pg_advisory_xact_lock(
+            938472616,
+            cast(mod(thread_id, 2147483647) as integer)
+          )
+          from turn_runs where id = ${id}
+        `);
+      }
+      const now = Date.now();
+      return queryOne<TurnRunRow>(tx, sql`
+        update turn_runs as target
+        set status = 'running', started_at = ${now}, updated_at = ${now}
+        where target.id = ${id}
+          and target.status = 'queued'
+          and not exists (
+            select 1 from turn_runs blocker
+            where blocker.thread_id = target.thread_id
+              and blocker.id <> target.id
+              and (
+                blocker.status in ('running', 'awaiting_delivery')
+                or (blocker.status = 'queued' and blocker.id < target.id)
+              )
+          )
+        returning *
+      `);
+    });
   }
 
   async interruptStaleRunning(): Promise<number> {
@@ -216,4 +259,39 @@ function uniqueSources(sources: TelegramTurnSource[]): TelegramTurnSource[] {
     byId.set(source.updateId, source);
   }
   return [...byId.values()];
+}
+
+function uniqueAttachments(attachments: DurableTurnAttachment[]): DurableTurnAttachment[] {
+  const byId = new Map<number, DurableTurnAttachment>();
+  for (const attachment of attachments) {
+    if (!Number.isSafeInteger(attachment.fileId) || attachment.fileId <= 0) continue;
+    byId.set(attachment.fileId, attachment);
+  }
+  return [...byId.values()];
+}
+
+async function attachFilesToAcceptedMessage(
+  tx: SqlExecutor,
+  messageId: number,
+  attachments: DurableTurnAttachment[],
+): Promise<void> {
+  for (const attachment of attachments) {
+    const file = await queryOne<{ id: number; name: string }>(tx, sql`
+      update files
+      set message_id = coalesce(message_id, ${messageId})
+      where id = ${attachment.fileId}
+      returning id, name
+    `);
+    if (!file) throw new Error(`File #${attachment.fileId} does not exist for the accepted turn.`);
+    await tx.execute(sql`
+      insert into message_files(message_id, file_id, display_name, caption, created_at)
+      values (
+        ${messageId}, ${file.id}, ${attachment.displayName ?? file.name},
+        ${attachment.caption ?? null}, ${Date.now()}
+      )
+      on conflict(message_id, file_id) do update set
+        display_name = excluded.display_name,
+        caption = excluded.caption
+    `);
+  }
 }

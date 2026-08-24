@@ -6,6 +6,7 @@ export class TurnFinalizer {
   deliveryUnknown = false;
   deliveryFailed = false;
   deliveryConfirmed = false;
+  deliveryStarted = false;
   executionFailed = false;
   resultMessageId: number | null = null;
 
@@ -17,12 +18,23 @@ export class TurnFinalizer {
   }) {}
 
   canCancel(): boolean {
-    return !this.deliveryConfirmed && !this.deliveryUnknown && !this.deliveryFailed;
+    return !this.deliveryStarted
+      && !this.deliveryConfirmed
+      && !this.deliveryUnknown
+      && !this.deliveryFailed;
   }
 
   requestCancellation(): boolean {
     if (!this.canCancel()) return false;
     this.cancelRequested = true;
+    return true;
+  }
+
+  beginDelivery(): boolean {
+    if (this.cancelRequested || this.deliveryConfirmed || this.deliveryUnknown || this.deliveryFailed) {
+      return false;
+    }
+    this.deliveryStarted = true;
     return true;
   }
 
@@ -32,6 +44,7 @@ export class TurnFinalizer {
     model?: string;
     usage?: unknown;
   }): Promise<void> {
+    this.deliveryStarted = true;
     this.resultMessageId = result.assistantMessageId;
     await this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
       resultMessageId: result.assistantMessageId,

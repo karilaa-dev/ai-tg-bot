@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sql } from "drizzle-orm";
 import { ThreadTurnCoordinator } from "../../src/ai/threadTurnCoordinator.js";
 import type { TurnInput } from "../../src/ai/run.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -128,6 +129,100 @@ describe("ThreadTurnCoordinator", () => {
         result_message_id: 77,
         failure_code: "telegram_delivery_unknown",
       }),
+    ]);
+    await coordinator.shutdown();
+  });
+
+  it("commits attachment associations with acceptance and repairs them on a duplicate update", async () => {
+    const { userId, threadId } = await ownership(repos, 805);
+    const file = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "pdf",
+      mimeType: "application/pdf",
+      extractionStatus: "source_only",
+      name: "queued.pdf",
+      size: 100,
+      isInline: false,
+    });
+    const input = {
+      ...request(userId, threadId, 5001, "inspect the PDF"),
+      attachments: [{ fileId: file.id, displayName: "queued.pdf", caption: "inspect" }],
+    };
+
+    const accepted = await repos.turnRuns.accept(input);
+    expect(await repos.files.listForMessage(accepted.userMessage.id)).toEqual([
+      expect.objectContaining({ id: file.id }),
+    ]);
+
+    await db.db.execute(sql`delete from message_files where message_id = ${accepted.userMessage.id}`);
+    await db.db.execute(sql`update files set message_id = null where id = ${file.id}`);
+    const duplicate = await repos.turnRuns.accept(input);
+
+    expect(duplicate.created).toBe(false);
+    expect(await repos.files.listForMessage(accepted.userMessage.id)).toEqual([
+      expect.objectContaining({ id: file.id }),
+    ]);
+  });
+
+  it("does not claim a later or concurrent turn while a thread owner is active", async () => {
+    const { userId, threadId } = await ownership(repos, 806);
+    const first = await repos.turnRuns.accept(request(userId, threadId, 6001, "first"));
+    const second = await repos.turnRuns.accept(request(userId, threadId, 6002, "second"));
+
+    await expect(repos.turnRuns.claimRunning(second.turnRun.id)).resolves.toBeUndefined();
+    await expect(repos.turnRuns.claimRunning(first.turnRun.id)).resolves.toMatchObject({ status: "running" });
+    await expect(repos.turnRuns.claimRunning(second.turnRun.id)).resolves.toBeUndefined();
+    await repos.turnRuns.markSucceeded(first.turnRun.id);
+    await expect(repos.turnRuns.claimRunning(second.turnRun.id)).resolves.toMatchObject({ status: "running" });
+  });
+
+  it("rejects late cancellation once final delivery has acquired its barrier", async () => {
+    const { userId, threadId } = await ownership(repos, 807);
+    const deliveryStarted = deferred<void>();
+    const release = deferred<void>();
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      expect(input.onDeliveryStarting?.()).toBe(true);
+      deliveryStarted.resolve();
+      await release.promise;
+      await confirmDelivery(input);
+    });
+
+    await coordinator.accept(request(userId, threadId, 7001, "deliver"));
+    await deliveryStarted.promise;
+    await expect(coordinator.cancelActive(threadId)).resolves.toBe(false);
+    release.resolve();
+    await coordinator.waitForIdle();
+
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "succeeded" }),
+    ]);
+    await coordinator.shutdown();
+  });
+
+  it("supervises a transient drain failure and later executes the queued turn", async () => {
+    const { userId, threadId } = await ownership(repos, 808);
+    const originalNextQueued = repos.turnRuns.nextQueued.bind(repos.turnRuns);
+    let failOnce = true;
+    vi.spyOn(repos.turnRuns, "nextQueued").mockImplementation(async (id) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("temporary database outage");
+      }
+      return originalNextQueued(id);
+    });
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+
+    await coordinator.accept(request(userId, threadId, 8001, "retry me"));
+    await coordinator.waitForIdle();
+
+    expect(executed).toEqual(["retry me"]);
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "succeeded" }),
     ]);
     await coordinator.shutdown();
   });

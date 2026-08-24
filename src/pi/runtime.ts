@@ -61,6 +61,7 @@ export interface PiTurnTransport {
   messageThreadId?: number;
   resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile>;
   currentFileIds?: number[];
+  userMessageId?: number;
 }
 
 export interface PiThreadRuntime {
@@ -403,6 +404,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   attachments: CreatedFileAttachment[] = [];
   pendingCreatedFiles: PendingCreatedFile[] = [];
   publishedWebsites: PublishedWebsite[] = [];
+  activeMessageId?: number;
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
@@ -443,13 +445,19 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     if (this.turnActive) await this.endTurn();
     const [turnSystemPrompt, turnSessionContext] = await Promise.all([
       renderSystemPrompt({ user: this.user, config: this.config }),
-      renderThreadSessionContext({ repos: this.repos, user: this.user, thread: this.thread }),
+      renderThreadSessionContext({
+        repos: this.repos,
+        user: this.user,
+        thread: this.thread,
+        maxMessageId: input.userMessageId,
+      }),
     ]);
     await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
     this.turnActive = true;
     this.turnSystemPrompt = turnSystemPrompt;
     this.turnSessionContext = turnSessionContext;
     this.transport = input;
+    this.activeMessageId = input.userMessageId;
     this.attachments = [];
     this.pendingCreatedFiles = [];
     this.publishedWebsites = [];
@@ -479,6 +487,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.turnSystemPrompt = undefined;
     this.turnSessionContext = undefined;
     this.transport = undefined;
+    this.activeMessageId = undefined;
     if (wasActive) await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
   }
 
@@ -501,6 +510,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       repos: this.repos,
       user: this.user,
       thread: this.thread,
+      maxMessageId: this.activeMessageId,
       logger: this.logger,
       commandRuntime: this.commandRuntime,
       browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
@@ -584,7 +594,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
     factory: (pi) => {
       pi.on("context", async (event) => {
         const messages = event.messages.map((message) => cloneMessage(message));
-        const scope = await threadChainScope(bridge.repos, bridge.thread);
+        const scope = await threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId);
         const allowedIds = new Set([
           ...scope.fileIds,
           ...bridge.attachments.map((attachment) => attachment.fileId),
