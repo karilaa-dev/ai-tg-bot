@@ -131,7 +131,7 @@ The empty-volume check makes this step fail instead of merging the archive into 
 
 Remove `RAILPACK_START_CMD`, add the normal OpenRouter, Tavily, E2B, and optional Browser Use or Codex credentials, then redeploy with one replica.
 
-The bot now starts through its ordinary entrypoint. Confirm that the logs contain `database initialized` and `bot started`, then run these smoke tests:
+The bot now starts as the ordinary Node process. Confirm that the logs contain `database initialized` and `bot started`, then run these smoke tests:
 
 - [ ] Continue an existing conversation.
 - [ ] Find an old message with `search_thread`.

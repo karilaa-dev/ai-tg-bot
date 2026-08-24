@@ -31,8 +31,6 @@ RUN apt-get update \
         ca-certificates \
         gzip \
         tar \
-        tini \
-        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -51,12 +49,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/locales ./locales
 COPY --from=build --chown=node:node /app/skills ./skills
 COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
-COPY docker/entrypoint.sh /usr/local/bin/ai-tg-bot-entrypoint
-
-RUN chmod 0755 /usr/local/bin/ai-tg-bot-entrypoint \
-    && install -d -o 1000 -g 1000 /app/data /app/data/pi
 
 VOLUME ["/app/data"]
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ai-tg-bot-entrypoint"]
 CMD ["node", "dist/src/main.js"]

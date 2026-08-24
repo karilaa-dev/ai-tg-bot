@@ -113,6 +113,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   private async initializeModelRuntime(): Promise<void> {
+    await fs.mkdir(this.agentDir, { recursive: true, mode: 0o700 });
     await validateOfficeSkills();
     const piAuthPath = path.join(this.agentDir, "auth.json");
     const piCodexCredential = readStoredCredential(CODEX_PROVIDER_ID, piAuthPath);

@@ -25,9 +25,6 @@ logger.info("bot process starting", {
 });
 
 try {
-  if (process.getuid?.() === 0) {
-    throw new Error("The bot process must run as a non-root user.");
-  }
   logger.debug("initializing database");
   await db.initialize();
   await checkConfiguredDocling(config, logger);
