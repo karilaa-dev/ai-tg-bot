@@ -17,7 +17,7 @@ export interface TextSearch {
   indexChunk(id: number, fileId: number, text: string): Promise<void>;
   removeMessage(id: number): Promise<void>;
   removeChunksForFile(fileId: number): Promise<void>;
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]>;
+  searchMessages(threadIds: number[], q: string, limit: number, messageIds?: number[]): Promise<SearchHit[]>;
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]>;
 }
 
@@ -56,8 +56,8 @@ class SqliteTextSearch implements TextSearch {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.message, threadIds, q, limit);
+  searchMessages(threadIds: number[], q: string, limit: number, messageIds?: number[]): Promise<SearchHit[]> {
+    return this.search(TARGETS.message, threadIds, q, limit, messageIds);
   }
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
@@ -86,8 +86,14 @@ class SqliteTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
   }
 
-  private search(target: SearchTarget, scopeIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    if (!scopeIds.length) return Promise.resolve([]);
+  private search(
+    target: SearchTarget,
+    scopeIds: number[],
+    q: string,
+    limit: number,
+    allowedIds?: number[],
+  ): Promise<SearchHit[]> {
+    if (!scopeIds.length || allowedIds?.length === 0) return Promise.resolve([]);
     const query = sqliteQuery(q);
     const table = sql.raw(target.sqliteTable);
     const idColumn = sql.raw(target.idColumn);
@@ -97,6 +103,7 @@ class SqliteTextSearch implements TextSearch {
       from ${table}
       where ${table} match ${query}
         and ${scopeColumn} in (${valueList(scopeIds)})
+        ${allowedIds ? sql`and ${idColumn} in (${valueList(allowedIds)})` : sql``}
       order by rank
       limit ${limit}
     `);
@@ -122,8 +129,8 @@ class PgTextSearch implements TextSearch {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.message, threadIds, q, limit);
+  searchMessages(threadIds: number[], q: string, limit: number, messageIds?: number[]): Promise<SearchHit[]> {
+    return this.search(TARGETS.message, threadIds, q, limit, messageIds);
   }
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
@@ -156,8 +163,14 @@ class PgTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
   }
 
-  private search(target: SearchTarget, scopeIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    if (!scopeIds.length) return Promise.resolve([]);
+  private search(
+    target: SearchTarget,
+    scopeIds: number[],
+    q: string,
+    limit: number,
+    allowedIds?: number[],
+  ): Promise<SearchHit[]> {
+    if (!scopeIds.length || allowedIds?.length === 0) return Promise.resolve([]);
     const table = sql.raw(target.pgTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
@@ -168,6 +181,7 @@ class PgTextSearch implements TextSearch {
              ts_rank(ts, websearch_to_tsquery('simple', ${q})) as rank
       from ${table}
       where ${scopeColumn} in (${valueList(scopeIds)})
+        ${allowedIds ? sql`and ${idColumn} in (${valueList(allowedIds)})` : sql``}
         and ts @@ websearch_to_tsquery('simple', ${q})
       order by rank desc
       limit ${limit}

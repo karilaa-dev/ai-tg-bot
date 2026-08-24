@@ -61,6 +61,7 @@ export class TurnRunsRepo {
     let accepted: AcceptedTurnRun;
     try {
       accepted = await this.db.transaction(async (tx) => {
+        await lockThreadTransaction(tx, input.threadId);
         const mappings = await existingSourceMappings(tx, sources.map((source) => source.updateId));
         for (const mapping of mappings) observedOwnedUpdateIds.add(mapping.telegram_update_id);
         const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
@@ -183,22 +184,16 @@ export class TurnRunsRepo {
         select thread_id from turn_runs where id = ${id} and status = 'queued'
       `);
       if (!candidate) return undefined;
-      if (tx.dialect === "postgres") {
-        // Claims are short transactions. A per-thread transaction lock makes
-        // overlapping deployments observe the same FIFO owner before either
-        // process advances to a later queued row.
-        await tx.execute(sql`
-          select pg_advisory_xact_lock(
-            938472616,
-            cast(mod(thread_id, 2147483647) as integer)
-          )
-          from turn_runs where id = ${id}
-        `);
-      }
+      await lockThreadTransaction(tx, candidate.thread_id);
       const now = Date.now();
+      await tx.execute(sql`
+        delete from thread_operation_barriers
+        where thread_id = ${candidate.thread_id} and lease_expires_at <= ${now}
+      `);
       await tx.execute(sql`
         update turn_runs
         set status = 'interrupted', failure_code = 'owner_lease_expired',
+            owner_id = null, lease_expires_at = null,
             finished_at = ${now}, updated_at = ${now}
         where thread_id = ${candidate.thread_id}
           and status in ('running', 'awaiting_delivery')
@@ -213,6 +208,11 @@ export class TurnRunsRepo {
             owner_id = ${ownerId}, lease_expires_at = ${leaseExpiresAt}
         where target.id = ${id}
           and target.status = 'queued'
+          and not exists (
+            select 1 from thread_operation_barriers barrier
+            where barrier.thread_id = target.thread_id
+              and barrier.lease_expires_at > ${now}
+          )
           and not exists (
             select 1 from turn_runs blocker
             where blocker.thread_id = target.thread_id
@@ -236,7 +236,9 @@ export class TurnRunsRepo {
     const legacyStaleBefore = input.legacyStaleBefore ?? now;
     const rows = await this.db.query<{ id: number }>(sql`
       update turn_runs
-      set status = 'interrupted', failure_code = 'process_interrupted', finished_at = ${now}, updated_at = ${now}
+      set status = 'interrupted', failure_code = 'process_interrupted',
+          owner_id = null, lease_expires_at = null,
+          finished_at = ${now}, updated_at = ${now}
       where status in ('running', 'awaiting_delivery')
         and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? 0})
         and (
@@ -293,6 +295,52 @@ export class TurnRunsRepo {
     `));
   }
 
+  async tryAcquireThreadBarrier(input: {
+    threadId: number;
+    ownerId: string;
+    operation: "fork" | "compact";
+    leaseExpiresAt: number;
+  }): Promise<{ snapshotMessageId: number | null } | undefined> {
+    return this.db.transaction(async (tx) => {
+      await lockThreadTransaction(tx, input.threadId);
+      const now = Date.now();
+      await tx.execute(sql`
+        delete from thread_operation_barriers
+        where thread_id = ${input.threadId} and lease_expires_at <= ${now}
+      `);
+      if (await queryOne<{ present: number }>(tx, sql`
+        select 1 as present from turn_runs
+        where thread_id = ${input.threadId}
+          and status in ('queued', 'running', 'awaiting_delivery')
+        limit 1
+      `)) return undefined;
+      const snapshot = await queryOne<{ id: number }>(tx, sql`
+        select id from messages where thread_id = ${input.threadId} order by id desc limit 1
+      `);
+      const inserted = await queryOne<{ snapshot_message_id: number | null }>(tx, sql`
+        insert into thread_operation_barriers(
+          thread_id, owner_id, operation, snapshot_message_id,
+          lease_expires_at, created_at, updated_at
+        ) values (
+          ${input.threadId}, ${input.ownerId}, ${input.operation}, ${snapshot?.id ?? null},
+          ${input.leaseExpiresAt}, ${now}, ${now}
+        )
+        on conflict(thread_id) do nothing
+        returning snapshot_message_id
+      `);
+      return inserted ? { snapshotMessageId: inserted.snapshot_message_id } : undefined;
+    });
+  }
+
+  async releaseThreadBarrier(threadId: number, ownerId: string): Promise<boolean> {
+    const released = await queryOne<{ thread_id: number }>(this.db, sql`
+      delete from thread_operation_barriers
+      where thread_id = ${threadId} and owner_id = ${ownerId}
+      returning thread_id
+    `);
+    return Boolean(released);
+  }
+
   async indexMessageForRun(run: Pick<TurnRunRow, "user_message_id">): Promise<void> {
     const message = await queryOne<MessageRow>(this.db, sql`
       select * from messages where id = ${run.user_message_id}
@@ -322,7 +370,10 @@ export class TurnRunsRepo {
       where id = ${id}
         and status = 'running'
         and cancel_requested_at is null
-        and (${ownerId === undefined ? 0 : 1} = 0 or owner_id = ${ownerId ?? ""})
+        and (
+          ${ownerId === undefined ? 0 : 1} = 0
+          or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
+        )
       returning id
     `);
     return Boolean(transitioned);
@@ -371,7 +422,10 @@ export class TurnRunsRepo {
         finished_at = ${input.finished ? now : null},
         updated_at = ${now}
       where id = ${id}
-        and (${ownerId === undefined ? 0 : 1} = 0 or owner_id = ${ownerId ?? ""})
+        and (
+          ${ownerId === undefined ? 0 : 1} = 0
+          or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
+        )
     `);
   }
 }
@@ -487,4 +541,13 @@ async function attachFilesToAcceptedMessage(
         caption = excluded.caption
     `);
   }
+}
+
+async function lockThreadTransaction(tx: SqlExecutor, threadId: number): Promise<void> {
+  if (tx.dialect !== "postgres") return;
+  // Acceptance, claims, and operation barriers share this transaction lock,
+  // which gives each thread one cross-process linearization point.
+  await tx.execute(sql`
+    select pg_advisory_xact_lock(938472616, cast(mod(${threadId}, 2147483647) as integer))
+  `);
 }

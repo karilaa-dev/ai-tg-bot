@@ -128,6 +128,17 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`create index if not exists messages_thread_id_idx on messages(thread_id, id)`));
   await db.execute(sql.raw(`
+    create table if not exists thread_operation_barriers (
+      thread_id ${intType} primary key references threads(id) on delete cascade,
+      owner_id text not null,
+      operation text not null,
+      snapshot_message_id ${intType},
+      lease_expires_at ${intType} not null,
+      created_at ${intType} not null,
+      updated_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
     create table if not exists turn_runs (
       id ${idType},
       user_id ${intType} not null references users(tg_id),

@@ -224,39 +224,48 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("compact", async (ctx) => {
     logCommand(ctx, "compact");
-    if (!ctx.thread) return;
-    const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(ctx.thread));
-    await ctx.services.turnCoordinator.waitForIdle(ctx.thread.id);
-    const count = await runCompaction(ctx, ctx.thread);
+    const thread = ctx.thread;
+    if (!thread) return;
+    const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
+    const count = await ctx.services.turnCoordinator.withThreadBarrier(
+      thread.id,
+      "compact",
+      async () => runCompaction(ctx, thread),
+    );
     await ctx.api
       .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
       .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");
-    if (!ctx.thread || !ctx.user || !ctx.chat) return;
+    const { thread, user, chat } = ctx;
+    if (!thread || !user || !chat) return;
     const me = await ctx.api.getMe();
     if (!me.has_topics_enabled) {
-      await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(ctx.thread));
+      await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(thread));
       return;
     }
-    await ctx.services.turnCoordinator.waitForIdle(ctx.thread.id);
-    const topic = await ctx.api.raw.createForumTopic({
-      chat_id: ctx.chat.id,
-      name: `Fork: ${ctx.thread.title}`,
+    const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId) => {
+      const topic = await ctx.api.raw.createForumTopic({
+        chat_id: chat.id,
+        name: `Fork: ${thread.title}`,
+      });
+      const latest = snapshotMessageId === null
+        ? undefined
+        : await ctx.services.repos.messages.get(snapshotMessageId);
+      const created = await ctx.services.repos.threads.create({
+        userId: user.tg_id,
+        topicId: topic.message_thread_id ?? null,
+        title: `Fork: ${thread.title}`,
+        parentThreadId: thread.id,
+        forkPointMessageId: snapshotMessageId,
+      });
+      await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id);
+      return created;
     });
-    const latest = await ctx.services.repos.messages.latest(ctx.thread.id);
-    const fork = await ctx.services.repos.threads.create({
-      userId: ctx.user.tg_id,
-      topicId: topic.message_thread_id ?? null,
-      title: `Fork: ${ctx.thread.title}`,
-      parentThreadId: ctx.thread.id,
-      forkPointMessageId: latest?.id ?? null,
-    });
-    await ctx.services.pi.fork(ctx.thread, fork, ctx.user, latest?.pi_entry_id);
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
       forkThreadId: fork.id,
-      parentThreadId: ctx.thread.id,
+      parentThreadId: thread.id,
       topicId: fork.topic_id,
     }));
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));

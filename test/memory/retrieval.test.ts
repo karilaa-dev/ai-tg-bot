@@ -142,6 +142,30 @@ describe("Pi retrieval tools backend", () => {
     expect(hits.some((hit) => hit.kind === "message" && hit.ref_id === after.id)).toBe(false);
   });
 
+  it("applies allowed message IDs before the FTS limit", async () => {
+    const user = await repos.users.ensure({ tgId: 305, firstName: "Bounded FTS" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const allowed = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "boundaryneedle with deliberately weaker ranking filler filler filler filler" },
+      textPlain: "boundaryneedle with deliberately weaker ranking filler filler filler filler",
+    });
+    await repos.messages.insert({
+      threadId: thread.id,
+      role: "assistant",
+      content: { text: "boundaryneedle" },
+      textPlain: "boundaryneedle",
+    });
+
+    await expect(db.search.searchMessages(
+      [thread.id],
+      "boundaryneedle",
+      1,
+      [allowed.id],
+    )).resolves.toEqual([expect.objectContaining({ id: allowed.id })]);
+  });
+
   it("hides later queued messages and their attachments behind the active message boundary", async () => {
     const user = await repos.users.ensure({ tgId: 304, firstName: "FIFO" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);

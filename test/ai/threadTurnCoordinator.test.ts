@@ -215,6 +215,24 @@ describe("ThreadTurnCoordinator", () => {
       .toEqual(["interrupted", "running"]);
   });
 
+  it("fences terminal writes from an owner whose lease expired", async () => {
+    const { userId, threadId } = await ownership(repos, 822);
+    const accepted = await repos.turnRuns.accept(request(userId, threadId, 22_001, "expired owner"));
+    await repos.turnRuns.claimRunning(accepted.turnRun.id, "expired-process", Date.now() - 1);
+
+    await repos.turnRuns.markSucceeded(accepted.turnRun.id, accepted.userMessage.id, "expired-process");
+    expect(await repos.turnRuns.get(accepted.turnRun.id)).toMatchObject({ status: "running" });
+    await repos.turnRuns.interruptStaleRunning();
+    await repos.turnRuns.markFailed(accepted.turnRun.id, "late_failure", "failed", "expired-process");
+
+    expect(await repos.turnRuns.get(accepted.turnRun.id)).toMatchObject({
+      status: "interrupted",
+      owner_id: null,
+      lease_expires_at: null,
+      failure_code: "process_interrupted",
+    });
+  });
+
   it("rejects late cancellation once final delivery has acquired its barrier", async () => {
     const { userId, threadId } = await ownership(repos, 807);
     const deliveryStarted = deferred<void>();
@@ -497,6 +515,41 @@ describe("ThreadTurnCoordinator", () => {
     expect(executed).toEqual(["take over queued work"]);
     expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
       .toEqual(["interrupted", "succeeded"]);
+    await coordinator.shutdown();
+  });
+
+  it("holds a thread barrier across an operation and snapshots its fork point", async () => {
+    const { userId, threadId } = await ownership(repos, 823);
+    const before = await repos.messages.insert({
+      threadId,
+      role: "assistant",
+      content: { text: "stable fork point" },
+      textPlain: "stable fork point",
+      piEntryId: "pi-before",
+    });
+    const barrierStarted = deferred<void>();
+    const releaseBarrier = deferred<void>();
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+    const operation = coordinator.withThreadBarrier(threadId, "fork", async (snapshotMessageId) => {
+      barrierStarted.resolve();
+      await releaseBarrier.promise;
+      return snapshotMessageId;
+    });
+    await barrierStarted.promise;
+
+    const accepted = await coordinator.accept(request(userId, threadId, 23_001, "arrived during fork"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(executed).toEqual([]);
+    releaseBarrier.resolve();
+
+    await expect(operation).resolves.toBe(before.id);
+    await coordinator.waitForIdle(threadId);
+    expect(executed).toEqual(["arrived during fork"]);
+    expect(accepted.userMessage.id).toBeGreaterThan(before.id);
     await coordinator.shutdown();
   });
 

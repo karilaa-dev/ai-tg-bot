@@ -146,6 +146,51 @@ export class ThreadTurnCoordinator {
     }
   }
 
+  async withThreadBarrier<T>(
+    threadId: number,
+    operation: "fork" | "compact",
+    callback: (snapshotMessageId: number | null) => Promise<T>,
+  ): Promise<T> {
+    await this.recovery;
+    const barrierOwnerId = `${this.ownerId}:${randomUUID()}`;
+    while (this.accepting) {
+      await this.waitForIdle(threadId);
+      if (!this.accepting) break;
+      const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
+        threadId,
+        ownerId: barrierOwnerId,
+        operation,
+        // The operation must not outlive its barrier. Use the existing maximum
+        // turn window so a transient database outage cannot expose the thread.
+        leaseExpiresAt: Date.now() + Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000,
+      });
+      if (!barrier) {
+        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
+        continue;
+      }
+      this.input.logger.info("thread operation barrier acquired", {
+        threadId,
+        operation,
+        snapshotMessageId: barrier.snapshotMessageId,
+      });
+      try {
+        return await callback(barrier.snapshotMessageId);
+      } finally {
+        const released = await this.input.repos.turnRuns.releaseThreadBarrier(threadId, barrierOwnerId);
+        if (!released) {
+          this.input.logger.error("thread operation barrier ownership was lost", {
+            threadId,
+            operation,
+          });
+        } else {
+          this.input.logger.info("thread operation barrier released", { threadId, operation });
+        }
+        if (this.accepting && await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
+      }
+    }
+    throw new Error("Turn coordinator is shutting down.");
+  }
+
   async shutdown(timeoutMs = 5_000): Promise<void> {
     this.accepting = false;
     this.lifecycle.abort();

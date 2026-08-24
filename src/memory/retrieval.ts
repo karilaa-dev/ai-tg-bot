@@ -4,7 +4,6 @@ import type { ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 
 const RRF_K = 60;
-const SCOPED_LEXICAL_FETCH_LIMIT = 1000;
 
 export type RetrievalHit =
   | { kind: "message"; ref_id: number; snippet: string; score: number }
@@ -37,9 +36,8 @@ export async function hybridSearch(input: {
     ranked.set(key, { kind, ref_id: refId, snippet: existing?.snippet ?? snippet, score } as RetrievalHit);
   };
 
-  const scopedLimit = Math.max(input.k, SCOPED_LEXICAL_FETCH_LIMIT);
   const [messages, chunks] = await Promise.all([
-    input.search.searchMessages(input.threadIds, input.query, allowedMessages ? scopedLimit : input.k),
+    input.search.searchMessages(input.threadIds, input.query, input.k, input.messageIds),
     input.fileIds.length ? input.search.searchChunks(input.fileIds, input.query, input.k) : Promise.resolve([]),
   ]);
   input.logger?.debug("hybrid lexical search complete", {
