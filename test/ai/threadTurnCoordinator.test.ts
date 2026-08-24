@@ -18,6 +18,7 @@ describe("ThreadTurnCoordinator", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await db.destroy();
   });
 
@@ -580,6 +581,37 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.waitForIdle(threadId);
     expect(executed).toEqual(["arrived during fork"]);
     expect(accepted.userMessage.id).toBeGreaterThan(before.id);
+    await coordinator.shutdown();
+  });
+
+  it("renews a thread barrier while the operation is still running", async () => {
+    vi.useFakeTimers();
+    const { threadId } = await ownership(repos, 825);
+    const operationStarted = deferred<void>();
+    const releaseOperation = deferred<void>();
+    const renewBarrier = vi.spyOn(repos.turnRuns, "renewThreadBarrier");
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await confirmDelivery(input);
+    });
+    const operation = coordinator.withThreadBarrier(threadId, "compact", async () => {
+      operationStarted.resolve();
+      await releaseOperation.promise;
+    });
+    await operationStarted.promise;
+    const [beforeRenewal] = await db.db.query<{ lease_expires_at: number }>(sql`
+      select lease_expires_at from thread_operation_barriers where thread_id = ${threadId}
+    `);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(renewBarrier).toHaveBeenCalledOnce();
+    expect(renewBarrier.mock.calls[0]?.[0]).toBe(threadId);
+    const [afterRenewal] = await db.db.query<{ lease_expires_at: number }>(sql`
+      select lease_expires_at from thread_operation_barriers where thread_id = ${threadId}
+    `);
+    expect(afterRenewal!.lease_expires_at).toBeGreaterThan(beforeRenewal!.lease_expires_at);
+
+    releaseOperation.resolve();
+    await operation;
     await coordinator.shutdown();
   });
 

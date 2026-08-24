@@ -39,6 +39,7 @@ export class ThreadTurnCoordinator {
   private static readonly FAILURE_RETRY_MAX_MS = 30_000;
   private static readonly OWNER_LEASE_MS = 60_000;
   private static readonly OWNER_RENEW_MS = 10_000;
+  private static readonly BARRIER_RENEW_MS = 10_000;
   private static readonly CANCELLATION_POLL_MS = 500;
 
   constructor(private readonly input: {
@@ -157,13 +158,12 @@ export class ThreadTurnCoordinator {
     while (this.accepting) {
       await this.waitForIdle(threadId);
       if (!this.accepting) break;
+      const barrierLeaseMs = Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000;
       const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
         threadId,
         ownerId: barrierOwnerId,
         operation,
-        // The operation must not outlive its barrier. Use the existing maximum
-        // turn window so a transient database outage cannot expose the thread.
-        leaseExpiresAt: Date.now() + Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000,
+        leaseExpiresAt: Date.now() + barrierLeaseMs,
       });
       if (!barrier) {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
@@ -174,9 +174,38 @@ export class ThreadTurnCoordinator {
         operation,
         snapshotMessageId: barrier.snapshotMessageId,
       });
+      let renewingBarrier: Promise<void> | undefined;
+      let barrierMonitoring = true;
+      const renewalTimer = setInterval(() => {
+        if (renewingBarrier) return;
+        renewingBarrier = this.input.repos.turnRuns.renewThreadBarrier(
+          threadId,
+          barrierOwnerId,
+          Date.now() + barrierLeaseMs,
+        ).then((renewed) => {
+          if (renewed || !barrierMonitoring) return;
+          this.input.logger.error("thread operation barrier lease was lost", {
+            threadId,
+            operation,
+          });
+        }).catch((error) => {
+          if (!barrierMonitoring) return;
+          this.input.logger.warn("thread operation barrier renewal failed", {
+            threadId,
+            operation,
+            error: String(error),
+          });
+        }).finally(() => {
+          renewingBarrier = undefined;
+        });
+      }, ThreadTurnCoordinator.BARRIER_RENEW_MS);
+      renewalTimer.unref();
       try {
         return await callback(barrier.snapshotMessageId);
       } finally {
+        barrierMonitoring = false;
+        clearInterval(renewalTimer);
+        await renewingBarrier;
         const released = await this.input.repos.turnRuns.releaseThreadBarrier(threadId, barrierOwnerId);
         if (!released) {
           this.input.logger.error("thread operation barrier ownership was lost", {

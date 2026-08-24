@@ -341,6 +341,22 @@ export class TurnRunsRepo {
     return Boolean(released);
   }
 
+  async renewThreadBarrier(threadId: number, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      await lockThreadTransaction(tx, threadId);
+      const now = Date.now();
+      const renewed = await queryOne<{ thread_id: number }>(tx, sql`
+        update thread_operation_barriers
+        set lease_expires_at = ${leaseExpiresAt}, updated_at = ${now}
+        where thread_id = ${threadId}
+          and owner_id = ${ownerId}
+          and lease_expires_at > ${now}
+        returning thread_id
+      `);
+      return Boolean(renewed);
+    });
+  }
+
   async indexMessageForRun(run: Pick<TurnRunRow, "user_message_id">): Promise<void> {
     const message = await queryOne<MessageRow>(this.db, sql`
       select * from messages where id = ${run.user_message_id}
