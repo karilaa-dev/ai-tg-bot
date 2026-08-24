@@ -264,6 +264,8 @@ function toolLabel(name: string): string {
       return "📥 Restoring chat files";
     case "render_pdf_pages":
       return "👁️ Rendering PDF pages";
+    case "inspect_workspace_images":
+      return "👁️ Inspecting images";
     case "generate_image":
       return "🖼️ Generating image";
     case "create_file":
@@ -329,6 +331,14 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
         ? record.pages.filter((value): value is number => typeof value === "number")
         : [];
       return [file, pages.length ? `pages ${pages.join(", ")}` : undefined].filter(Boolean).join(" · ") || undefined;
+    }
+    case "inspect_workspace_images": {
+      const paths = Array.isArray(record?.paths)
+        ? record.paths.filter((value): value is string => typeof value === "string")
+        : [];
+      if (!paths.length) return undefined;
+      const suffix = paths.length > 1 ? ` +${paths.length - 1}` : "";
+      return truncateSubject(`${paths[0]}${suffix}`, 64);
     }
     case "generate_image":
       return generateImageSubject(record);

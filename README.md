@@ -60,6 +60,7 @@ Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser 
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
 - `/home/user/workspace` is writable and persists across pause and resume.
 - `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
+- `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.

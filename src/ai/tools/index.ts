@@ -12,6 +12,7 @@ import { isBrowserUseConfigured } from "../../config.js";
 import { createRenderOfficePreviewTool } from "./renderOfficePreview.js";
 import { createMaterializeChatFilesTool } from "./materializeChatFiles.js";
 import { createRenderPdfPagesTool } from "./renderPdfPages.js";
+import { createInspectWorkspaceImagesTool } from "./inspectWorkspaceImages.js";
 import type { BotToolRegistry, ToolBuildInput } from "./types.js";
 
 export type {
@@ -29,6 +30,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     read_file_section: createReadFileSectionTool(input),
     materialize_chat_files: createMaterializeChatFilesTool(input),
     render_pdf_pages: createRenderPdfPagesTool(input),
+    inspect_workspace_images: createInspectWorkspaceImagesTool(input),
     create_file: createCreateFileTool(input),
     publish_website: createPublishWebsiteTool(input),
     bash: createBashTool(input),

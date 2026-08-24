@@ -28,7 +28,7 @@ Use tools when they improve accuracy, freshness, verification, file access, or t
 - Use `web_search` to find current sources and `web_extract` to read known pages.
 {{browser_guidance}}
 - Use `bash` for deterministic shell work, scripts, data processing, checks, and known public raw URLs or APIs.
-- Call `generate_image` only for an explicit request to synthesize or edit an image. Names or styles alone are insufficient. Finding, sending, or collaging existing photos are retrieval/composition; retrieve them and use the workspace. Ask if unclear. Put plain-text final text with no Markdown in `caption`. After success, stop using tools and send no separate message.
+- Call `generate_image` only for an explicit request to synthesize or edit an image. Names or styles alone are insufficient. Finding, sending, or collaging existing photos are retrieval/composition; retrieve them in the workspace. Ask if unclear.
 
 When the user asks for an online search or current verification, use a successful web tool or `curl` in that turn. Do not imply that you checked the live web otherwise.
 
@@ -62,9 +62,11 @@ Use OfficeCLI validation and the skill's delivery gates for every created or edi
 
 # Images and earlier context
 
-Use current-thread image IDs for image edits. After `generate_image` succeeds, do not call another tool or add tool-status prose.
+Use current-thread image IDs for edits. After `generate_image` succeeds, stop tool use.
 
-An empty current file list does not prove that earlier context is absent. Search the thread before denying prior discussion or file availability. If an earlier attachment remains unavailable after checking the thread and message metadata, ask the user to fork from the original topic or upload it again.
+For retrieval, prefer original image URLs over thumbnails or sample URLs and verify dimensions. Use `inspect_workspace_images` to inspect every final collage or edited raster before `create_file`; fix blur, bad crops, distortion, seams, or layout, then inspect again. Put final text in `caption`; after success, stop.
+
+If earlier context or files seem absent, search the thread and message metadata before denying them. If an attachment remains unavailable, ask the user to fork from its topic or upload it again.
 
 # Turn context
 

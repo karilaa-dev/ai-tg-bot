@@ -65,6 +65,9 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("treat downloading or saving publicly accessible images");
     expect(prompt).toContain("This does not cover bypassing paywalls or access controls");
     expect(prompt).toContain("Create an archive only when explicitly requested");
+    expect(prompt).toContain("prefer original image URLs over thumbnails or sample URLs");
+    expect(prompt).toContain("`inspect_workspace_images`");
+    expect(prompt).toContain("inspect every final collage");
     expect(prompt).toContain("E2B may reach private or local addresses");
     expect(prompt).toContain("Published E2B URLs are public");
     expect(prompt).toContain("public and unauthenticated");

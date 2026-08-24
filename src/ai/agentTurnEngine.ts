@@ -33,6 +33,7 @@ import {
 } from "../pi/usage.js";
 import { budgetReasonText } from "../pi/turnBudget.js";
 import { currentTurnAssistantResult } from "./currentTurnResult.js";
+import { resolveTurnAnswer } from "./turnOutput.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 const TG_CAPTION_LIMIT = 1024;
@@ -199,14 +200,18 @@ export const runTurn: TurnRunner = async (input) => {
       throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
     }
     const finalText = normalizeGeneratedImageFinalText(hasGeneratedImage ? "" : answer, hasGeneratedImage);
-    let finalAnswer = finalText.answer;
-    if (!finalAnswer.trim() && !(hasGeneratedImage && createdFiles.length)) {
+    const resolvedAnswer = resolveTurnAnswer({
+      answer: finalText.answer,
+      attachmentCount: createdFiles.length,
+      emptyAnswer: input.t("empty-answer"),
+    });
+    let finalAnswer = resolvedAnswer.answer;
+    if (resolvedAnswer.usedEmptyFallback) {
       input.logger.warn("turn produced empty final answer", {
         threadId: input.thread.id,
         userId: input.user.tg_id,
         toolStatus: shaper.toolStatusMd(),
       });
-      finalAnswer = input.t("empty-answer");
     }
     finalAnswer = appendPublishedWebsiteNotice(
       finalAnswer,
@@ -2059,6 +2064,10 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   if (toolName === "render_office_preview" && record) {
     return record.rendered === true ? formatCount(1, "preview") : "done";
+  }
+
+  if (toolName === "inspect_workspace_images" && record && Array.isArray(record.images)) {
+    return formatCount(record.images.length, "image");
   }
 
   if (toolName === "browser_list_tabs" && record && Array.isArray(record.tabs)) {

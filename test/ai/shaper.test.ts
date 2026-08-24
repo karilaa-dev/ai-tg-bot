@@ -274,6 +274,7 @@ describe("StreamShaper", () => {
     s.onToolCall("browser_snapshot", { tab_id: "tab-1" });
     s.onToolCall("browser_close_session", {});
     s.onToolCall("render_office_preview", { path: "/deck.pptx", page: 1 });
+    s.onToolCall("inspect_workspace_images", { paths: ["/collage.jpg", "/detail.png"] });
     const status = s.toolStatusMd();
 
     expect(status).toContain("🔎 Searching web <code>current info</code>");
@@ -289,6 +290,7 @@ describe("StreamShaper", () => {
     expect(status).toContain("🧭 Reading browser <code>tab-1</code>");
     expect(status).toContain("🧹 Closing browser session");
     expect(status).toContain("🖼️ Previewing Office file <code>/deck.pptx</code>");
+    expect(status).toContain("👁️ Inspecting images <code>/collage.jpg +1</code>");
     expect(status).not.toContain("web_search");
     expect(status).not.toContain("web_extract");
     expect(status).not.toContain("search_thread");
@@ -316,6 +318,21 @@ describe("StreamShaper", () => {
       toolCallCount: 1,
       toolCounts: [{ label: "🖼️ Generating image", count: 1 }],
     });
+  });
+
+  it("summarizes workspace image inspection outputs as images", () => {
+    const s = new StreamShaper();
+    expect(handleStreamPart(s, {
+      type: "tool-call",
+      toolName: "inspect_workspace_images",
+      input: { paths: ["/collage.jpg", "/detail.png"] },
+    })).toBe("tool-call");
+    expect(handleStreamPart(s, {
+      type: "tool-result",
+      toolName: "inspect_workspace_images",
+      output: { inspected: true, images: [{ path: "/collage.jpg" }, { path: "/detail.png" }] },
+    })).toBe("tool-result");
+    expect(s.thinkingMd()).toContain("👁️ Inspecting images <code>/collage.jpg +1</code> (2 images)");
   });
 
   it("summarizes browser session closure without exposing tab URLs", () => {
