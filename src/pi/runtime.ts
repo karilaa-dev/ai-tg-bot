@@ -135,7 +135,6 @@ export class PiRuntimeManager implements PiRuntimeService {
     await this.modelRuntime.setRuntimeApiKey(
       "openrouter",
       this.input.config.OPENROUTER_API_KEY,
-      { allowNetwork: false },
     );
     const codexConfigured = this.modelRuntime.hasConfiguredAuth(CODEX_PROVIDER_ID);
     this.input.logger.info("Pi inference providers initialized", {

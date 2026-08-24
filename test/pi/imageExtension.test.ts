@@ -152,7 +152,11 @@ describe("Pi generate_image extension", () => {
       attachments: [],
       modelRegistry: {
         hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: accessToken, headers: { "x-pi-auth": "kept" } }),
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: accessToken,
+          headers: { "x-pi-auth": "kept", "x-removed": null },
+        }),
       } as unknown as ModelRegistry,
       providerRouter: providerRouter(model),
       resolveImage: async () => { throw new Error("no reference expected"); },
@@ -168,6 +172,7 @@ describe("Pi generate_image extension", () => {
     expect(requestHeaders?.get("chatgpt-account-id")).toBe("account-123");
     expect(requestHeaders?.get("originator")).toBe("pi");
     expect(requestHeaders?.get("x-pi-auth")).toBe("kept");
+    expect(requestHeaders?.has("x-removed")).toBe(false);
     expect(requestBody).toMatchObject({
       model: "codex-test",
       parallel_tool_calls: false,
