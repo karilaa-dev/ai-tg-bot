@@ -230,7 +230,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     const count = await ctx.services.turnCoordinator.withThreadBarrier(
       thread.id,
       "compact",
-      async () => runCompaction(ctx, thread),
+      async (_snapshotMessageId, signal) => runCompaction(ctx, thread, signal),
     );
     await ctx.api
       .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
@@ -245,14 +245,17 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(thread));
       return;
     }
-    const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId) => {
+    const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId, signal) => {
+      signal.throwIfAborted();
       const topic = await ctx.api.raw.createForumTopic({
         chat_id: chat.id,
         name: `Fork: ${thread.title}`,
       });
+      signal.throwIfAborted();
       const latest = snapshotMessageId === null
         ? undefined
         : await ctx.services.repos.messages.get(snapshotMessageId);
+      signal.throwIfAborted();
       const created = await ctx.services.repos.threads.create({
         userId: user.tg_id,
         topicId: topic.message_thread_id ?? null,
@@ -260,7 +263,9 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
         parentThreadId: thread.id,
         forkPointMessageId: snapshotMessageId,
       });
-      await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id);
+      signal.throwIfAborted();
+      await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id, signal);
+      signal.throwIfAborted();
       return created;
     });
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
@@ -384,9 +389,10 @@ function threadSequentializationKey(ctx: BotContext): string | undefined {
   return `${ctx.chat.id}:${messageThreadId(ctx) ?? "general"}`;
 }
 
-async function runCompaction(ctx: BotContext, thread: ThreadRow): Promise<number> {
+async function runCompaction(ctx: BotContext, thread: ThreadRow, signal: AbortSignal): Promise<number> {
   if (!ctx.user) return 0;
-  const count = await ctx.services.pi.compact(thread, ctx.user);
+  const count = await ctx.services.pi.compact(thread, ctx.user, signal);
+  signal.throwIfAborted();
   ctx.thread = (await ctx.services.repos.threads.get(thread.id)) ?? thread;
   return count;
 }

@@ -39,7 +39,10 @@ export class ThreadTurnCoordinator {
   private static readonly FAILURE_RETRY_MAX_MS = 30_000;
   private static readonly OWNER_LEASE_MS = 60_000;
   private static readonly OWNER_RENEW_MS = 10_000;
+  private static readonly BARRIER_LEASE_MS = 60_000;
   private static readonly BARRIER_RENEW_MS = 10_000;
+  private static readonly BARRIER_RELEASE_ATTEMPTS = 5;
+  private static readonly BARRIER_RELEASE_RETRY_MS = 100;
   private static readonly CANCELLATION_POLL_MS = 500;
 
   constructor(private readonly input: {
@@ -151,19 +154,18 @@ export class ThreadTurnCoordinator {
   async withThreadBarrier<T>(
     threadId: number,
     operation: "fork" | "compact",
-    callback: (snapshotMessageId: number | null) => Promise<T>,
+    callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     await this.recovery;
     const barrierOwnerId = `${this.ownerId}:${randomUUID()}`;
     while (this.accepting) {
       await this.waitForIdle(threadId);
       if (!this.accepting) break;
-      const barrierLeaseMs = Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000;
       const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
         threadId,
         ownerId: barrierOwnerId,
         operation,
-        leaseExpiresAt: Date.now() + barrierLeaseMs,
+        leaseExpiresAt: Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS,
       });
       if (!barrier) {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
@@ -176,18 +178,22 @@ export class ThreadTurnCoordinator {
       });
       let renewingBarrier: Promise<void> | undefined;
       let barrierMonitoring = true;
+      const operationController = new AbortController();
+      const onShutdown = () => operationController.abort(new Error("Turn coordinator is shutting down."));
+      this.lifecycle.signal.addEventListener("abort", onShutdown, { once: true });
       const renewalTimer = setInterval(() => {
         if (renewingBarrier) return;
         renewingBarrier = this.input.repos.turnRuns.renewThreadBarrier(
           threadId,
           barrierOwnerId,
-          Date.now() + barrierLeaseMs,
+          Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS,
         ).then((renewed) => {
           if (renewed || !barrierMonitoring) return;
           this.input.logger.error("thread operation barrier lease was lost", {
             threadId,
             operation,
           });
+          operationController.abort(new Error("Thread operation barrier lease was lost."));
         }).catch((error) => {
           if (!barrierMonitoring) return;
           this.input.logger.warn("thread operation barrier renewal failed", {
@@ -200,23 +206,42 @@ export class ThreadTurnCoordinator {
         });
       }, ThreadTurnCoordinator.BARRIER_RENEW_MS);
       renewalTimer.unref();
+      let result!: T;
+      let operationError: unknown;
+      let operationFailed = false;
       try {
-        return await callback(barrier.snapshotMessageId);
+        result = await callback(barrier.snapshotMessageId, operationController.signal);
+        operationController.signal.throwIfAborted();
+      } catch (error) {
+        operationFailed = true;
+        operationError = error;
       } finally {
-        barrierMonitoring = false;
         clearInterval(renewalTimer);
         await renewingBarrier;
-        const released = await this.input.repos.turnRuns.releaseThreadBarrier(threadId, barrierOwnerId);
-        if (!released) {
+        barrierMonitoring = false;
+        this.lifecycle.signal.removeEventListener("abort", onShutdown);
+        const released = await this.releaseThreadBarrierWithRetry(threadId, barrierOwnerId, operation);
+        if (released === false) {
           this.input.logger.error("thread operation barrier ownership was lost", {
             threadId,
             operation,
           });
-        } else {
+        } else if (released) {
           this.input.logger.info("thread operation barrier released", { threadId, operation });
         }
-        if (this.accepting && await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
+        try {
+          if (this.accepting && await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
+        } catch (error) {
+          this.input.logger.warn("queued turn lookup after thread operation failed", {
+            threadId,
+            operation,
+            error: String(error),
+          });
+        }
       }
+      if (operationFailed) throw operationError;
+      operationController.signal.throwIfAborted();
+      return result;
     }
     throw new Error("Turn coordinator is shutting down.");
   }
@@ -494,6 +519,36 @@ export class ThreadTurnCoordinator {
 
   private legacyStaleBefore(now: number): number {
     return now - Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) - 60_000;
+  }
+
+  private async releaseThreadBarrierWithRetry(
+    threadId: number,
+    ownerId: string,
+    operation: "fork" | "compact",
+  ): Promise<boolean | undefined> {
+    for (let attempt = 1; attempt <= ThreadTurnCoordinator.BARRIER_RELEASE_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.input.repos.turnRuns.releaseThreadBarrier(threadId, ownerId);
+      } catch (error) {
+        if (attempt === ThreadTurnCoordinator.BARRIER_RELEASE_ATTEMPTS) {
+          this.input.logger.error("thread operation barrier release failed", {
+            threadId,
+            operation,
+            attempts: attempt,
+            error: String(error),
+          });
+          return undefined;
+        }
+        this.input.logger.warn("thread operation barrier release failed; retrying", {
+          threadId,
+          operation,
+          attempt,
+          error: String(error),
+        });
+        await delay(ThreadTurnCoordinator.BARRIER_RELEASE_RETRY_MS * 2 ** (attempt - 1));
+      }
+    }
+    return undefined;
   }
 }
 

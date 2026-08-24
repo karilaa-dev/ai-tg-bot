@@ -72,8 +72,14 @@ export interface PiThreadRuntime {
 
 export interface PiRuntimeService {
   runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime>;
-  compact(thread: ThreadRow, user: UserRow): Promise<number>;
-  fork(source: ThreadRow, target: ThreadRow, user: UserRow, entryId?: string | null): Promise<void>;
+  compact(thread: ThreadRow, user: UserRow, signal?: AbortSignal): Promise<number>;
+  fork(
+    source: ThreadRow,
+    target: ThreadRow,
+    user: UserRow,
+    entryId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<void>;
   captionImage(bytes: Buffer, mimeType: string, userCaption?: string): Promise<string>;
   generateThreadTitle(input: ThreadTitlePromptInput): Promise<string>;
   abort(threadId: number): Promise<boolean>;
@@ -247,22 +253,44 @@ export class PiRuntimeManager implements PiRuntimeService {
     return runtime;
   }
 
-  async compact(thread: ThreadRow, user: UserRow): Promise<number> {
+  async compact(thread: ThreadRow, user: UserRow, signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
     const runtime = await this.runtime(thread, user);
+    signal?.throwIfAborted();
     const before = runtime.session.getSessionStats().totalMessages;
-    await runtime.session.compact();
-    const after = runtime.session.getSessionStats().totalMessages;
-    return Math.max(0, before - after);
+    const compaction = runtime.session.compact();
+    const onAbort = () => runtime.session.abortCompaction();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    try {
+      await compaction;
+      signal?.throwIfAborted();
+      const after = runtime.session.getSessionStats().totalMessages;
+      return Math.max(0, before - after);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
-  async fork(source: ThreadRow, target: ThreadRow, user: UserRow, entryId?: string | null): Promise<void> {
+  async fork(
+    source: ThreadRow,
+    target: ThreadRow,
+    user: UserRow,
+    entryId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const runtime = await this.runtime(source, user);
+    signal?.throwIfAborted();
     const branchPoint = entryId ?? runtime.session.sessionManager.getLeafId();
     if (!branchPoint) return;
     const sessionFile = runtime.session.sessionManager.createBranchedSession(branchPoint);
     if (!sessionFile) throw new Error("Pi could not create a persistent branched session.");
+    signal?.throwIfAborted();
     const branch = SessionManager.open(sessionFile, path.dirname(sessionFile), process.cwd());
+    signal?.throwIfAborted();
     await this.input.repos.threads.setPiSession(target.id, sessionFile, branch.getSessionId());
+    signal?.throwIfAborted();
     this.input.logger.info("Pi thread session forked", {
       sourceThreadId: source.id,
       targetThreadId: target.id,

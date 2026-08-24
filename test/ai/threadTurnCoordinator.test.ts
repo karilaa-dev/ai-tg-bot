@@ -615,6 +615,69 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("aborts a thread operation when barrier ownership is lost", async () => {
+    vi.useFakeTimers();
+    const { threadId } = await ownership(repos, 826);
+    const operationStarted = deferred<void>();
+    vi.spyOn(repos.turnRuns, "renewThreadBarrier").mockResolvedValue(false);
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await confirmDelivery(input);
+    });
+    const operation = coordinator.withThreadBarrier(threadId, "compact", async (_snapshot, signal) => {
+      operationStarted.resolve();
+      await waitForAbort(signal);
+      signal.throwIfAborted();
+    });
+    const rejection = expect(operation).rejects.toThrow("barrier lease was lost");
+    await operationStarted.promise;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejection;
+    await coordinator.shutdown();
+  });
+
+  it("rejects a completed operation when its final renewal loses ownership", async () => {
+    vi.useFakeTimers();
+    const { threadId } = await ownership(repos, 828);
+    const operationStarted = deferred<void>();
+    const releaseOperation = deferred<void>();
+    const renewal = deferred<boolean>();
+    vi.spyOn(repos.turnRuns, "renewThreadBarrier").mockReturnValue(renewal.promise);
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await confirmDelivery(input);
+    });
+    const operation = coordinator.withThreadBarrier(threadId, "fork", async () => {
+      operationStarted.resolve();
+      await releaseOperation.promise;
+    });
+    const rejection = expect(operation).rejects.toThrow("barrier lease was lost");
+    await operationStarted.promise;
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    releaseOperation.resolve();
+    renewal.resolve(false);
+
+    await rejection;
+    await coordinator.shutdown();
+  });
+
+  it("retries a transient thread barrier release failure", async () => {
+    const { threadId } = await ownership(repos, 827);
+    const releaseBarrier = vi.spyOn(repos.turnRuns, "releaseThreadBarrier")
+      .mockRejectedValueOnce(new Error("temporary database outage"));
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await confirmDelivery(input);
+    });
+
+    await expect(coordinator.withThreadBarrier(threadId, "fork", async () => "done"))
+      .resolves.toBe("done");
+    expect(releaseBarrier).toHaveBeenCalledTimes(2);
+    await expect(db.db.query(sql`
+      select thread_id from thread_operation_barriers where thread_id = ${threadId}
+    `)).resolves.toEqual([]);
+    await coordinator.shutdown();
+  });
+
   it("retries FTS indexing before claiming a durably queued turn", async () => {
     const { userId, threadId } = await ownership(repos, 813);
     const originalIndex = db.search.indexMessage.bind(db.search);
