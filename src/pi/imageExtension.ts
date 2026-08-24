@@ -1,7 +1,7 @@
 // Codex image request structure is adapted from pi-better-openai (MIT).
 import { createHash, randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import type { Repos } from "../db/repos/index.js";
@@ -215,7 +215,7 @@ async function requestCodexImage(
     signal?: AbortSignal;
   },
   accessToken: string,
-  authHeaders?: Record<string, string>,
+  authHeaders?: ProviderHeaders,
 ): Promise<GeneratedImage> {
   const content: Array<Record<string, unknown>> = [{ type: "input_text", text: request.prompt }];
   for (const image of request.references) {
@@ -226,10 +226,13 @@ async function requestCodexImage(
   const timeout = bridge.config.IMAGE_TIMEOUT_MS > 0 ? AbortSignal.timeout(bridge.config.IMAGE_TIMEOUT_MS) : undefined;
   const signal = combineSignals(request.signal, timeout);
   const accountId = codexAccountId(accessToken);
+  const requestHeaders = Object.fromEntries(
+    Object.entries(authHeaders ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
+  );
   const response = await fetch(CODEX_RESPONSES_URL, {
     method: "POST",
     headers: {
-      ...authHeaders,
+      ...requestHeaders,
       authorization: `Bearer ${accessToken}`,
       "chatgpt-account-id": accountId,
       accept: "text/event-stream",

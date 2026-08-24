@@ -22,7 +22,7 @@ jobs:
       TEST_POSTGRES_URL: postgres://ai_tg_bot_test:test@127.0.0.1:5432/ai_tg_bot_test
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_DB: ai_tg_bot_test
           POSTGRES_USER: ai_tg_bot_test

@@ -2,7 +2,7 @@
 
 This directory defines the private `ai-tg-bot-tools` template used by thread sandboxes. It starts from E2B Base with 2 vCPU and 2 GiB RAM.
 
-The image contains the shell tools listed in `template.ts`, ImageMagick, and OfficeCLI `1.0.142`. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are deliberately absent because Browser Use Cloud handles browser work.
+The image contains the shell tools listed in `template.ts`, ImageMagick, and OfficeCLI `1.0.144`. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are deliberately absent because Browser Use Cloud handles browser work.
 
 ## Build and promote
 
