@@ -61,8 +61,11 @@ describe("E2B toolbox template definition", () => {
     expect(e2bToolboxBuildRef("build-20260803-020000"))
       .toBe("ai-tg-bot-tools:build-20260803-020000");
     expect(() => e2bToolboxBuildRef("production:unexpected")).toThrow("contain no colon");
+    expect(() => e2bToolboxBuildRef("production")).toThrow("reserved production tag");
     const source = await fs.readFile("e2b-template/build.ts", "utf8");
     expect(source).toContain("const exactRef = e2bToolboxBuildRef(buildTag)");
+    expect(source.indexOf("const exactRef = e2bToolboxBuildRef(buildTag)"))
+      .toBeLessThan(source.indexOf("Template.build"));
     expect(source).toContain("process.env.E2B_BUILD_TAG");
     expect(source).not.toContain("buildInfo.buildId}`");
   });

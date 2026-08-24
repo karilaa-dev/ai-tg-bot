@@ -28,6 +28,15 @@ describe("TurnBudget", () => {
     expect(budget.snapshot().terminationReason).toBe("identical_tool_failures");
   });
 
+  it("uses a deterministic signature when tool arguments are not JSON values", () => {
+    const budget = createBudget({ maxIdenticalToolFailures: 2 });
+    expect(budget.beforeToolCall("1", "bash", undefined).block).toBe(false);
+    expect(budget.afterToolResult("1", true)).toBe(false);
+    expect(budget.beforeToolCall("2", "bash", undefined).block).toBe(false);
+    expect(budget.afterToolResult("2", true)).toBe(true);
+    expect(budget.snapshot().terminationReason).toBe("identical_tool_failures");
+  });
+
   it("resets consecutive failures after a successful tool", () => {
     const budget = createBudget({ maxConsecutiveToolFailures: 3, maxIdenticalToolFailures: 10 });
     budget.beforeToolCall("1", "a", {});

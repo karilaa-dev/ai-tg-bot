@@ -488,6 +488,7 @@ async function handlePreparedTelegramFile(
       fileId: prepared.fileId,
       displayName: input.name,
       caption: input.caption ?? null,
+      telegramMessageId: ctx.message?.message_id ?? null,
     }],
   });
 }

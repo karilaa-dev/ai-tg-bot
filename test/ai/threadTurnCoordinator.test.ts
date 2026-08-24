@@ -226,6 +226,78 @@ describe("ThreadTurnCoordinator", () => {
     ]);
     await coordinator.shutdown();
   });
+
+  it("persists the new portion of a mixed duplicate and new-source batch", async () => {
+    const { userId, threadId } = await ownership(repos, 809);
+    const firstFile = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      name: "first.txt",
+      size: 5,
+      contentMd: "first",
+      isInline: true,
+    });
+    const secondFile = await repos.files.insertFile({
+      userId,
+      threadId,
+      type: "txt",
+      name: "second.txt",
+      size: 6,
+      contentMd: "second",
+      isInline: true,
+    });
+    const firstInput = {
+      ...request(userId, threadId, 9001, "first"),
+      attachments: [{ fileId: firstFile.id, telegramMessageId: 19_001 }],
+    };
+    const first = await repos.turnRuns.accept(firstInput);
+    const mixed = await repos.turnRuns.accept({
+      ...request(userId, threadId, 9002, "first\n\nsecond"),
+      sources: [
+        { updateId: 9001, messageId: 19_001 },
+        { updateId: 9002, messageId: 19_002 },
+      ],
+      attachments: [
+        { fileId: firstFile.id, telegramMessageId: 19_001 },
+        { fileId: secondFile.id, telegramMessageId: 19_002 },
+      ],
+    });
+
+    expect(first.created).toBe(true);
+    expect(mixed.created).toBe(true);
+    expect(mixed.turnRun.id).not.toBe(first.turnRun.id);
+    expect(await repos.files.listForMessage(mixed.userMessage.id)).toEqual([
+      expect.objectContaining({ id: secondFile.id }),
+    ]);
+    const sources = await db.db.query<{ turn_run_id: number; telegram_update_id: number }>(sql`
+      select turn_run_id, telegram_update_id from turn_run_sources order by telegram_update_id
+    `);
+    expect(sources).toEqual([
+      { turn_run_id: first.turnRun.id, telegram_update_id: 9001 },
+      { turn_run_id: mixed.turnRun.id, telegram_update_id: 9002 },
+    ]);
+  });
+
+  it("does not accept a turn after shutdown starts while recovery is pending", async () => {
+    const { userId, threadId } = await ownership(repos, 810);
+    const recoveryStarted = deferred<void>();
+    const releaseRecovery = deferred<void>();
+    vi.spyOn(repos.turnRuns, "interruptStaleRunning").mockImplementationOnce(async () => {
+      recoveryStarted.resolve();
+      await releaseRecovery.promise;
+      return 0;
+    });
+    const coordinator = createCoordinator(db, repos, async () => undefined);
+    await recoveryStarted.promise;
+    const accepting = coordinator.accept(request(userId, threadId, 10_001, "too late"));
+    const shuttingDown = coordinator.shutdown();
+    releaseRecovery.resolve();
+
+    await expect(accepting).rejects.toThrow("shutting down");
+    await shuttingDown;
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([]);
+  });
 });
 
 function createCoordinator(

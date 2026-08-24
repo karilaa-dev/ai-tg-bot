@@ -8,8 +8,12 @@ export const E2B_TOOLBOX_CPU_COUNT = 2;
 export const E2B_TOOLBOX_MEMORY_MB = 2048;
 
 export function e2bToolboxBuildRef(tag: string): string {
-  if (!tag.trim() || tag.includes(":")) throw new Error("E2B toolbox build tag must be non-empty and contain no colon");
-  return `${E2B_TOOLBOX_TEMPLATE_NAME}:${tag}`;
+  const normalized = tag.trim();
+  if (!normalized || normalized.includes(":")) throw new Error("E2B toolbox build tag must be non-empty and contain no colon");
+  if (normalized === E2B_TOOLBOX_PRODUCTION_TAG) {
+    throw new Error("E2B toolbox build tag cannot use the reserved production tag");
+  }
+  return `${E2B_TOOLBOX_TEMPLATE_NAME}:${normalized}`;
 }
 
 export const OFFICECLI_VERSION = "1.0.144";

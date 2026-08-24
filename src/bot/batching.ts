@@ -147,6 +147,7 @@ async function flushMediaGroup(flushCtx: BotContext, key: string): Promise<void>
       fileId: item.file.id,
       displayName: item.file.name,
       caption: item.caption ?? null,
+      telegramMessageId: item.source.messageId,
     })),
   });
 }

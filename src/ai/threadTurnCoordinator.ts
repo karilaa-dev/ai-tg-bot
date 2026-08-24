@@ -70,6 +70,7 @@ export class ThreadTurnCoordinator {
   }): Promise<AcceptedTurnRun> {
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     await this.recovery;
+    if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     const accepted = await this.input.repos.turnRuns.accept(input);
     if (accepted.created) {
       this.input.logger.info("turn accepted", {

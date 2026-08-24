@@ -142,7 +142,7 @@ export function budgetReasonText(reason: TurnBudgetReason, locale: "en" | "ru" =
 }
 
 function stableJson(value: unknown): string {
-  return JSON.stringify(normalize(value));
+  return JSON.stringify(normalize(value)) ?? "undefined";
 }
 
 function normalize(value: unknown): unknown {

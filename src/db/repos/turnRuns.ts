@@ -19,6 +19,7 @@ export interface DurableTurnAttachment {
   fileId: number;
   displayName?: string | null;
   caption?: string | null;
+  telegramMessageId?: number | null;
 }
 
 export interface AcceptedTurnRun {
@@ -52,11 +53,21 @@ export class TurnRunsRepo {
     let accepted: AcceptedTurnRun;
     try {
       accepted = await this.db.transaction(async (tx) => {
-        const duplicate = await existingForSources(tx, sources.map((source) => source.updateId));
-        if (duplicate) {
+        const mappings = await existingSourceMappings(tx, sources.map((source) => source.updateId));
+        const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
+        const acceptedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
+        if (!acceptedSources.length) {
+          const duplicate = await existingTurnForMappings(tx, mappings);
+          if (!duplicate) throw new Error("Duplicate Telegram sources have no owning turn.");
           const userMessage = await queryOne<MessageRow>(tx, sql`select * from messages where id = ${duplicate.user_message_id}`);
           if (!userMessage) throw new Error(`Turn #${duplicate.id} references a missing user message.`);
-          await attachFilesToAcceptedMessage(tx, userMessage.id, attachments);
+          const duplicateSources = sources.filter((source) => mappings.some((mapping) =>
+            mapping.turn_run_id === duplicate.id && mapping.telegram_update_id === source.updateId));
+          await attachFilesToAcceptedMessage(
+            tx,
+            userMessage.id,
+            attachmentsForSources(attachments, duplicateSources),
+          );
           return { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
         }
 
@@ -75,8 +86,12 @@ export class TurnRunsRepo {
             'queued', 'pending', ${now}, ${now}
           ) returning *
         `);
-        await attachFilesToAcceptedMessage(tx, userMessage.id, attachments);
-        for (const source of sources) {
+        await attachFilesToAcceptedMessage(
+          tx,
+          userMessage.id,
+          attachmentsForSources(attachments, acceptedSources),
+        );
+        for (const source of acceptedSources) {
           await tx.execute(sql`
             insert into turn_run_sources(turn_run_id, telegram_update_id, telegram_message_id, created_at)
             values (${turnRun.id}, ${source.updateId}, ${source.messageId}, ${now})
@@ -95,13 +110,22 @@ export class TurnRunsRepo {
       // A concurrent PostgreSQL transaction can win the unique update-id race
       // after our initial read. Resolve that durable winner instead of surfacing
       // an error that would invite Telegram to retry the update.
-      const duplicate = await existingForSources(this.db, sources.map((source) => source.updateId));
+      const mappings = await existingSourceMappings(this.db, sources.map((source) => source.updateId));
+      const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
+      const unownedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
+      if (unownedSources.length) {
+        return this.accept({ ...input, sources: unownedSources });
+      }
+      const duplicate = await existingTurnForMappings(this.db, mappings);
       if (!duplicate) throw error;
       const userMessage = await queryOne<MessageRow>(this.db, sql`select * from messages where id = ${duplicate.user_message_id}`);
       if (!userMessage) throw error;
-      if (attachments.length) {
+      const duplicateSources = sources.filter((source) => mappings.some((mapping) =>
+        mapping.turn_run_id === duplicate.id && mapping.telegram_update_id === source.updateId));
+      const duplicateAttachments = attachmentsForSources(attachments, duplicateSources);
+      if (duplicateAttachments.length) {
         await this.db.transaction((tx) =>
-          attachFilesToAcceptedMessage(tx, userMessage.id, attachments));
+          attachFilesToAcceptedMessage(tx, userMessage.id, duplicateAttachments));
       }
       accepted = { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
     }
@@ -242,13 +266,28 @@ export class TurnRunsRepo {
   }
 }
 
-async function existingForSources(db: SqlExecutor, updateIds: number[]): Promise<TurnRunRow | undefined> {
-  if (!updateIds.length) return undefined;
+interface ExistingSourceMapping {
+  telegram_update_id: number;
+  turn_run_id: number;
+}
+
+function existingSourceMappings(db: SqlExecutor, updateIds: number[]): Promise<ExistingSourceMapping[]> {
+  if (!updateIds.length) return Promise.resolve([]);
+  return db.query<ExistingSourceMapping>(sql`
+    select telegram_update_id, turn_run_id from turn_run_sources
+    where telegram_update_id in (${valueList(updateIds)})
+    order by telegram_update_id asc
+  `);
+}
+
+function existingTurnForMappings(
+  db: SqlExecutor,
+  mappings: ExistingSourceMapping[],
+): Promise<TurnRunRow | undefined> {
+  const turnRunIds = [...new Set(mappings.map((mapping) => mapping.turn_run_id))];
+  if (!turnRunIds.length) return Promise.resolve(undefined);
   return queryOne<TurnRunRow>(db, sql`
-    select tr.* from turn_run_sources trs
-    join turn_runs tr on tr.id = trs.turn_run_id
-    where trs.telegram_update_id in (${valueList(updateIds)})
-    order by tr.id asc limit 1
+    select * from turn_runs where id in (${valueList(turnRunIds)}) order by id asc limit 1
   `);
 }
 
@@ -268,6 +307,17 @@ function uniqueAttachments(attachments: DurableTurnAttachment[]): DurableTurnAtt
     byId.set(attachment.fileId, attachment);
   }
   return [...byId.values()];
+}
+
+function attachmentsForSources(
+  attachments: DurableTurnAttachment[],
+  sources: TelegramTurnSource[],
+): DurableTurnAttachment[] {
+  const messageIds = new Set(sources.flatMap((source) => source.messageId === null ? [] : [source.messageId]));
+  return attachments.filter((attachment) =>
+    attachment.telegramMessageId === null
+    || attachment.telegramMessageId === undefined
+    || messageIds.has(attachment.telegramMessageId));
 }
 
 async function attachFilesToAcceptedMessage(
