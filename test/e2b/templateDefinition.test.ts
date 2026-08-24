@@ -63,7 +63,7 @@ describe("E2B toolbox template definition", () => {
     expect(deploymentFiles.join("\n")).not.toContain("TELEGRAM_FILE_GATEWAY");
   });
 
-  it("exposes every optional Browser Use setting in the Unraid template", async () => {
+  it("exposes every optional Browser Use setting in the deployment template", async () => {
     const template = await fs.readFile("templates/ai-tg-bot.xml", "utf8");
     for (const name of [
       "BROWSER_USE_API_KEY",

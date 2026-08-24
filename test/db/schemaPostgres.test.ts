@@ -1,38 +1,11 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import {
-  createUpgradeAuditManifest as createUpgradeAuditManifestImpl,
-  verifyUpgradeAuditManifest as verifyUpgradeAuditManifestImpl,
-} from "../../src/upgrade/audit.js";
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
-const BOT_TOKEN = "778899:postgres-audit-token";
-const E2B_DEPLOYMENT_ID = "postgres-audit-deployment";
-const BROWSER_USE_DEPLOYMENT_ID = "postgres-browser-deployment";
-const createUpgradeAuditManifest = (db: AppDatabase["db"], piCodingAgentDir: string) =>
-  createUpgradeAuditManifestImpl(
-    db,
-    piCodingAgentDir,
-    BOT_TOKEN,
-    E2B_DEPLOYMENT_ID,
-    BROWSER_USE_DEPLOYMENT_ID,
-  );
-const verifyUpgradeAuditManifest = (
-  db: AppDatabase["db"],
-  piCodingAgentDir: string,
-  manifest: Awaited<ReturnType<typeof createUpgradeAuditManifestImpl>>,
-) => verifyUpgradeAuditManifestImpl(db, piCodingAgentDir, manifest, {
-  botToken: BOT_TOKEN,
-  e2bDeploymentId: E2B_DEPLOYMENT_ID,
-  browserUseDeploymentId: BROWSER_USE_DEPLOYMENT_ID,
-});
 
 describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
   let admin: AppDatabase;
@@ -72,12 +45,9 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     expect(await database.db.query<{ tg_id: number }>(sql`select tg_id from users`)).toEqual([{ tg_id: 42 }]);
   });
 
-  it("migrates latest-main history and Telegram locators without changing durable rows", async () => {
+  it("updates an older schema without changing durable rows", async () => {
     const legacySchema = `legacy_schema_${randomUUID().replaceAll("-", "")}`;
-    const piDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-postgres-audit-"));
-    const sessionFile = path.join(piDir, "sessions", "telegram", "preserved.jsonl");
-    await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-    await fs.writeFile(sessionFile, '{"role":"user","content":"preserve me"}\n');
+    const sessionFile = "/data/pi/sessions/telegram/preserved.jsonl";
     await admin.db.execute(sql.raw(`create schema ${legacySchema}`));
     const url = new URL(postgresUrl!);
     url.searchParams.set("options", `-c search_path=${legacySchema}`);
@@ -214,29 +184,8 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         ));
       }
 
-      const manifest = await createUpgradeAuditManifest(legacy.db, piDir);
-      expect(manifest.datasets.messageSearch.count).toBe(1);
-      expect(manifest.datasets.chunkSearch.count).toBe(1);
-      expect(manifest.datasets.embeddings.count).toBe(1);
-      expect(manifest.datasets.browserUseProfiles.count).toBe(1);
-      expect(manifest.datasets.threadSandboxes.count).toBe(1);
-      expect(manifest.datasets.sandboxFileRestoreStatus.count).toBe(1);
-      expect(manifest.datasets.postgresSequences.count).toBe(6);
-
       await legacy.initialize();
       await legacy.initialize();
-
-      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest)).resolves.toMatchObject({
-        datasets: {
-          messageSearch: 1,
-          chunkSearch: 1,
-          embeddings: 1,
-          browserUseProfiles: 1,
-          threadSandboxes: 1,
-          sandboxFileRestoreStatus: 1,
-          postgresSequences: 6,
-        },
-      });
 
       await expect(legacy.db.query<{ text_plain: string; pi_session_id: string }>(sql`
         select m.text_plain, t.pi_session_id from messages m join threads t on t.id = m.thread_id
@@ -249,22 +198,21 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
         where table_schema = current_schema() and table_name = 'files'
       `);
       expect(fileColumns.map((column) => column.name)).not.toContain("path");
-
-      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 100, true)`);
-      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest)).resolves.toBeDefined();
-
-      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 1, false)`);
-      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))
-        .rejects.toThrow("unsafe PostgreSQL sequence");
-      await legacy.db.execute(sql`select setval(pg_get_serial_sequence('threads', 'id'), 73, true)`);
-
-      await legacy.db.execute(sql`delete from message_search`);
-      await expect(verifyUpgradeAuditManifest(legacy.db, piDir, manifest))
-        .rejects.toThrow("messageSearch count fell");
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from message_search`))
+        .resolves.toEqual([{ count: 1 }]);
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from chunk_search`))
+        .resolves.toEqual([{ count: 1 }]);
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from embeddings`))
+        .resolves.toEqual([{ count: 1 }]);
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from browser_use_profiles`))
+        .resolves.toEqual([{ count: 1 }]);
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from thread_sandboxes`))
+        .resolves.toEqual([{ count: 1 }]);
+      await expect(legacy.db.query<{ count: number }>(sql`select count(*)::int as count from sandbox_file_restore_status`))
+        .resolves.toEqual([{ count: 1 }]);
     } finally {
       await legacy.destroy();
       await admin.db.execute(sql.raw(`drop schema if exists ${legacySchema} cascade`));
-      await fs.rm(piDir, { recursive: true, force: true });
     }
   });
 

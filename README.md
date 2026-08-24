@@ -43,15 +43,9 @@ The bot reads `~/.codex/auth.json` by default. Set `CODEX_AUTH_FILE` to use anot
 
 An OAuth credential already stored in `PI_CODING_AGENT_DIR/auth.json` takes precedence over `CODEX_AUTH_FILE`. This keeps existing deployments compatible.
 
-## Database and upgrades
+## Database
 
 The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `postgresql://` form.
-
-The current schema no longer uses the old host-file `files.path` column. Rows remain in active thread scope when they have a Telegram or E2B source, extracted text, or indexed chunks. Host-only diagnostic rows remain in the database but are hidden from the agent. The upgrade does not delete old host files.
-
-OpenSandbox-era generated files that were never delivered through Telegram cannot be imported. Keep the old managed-file directory as rollback material until the new deployment passes its smoke tests.
-
-For the Unraid cutover, use the [Unraid to Dokploy migration guide](MIGRATION.md).
 
 ## Docker Compose
 
