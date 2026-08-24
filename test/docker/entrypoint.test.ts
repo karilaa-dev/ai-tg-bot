@@ -8,20 +8,18 @@ import { quoteShellToken } from "../../src/util/shell.js";
 
 const execFileAsync = promisify(execFile);
 const entrypoint = path.resolve("docker/entrypoint.sh");
+const applicationUid = "1000";
+const applicationGid = "1000";
 
 let tempDir: string;
 let env: NodeJS.ProcessEnv;
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-entrypoint-"));
-  const currentUid = process.getuid?.() ?? 1000;
-  const currentGid = process.getgid?.() ?? 1000;
   env = {
     ...process.env,
     AI_TG_BOT_ENTRYPOINT_TEST: "1",
     AI_TG_BOT_TEST_SKIP_PRIVILEGE_DROP: "1",
-    APP_UID: String(currentUid === 0 ? 1000 : currentUid),
-    APP_GID: String(currentGid === 0 ? 1000 : currentGid),
     APP_DATA_ROOT: path.join(tempDir, "app-data"),
     PI_CODING_AGENT_DIR: path.join(tempDir, "app-data", "pi"),
   };
@@ -64,7 +62,7 @@ describe("container entrypoint", () => {
 
     expect(await fs.readFile(chownLog, "utf8")).toBe([
       "-R",
-      `${env.APP_UID}:${env.APP_GID}`,
+      `${applicationUid}:${applicationGid}`,
       env.APP_DATA_ROOT,
       piDirectory,
       "",
@@ -117,48 +115,92 @@ describe("container entrypoint", () => {
     expect(result.stdout).toBe("dist/src/main.js");
   });
 
-  it.skipIf((process.getuid?.() ?? 1) !== 0)(
-    "drops identity and capabilities through setpriv when started as root",
-    async () => {
-      const binDir = path.join(tempDir, "bin");
-      const setprivLog = path.join(tempDir, "setpriv.args");
-      await fs.mkdir(binDir);
-      await fs.writeFile(path.join(binDir, "setpriv"), [
-        "#!/bin/sh",
-        `printf '%s\\n' \"$@\" > ${quoteShellToken(setprivLog)}`,
-        "while [ \"$1\" != \"--\" ]; do shift; done",
-        "shift",
-        "exec \"$@\"",
-        "",
-      ].join("\n"), { mode: 0o755 });
+  it("prepares persistent data and launches Node through a fixed, capability-free identity as root", async () => {
+    const harness = await installRootHarness();
 
-      await runEntrypoint({
-        ...env,
-        PATH: `${binDir}:${env.PATH}`,
-        AI_TG_BOT_TEST_SKIP_PRIVILEGE_DROP: "0",
-      });
-
-      const args = await fs.readFile(setprivLog, "utf8");
-      expect(args).toContain(`--reuid\n${env.APP_UID}\n`);
-      expect(args).toContain(`--regid\n${env.APP_GID}\n`);
-      expect(args).toContain("--clear-groups\n");
-      expect(args).toContain("--bounding-set=-all\n");
-      expect(args).toContain("--no-new-privs\n");
-    },
-  );
-
-  it("refuses to launch as application UID zero", async () => {
-    await expect(runEntrypoint({ ...env, APP_UID: "0" })).rejects.toMatchObject({
-      stderr: expect.stringContaining("APP_UID must not be 0"),
+    await runEntrypointDefault({
+      ...env,
+      PATH: `${harness.binDir}:${env.PATH}`,
+      AI_TG_BOT_TEST_SKIP_PRIVILEGE_DROP: "0",
     });
+
+    await expect(fs.stat(env.APP_DATA_ROOT!)).resolves.toMatchObject({});
+    await expect(fs.stat(env.PI_CODING_AGENT_DIR!)).resolves.toMatchObject({});
+    expect(await fs.readFile(harness.chownLog, "utf8")).toBe([
+      "-R",
+      `${applicationUid}:${applicationGid}`,
+      env.APP_DATA_ROOT,
+      env.PI_CODING_AGENT_DIR,
+      "",
+    ].join("\n"));
+    expect((await fs.readFile(harness.setprivLog, "utf8")).trim().split("\n")).toEqual([
+      "--reuid",
+      applicationUid,
+      "--regid",
+      applicationGid,
+      "--clear-groups",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      "--bounding-set=-all",
+      "--no-new-privs",
+      "--",
+      "node",
+      "dist/src/main.js",
+    ]);
+    expect(await fs.readFile(harness.nodeLog, "utf8")).toBe("dist/src/main.js\n");
   });
 
-  it("refuses to launch with application GID zero", async () => {
-    await expect(runEntrypoint({ ...env, APP_GID: "0" })).rejects.toMatchObject({
-      stderr: expect.stringContaining("APP_GID must not be 0"),
+  it("ignores legacy APP_UID and APP_GID overrides", async () => {
+    const harness = await installRootHarness();
+
+    await runEntrypointDefault({
+      ...env,
+      PATH: `${harness.binDir}:${env.PATH}`,
+      AI_TG_BOT_TEST_SKIP_PRIVILEGE_DROP: "0",
+      APP_UID: "2345",
+      APP_GID: "3456",
     });
+
+    const chownArgs = await fs.readFile(harness.chownLog, "utf8");
+    const setprivArgs = await fs.readFile(harness.setprivLog, "utf8");
+    expect(chownArgs).toContain(`${applicationUid}:${applicationGid}`);
+    expect(setprivArgs).toContain(`--reuid\n${applicationUid}\n`);
+    expect(setprivArgs).toContain(`--regid\n${applicationGid}\n`);
+    expect(`${chownArgs}\n${setprivArgs}`).not.toMatch(/2345|3456/);
   });
 });
+
+async function installRootHarness() {
+  const binDir = path.join(tempDir, "root-bin");
+  const chownLog = path.join(tempDir, "root-chown.args");
+  const setprivLog = path.join(tempDir, "setpriv.args");
+  const nodeLog = path.join(tempDir, "node.args");
+  await fs.mkdir(binDir);
+  await fs.writeFile(path.join(binDir, "id"), [
+    "#!/bin/sh",
+    "if [ \"${1:-}\" = \"-u\" ]; then printf '0'; else exec /usr/bin/id \"$@\"; fi",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, "chown"), [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$@\" > ${quoteShellToken(chownLog)}`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, "setpriv"), [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$@\" > ${quoteShellToken(setprivLog)}`,
+    "while [ \"$1\" != \"--\" ]; do shift; done",
+    "shift",
+    "exec \"$@\"",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, "node"), [
+    "#!/bin/sh",
+    `printf '%s\\n' \"$*\" > ${quoteShellToken(nodeLog)}`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return { binDir, chownLog, setprivLog, nodeLog };
+}
 
 function runEntrypoint(
   environment: NodeJS.ProcessEnv,

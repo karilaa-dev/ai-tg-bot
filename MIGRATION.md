@@ -61,7 +61,7 @@ sha256sum --check SHA256SUMS
 
 Create a Railpack application with one replica. Under **Advanced > Mounts**, create one Docker named volume mounted at `/app/data`. Dokploy documents named application volumes in its [mount settings](https://docs.dokploy.com/docs/core/applications/advanced#volumesmounts).
 
-Set the normal application identity and data variables printed by the wizard:
+Set the normal data variables printed by the wizard:
 
 ```dotenv
 BOT_TOKEN=<same token as the old bot>
@@ -69,8 +69,6 @@ DB_URL=sqlite:/app/data/bot.db
 PI_CODING_AGENT_DIR=/app/data/pi
 E2B_DEPLOYMENT_ID=<value printed by the wizard>
 BROWSER_USE_DEPLOYMENT_ID=<value printed by the wizard>
-APP_UID=<value printed by the wizard>
-APP_GID=<value printed by the wizard>
 ```
 
 Do not set `POSTGRES_PASSWORD` or any `UPGRADE_*` variables.

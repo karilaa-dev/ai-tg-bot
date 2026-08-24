@@ -58,6 +58,8 @@ describe("Unraid migration wizard", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Migration export ready");
+    expect(result.stdout).not.toContain("APP_UID=");
+    expect(result.stdout).not.toContain("APP_GID=");
     const [exportDir] = (await fs.readdir(exportParent)).map((entry) => path.join(exportParent, entry));
     expect(await fs.readdir(exportDir)).toEqual(["SHA256SUMS", "app-data.tgz"]);
     expect((await fs.readFile(path.join(exportDir, "SHA256SUMS"), "utf8"))).toContain("app-data.tgz");

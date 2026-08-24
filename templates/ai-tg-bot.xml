@@ -39,8 +39,6 @@
   <Config Name="Database URL" Target="DB_URL" Default="sqlite:/app/data/bot.db" Description="SQLite or PostgreSQL database URL." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Pi Agent Directory" Target="PI_CODING_AGENT_DIR" Default="/app/data/pi" Description="Persistent Pi configuration, OAuth credentials, and thread sessions." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Docling URL" Target="DOCLING_URL" Default="" Description="Optional external Docling server." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Application UID" Target="APP_UID" Default="1000" Description="Non-root UID used by the bot." Type="Variable" Display="advanced" Required="true" Mask="false"/>
-  <Config Name="Application GID" Target="APP_GID" Default="1000" Description="Primary non-root GID used by the bot." Type="Variable" Display="advanced" Required="true" Mask="false"/>
   <Config Name="Bash Timeout" Target="BASH_TIMEOUT_MS" Default="30000" Description="Maximum milliseconds for one foreground sandbox command." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Bash Max Output" Target="BASH_MAX_OUTPUT_CHARS" Default="12000" Description="Maximum characters returned for each stdout or stderr stream." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Pi Turn Timeout" Target="PI_TURN_TIMEOUT_MS" Default="900000" Description="Maximum milliseconds for a Pi turn." Type="Variable" Display="advanced" Required="false" Mask="false"/>

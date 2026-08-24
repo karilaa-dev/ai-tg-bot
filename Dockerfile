@@ -43,8 +43,6 @@ ENV NODE_ENV=production \
     E2B_DEPLOYMENT_ID=ai-tg-bot \
     TELEGRAM_FILE_RESTORE_TIMEOUT_MS=300000 \
     TELEGRAM_FILE_RESTORE_CONCURRENCY=4 \
-    APP_UID=1000 \
-    APP_GID=1000 \
     PI_CODING_AGENT_DIR=/app/data/pi
 
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./

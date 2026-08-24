@@ -1,13 +1,8 @@
 #!/bin/sh
 set -eu
 
-log() {
-    printf '%s\n' "ai-tg-bot: $*" >&2
-}
-
-valid_id() {
-    printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)$'
-}
+APPLICATION_UID=1000
+APPLICATION_GID=1000
 
 configure_postgres_url() {
     if [ -n "${DB_URL:-}" ] \
@@ -26,7 +21,7 @@ configure_postgres_url() {
 prepare_directories() {
     mkdir -p "${APP_DATA_ROOT}" "${PI_CODING_AGENT_DIR}"
     if [ "$(id -u)" = "0" ]; then
-        chown -R "${APP_UID}:${APP_GID}" "${APP_DATA_ROOT}" "${PI_CODING_AGENT_DIR}"
+        chown -R "${APPLICATION_UID}:${APPLICATION_GID}" "${APP_DATA_ROOT}" "${PI_CODING_AGENT_DIR}"
     else
         probe="${APP_DATA_ROOT}/.write-test.$$"
         : >"${probe}"
@@ -42,8 +37,8 @@ run_as_application_user() {
         exec "$@"
     fi
     exec setpriv \
-        --reuid "${APP_UID}" \
-        --regid "${APP_GID}" \
+        --reuid "${APPLICATION_UID}" \
+        --regid "${APPLICATION_GID}" \
         --clear-groups \
         --inh-caps=-all \
         --ambient-caps=-all \
@@ -52,16 +47,9 @@ run_as_application_user() {
         -- "$@"
 }
 
-: "${APP_UID:=1000}"
-: "${APP_GID:=1000}"
 : "${APP_DATA_ROOT:=/app/data}"
 : "${PI_CODING_AGENT_DIR:=${APP_DATA_ROOT}/pi}"
-export APP_UID APP_GID APP_DATA_ROOT PI_CODING_AGENT_DIR
-
-valid_id "${APP_UID}" || { log "ERROR: APP_UID must be a non-negative numeric UID."; exit 1; }
-valid_id "${APP_GID}" || { log "ERROR: APP_GID must be a non-negative numeric GID."; exit 1; }
-[ "${APP_UID}" != "0" ] || { log "ERROR: APP_UID must not be 0."; exit 1; }
-[ "${APP_GID}" != "0" ] || { log "ERROR: APP_GID must not be 0."; exit 1; }
+export APP_DATA_ROOT PI_CODING_AGENT_DIR
 
 if [ "$#" -eq 0 ]; then
     set -- node dist/src/main.js
