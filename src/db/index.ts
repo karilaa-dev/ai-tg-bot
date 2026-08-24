@@ -33,28 +33,54 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     if (sqlitePath !== ":memory:") fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
     logger?.debug("opening sqlite database", { path: sqlitePath });
     const sqlite = drizzleSqlite({ client: new Database(sqlitePath) });
-    let sqliteExecutor: SqlExecutor;
-    sqliteExecutor = {
+    let operationTail = Promise.resolve();
+    const withLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const previous = operationTail;
+      let release!: () => void;
+      operationTail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        release();
+      }
+    };
+    const rawQuery = async <T extends object>(statement: SQL): Promise<T[]> =>
+      normalizeRows(sqlite.all<T>(statement));
+    const rawExecute = async (statement: SQL): Promise<void> => {
+      sqlite.run(statement);
+    };
+    let transactionExecutor: SqlExecutor;
+    transactionExecutor = {
       dialect,
-      query: async <T extends object>(statement: SQL) => normalizeRows(sqlite.all<T>(statement)),
-      execute: async (statement: SQL) => {
-        sqlite.run(statement);
-      },
+      query: rawQuery,
+      execute: rawExecute,
+      // Nested repository transactions share the already-exclusive outer
+      // transaction. A nested failure still rolls back the outer work.
+      transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>) => callback(transactionExecutor),
+      destroy: async () => undefined,
+    };
+    const sqliteExecutor: SqlExecutor = {
+      dialect,
+      query: <T extends object>(statement: SQL) => withLock(() => rawQuery<T>(statement)),
+      execute: (statement: SQL) => withLock(() => rawExecute(statement)),
       transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>) => {
-        sqlite.$client.exec("begin immediate");
-        try {
-          const result = await callback(sqliteExecutor);
-          sqlite.$client.exec("commit");
-          return result;
-        } catch (error) {
-          sqlite.$client.exec("rollback");
-          throw error;
-        }
+        return withLock(async () => {
+          sqlite.$client.exec("begin immediate");
+          try {
+            const result = await callback(transactionExecutor);
+            sqlite.$client.exec("commit");
+            return result;
+          } catch (error) {
+            sqlite.$client.exec("rollback");
+            throw error;
+          }
+        });
       },
-      destroy: async () => {
+      destroy: () => withLock(async () => {
         logger?.debug("closing sqlite database");
         sqlite.$client.close();
-      },
+      }),
     };
     db = sqliteExecutor;
   } else {

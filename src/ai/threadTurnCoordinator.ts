@@ -104,9 +104,10 @@ export class ThreadTurnCoordinator {
     const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
     if (!requested) return false;
     if (active) {
-      if (!active.finalizer.requestCancellation()) return false;
-      active.controller.abort(new Error("Turn cancelled by user."));
-      await this.input.pi.abort(threadId);
+      if (active.finalizer.requestCancellation()) {
+        active.controller.abort(new Error("Turn cancelled by user."));
+        await this.input.pi.abort(threadId);
+      }
     }
     this.input.logger.info(active
       ? "active turn cancellation requested"

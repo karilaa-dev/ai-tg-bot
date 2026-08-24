@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
+import { telegramFileSource } from "../../src/files/telegramSource.js";
 import { clearRetrievalVectorCacheForTests, hybridSearch, threadChainScope } from "../../src/memory/retrieval.js";
 
 describe("Pi retrieval tools backend", () => {
@@ -217,5 +218,42 @@ describe("Pi retrieval tools backend", () => {
     expect(scope.messageIds).not.toContain(queued.userMessage.id);
     expect(scope.fileIds).toContain(activeFile.id);
     expect(scope.fileIds).not.toContain(queuedFile.id);
+  });
+
+  it("hides an inbound upload until durable turn acceptance attaches it", async () => {
+    const user = await repos.users.ensure({ tgId: 306, firstName: "Inbound Boundary" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const active = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "active turn" },
+      textPlain: "active turn",
+    });
+    const pending = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "pdf",
+      extractionStatus: "source_only",
+      name: "later.pdf",
+      size: 100,
+      isInline: false,
+    });
+    await repos.files.rememberTelegramObservation(
+      pending.id,
+      telegramFileSource({ fileId: "pending-file", fileUniqueId: "pending-unique" }),
+      {
+        direction: "inbound",
+        mediaKind: "document",
+        telegramMessageId: 9001,
+        refs: [{ fileId: "pending-file", fileUniqueId: "pending-unique", primary: true }],
+      },
+    );
+
+    const beforeAcceptance = await threadChainScope(repos, thread, active.id);
+    expect(beforeAcceptance.fileIds).not.toContain(pending.id);
+
+    await repos.files.setMessageId(pending.id, active.id);
+    const afterAcceptance = await threadChainScope(repos, thread, active.id);
+    expect(afterAcceptance.fileIds).toContain(pending.id);
   });
 });

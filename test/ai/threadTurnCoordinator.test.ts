@@ -497,6 +497,36 @@ describe("ThreadTurnCoordinator", () => {
     await owner.shutdown();
   });
 
+  it("reports local cancellation accepted when its durable write wins delivery", async () => {
+    const { userId, threadId } = await ownership(repos, 824);
+    const runnerStarted = deferred<void>();
+    const startDelivery = deferred<void>();
+    const deliveryStarted = deferred<void>();
+    const owner = createCoordinator(db, repos, async (input) => {
+      runnerStarted.resolve();
+      await startDelivery.promise;
+      expect(input.onDeliveryStarting?.()).toBe(true);
+      deliveryStarted.resolve();
+      await input.onAwaitingDelivery?.({ assistantMessageId: input.userMessageId! });
+    });
+    await owner.accept(request(userId, threadId, 24_001, "local cancellation race"));
+    await runnerStarted.promise;
+    const requestCancellation = repos.turnRuns.requestCancellation.bind(repos.turnRuns);
+    vi.spyOn(repos.turnRuns, "requestCancellation").mockImplementationOnce(async (id) => {
+      const requested = await requestCancellation(id);
+      startDelivery.resolve();
+      await deliveryStarted.promise;
+      return requested;
+    });
+
+    await expect(owner.cancelActive(threadId)).resolves.toBe(true);
+    await owner.waitForIdle();
+    expect(await repos.turnRuns.listForThread(threadId)).toEqual([
+      expect.objectContaining({ status: "cancelled", cancel_requested_at: expect.any(Number) }),
+    ]);
+    await owner.shutdown();
+  });
+
   it("schedules a queued successor exposed while waiting for idle", async () => {
     const { userId, threadId } = await ownership(repos, 820);
     const empty = await ownership(repos, 821);

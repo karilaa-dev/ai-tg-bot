@@ -427,6 +427,28 @@ export class FilesRepo {
     `);
   }
 
+  async listUnattachedInboundIds(fileIds: number[]): Promise<number[]> {
+    if (!fileIds.length) return [];
+    const rows = await this.db.query<{ id: number }>(sql`
+      select distinct f.id
+      from files f
+      where f.id in (${valueList(fileIds)})
+        and f.message_id is null
+        and (
+          exists (
+            select 1 from telegram_file_refs ref
+            where ref.file_id = f.id and ref.direction = 'inbound'
+          )
+          or exists (
+            select 1 from file_sources source
+            where source.file_id = f.id and source.transport = 'telegram'
+          )
+        )
+      order by f.id asc
+    `);
+    return rows.map((row) => row.id);
+  }
+
   chunksForFiles(fileIds: number[]): Promise<FileChunkRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileChunkRow>(sql`select * from file_chunks where file_id in (${valueList(fileIds)}) order by file_id asc, idx asc`);

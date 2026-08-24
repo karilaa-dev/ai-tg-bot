@@ -393,7 +393,7 @@ export function appendPublishedWebsiteNotice(
   return answer.trim() ? `${answer.trimEnd()}\n\n${notice}` : notice;
 }
 
-async function runPiPromptWithTimeout(
+export async function runPiPromptWithTimeout(
   session: Awaited<ReturnType<PiRuntimeService["runtime"]>>["session"],
   text: string,
   timeoutMs: number,
@@ -402,29 +402,38 @@ async function runPiPromptWithTimeout(
   signal?.throwIfAborted();
   let timer: NodeJS.Timeout | undefined;
   let rejectAbort!: (reason?: unknown) => void;
+  let shutdownRequested = false;
   const abortPromise = new Promise<never>((_, reject) => {
     rejectAbort = reject;
   });
   const onAbort = () => {
-    void session.abort().catch(() => undefined);
+    shutdownRequested = true;
     rejectAbort(signal?.reason ?? new Error("Turn cancelled."));
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
+  let prompt: ReturnType<typeof session.prompt> | undefined;
   try {
+    prompt = session.prompt(text, { expandPromptTemplates: false, source: "extension" });
     const operations: Promise<unknown>[] = [
-      session.prompt(text, { expandPromptTemplates: false, source: "extension" }),
+      prompt,
       abortPromise,
     ];
     if (timeoutMs > 0) {
       operations.push(new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          void session.abort().catch(() => undefined);
+          shutdownRequested = true;
           reject(new Error(`Pi turn timed out after ${timeoutMs} ms.`));
         }, timeoutMs);
       }));
     }
     await Promise.race(operations);
+  } catch (error) {
+    if (shutdownRequested) {
+      await session.abort().catch(() => undefined);
+      await prompt?.catch(() => undefined);
+    }
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);

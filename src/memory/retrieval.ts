@@ -67,11 +67,18 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessa
   const messageIdSet = new Set(messageIds);
   const attachedFiles = await repos.files.listForMessages(messageIds);
   const threadFiles = await repos.files.listForThreads(threadIds);
+  const unattachedInboundIds = new Set(maxMessageId === undefined
+    ? []
+    : await repos.files.listUnattachedInboundIds(
+        threadFiles.filter((file) => file.message_id === null).map((file) => file.id),
+      ));
   const candidateFileIds = [
     ...new Set([
       ...attachedFiles.map((file) => file.id),
       ...threadFiles
-        .filter((file) => file.message_id === null || messageIdSet.has(file.message_id))
+        .filter((file) => file.message_id === null
+          ? !unattachedInboundIds.has(file.id)
+          : messageIdSet.has(file.message_id))
         .map((file) => file.id),
     ]),
   ];
