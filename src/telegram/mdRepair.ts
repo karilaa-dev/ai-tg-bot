@@ -90,11 +90,11 @@ export function repairLadder(md: string): string[] {
   ];
 }
 
-export function escapeAllHtml(md: string): string {
+function escapeAllHtml(md: string): string {
   return md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function neutralizeExotics(md: string): string {
+function neutralizeExotics(md: string): string {
   return md
     .replace(/\$\$([\s\S]*?)\$\$/g, "```math\n$1\n```")
     .replace(/\$([^$\n]+)\$/g, "`$1`")
@@ -102,7 +102,7 @@ export function neutralizeExotics(md: string): string {
     .replace(/\[\^([^\]]+)\]:\s*(.+)$/gm, "($1: $2)");
 }
 
-export function fenceWholeBlocks(md: string): string {
+function fenceWholeBlocks(md: string): string {
   return md
     .split(/\n{2,}/)
     .map((block) => (block.startsWith("```") ? block : `\`\`\`\n${block}\n\`\`\``))

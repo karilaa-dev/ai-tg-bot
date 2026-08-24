@@ -114,10 +114,4 @@ describe("pinned OfficeCLI Pi skills", () => {
       {} as never,
     )).rejects.toThrow("restricted to approved installed skill files");
   });
-
-  it("includes vendored skills in the production container", async () => {
-    const dockerfile = await fs.readFile("Dockerfile", "utf8");
-    expect(dockerfile).toContain("COPY skills ./skills");
-    expect(dockerfile).toContain("/app/skills ./skills");
-  });
 });

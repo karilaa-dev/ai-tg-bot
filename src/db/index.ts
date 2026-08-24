@@ -73,7 +73,7 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     search: createTextSearch(db, dialect),
     initialize: async () => {
       logger?.debug("database initialization starting", { dialect });
-      await initializeSchema(db, dialect, logger);
+      await initializeSchema(db, dialect);
       logger?.info("database initialized", { dialect });
     },
     destroy: async () => {

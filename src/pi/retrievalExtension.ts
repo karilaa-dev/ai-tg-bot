@@ -2,7 +2,7 @@ import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 
 export const EMBEDDING_BATCH_SIZE = 96;
-export const EMBEDDING_REQUEST_TIMEOUT_MS = 30_000;
+const EMBEDDING_REQUEST_TIMEOUT_MS = 30_000;
 
 /** OpenRouter vector backend owned by the Pi retrieval extension. */
 export async function embedForRetrieval(

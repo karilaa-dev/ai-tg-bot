@@ -4,7 +4,7 @@ import type { DialectName } from "./types.js";
 
 const SNIPPET_MAX_WORDS = 24;
 
-export interface SearchHit {
+interface SearchHit {
   id: number;
   snippet: string;
   // sqlite bm25: lower rank is better (ordered asc); pg ts_rank: higher is better (ordered desc).

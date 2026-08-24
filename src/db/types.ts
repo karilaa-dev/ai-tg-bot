@@ -10,7 +10,7 @@ export type MessageKind = "text" | "image" | "file" | "system";
 
 export type ThreadTitleSource = "placeholder" | "explicit" | "generated";
 
-export interface UsersTable {
+interface UsersTable {
   tg_id: number;
   first_name: string | null;
   username: string | null;
@@ -20,7 +20,7 @@ export interface UsersTable {
   created_at: number;
 }
 
-export interface ThreadsTable {
+interface ThreadsTable {
   id: number;
   user_id: number;
   topic_id: number | null;
@@ -36,7 +36,7 @@ export interface ThreadsTable {
   created_at: number;
 }
 
-export interface MessagesTable {
+interface MessagesTable {
   id: number;
   thread_id: number;
   role: MessageRole;
@@ -49,7 +49,7 @@ export interface MessagesTable {
   created_at: number;
 }
 
-export interface FilesTable {
+interface FilesTable {
   id: number;
   user_id: number;
   thread_id: number;
@@ -67,7 +67,7 @@ export interface FilesTable {
   created_at: number;
 }
 
-export interface ThreadSandboxesTable {
+interface ThreadSandboxesTable {
   deployment_id: string;
   user_id: number;
   thread_id: number;
@@ -76,7 +76,7 @@ export interface ThreadSandboxesTable {
   updated_at: number;
 }
 
-export interface BrowserUseProfilesTable {
+interface BrowserUseProfilesTable {
   deployment_id: string;
   user_id: number;
   provider_user_key: string;
@@ -85,7 +85,7 @@ export interface BrowserUseProfilesTable {
   updated_at: number;
 }
 
-export interface FileSourcesTable {
+interface FileSourcesTable {
   id: number;
   file_id: number;
   transport: string;
@@ -97,7 +97,7 @@ export interface FileSourcesTable {
   created_at: number;
 }
 
-export interface TelegramFileRefsTable {
+interface TelegramFileRefsTable {
   id: number;
   file_id: number;
   telegram_file_id: string;
@@ -113,7 +113,7 @@ export interface TelegramFileRefsTable {
   last_seen_at: number;
 }
 
-export interface SandboxFileRestoreStatusTable {
+interface SandboxFileRestoreStatusTable {
   deployment_id: string;
   thread_id: number;
   sandbox_id: string;
@@ -129,7 +129,7 @@ export interface SandboxFileRestoreStatusTable {
   completed_at: number | null;
 }
 
-export interface FileChunksTable {
+interface FileChunksTable {
   id: number;
   file_id: number;
   idx: number;
@@ -138,15 +138,7 @@ export interface FileChunksTable {
   created_at: number;
 }
 
-export interface MessageFilesTable {
-  message_id: number;
-  file_id: number;
-  display_name: string | null;
-  caption: string | null;
-  created_at: number;
-}
-
-export interface EmbeddingsTable {
+interface EmbeddingsTable {
   id: number;
   kind: "chunk";
   ref_id: number;

@@ -1790,13 +1790,11 @@ async function sendRichWithFallback(
   rich: InputRichMessage,
 ): Promise<SentTelegramFileMessage[]> {
   const markdown = rich.markdown ?? rich.html ?? "";
-  let lastRichError: unknown;
   try {
     const sent = await sendRichMessageWithThreadFallback(input, rich);
     return [sent];
   } catch (err) {
     if (!isRichParseError(err)) throw err;
-    lastRichError = err;
     input.logger.debug("rich message parse failed; trying repaired variants", {
       threadId: input.thread.id,
       err: String(err),
@@ -1809,7 +1807,6 @@ async function sendRichWithFallback(
       return [sent];
     } catch (err) {
       if (!isRichParseError(err)) throw err;
-      lastRichError = err;
       input.logger.debug("rich message repaired variant failed", {
         threadId: input.thread.id,
         err: String(err),
@@ -1879,34 +1876,6 @@ function splitPlainText(text: string): string[] {
   }
   if (rest) chunks.push(rest);
   return chunks;
-}
-
-async function toolCallMetadata(
-  input: TurnInput,
-  part: Extract<NormalizedStreamPart, { kind: "tool-call" }>,
-): Promise<ToolCallMetadata | undefined> {
-  if (part.toolName !== "search_in_file" && part.toolName !== "read_file_section") return undefined;
-  const fileId = fileIdFromToolInput(part.input);
-  if (fileId === undefined) return undefined;
-  try {
-    const file = await input.repos.files.get(fileId);
-    return { fileName: file?.name ?? `#${fileId}` };
-  } catch (err) {
-    input.logger.warn("failed to resolve tool file name", {
-      threadId: input.thread.id,
-      fileId,
-      toolName: part.toolName,
-      err: String(err),
-    });
-    return { fileName: `#${fileId}` };
-  }
-}
-
-function fileIdFromToolInput(input: unknown): number | undefined {
-  const value = asRecord(input)?.file_id;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
-  return undefined;
 }
 
 type StreamEvent = "content" | "tool-call" | "tool-result";
@@ -2042,31 +2011,10 @@ export function toolErrorText(value: unknown, includeContentText = false): strin
   return undefined;
 }
 
-function isPendingToolResult(value: unknown): boolean {
-  return asRecord(value)?.pending === true;
-}
-
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function countLoadedFileSections(content: string): number {
   return Math.max(1, content.match(/^# chunk /gm)?.length ?? 0);
-}
-
-export function isContextLengthError(err: unknown): boolean {
-  return /context|maximum.*tokens|too (many|long)/i.test(errorText(err));
-}
-
-function errorText(err: unknown): string {
-  const parts = [String(err)];
-  if (err && typeof err === "object") {
-    const record = err as Record<string, unknown>;
-    for (const key of ["message", "description", "body", "responseBody", "data", "cause"]) {
-      const value = record[key];
-      if (typeof value === "string") parts.push(value);
-      else if (value !== undefined) parts.push(safeJson(value));
-    }
-  }
-  return parts.join("\n");
 }

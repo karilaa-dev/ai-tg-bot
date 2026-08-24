@@ -25,14 +25,3 @@ To roll back, point the `production` tag at an earlier validated build through E
 Keep `thread_sandboxes` mappings during a tag change. Metadata recovery includes `template_ref`, so deleting a mapping while also changing `E2B_TEMPLATE` can make an older sandbox undiscoverable and cause the bot to create a replacement.
 
 Pinned tool versions may trail upstream. Upgrade a pin only after updating its revision and checksums and passing the full template contract.
-
-## Remove legacy Desktop sandboxes
-
-Stop the bot first. Preview the deletion set, then run it:
-
-```sh
-npm run e2b:sandboxes:prune-desktop
-npm run e2b:sandboxes:prune-desktop -- --execute
-```
-
-The command matches only E2B sandboxes whose template name is `desktop` and whose metadata contains `app=ai-tg-bot`. Execution permanently removes their workspace and process state. Telegram-backed files are restored when a thread creates a replacement toolbox sandbox.

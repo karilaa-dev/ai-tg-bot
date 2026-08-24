@@ -14,7 +14,7 @@ import type { FileResolver } from "../files/resolver.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 
-export interface ActiveFileJob {
+interface ActiveFileJob {
   controller: AbortController;
   status: FileProcessingStatus;
 }
@@ -36,7 +36,7 @@ export interface PendingMediaGroup {
   items: PendingMediaGroupItem[];
 }
 
-export interface PendingTextBurst {
+interface PendingTextBurst {
   ctx: BotContext;
   timer: NodeJS.Timeout;
   texts: string[];

@@ -2,7 +2,7 @@ import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import { throwIfAborted } from "./cancel.js";
 
-export interface DownloadedTelegramFile {
+interface DownloadedTelegramFile {
   bytes: Buffer;
   filePath?: string;
 }

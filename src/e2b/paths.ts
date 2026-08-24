@@ -39,7 +39,7 @@ export function sandboxWebsiteDirectory(virtualPath: string): string {
   return candidate;
 }
 
-export function normalizeVirtualPath(value: string): string {
+function normalizeVirtualPath(value: string): string {
   const normalized = path.posix.normalize(value);
   if (!normalized.startsWith("/")) throw new Error("path must be absolute");
   return normalized;

@@ -1,4 +1,3 @@
-import path from "node:path";
 import { parse } from "csv-parse/sync";
 import type { AppConfig } from "../config.js";
 import type { EmbeddingsRepo } from "../db/repos/embeddings.js";
@@ -20,13 +19,13 @@ const FILE_SUMMARY_MAX_CHARS = 180;
 const OUTLINE_PREVIEW_HEADINGS = 5;
 
 export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image";
-export type FileIngestStage = "extracting" | "indexing" | "embedding";
+type FileIngestStage = "extracting" | "indexing" | "embedding";
 export interface FileIngestProgress {
   stage: FileIngestStage;
   completed?: number;
   total?: number;
 }
-export type FileIngestStageReporter = (progress: FileIngestProgress) => void | Promise<void>;
+type FileIngestStageReporter = (progress: FileIngestProgress) => void | Promise<void>;
 
 export function classifyFile(name: string, mime = ""): AcceptedFileType | "legacy-doc" | null {
   if (/\.doc$/i.test(name)) return "legacy-doc";

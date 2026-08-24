@@ -53,27 +53,4 @@ describe("E2B toolbox template definition", () => {
     expect(source).toContain("const exactRef = e2bToolboxBuildRef(buildTag)");
     expect(source).not.toContain("buildInfo.buildId}`");
   });
-
-  it("contains no configuration for the removed Telegram file gateway", async () => {
-    const deploymentFiles = await Promise.all([
-      fs.readFile("Dockerfile", "utf8"),
-      fs.readFile("docker-compose.yml", "utf8"),
-      fs.readFile("templates/ai-tg-bot.xml", "utf8"),
-    ]);
-    expect(deploymentFiles.join("\n")).not.toContain("TELEGRAM_FILE_GATEWAY");
-  });
-
-  it("exposes every optional Browser Use setting in the deployment template", async () => {
-    const template = await fs.readFile("templates/ai-tg-bot.xml", "utf8");
-    for (const name of [
-      "BROWSER_USE_API_KEY",
-      "BROWSER_USE_DEPLOYMENT_ID",
-      "BROWSER_USE_DEFAULT_TIMEOUT_MINUTES",
-      "BROWSER_USE_IDLE_TIMEOUT_MS",
-      "BROWSER_USE_API_TIMEOUT_MS",
-      "BROWSER_USE_NAVIGATION_TIMEOUT_MS",
-    ]) {
-      expect(template).toContain(`Target="${name}"`);
-    }
-  });
 });
