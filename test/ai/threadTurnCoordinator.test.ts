@@ -416,6 +416,30 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("aborts a local turn when its renewal remains pending past the owner lease", async () => {
+    vi.useFakeTimers();
+    const { userId, threadId } = await ownership(repos, 829);
+    const started = deferred<void>();
+    const aborted = deferred<void>();
+    const abort = vi.fn(async () => true);
+    vi.spyOn(repos.turnRuns, "renewLease").mockReturnValue(new Promise<boolean>(() => undefined));
+    vi.spyOn(repos.turnRuns, "cancellationRequested").mockResolvedValue(false);
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      started.resolve();
+      await waitForAbort(input.signal!);
+      aborted.resolve();
+    }, abort);
+    await coordinator.accept(request(userId, threadId, 29_001, "lease deadline"));
+    await started.promise;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await aborted.promise;
+
+    expect(abort).toHaveBeenCalledWith(threadId);
+    await coordinator.waitForIdle();
+    await coordinator.shutdown();
+  });
+
   it("waits for an externally owned turn before reporting a thread idle", async () => {
     const { userId, threadId } = await ownership(repos, 812);
     const active = await repos.turnRuns.accept(request(userId, threadId, 12_001, "external"));
@@ -636,27 +660,23 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
-  it("rejects a completed operation when its final renewal loses ownership", async () => {
+  it("aborts a thread operation when renewal remains pending past the lease", async () => {
     vi.useFakeTimers();
     const { threadId } = await ownership(repos, 828);
     const operationStarted = deferred<void>();
-    const releaseOperation = deferred<void>();
-    const renewal = deferred<boolean>();
-    vi.spyOn(repos.turnRuns, "renewThreadBarrier").mockReturnValue(renewal.promise);
+    vi.spyOn(repos.turnRuns, "renewThreadBarrier").mockReturnValue(new Promise<boolean>(() => undefined));
     const coordinator = createCoordinator(db, repos, async (input) => {
       await confirmDelivery(input);
     });
-    const operation = coordinator.withThreadBarrier(threadId, "fork", async () => {
+    const operation = coordinator.withThreadBarrier(threadId, "fork", async (_snapshot, signal) => {
       operationStarted.resolve();
-      await releaseOperation.promise;
+      await waitForAbort(signal);
+      signal.throwIfAborted();
     });
     const rejection = expect(operation).rejects.toThrow("barrier lease was lost");
     await operationStarted.promise;
-    await vi.advanceTimersByTimeAsync(10_000);
 
-    releaseOperation.resolve();
-    renewal.resolve(false);
-
+    await vi.advanceTimersByTimeAsync(60_000);
     await rejection;
     await coordinator.shutdown();
   });

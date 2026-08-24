@@ -59,6 +59,19 @@ export async function flushPendingTextBurstForContext(ctx: BotContext): Promise<
   await flushPendingTextBurst(ctx, key);
 }
 
+export function cancelPendingTextBurstForContext(ctx: BotContext): boolean {
+  const key = textBurstKey(ctx);
+  if (!key) return false;
+  const pending = ctx.services.routerState.pendingTextBursts.get(key);
+  if (!pending) return false;
+  ctx.services.routerState.pendingTextBursts.delete(key);
+  clearTimeout(pending.timer);
+  ctx.services.logger.info("pending text burst cancelled", ctxLogMeta(ctx, {
+    parts: pending.texts.length,
+  }));
+  return true;
+}
+
 async function flushPendingTextBurst(ctx: BotContext, key: string): Promise<void> {
   const pendingTextBursts = ctx.services.routerState.pendingTextBursts;
   const pending = pendingTextBursts.get(key);

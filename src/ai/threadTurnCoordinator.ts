@@ -161,11 +161,12 @@ export class ThreadTurnCoordinator {
     while (this.accepting) {
       await this.waitForIdle(threadId);
       if (!this.accepting) break;
+      const barrierLeaseExpiresAt = Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS;
       const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
         threadId,
         ownerId: barrierOwnerId,
         operation,
-        leaseExpiresAt: Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS,
+        leaseExpiresAt: barrierLeaseExpiresAt,
       });
       if (!barrier) {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
@@ -181,19 +182,28 @@ export class ThreadTurnCoordinator {
       const operationController = new AbortController();
       const onShutdown = () => operationController.abort(new Error("Turn coordinator is shutting down."));
       this.lifecycle.signal.addEventListener("abort", onShutdown, { once: true });
+      const abortBarrierOperation = (message: string) => {
+        if (operationController.signal.aborted || !barrierMonitoring) return;
+        this.input.logger.error(message, { threadId, operation });
+        operationController.abort(new Error("Thread operation barrier lease was lost."));
+      };
+      const barrierDeadline = new LeaseDeadline(barrierLeaseExpiresAt, () => {
+        abortBarrierOperation("thread operation barrier lease expired locally");
+      });
       const renewalTimer = setInterval(() => {
         if (renewingBarrier) return;
+        const renewedLeaseExpiresAt = Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS;
         renewingBarrier = this.input.repos.turnRuns.renewThreadBarrier(
           threadId,
           barrierOwnerId,
-          Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS,
+          renewedLeaseExpiresAt,
         ).then((renewed) => {
-          if (renewed || !barrierMonitoring) return;
-          this.input.logger.error("thread operation barrier lease was lost", {
-            threadId,
-            operation,
-          });
-          operationController.abort(new Error("Thread operation barrier lease was lost."));
+          if (!barrierMonitoring) return;
+          if (renewed) {
+            barrierDeadline.confirm(renewedLeaseExpiresAt);
+            return;
+          }
+          abortBarrierOperation("thread operation barrier lease was lost");
         }).catch((error) => {
           if (!barrierMonitoring) return;
           this.input.logger.warn("thread operation barrier renewal failed", {
@@ -216,9 +226,9 @@ export class ThreadTurnCoordinator {
         operationFailed = true;
         operationError = error;
       } finally {
-        clearInterval(renewalTimer);
-        await renewingBarrier;
         barrierMonitoring = false;
+        clearInterval(renewalTimer);
+        barrierDeadline.stop();
         this.lifecycle.signal.removeEventListener("abort", onShutdown);
         const released = await this.releaseThreadBarrierWithRetry(threadId, barrierOwnerId, operation);
         if (released === false) {
@@ -394,21 +404,34 @@ export class ThreadTurnCoordinator {
     this.active.set(run.thread_id, active);
     let renewingLease = false;
     let leaseMonitoring = true;
+    const abortOwnedTurn = (message: string) => {
+      if (controller.signal.aborted || !leaseMonitoring) return;
+      this.input.logger.error(message, {
+        turnRunId: run.id,
+        threadId: run.thread_id,
+      });
+      controller.abort(new Error("Turn owner lease was lost."));
+      void this.input.pi.abort(run.thread_id);
+    };
+    const leaseDeadline = new LeaseDeadline(
+      run.lease_expires_at ?? Date.now() + ThreadTurnCoordinator.OWNER_LEASE_MS,
+      () => abortOwnedTurn("turn owner lease expired locally; aborting local execution"),
+    );
     const leaseTimer = setInterval(() => {
       if (renewingLease) return;
       renewingLease = true;
+      const renewedLeaseExpiresAt = Date.now() + ThreadTurnCoordinator.OWNER_LEASE_MS;
       void this.input.repos.turnRuns.renewLease(
         run.id,
         this.ownerId,
-        Date.now() + ThreadTurnCoordinator.OWNER_LEASE_MS,
+        renewedLeaseExpiresAt,
       ).then((renewed) => {
-        if (renewed || !leaseMonitoring) return;
-        this.input.logger.error("turn owner lease was lost; aborting local execution", {
-          turnRunId: run.id,
-          threadId: run.thread_id,
-        });
-        controller.abort(new Error("Turn owner lease was lost."));
-        void this.input.pi.abort(run.thread_id);
+        if (!leaseMonitoring) return;
+        if (renewed) {
+          leaseDeadline.confirm(renewedLeaseExpiresAt);
+          return;
+        }
+        abortOwnedTurn("turn owner lease was lost; aborting local execution");
       }).catch((error) => {
         if (!leaseMonitoring) return;
         this.input.logger.warn("turn owner lease renewal failed", {
@@ -505,6 +528,7 @@ export class ThreadTurnCoordinator {
     } finally {
       leaseMonitoring = false;
       clearInterval(leaseTimer);
+      leaseDeadline.stop();
       clearInterval(cancellationTimer);
       this.active.delete(run.thread_id);
       this.input.logger.info("queued turn execution finished", {
@@ -563,4 +587,26 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     const timer = setTimeout(done, ms);
     signal?.addEventListener("abort", done, { once: true });
   });
+}
+
+class LeaseDeadline {
+  private timer: NodeJS.Timeout | undefined;
+
+  constructor(expiresAt: number, private readonly onExpired: () => void) {
+    this.confirm(expiresAt);
+  }
+
+  confirm(expiresAt: number): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.onExpired();
+    }, Math.max(0, expiresAt - Date.now()));
+    this.timer.unref();
+  }
+
+  stop(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
 }

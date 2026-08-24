@@ -169,6 +169,24 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain(tail);
   });
 
+  it("cancels a pending text burst when /stop arrives before acceptance", async () => {
+    await startBot();
+    const pendingText = "cancel this chunk".repeat(300);
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, pendingText),
+    ]);
+    expect(env.services.routerState.pendingTextBursts.size).toBe(1);
+
+    const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+    expect(expectResponseSurface(stop)).toContain("Pending message cancelled");
+    await wait(1_150);
+
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(env.services.routerState.pendingTextBursts.size).toBe(0);
+    expect(await env.repos.messages.listThread(thread.id)).toEqual([]);
+    expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
+  });
+
   it("does not coalesce quick short text messages", async () => {
     await startBot();
 

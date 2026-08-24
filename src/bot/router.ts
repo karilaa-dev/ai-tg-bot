@@ -26,7 +26,12 @@ import {
   threadExtra,
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
-import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } from "./batching.js";
+import {
+  cancelPendingTextBurstForContext,
+  enqueueUserText,
+  flushPendingTextBurstForContext,
+  isPlainUserText,
+} from "./batching.js";
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { initializeUserAndThread, isStopCommand, privateOnly } from "./auth.js";
 import { sendWelcome, timezoneConversation } from "./onboarding.js";
@@ -140,7 +145,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
   bot.use(async (ctx, next) => {
-    if (!isPlainUserText(ctx)) {
+    if (!isPlainUserText(ctx) && !isStopCommand(ctx)) {
       await flushPendingTextBurstForContext(ctx);
     }
     await next();
@@ -156,12 +161,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
+    const textStopped = cancelPendingTextBurstForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
     const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
-    if (!fileStopped && !turnStopped) {
+    if (!textStopped && !fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-stopping"), threadExtra(ctx.thread));
+    } else if (textStopped) {
+      await replyWithThreadFallback(ctx, ctx.t("turn-pending-cancelled"), threadExtra(ctx.thread));
     }
   });
   bot.command("lang", async (ctx) => {

@@ -76,6 +76,7 @@ file-processing-stopping = 🛑 Stopping file processing...
 file-processing-cancelled = 🛑 File processing cancelled.
 stop-none = ℹ️ No active task in this thread.
 turn-stopping = 🛑 Stopping the active agent turn...
+turn-pending-cancelled = 🛑 Pending message cancelled.
 file-processed = ✅ File <code>{ $name }</code> processed.
 file-source-registered = ✅ File <code>{ $name }</code> registered for sandbox inspection.
 file-reused = ♻️ Reused saved file <code>{ $name }</code>.

@@ -76,6 +76,7 @@ file-processing-stopping = 🛑 Останавливаю обработку фа
 file-processing-cancelled = 🛑 Обработка файла отменена.
 stop-none = ℹ️ В этом треде нет активной задачи.
 turn-stopping = 🛑 Останавливаю активный ход агента...
+turn-pending-cancelled = 🛑 Отложенное сообщение отменено.
 file-processed = ✅ Файл <code>{ $name }</code> обработан.
 file-source-registered = ✅ Файл <code>{ $name }</code> зарегистрирован для анализа в песочнице.
 file-reused = ♻️ Использую сохраненный файл <code>{ $name }</code>.
