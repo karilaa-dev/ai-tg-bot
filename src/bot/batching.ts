@@ -1,6 +1,6 @@
 import type { BotContext, PendingMediaGroup, PendingMediaGroupItem } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
-import { handleUserText } from "./turns.js";
+import { handleUserText, telegramTurnSource } from "./turns.js";
 
 const mediaGroupFlushMs = 250;
 const textBurstFlushMs = 1_000;
@@ -20,6 +20,7 @@ export async function enqueueUserText(ctx: BotContext, text: string): Promise<vo
     clearTimeout(existing.timer);
     existing.ctx = ctx;
     existing.texts.push(text);
+    existing.sources.push(telegramTurnSource(ctx));
     existing.timer = scheduleTextBurstFlush(key, ctx);
     ctx.services.logger.debug("text burst appended", ctxLogMeta(ctx, {
       parts: existing.texts.length,
@@ -37,6 +38,7 @@ export async function enqueueUserText(ctx: BotContext, text: string): Promise<vo
   pendingTextBursts.set(key, {
     ctx,
     texts: [text],
+    sources: [telegramTurnSource(ctx)],
     timer: scheduleTextBurstFlush(key, ctx),
   });
   ctx.services.logger.debug("text burst queued", ctxLogMeta(ctx, { chars: text.length }));
@@ -70,7 +72,7 @@ async function flushPendingTextBurst(ctx: BotContext, key: string): Promise<void
     parts: pending.texts.length,
     chars: text.length,
   }));
-  await handleUserText(pending.ctx, text);
+  await handleUserText(pending.ctx, text, { sources: pending.sources });
 }
 
 function textBurstKey(ctx: BotContext): string | undefined {
@@ -83,7 +85,7 @@ export function isPlainUserText(ctx: BotContext): boolean {
   return typeof text === "string" && !text.startsWith("/");
 }
 
-export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: PendingMediaGroupItem): void {
+export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<PendingMediaGroupItem, "source">): void {
   if (!ctx.chat || !ctx.thread) return;
   const pendingMediaGroups = ctx.services.routerState.pendingMediaGroups;
   const key = `${ctx.chat.id}:${ctx.thread.id}:${groupId}`;
@@ -91,7 +93,7 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Pendin
   if (existing) {
     clearTimeout(existing.timer);
     existing.ctx = ctx;
-    existing.items.push(item);
+    existing.items.push({ ...item, source: telegramTurnSource(ctx) });
     ctx.services.logger.debug("media group item appended", ctxLogMeta(ctx, {
       groupId,
       items: existing.items.length,
@@ -102,7 +104,7 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Pendin
 
   const pending: PendingMediaGroup = {
     ctx,
-    items: [item],
+    items: [{ ...item, source: telegramTurnSource(ctx) }],
     timer: scheduleMediaGroupFlush(key, ctx, groupId),
   };
   pendingMediaGroups.set(key, pending);
@@ -140,6 +142,7 @@ async function flushMediaGroup(flushCtx: BotContext, key: string): Promise<void>
       captions,
       files: items.map((item) => item.file),
     },
+    sources: items.map((item) => item.source),
     onUserMessagePersisted: async (message) => {
       for (const item of items) {
         await ctx.services.repos.files.setMessageId(item.file.id, message.id, {

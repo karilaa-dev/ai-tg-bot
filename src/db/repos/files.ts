@@ -9,7 +9,6 @@ import type {
   TelegramFileRefRow,
 } from "../types.js";
 import type { ChatFileSource } from "../../files/source.js";
-import { vectorToBuffer } from "./embeddings.js";
 
 export class FilesRepo {
   constructor(
@@ -232,19 +231,11 @@ export class FilesRepo {
       idx: number;
       headingPath: string | null;
       content: string;
-      vector?: Float32Array;
     }>;
-    embeddingModel: string | null;
   }): Promise<FileRow> {
     return this.db.transaction(async (tx) => {
       const transactionalSearch = createTextSearch(tx, tx.dialect);
-      const oldChunks = await tx.query<FileChunkRow>(sql`
-        select * from file_chunks where file_id = ${fileId} order by idx asc
-      `);
       await transactionalSearch.removeChunksForFile(fileId);
-      if (oldChunks.length) {
-        await tx.execute(sql`delete from embeddings where kind = 'chunk' and ref_id in (${valueList(oldChunks.map((chunk) => chunk.id))})`);
-      }
       await tx.execute(sql`delete from file_chunks where file_id = ${fileId}`);
       const outline = input.chunks.map((chunk) => ({
         chunk_index: chunk.idx,
@@ -269,12 +260,6 @@ export class FilesRepo {
           returning *
         `);
         await transactionalSearch.indexChunk(inserted.id, fileId, inserted.content);
-        if (chunk.vector) {
-          await tx.execute(sql`
-            insert into embeddings(kind, ref_id, model, dim, vector, created_at)
-            values ('chunk', ${inserted.id}, ${input.embeddingModel}, ${chunk.vector.length}, ${vectorToBuffer(chunk.vector)}, ${Date.now()})
-          `);
-        }
       }
       const updated = await queryOne<FileRow>(tx, sql`select * from files where id = ${fileId}`);
       if (!updated) throw new Error(`File #${fileId} disappeared while replacing its extracted content.`);

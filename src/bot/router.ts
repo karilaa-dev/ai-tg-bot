@@ -17,7 +17,6 @@ import { Localizer } from "./i18n.js";
 import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
-import type { TextEmbedder } from "../memory/embeddings.js";
 import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
 import {
   clearInlineKeyboard,
@@ -36,6 +35,7 @@ import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/tel
 import { E2BFileSourceAdapter } from "../e2b/fileSource.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
+import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -46,17 +46,17 @@ interface InstallOptions {
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
   fileResolver?: FileResolver;
-  embedder?: TextEmbedder;
   commandRuntime?: CommandRuntime;
   pi?: PiRuntimeService;
+  awaitTurnProcessingOnAccept?: boolean;
 }
 
 const moscowTimezoneOffsetMin = 180;
 
 export function createBot(options: InstallOptions): Bot<BotContext> {
   const bot = new Bot<BotContext>(options.config.BOT_TOKEN);
-  installBot(bot, options);
-  return bot;
+  const services = installBot(bot, options);
+  return Object.assign(bot, { services });
 }
 
 export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotServices {
@@ -64,7 +64,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     hasCustomRepos: Boolean(options.repos),
     hasCustomLocalizer: Boolean(options.localizer),
     hasCustomTurnRunner: Boolean(options.turnRunner),
-    hasEmbedder: Boolean(options.embedder),
     hasPiRuntime: Boolean(options.pi),
   });
   const repos = options.repos ?? createRepos(options.db.db, options.db.search);
@@ -74,7 +73,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     db: options.db,
     repos,
     logger: options.logger,
-    embedder: options.embedder,
     commandRuntime: options.commandRuntime,
   });
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
@@ -97,17 +95,36 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   ) {
     fileResolver.registry.register(new E2BFileSourceAdapter(options.config, options.commandRuntime));
   }
+  const threadTitles = new ThreadTitleCoordinator({ repos, pi, logger: options.logger });
+  const turnRunner = options.turnRunner ?? runTurn;
+  const turnCoordinator = new ThreadTurnCoordinator({
+    api: bot.api,
+    config: options.config,
+    db: options.db,
+    repos,
+    logger: options.logger,
+    pi,
+    fileResolver,
+    turnRunner,
+    t: (locale, key, params) => localizer.t(locale, key, params),
+    scheduleThreadTitle: (input) => threadTitles.schedule({
+      api: bot.api,
+      chatId: input.chatId,
+      threadId: input.threadId,
+    }),
+    awaitProcessingOnAccept: options.awaitTurnProcessingOnAccept,
+  });
   const services: BotServices = {
     config: options.config,
     db: options.db,
     repos,
     logger: options.logger,
-    turnRunner: options.turnRunner ?? runTurn,
+    turnRunner,
+    turnCoordinator,
     fileResolver,
     commandRuntime: options.commandRuntime,
-    embedder: options.embedder,
     pi,
-    threadTitles: new ThreadTitleCoordinator({ repos, pi, logger: options.logger }),
+    threadTitles,
     routerState: createRouterState(),
   };
 
@@ -140,7 +157,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
     const fileStopped = await stopActiveFileProcessing(ctx, true);
-    const turnStopped = ctx.thread ? await ctx.services.pi.abort(ctx.thread.id) : false;
+    const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
     if (!fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {

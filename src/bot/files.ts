@@ -1,6 +1,5 @@
 import type { FileRow } from "../db/types.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
-import { isDoclingConversionError } from "../files/docling.js";
 import { sha256Hex } from "../files/hash.js";
 import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
@@ -70,7 +69,6 @@ export class FileProcessingStatus {
 
   updateIngestStage(progress: FileIngestProgress): Promise<void> {
     if (progress.stage === "extracting") return this.updateKey("file-processing-extracting");
-    if (progress.stage === "embedding") return this.updateKey("file-processing-embedding", { percent: indexingPercent(progress) });
     return this.updateKey("file-processing-indexing", { percent: indexingPercent(progress) });
   }
 
@@ -122,7 +120,6 @@ async function ingestTelegramFile(
   opts: {
     signal: AbortSignal | undefined;
     status?: FileProcessingStatus;
-    withEmbeddings: boolean;
     logLabel: "file" | "image";
   },
 ): Promise<IngestTelegramResult> {
@@ -138,10 +135,37 @@ async function ingestTelegramFile(
       ...(withType ? { type: cached.type } : {}),
     }));
   }
-  const reused = cached?.type === input.type && cached.extraction_status === "ready"
+  const reused = cached && isCompatibleStoredFile(cached, input)
     ? await prepareCachedTelegramFile(ctx, input, cached, signal, status)
     : undefined;
   if (reused) return { outcome: "reused-cached", prepared: reused };
+
+  if (input.type === "pdf" || input.type === "docx") {
+    throwIfAborted(signal);
+    if ((input.size ?? 0) > MAX_FILE_BYTES) {
+      if (status) await status.updateText(ctx.t("file-too-big"));
+      else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
+      return "too-big";
+    }
+    const file = await ctx.services.repos.files.insertFile({
+      userId: ctx.user.tg_id,
+      threadId: ctx.thread.id,
+      type: input.type,
+      mimeType: input.mime ?? null,
+      extractionStatus: "source_only",
+      name: input.name,
+      size: input.size ?? 0,
+      summary: input.type === "pdf"
+        ? "Original PDF available for PDF Inspector or model vision in the sandbox."
+        : "Original DOCX available for OfficeCLI in the sandbox.",
+      isInline: false,
+    });
+    const canonical = await claimTelegramSource(ctx, file, source, input);
+    return {
+      outcome: "ingested",
+      prepared: await preparedTelegramFile(ctx, input, canonical),
+    };
+  }
 
   await status?.updateKey("file-processing-downloading");
   ctx.services.logger.debug(withType ? "telegram file download starting" : "telegram image download starting", ctxLogMeta(ctx, {
@@ -209,8 +233,6 @@ async function ingestTelegramFile(
     name: input.name,
     mime: input.mime,
     contentSha256,
-    embeddings: opts.withEmbeddings ? ctx.services.repos.embeddings : undefined,
-    embedder: opts.withEmbeddings ? ctx.services.embedder : undefined,
     logger: ctx.services.logger,
     signal,
     onStage: status ? (stage) => status.updateIngestStage(stage) : undefined,
@@ -260,7 +282,6 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     const result = await ingestTelegramFile(ctx, input, {
       signal: controller.signal,
       status,
-      withEmbeddings: true,
       logLabel: "file",
     });
     if (result === "too-big" || result === undefined) return;
@@ -275,7 +296,9 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       await handlePreparedTelegramFile(ctx, input, result.prepared);
       return;
     }
-    await status.updateKey("file-processed");
+    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx"
+      ? "file-source-registered"
+      : "file-processed");
     clearJob();
     ctx.services.logger.info("file job complete", ctxLogMeta(ctx, {
       fileId: result.prepared.fileId,
@@ -292,10 +315,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       return;
     }
     ctx.services.logger.warn("file ingestion failed", { err: String(err), name: input.name });
-    const key = isDoclingConversionError(err)
-      ? err.kind === "unavailable" ? "docling-unavailable" : "docling-conversion-failed"
-      : "error-generic";
-    await status.updateText(ctx.t(key));
+    await status.updateText(ctx.t("error-generic"));
   } finally {
     clearJob();
   }
@@ -313,7 +333,6 @@ async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): P
   try {
     const result = await ingestTelegramFile(ctx, input, {
       signal: undefined,
-      withEmbeddings: false,
       logLabel: "image",
     });
     if (result === "too-big" || result === undefined) return;
@@ -392,11 +411,10 @@ async function claimTelegramSource(
   const canonical = await ctx.services.repos.files.get(observation.source.file_id);
   if (!canonical) throw new Error(`Canonical file #${observation.source.file_id} is missing.`);
   if (canonical.id === candidate.id) return canonical;
-  if (canonical.type !== candidate.type || canonical.extraction_status !== "ready") {
+  if (!isCompatibleStoredFile(canonical, input)) {
     throw new Error(`Telegram source already belongs to incompatible file #${canonical.id}.`);
   }
-  const removedChunkIds = await ctx.services.repos.files.deleteFile(candidate.id);
-  if (removedChunkIds.length) await ctx.services.repos.embeddings.deleteRefs("chunk", removedChunkIds);
+  await ctx.services.repos.files.deleteFile(candidate.id);
   ctx.services.logger.info("reused canonical Telegram source owner", ctxLogMeta(ctx, {
     duplicateFileId: candidate.id,
     canonicalFileId: canonical.id,
@@ -420,9 +438,17 @@ async function preparedTelegramFile(
 }
 
 function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): void {
-  if (file.type !== input.type || file.extraction_status !== "ready") {
+  if (!isCompatibleStoredFile(file, input)) {
     throw new Error(`Telegram source resolves to incompatible file #${file.id}.`);
   }
+}
+
+function isCompatibleStoredFile(file: FileRow, input: TelegramFileInput): boolean {
+  if (file.type !== input.type) return false;
+  if (input.type === "pdf" || input.type === "docx") {
+    return file.extraction_status === "source_only" || file.extraction_status === "ready";
+  }
+  return file.extraction_status === "ready";
 }
 
 async function handlePreparedTelegramFile(

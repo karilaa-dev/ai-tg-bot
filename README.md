@@ -13,7 +13,7 @@
 | Browser Use Cloud | Adds optional interactive browsing, screenshots, downloads, and Office previews. |
 | Tavily | Handles `web_search` and the stateless `web_extract` tool. |
 
-Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and embeddings.
+Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference and image generation.
 
 ## Requirements
 
@@ -22,7 +22,7 @@ Pi uses Codex OAuth when valid credentials are available. If Codex is not config
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
 - Optional Browser Use Cloud API key
-- Optional Docling service for DOCX, scanned PDF, and image-only PDF extraction
+- An E2B template with PDF Inspector, Poppler, ImageMagick, and OfficeCLI
 
 ## Local setup
 
@@ -53,13 +53,13 @@ Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
-Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use and Docling remain optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
+Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use remains optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
 ## E2B sandbox behavior
 
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
 - `/home/user/workspace` is writable and persists across pause and resume.
-- `/home/user/telegram-files` contains thread-visible Telegram files. The bot owns this directory and makes it read-only to agent commands. Copy a file into the workspace before editing it.
+- `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.

@@ -1,10 +1,9 @@
 import { z } from "zod";
-import type { TextEmbedder } from "../../memory/embeddings.js";
 import { hybridSearch, threadChainScope } from "../../memory/retrieval.js";
 import { enrichThreadHits } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
-export function createSearchThreadTool(input: ToolBuildInput, embedder: TextEmbedder) {
+export function createSearchThreadTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
       "Search chat messages and file chunks in this thread and its fork ancestry. Use before claiming something was not discussed, when the user asks about prior chat details, or to find message ids for load_message.",
@@ -24,8 +23,6 @@ export function createSearchThreadTool(input: ToolBuildInput, embedder: TextEmbe
         fileIds: scope.fileIds,
         query,
         k: limit,
-        embedder,
-        embeddingModel: embedder.model,
         logger: input.logger,
         signal,
       });

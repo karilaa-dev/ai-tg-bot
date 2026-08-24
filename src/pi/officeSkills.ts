@@ -19,11 +19,25 @@ export const OFFICECLI_SKILLS = [
   },
 ] as const;
 
+export const SANDBOX_FILE_SKILLS = [
+  {
+    name: "sandbox-files",
+    relativePath: "skills/sandbox-files/SKILL.md",
+    sha256: "7257f17ac529849b6efb15d97bcdcaa84f535457e29f7c6c13358b8e41a923ac",
+  },
+] as const;
+
+export const APPROVED_PI_SKILLS = [...OFFICECLI_SKILLS, ...SANDBOX_FILE_SKILLS] as const;
+
 const MAX_SKILL_READ_LINES = 2_000;
 const validationPromises = new Map<string, Promise<void>>();
 
 export function officeSkillPaths(cwd = process.cwd()): string[] {
   return OFFICECLI_SKILLS.map((skill) => path.resolve(cwd, skill.relativePath));
+}
+
+export function approvedSkillPaths(cwd = process.cwd()): string[] {
+  return APPROVED_PI_SKILLS.map((skill) => path.resolve(cwd, skill.relativePath));
 }
 
 export function validateOfficeSkills(cwd = process.cwd()): Promise<void> {
@@ -39,8 +53,12 @@ export function validateOfficeSkills(cwd = process.cwd()): Promise<void> {
   return pending;
 }
 
+export function validateApprovedSkills(cwd = process.cwd()): Promise<void> {
+  return validateSkills(cwd, APPROVED_PI_SKILLS);
+}
+
 export function createOfficeSkillReadTool(cwd = process.cwd()): ToolDefinition {
-  const roots = OFFICECLI_SKILLS.map((skill) => path.dirname(path.resolve(cwd, skill.relativePath)));
+  const roots = APPROVED_PI_SKILLS.map((skill) => path.dirname(path.resolve(cwd, skill.relativePath)));
   return {
     name: "read",
     label: "Read skill",
@@ -54,7 +72,8 @@ export function createOfficeSkillReadTool(cwd = process.cwd()): ToolDefinition {
     async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as { path: string; offset?: number; limit?: number };
       signal?.throwIfAborted();
-      const approvedRoots = await Promise.all(roots.map((root) => fs.realpath(root)));
+      const resolvedRoots = await Promise.allSettled(roots.map((root) => fs.realpath(root)));
+      const approvedRoots = resolvedRoots.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
       const requested = path.isAbsolute(params.path)
         ? params.path
         : path.resolve(cwd, params.path);
@@ -91,7 +110,14 @@ export function createOfficeSkillReadTool(cwd = process.cwd()): ToolDefinition {
 }
 
 async function validateOfficeSkillsUncached(cwd: string): Promise<void> {
-  for (const skill of OFFICECLI_SKILLS) {
+  await validateSkills(cwd, OFFICECLI_SKILLS);
+}
+
+async function validateSkills(
+  cwd: string,
+  skills: ReadonlyArray<{ name: string; relativePath: string; sha256: string }>,
+): Promise<void> {
+  for (const skill of skills) {
     const filePath = path.resolve(cwd, skill.relativePath);
     const bytes = await fs.readFile(filePath);
     const actual = createHash("sha256").update(bytes).digest("hex");

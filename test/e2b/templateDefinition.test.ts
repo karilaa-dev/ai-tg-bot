@@ -14,6 +14,7 @@ import {
   OFFICECLI_PPTX_SKILL_SHA256,
   OFFICECLI_SOURCE_REVISION,
   OFFICECLI_VERSION,
+  PDF_INSPECTOR_VERSION,
   createE2BToolboxTemplate,
   e2bToolboxBuildRef,
 } from "../../e2b-template/template.js";
@@ -29,7 +30,7 @@ describe("E2B toolbox template definition", () => {
   it("contains the missing non-browser toolbox packages", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES).toEqual(expect.arrayContaining([
       "build-essential", "curl", "dnsutils", "fd-find", "git", "gnupg", "iproute2", "jq", "openssh-client", "procps", "ripgrep",
-      "sqlite3", "tree", "unzip", "zip", "zstd",
+      "poppler-utils", "sqlite3", "tree", "unzip", "zip", "zstd",
     ]));
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);
   });
@@ -41,8 +42,19 @@ describe("E2B toolbox template definition", () => {
     expect(OFFICECLI_ARM64_SHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(OFFICECLI_DOCX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(OFFICECLI_PPTX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
+    expect(PDF_INSPECTOR_VERSION).toBe("1.17.0");
     expect(IMAGEMAGICK_COMMIT).toMatch(/^[a-f0-9]{40}$/);
     expect(IMAGEMAGICK_SOURCE_SHA256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("installs and contracts the PDF document tools", async () => {
+    const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
+    expect(dockerfile).toContain("@firecrawl/pdf-inspector@1.17.0");
+    const contract = await fs.readFile("e2b-template/assets/tool-contract.sh", "utf8");
+    expect(contract).toContain("pdf-inspector detect");
+    expect(contract).toContain('.pdfType == "Scanned"');
+    expect(contract).toContain("pdftoppm");
+    expect(contract).toContain("officecli view contract.docx text");
   });
 
   it("validates and promotes the same version-tagged build reference", async () => {
@@ -51,6 +63,7 @@ describe("E2B toolbox template definition", () => {
     expect(() => e2bToolboxBuildRef("production:unexpected")).toThrow("contain no colon");
     const source = await fs.readFile("e2b-template/build.ts", "utf8");
     expect(source).toContain("const exactRef = e2bToolboxBuildRef(buildTag)");
+    expect(source).toContain("process.env.E2B_BUILD_TAG");
     expect(source).not.toContain("buildInfo.buildId}`");
   });
 });

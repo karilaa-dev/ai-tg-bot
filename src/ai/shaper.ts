@@ -260,6 +260,10 @@ function toolLabel(name: string): string {
       return "📄 Searching file";
     case "read_file_section":
       return "📖 Reading file";
+    case "materialize_chat_files":
+      return "📥 Restoring chat files";
+    case "render_pdf_pages":
+      return "👁️ Rendering PDF pages";
     case "generate_image":
       return "🖼️ Generating image";
     case "create_file":
@@ -313,6 +317,19 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
     case "search_in_file":
     case "read_file_section":
       return metadata.fileName ?? fileIdSubject(record);
+    case "materialize_chat_files": {
+      const fileIds = record?.file_ids;
+      if (!Array.isArray(fileIds)) return undefined;
+      const valid = fileIds.filter((value): value is number => typeof value === "number");
+      return valid.length ? valid.map((value) => `#${value}`).join(", ") : undefined;
+    }
+    case "render_pdf_pages": {
+      const file = fileIdSubject(record);
+      const pages = Array.isArray(record?.pages)
+        ? record.pages.filter((value): value is number => typeof value === "number")
+        : [];
+      return [file, pages.length ? `pages ${pages.join(", ")}` : undefined].filter(Boolean).join(" · ") || undefined;
+    }
     case "generate_image":
       return generateImageSubject(record);
     case "create_file":

@@ -18,6 +18,7 @@ export const OFFICECLI_AMD64_SHA256 = "32ef7a21a54a4ca6c9806bf5e9f3d32bfb1291017
 export const OFFICECLI_ARM64_SHA256 = "56ec2c3114b66f6490888b6778cbb8413a65911a26cacc7207f29e13424966da";
 export const OFFICECLI_DOCX_SKILL_SHA256 = "1da56ed53a308222ab2516a2974ae98c6703b7d504fa5158348c39a18e85a4f1";
 export const OFFICECLI_PPTX_SKILL_SHA256 = "0d53192751d5770984f16f3c34f9923377651555c667150d7f96e16e8c9757b3";
+export const PDF_INSPECTOR_VERSION = "1.17.0";
 
 const IMAGEMAGICK_VERSION = "7.1.2-30";
 export const IMAGEMAGICK_COMMIT = "344e9056f43764bfdf82456faf3bc2feee98a6fe";
@@ -58,6 +59,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "patch",
   "pkg-config",
   "procps",
+  "poppler-utils",
   "python3-pip",
   "python3-venv",
   "ripgrep",
@@ -93,6 +95,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .makeSymlink("/usr/local/bin/python3", "/usr/local/bin/python", { user: "root", force: true })
     .runCmd(installImageMagickCommand(), { user: "root" })
     .runCmd(installOfficeCliCommand(), { user: "root" })
+    .runCmd(installPdfInspectorCommand(), { user: "root" })
     .runCmd("/usr/local/bin/tool-contract.sh", { user: "user" })
     .setWorkdir("/home/user/workspace")
     .setUser("user");
@@ -138,6 +141,12 @@ for legal_file in LICENSE NOTICE; do
   install -Dm0644 "$tmp_dir/$legal_file" "/usr/local/share/licenses/officecli/$legal_file"
 done
 /usr/local/bin/officecli --version`;
+}
+
+function installPdfInspectorCommand(): string {
+  return `set -euo pipefail
+npm install -g --omit=dev --no-audit --no-fund '@firecrawl/pdf-inspector@${PDF_INSPECTOR_VERSION}'
+[[ "$(pdf-inspector --version)" == '${PDF_INSPECTOR_VERSION}' ]]`;
 }
 
 export const e2bToolboxTemplate = createE2BToolboxTemplate();

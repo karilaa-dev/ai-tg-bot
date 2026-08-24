@@ -80,6 +80,7 @@ function fakeBrowserRuntime() {
 
 function fakeRuntime(html: string) {
   return {
+    materializeFiles: vi.fn(async () => ({ directory: "/home/user/telegram-files", available: 0, files: [] })),
     execute: vi.fn(async (_request: SandboxCommandRequest): Promise<SandboxCommandResult> => commandResult()),
     readWorkspaceFile: vi.fn(async () => ({
       sandboxId: "sandbox-1",
@@ -103,6 +104,6 @@ function commandResult(): SandboxCommandResult {
     timedOut: false,
     stdoutTruncated: false,
     stderrTruncated: false,
-    threadFiles: { directory: "/home/user/telegram-files", available: 0 },
+    threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
   };
 }

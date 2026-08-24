@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { sandboxWorkingDirectory } from "../../e2b/paths.js";
 import type { SandboxThreadFileSyncResult } from "../../sandbox/types.js";
 import { asRecord } from "../../util/records.js";
@@ -21,13 +20,14 @@ type BashToolResult = {
 const EMPTY_THREAD_FILES: SandboxThreadFileSyncResult = {
   directory: "/home/user/telegram-files",
   available: 0,
+  files: [],
 };
 
 export function createBashTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace, while synchronized Telegram files under /home/user/telegram-files are read-only. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Bind local or diagnostic services to 127.0.0.1; bind to 0.0.0.0 only for a user-requested website whose next action is publish_website. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
+      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace. Telegram files are not restored automatically: call materialize_chat_files first, then use its read-only paths under /home/user/telegram-files. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Bind local or diagnostic services to 127.0.0.1; bind to 0.0.0.0 only for a user-requested website whose next action is publish_website. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
@@ -45,7 +45,6 @@ export function createBashTool(input: ToolBuildInput) {
       let result: BashToolResult;
       try {
         if (!input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
-        const threadFiles = await resolveThreadFileDescriptors(input, signal);
         const executed = await input.commandRuntime.execute({
           userId: input.user.tg_id,
           threadId: input.thread.id,
@@ -56,7 +55,6 @@ export function createBashTool(input: ToolBuildInput) {
           workingDir: sandboxWorkingDirectory(logicalCwd),
           timeoutMs: input.config.BASH_TIMEOUT_MS,
           maxOutputChars: input.config.BASH_MAX_OUTPUT_CHARS,
-          threadFiles,
           signal,
         });
         result = {
@@ -99,7 +97,7 @@ export function createBashTool(input: ToolBuildInput) {
       if (!result) return { type: "json", value: output };
       const hint = bashModelHint(result, toolInput);
       const readOnlyReminder =
-        "Telegram files are read-only in /home/user/telegram-files; copy them to /home/user/workspace before editing.";
+        "Telegram files are read-only in /home/user/telegram-files. Call materialize_chat_files first, then copy a returned path to /home/user/workspace before editing.";
       return {
         type: "json",
         value: {

@@ -103,6 +103,7 @@ describe("create_file", () => {
 
 function fileRuntime(bytes: Buffer, contentSha256: string): CommandRuntime {
   return {
+    materializeFiles: async () => ({ directory: "/home/user/telegram-files", available: 0, files: [] }),
     execute: async () => { throw new Error("not used"); },
     readWorkspaceFile: async () => ({
       sandboxId: "sandbox-1",

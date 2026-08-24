@@ -1,13 +1,12 @@
 import { z } from "zod";
-import type { TextEmbedder } from "../../memory/embeddings.js";
 import { hybridSearch } from "../../memory/retrieval.js";
 import { getScopedFile } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
-export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbedder) {
+export function createSearchInFileTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Search chunks of an attached large file by file_id. Use before read_file_section when the user asks about a large uploaded document and the relevant chunk is unknown.",
+      "Lexically search chunks of a large TXT or CSV attachment by file_id. PDF and DOCX files are source-only and must be inspected with materialize_chat_files plus sandbox tools.",
     inputSchema: z.object({
       file_id: z.number(),
       query: z.string(),
@@ -25,6 +24,13 @@ export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbe
         input.logger?.debug("tool search_in_file not found", { threadId: input.thread.id, fileId: file_id });
         return { error: "file not found in this thread" };
       }
+      if (file.extraction_status === "source_only") {
+        return {
+          error: "sandbox_required",
+          file_id,
+          message: "This PDF or DOCX is read in E2B. Call materialize_chat_files, then use PDF Inspector or OfficeCLI.",
+        };
+      }
       const hits = await hybridSearch({
         search: input.db.search,
         repos: input.repos,
@@ -33,8 +39,6 @@ export function createSearchInFileTool(input: ToolBuildInput, embedder: TextEmbe
         fileIds: [file_id],
         query,
         k: limit,
-        embedder,
-        embeddingModel: embedder.model,
         logger: input.logger,
         signal,
       });

@@ -6,6 +6,7 @@ import {
   MAX_PROMPT_USER_NAME_CHARS,
   MAX_SYSTEM_PROMPT_FILES,
   renderPromptTemplate,
+  renderThreadSessionContext,
   renderSessionContext,
   renderSystemPrompt,
   type PromptFileContext,
@@ -163,6 +164,35 @@ describe("renderSystemPrompt", () => {
       Array.from({ length: MAX_SYSTEM_PROMPT_FILES }, (_, index) => index + 16),
     );
     expect(context.omitted_file_count).toBe(15);
+  });
+
+  it("labels source-only documents as sandbox sources", async () => {
+    const config = loadTestConfig();
+    const database = (await import("../../src/db/index.js")).createDatabase(config);
+    await database.initialize();
+    try {
+      const repos = (await import("../../src/db/repos/index.js")).createRepos(database.db, database.search);
+      const user = await repos.users.ensure({ tgId: 901, firstName: "PDF", lang: "en" });
+      const ownedThread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: ownedThread.id,
+        type: "pdf",
+        extractionStatus: "source_only",
+        name: "scan.pdf",
+        size: 1,
+        contentMd: "legacy fallback",
+        isInline: false,
+      });
+      const context = parseSessionContext(await renderThreadSessionContext({
+        repos,
+        user,
+        thread: ownedThread,
+      })) as { files: Array<{ mode: string }> };
+      expect(context.files[0]?.mode).toBe("sandbox source");
+    } finally {
+      await database.destroy();
+    }
   });
 
   it("adds current Browser Use and Office visual-QA guidance when configured", async () => {

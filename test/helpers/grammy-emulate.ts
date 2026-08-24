@@ -8,7 +8,6 @@ import { installBot } from "../../src/bot/router.js";
 import type { BotContext, BotServices } from "../../src/bot/context.js";
 import { sendFinal, type TurnRunner } from "../../src/ai/run.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
-import type { TextEmbedder } from "../../src/memory/embeddings.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
 
 export interface GrammyEmulator {
@@ -29,12 +28,8 @@ export async function createGrammyEmulator(options: {
   imageCaptioner?: { caption(input: { bytes: Buffer; name: string; mime?: string }): Promise<string> };
   pi?: PiRuntimeService;
   downloadFile?: TelegramFileDownloader;
-  embedder?: TextEmbedder;
 } = {}): Promise<GrammyEmulator> {
-  const config = loadTestConfig({
-    DOCLING_URL: "http://docling.test",
-    ...options.config,
-  });
+  const config = loadTestConfig(options.config);
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
   await db.initialize();
@@ -57,11 +52,10 @@ export async function createGrammyEmulator(options: {
   const turnRunner =
     options.turnRunner ??
     (async (input) => {
-      const latest = await input.repos.messages.latest(input.thread.id);
-      const message =
-        latest?.role === "user" && latest.text_plain === input.text
-          ? latest
-          : await input.repos.messages.insert({
+      const accepted = input.userMessageId === undefined
+        ? undefined
+        : await input.repos.messages.get(input.userMessageId);
+      const message = accepted ?? await input.repos.messages.insert({
               threadId: input.thread.id,
               role: "user",
               kind: input.userMessageKind,
@@ -89,7 +83,7 @@ export async function createGrammyEmulator(options: {
     repos,
     turnRunner,
     pi,
-    embedder: options.embedder,
+    awaitTurnProcessingOnAccept: true,
     downloadFile: options.downloadFile ?? (async ({ fileId }) => {
       const content = bot.server.fileState.getFileContent(fileId);
       if (!content) throw new Error(`test file content not found: ${fileId}`);
@@ -120,6 +114,7 @@ export async function createGrammyEmulator(options: {
     user,
     chat,
     dispose: async () => {
+      await services.turnCoordinator.shutdown();
       await services.threadTitles.waitForIdle();
       bot.dispose();
       await db.destroy();

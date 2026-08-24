@@ -43,9 +43,26 @@ export interface SandboxCommandResult {
   error?: string;
 }
 
+export interface SandboxMaterializedFile {
+  fileId: number;
+  originalName: string;
+  mimeType: string | null;
+  path: string | null;
+  status: "available" | "source_unavailable" | "restore_failed";
+  errorCode?: string;
+}
+
 export interface SandboxThreadFileSyncResult {
   directory: string;
   available: number;
+  files: SandboxMaterializedFile[];
+}
+
+export interface SandboxFileMaterializeRequest {
+  userId: number;
+  threadId: number;
+  files: SandboxThreadFile[];
+  signal?: AbortSignal;
 }
 
 export interface SandboxFileReadRequest {
@@ -101,6 +118,7 @@ export interface SandboxActivityLease {
 
 export interface CommandRuntime {
   acquireActivityLease?(userId: number, threadId: number): SandboxActivityLease;
+  materializeFiles(request: SandboxFileMaterializeRequest): Promise<SandboxThreadFileSyncResult>;
   execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
   readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult>;
   readSourceFile(request: SandboxSourceFileReadRequest): Promise<Buffer>;

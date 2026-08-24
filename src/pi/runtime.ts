@@ -21,7 +21,6 @@ import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
 import { renderSystemPrompt, renderThreadSessionContext } from "../ai/prompt.js";
 import type { CreatedFileAttachment, PendingCreatedFile, ToolBuildInput } from "../ai/tools/types.js";
-import type { TextEmbedder } from "../memory/embeddings.js";
 import type { Logger } from "../logger.js";
 import { detectImageMediaType, imageMediaTypeFromName } from "../files/mediaType.js";
 import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtension.js";
@@ -40,10 +39,10 @@ import {
 import { isBrowserUseConfigured } from "../config.js";
 import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
 import {
-  OFFICECLI_SKILLS,
+  APPROVED_PI_SKILLS,
+  approvedSkillPaths,
   createOfficeSkillReadTool,
-  officeSkillPaths,
-  validateOfficeSkills,
+  validateApprovedSkills,
 } from "./officeSkills.js";
 import { createTurnPromptContextExtension, type TurnPromptContextSource } from "./turnContext.js";
 import {
@@ -52,6 +51,7 @@ import {
   isOAuthCredential,
   resolveCodexAuthFile,
 } from "./codexCliCredentials.js";
+import { createTurnBudgetExtension, TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -93,7 +93,6 @@ export class PiRuntimeManager implements PiRuntimeService {
     db: AppDatabase;
     repos: Repos;
     logger: Logger;
-    embedder?: TextEmbedder;
     commandRuntime?: CommandRuntime;
     providerStreams?: PiProviderStreamOverrides;
   }) {
@@ -114,7 +113,7 @@ export class PiRuntimeManager implements PiRuntimeService {
 
   private async initializeModelRuntime(): Promise<void> {
     await fs.mkdir(this.agentDir, { recursive: true, mode: 0o700 });
-    await validateOfficeSkills();
+    await validateApprovedSkills();
     const piAuthPath = path.join(this.agentDir, "auth.json");
     const piCodexCredential = readStoredCredential(CODEX_PROVIDER_ID, piAuthPath);
     const cliCredentials = isOAuthCredential(piCodexCredential)
@@ -193,10 +192,11 @@ export class PiRuntimeManager implements PiRuntimeService {
       agentDir: this.agentDir,
       settingsManager,
       extensionFactories: [
+        createTurnBudgetExtension(bridge),
         createTurnPromptContextExtension(bridge),
         createChatFileContextExtension(bridge),
       ],
-      additionalSkillPaths: officeSkillPaths(),
+      additionalSkillPaths: approvedSkillPaths(),
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -208,7 +208,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     if (loadedSkills.diagnostics.length) {
       throw new Error(`OfficeCLI skill loading failed: ${JSON.stringify(loadedSkills.diagnostics)}`);
     }
-    const expectedSkillNames = OFFICECLI_SKILLS.map((skill) => skill.name).sort();
+    const expectedSkillNames = APPROVED_PI_SKILLS.map((skill) => skill.name).sort();
     const loadedSkillNames = loadedSkills.skills.map((skill) => skill.name).sort();
     if (JSON.stringify(loadedSkillNames) !== JSON.stringify(expectedSkillNames)) {
       throw new Error(`Unexpected Pi skills: expected ${expectedSkillNames.join(", ")}; loaded ${loadedSkillNames.join(", ") || "none"}.`);
@@ -390,14 +390,13 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 }
 
-export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptContextSource {
+export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptContextSource, TurnBudgetSource {
   user: UserRow;
   thread: ThreadRow;
   readonly config: AppConfig;
   readonly db: AppDatabase;
   readonly repos: Repos;
   readonly logger: Logger;
-  readonly embedder?: TextEmbedder;
   readonly commandRuntime?: CommandRuntime;
   readonly modelRegistry: ModelRegistry;
   readonly providerRouter: PiProviderRouter;
@@ -413,13 +412,13 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   private turnSystemPrompt?: string;
   private turnSessionContext?: string;
   private readonly browserRuntime?: BrowserUseRuntimeManager;
+  private turnBudget?: TurnBudget;
 
   constructor(input: {
     config: AppConfig;
     db: AppDatabase;
     repos: Repos;
     logger: Logger;
-    embedder?: TextEmbedder;
     commandRuntime?: CommandRuntime;
     user: UserRow;
     thread: ThreadRow;
@@ -434,7 +433,6 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.db = input.db;
     this.repos = input.repos;
     this.logger = input.logger;
-    this.embedder = input.embedder;
     this.commandRuntime = input.commandRuntime;
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
@@ -455,6 +453,12 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.attachments = [];
     this.pendingCreatedFiles = [];
     this.publishedWebsites = [];
+    this.turnBudget = new TurnBudget({
+      maxModelCycles: this.config.PI_MAX_MODEL_CYCLES,
+      maxToolCalls: this.config.PI_MAX_TOOL_CALLS,
+      maxConsecutiveToolFailures: this.config.PI_MAX_CONSECUTIVE_TOOL_FAILURES,
+      maxIdenticalToolFailures: this.config.PI_MAX_IDENTICAL_TOOL_FAILURES,
+    });
     this.turnFileCache.clear();
     this.contextFileIds.clear();
     this.durableContextFileIds.clear();
@@ -486,6 +490,10 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     return this.turnSessionContext;
   }
 
+  currentTurnBudget(): TurnBudget | undefined {
+    return this.turnBudget;
+  }
+
   buildInput(): ToolBuildInput {
     return {
       config: this.config,
@@ -494,7 +502,6 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       user: this.user,
       thread: this.thread,
       logger: this.logger,
-      embedder: this.embedder,
       commandRuntime: this.commandRuntime,
       browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
       resolveFile: (file, signal) => this.resolveFile(file, signal),
@@ -599,6 +606,11 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
           for (const fileId of fileIds) {
             let file = byId.get(fileId);
             if (!file) continue;
+            if (file.type === "pdf" || file.type === "docx") {
+              injectedIds.add(file.id);
+              additions.push(sandboxDocumentContext(file));
+              continue;
+            }
             if (file.is_inline && file.content_md && containsInlineAttachment(textParts, file.id)) {
               injectedIds.add(file.id);
               continue;
@@ -616,7 +628,9 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               const resolved = await bridge.resolveFile(file);
               const contentChanged = Boolean(resolved.contentSha256
                 && file.content_sha256 !== resolved.contentSha256);
-              const needsExtractionRetry = file.type !== "image" && file.extraction_status !== "ready";
+              const needsExtractionRetry = file.type !== "image"
+                && file.extraction_status !== "ready"
+                && file.extraction_status !== "source_only";
               if (contentChanged || needsExtractionRetry) {
                 bridge.logger.warn(contentChanged ? "chat file content hash changed" : "chat file extraction retrying", {
                   fileId: file.id,
@@ -630,8 +644,6 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
                     file,
                     bytes: resolved.bytes,
                     mime: resolved.mimeType,
-                    embeddings: bridge.repos.embeddings,
-                    embedder: bridge.embedder,
                     logger: bridge.logger,
                   });
                 } catch (error) {
@@ -678,12 +690,26 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
 }
 
 function durableDocumentContext(file: FileRow): TextContent {
+  if (file.extraction_status === "source_only") return sandboxDocumentContext(file);
   if (file.is_inline && file.content_md) {
     return { type: "text", text: `\n\n<attachment id="${file.id}" name="${file.name}">\n${file.content_md}\n</attachment>` };
   }
   return {
     type: "text",
     text: `\n\n[Attachment #${file.id} ${file.name} is indexed. ${file.summary ?? ""} Use search_in_file or read_file_section for its full extracted content.]`,
+  };
+}
+
+function sandboxDocumentContext(file: FileRow): TextContent {
+  const next = file.type === "pdf"
+    ? "Call materialize_chat_files, then use pdf-inspector for native text or render_pdf_pages for vision."
+    : "Call materialize_chat_files, read the OfficeCLI DOCX skill, and inspect it with officecli.";
+  const fallback = file.extraction_status === "ready"
+    ? " If the original source cannot be restored, use search_in_file/read_file_section as a legacy extracted-text fallback."
+    : "";
+  return {
+    type: "text",
+    text: `\n\n[Attachment #${file.id} ${file.name} should be inspected in the sandbox. ${next}${fallback}]`,
   };
 }
 

@@ -4,7 +4,6 @@ import type { AppDatabase } from "../../db/index.js";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType, ThreadRow, UserRow } from "../../db/types.js";
 import type { Logger } from "../../logger.js";
-import type { TextEmbedder } from "../../memory/embeddings.js";
 import type { ResolvedChatFile } from "../../files/source.js";
 import type { CommandRuntime } from "../../sandbox/types.js";
 import type { PublishedWebsite } from "../../sandbox/types.js";
@@ -18,7 +17,6 @@ export interface ToolBuildInput {
   user: UserRow;
   thread: ThreadRow;
   logger?: Logger;
-  embedder?: TextEmbedder;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
@@ -87,6 +85,8 @@ interface LoadMessageFileEntry {
   summary: string | null;
   inline: boolean;
   bash_input_file_id: number;
+  source_only: boolean;
+  recommended_tool: "materialize_chat_files" | "load_message";
 }
 
 interface LoadMessageImageEntry {
@@ -109,4 +109,5 @@ export type LoadMessageResult =
       images: LoadMessageImageEntry[];
       materialized_file_ids: number[];
       durable_file_ids: number[];
+      sandbox_file_ids: number[];
     };

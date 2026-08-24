@@ -11,7 +11,7 @@ import {
 import { requireE2BApiKey, validateE2BToolboxTemplate } from "./validate.js";
 
 const apiKey = requireE2BApiKey();
-const buildTag = buildTimestampTag(new Date());
+const buildTag = process.env.E2B_BUILD_TAG?.trim() || buildTimestampTag(new Date());
 const buildInfo = await Template.build(e2bToolboxTemplate, E2B_TOOLBOX_TEMPLATE_NAME, {
   apiKey,
   tags: [buildTag],

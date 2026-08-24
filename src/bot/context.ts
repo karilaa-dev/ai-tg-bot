@@ -7,12 +7,13 @@ import type { ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TurnRunner } from "../ai/run.js";
 import type { AcceptedFileType } from "../files/ingest.js";
-import type { TextEmbedder } from "../memory/embeddings.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
+import type { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
+import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
 
 interface ActiveFileJob {
   controller: AbortController;
@@ -28,6 +29,7 @@ export interface PendingMediaGroupItem {
     name: string;
     inline: boolean;
   };
+  source: TelegramTurnSource;
 }
 
 export interface PendingMediaGroup {
@@ -40,10 +42,10 @@ interface PendingTextBurst {
   ctx: BotContext;
   timer: NodeJS.Timeout;
   texts: string[];
+  sources: TelegramTurnSource[];
 }
 
 export interface RouterState {
-  busyThreads: Set<number>;
   activeFileJobs: Map<string, ActiveFileJob>;
   pendingMediaGroups: Map<string, PendingMediaGroup>;
   pendingTextBursts: Map<string, PendingTextBurst>;
@@ -51,7 +53,6 @@ export interface RouterState {
 
 export function createRouterState(): RouterState {
   return {
-    busyThreads: new Set<number>(),
     activeFileJobs: new Map<string, ActiveFileJob>(),
     pendingMediaGroups: new Map<string, PendingMediaGroup>(),
     pendingTextBursts: new Map<string, PendingTextBurst>(),
@@ -64,9 +65,9 @@ export interface BotServices {
   repos: Repos;
   logger: Logger;
   turnRunner: TurnRunner;
+  turnCoordinator: ThreadTurnCoordinator;
   fileResolver: FileResolver;
   commandRuntime?: CommandRuntime;
-  embedder?: TextEmbedder;
   pi: PiRuntimeService;
   threadTitles: ThreadTitleCoordinator;
   routerState: RouterState;
