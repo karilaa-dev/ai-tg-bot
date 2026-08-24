@@ -27,7 +27,6 @@ import {
   threadExtra,
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
-import { handleUserText } from "./turns.js";
 import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } from "./batching.js";
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { initializeUserAndThread, isStopCommand, privateOnly } from "./auth.js";

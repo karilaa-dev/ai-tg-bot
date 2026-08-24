@@ -1,4 +1,4 @@
-export class FileProcessingCancelledError extends Error {
+class FileProcessingCancelledError extends Error {
   constructor() {
     super("file processing cancelled");
     // Named "AbortError" so it interops with fetch/AbortController AbortErrors downstream.

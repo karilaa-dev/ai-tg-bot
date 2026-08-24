@@ -15,9 +15,9 @@ import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 
-export const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
-export const TELEGRAM_MAIN_MODEL = "main";
-export const TELEGRAM_HELPER_MODEL = "helper";
+const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
+const TELEGRAM_MAIN_MODEL = "main";
+const TELEGRAM_HELPER_MODEL = "helper";
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 

@@ -42,7 +42,7 @@ export function vectorToBuffer(vector: Float32Array): Buffer {
   return buffer;
 }
 
-export function bufferToVector(buffer: Buffer, dim: number): Float32Array {
+function bufferToVector(buffer: Buffer, dim: number): Float32Array {
   const vector = new Float32Array(dim);
   for (let i = 0; i < dim; i += 1) vector[i] = buffer.readFloatLE(i * 4);
   return vector;

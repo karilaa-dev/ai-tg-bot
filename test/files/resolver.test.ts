@@ -4,7 +4,6 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { FileResolver } from "../../src/files/resolver.js";
-import type { ChatFileSourceAdapter } from "../../src/files/source.js";
 import { createLogger } from "../../src/logger.js";
 
 describe("transport-neutral file resolver", () => {

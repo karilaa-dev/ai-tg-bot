@@ -3,7 +3,6 @@ import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
 import { deferred } from "../helpers/async.js";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
-import { sendFinal, type TurnInput } from "../../src/ai/run.js";
 import type { ThreadRow } from "../../src/db/types.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
 

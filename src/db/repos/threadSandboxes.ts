@@ -49,20 +49,7 @@ export class ThreadSandboxesRepo {
       delete from thread_sandboxes
       where deployment_id = ${deploymentId}
         and thread_id = ${threadId}
-        and sandbox_id = ${sandboxId}
+      and sandbox_id = ${sandboxId}
     `);
-  }
-
-  async removeBySandboxIds(sandboxIds: string[]): Promise<void> {
-    const uniqueIds = [...new Set(sandboxIds.filter(Boolean))];
-    if (!uniqueIds.length) return;
-    await this.db.transaction(async (tx) => {
-      for (const sandboxId of uniqueIds) {
-        await tx.execute(sql`
-          delete from thread_sandboxes
-          where sandbox_id = ${sandboxId}
-        `);
-      }
-    });
   }
 }

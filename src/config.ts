@@ -1,9 +1,9 @@
 import "dotenv/config";
 import { z } from "zod";
 
-export const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
+const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
 
-export const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.url().optional());
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
@@ -74,22 +74,7 @@ export function isBrowserUseConfigured(
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  return ConfigSchema.parse(resolveDatabaseEnvironment(env));
-}
-
-function resolveDatabaseEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const password = env.POSTGRES_PASSWORD;
-  if (!password) return env;
-
-  const databaseUrl = env.DB_URL;
-  if (databaseUrl && databaseUrl !== "sqlite:/app/data/bot.db" && databaseUrl !== "sqlite:./data/bot.db") {
-    return env;
-  }
-
-  return {
-    ...env,
-    DB_URL: `postgres://aibot:${encodeURIComponent(password)}@postgres:5432/aibot`,
-  };
+  return ConfigSchema.parse(env);
 }
 
 export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {

@@ -14,7 +14,6 @@ import { createRenderOfficePreviewTool } from "./renderOfficePreview.js";
 import type { BotToolRegistry, ToolBuildInput } from "./types.js";
 
 export type {
-  BotToolDefinition,
   BotToolRegistry,
   CreatedFileAttachment,
   PendingCreatedFile,

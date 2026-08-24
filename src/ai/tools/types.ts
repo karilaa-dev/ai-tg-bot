@@ -8,7 +8,7 @@ import type { TextEmbedder } from "../../memory/embeddings.js";
 import type { ResolvedChatFile } from "../../files/source.js";
 import type { CommandRuntime } from "../../sandbox/types.js";
 import type { PublishedWebsite } from "../../sandbox/types.js";
-import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
+import { MAX_FILE_BYTES } from "../../files/limits.js";
 import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
 
 export interface ToolBuildInput {
@@ -64,7 +64,7 @@ export type CreatedFileDeliveryPreference = "auto" | "photo" | "document";
 export const MAX_LOADED_MESSAGE_CHARS = 8000;
 export const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 
-export interface BotToolDefinition<Input = unknown, Output = unknown> {
+interface BotToolDefinition<Input = unknown, Output = unknown> {
   description: string;
   holdsCommandActivity?: boolean;
   inputSchema: z.ZodType<Input>;
@@ -79,7 +79,7 @@ export function defineBotTool<Input, Output>(definition: BotToolDefinition<Input
   return definition;
 }
 
-export interface LoadMessageFileEntry {
+interface LoadMessageFileEntry {
   file_id: number;
   marker: string;
   type: StoredFileType;
@@ -89,7 +89,7 @@ export interface LoadMessageFileEntry {
   bash_input_file_id: number;
 }
 
-export interface LoadMessageImageEntry {
+interface LoadMessageImageEntry {
   file_id: number;
   marker: string;
   name: string;

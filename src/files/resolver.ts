@@ -9,7 +9,7 @@ import {
   type ResolvedChatFile,
 } from "./source.js";
 
-export class FileSourceRegistry {
+class FileSourceRegistry {
   private readonly adapters = new Map<string, ChatFileSourceAdapter>();
 
   register(adapter: ChatFileSourceAdapter): void {
@@ -73,7 +73,7 @@ function assertE2BSourceIntegrity(file: FileRow, resolved: ResolvedChatFile): vo
   }
 }
 
-export function rowToSource(row: FileSourceRow): ChatFileSource {
+function rowToSource(row: FileSourceRow): ChatFileSource {
   let locator: Record<string, unknown>;
   try {
     const parsed = JSON.parse(row.locator_json) as unknown;

@@ -3,7 +3,7 @@ import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { ChatFileSource, ChatFileSourceAdapter } from "../files/source.js";
 import type { CommandRuntime, SandboxFileReadResult } from "../sandbox/types.js";
 
-export function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): string {
+function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): string {
   return config.E2B_DEPLOYMENT_ID;
 }
 

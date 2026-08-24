@@ -1,7 +1,6 @@
 import path from "node:path";
 import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
-import type { Logger } from "../../logger.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { sha256Hex } from "../../files/hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
@@ -11,7 +10,6 @@ import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
-  MAX_FILE_MB,
   type CreatedFileAttachment,
   type CreatedFileDeliveryPreference,
   type ToolBuildInput,
@@ -37,7 +35,7 @@ export function assertCreatedFileCapacity(input: ToolBuildInput): number {
   return usedBefore;
 }
 
-export function assertPhotoDeliverable(type: string | null, name: string): void {
+function assertPhotoDeliverable(type: string | null, name: string): void {
   if (type !== "image") {
     throw new Error(`delivery photo requires an image file: ${name}`);
   }
@@ -223,14 +221,6 @@ export async function prepareDirectCreatedFile(
   };
 }
 
-export async function exportSandboxFileBytes(
-  input: ToolBuildInput,
-  virtualPath: string,
-  signal?: AbortSignal,
-): Promise<Buffer> {
-  return (await exportSandboxFile(input, virtualPath, signal)).bytes;
-}
-
 async function exportSandboxFile(
   input: ToolBuildInput,
   virtualPath: string,
@@ -385,7 +375,7 @@ function executableMagic(headHex: string): string | undefined {
   }
 }
 
-export function formatBytes(bytes: number): string {
+function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${Math.round(bytes / 1024 / 1024)} MB`;
@@ -401,12 +391,6 @@ function normalizeCreatedFileName(value: string): string {
 export function normalizeBashCwd(value: string): string {
   const normalized = path.posix.normalize(value);
   return normalized.startsWith("/") ? normalized : `/${normalized}`;
-}
-
-export function truncateBashOutput(value: string, maxChars: number): { text: string; truncated: boolean } {
-  const limit = Math.max(1, maxChars);
-  if (value.length <= limit) return { text: value, truncated: false };
-  return { text: value.slice(0, limit), truncated: true };
 }
 
 export function bashModelHint(result: Record<string, unknown>, input?: unknown): string | undefined {

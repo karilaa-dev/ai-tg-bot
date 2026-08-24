@@ -27,7 +27,7 @@ export type ThinkingRunSummary = {
   toolCounts: ToolCountSummary[];
 };
 
-export type ToolCountSummary = {
+type ToolCountSummary = {
   label: string;
   count: number;
 };

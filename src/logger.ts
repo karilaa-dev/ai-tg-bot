@@ -1,7 +1,7 @@
 import type { AppConfig } from "./config.js";
 
 const levels = ["debug", "info", "warn", "error"] as const;
-export type LogLevel = (typeof levels)[number];
+type LogLevel = (typeof levels)[number];
 
 export interface Logger {
   level: LogLevel;

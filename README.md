@@ -43,27 +43,17 @@ The bot reads `~/.codex/auth.json` by default. Set `CODEX_AUTH_FILE` to use anot
 
 An OAuth credential already stored in `PI_CODING_AGENT_DIR/auth.json` takes precedence over `CODEX_AUTH_FILE`. This keeps existing deployments compatible.
 
-## Database and upgrades
+## Database
 
 The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `postgresql://` form.
 
-The current schema no longer uses the old host-file `files.path` column. Rows remain in active thread scope when they have a Telegram or E2B source, extracted text, or indexed chunks. Host-only diagnostic rows remain in the database but are hidden from the agent. The upgrade does not delete old host files.
+## Dokploy
 
-OpenSandbox-era generated files that were never delivered through Telegram cannot be imported. Keep the old managed-file directory as rollback material until the new deployment passes its smoke tests.
+Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `npm run build` and starts the bot with `npm start`.
 
-For the Unraid cutover, use the [Unraid to Dokploy migration guide](MIGRATION.md).
+Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
-## Docker Compose
-
-```bash
-cp .env.example .env
-# Set the required API keys and POSTGRES_PASSWORD.
-docker compose up --build -d
-```
-
-Compose runs the bot on an outbound network and PostgreSQL on a separate internal network. The bot does not need a Docker socket, privileged mode, a host workspace mount, or a local sandbox service.
-
-Compose does not mount Codex credentials for you. If you want Codex primary inference in the container, mount a persistent directory at a path such as `/app/data/codex`, set `CODEX_AUTH_FILE=/app/data/codex/auth.json`, and keep the directory writable.
+Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use and Docling remain optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
 ## E2B sandbox behavior
 
@@ -91,15 +81,6 @@ npm run e2b:template:check
 ```
 
 The build command promotes `production` only after the contract, internet access, and pause/resume checks pass. Moving the tag affects new sandboxes only.
-
-To remove legacy Desktop sandboxes, stop the bot, preview the match set, then execute the deletion:
-
-```bash
-npm run e2b:sandboxes:prune-desktop
-npm run e2b:sandboxes:prune-desktop -- --execute
-```
-
-Only sandboxes with template name `desktop` and metadata `app=ai-tg-bot` match. The executed command permanently deletes their workspace and process state. Telegram-backed files remain recoverable.
 
 ### E2B settings
 

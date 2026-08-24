@@ -1,9 +1,8 @@
 import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
-import type { Logger } from "../logger.js";
 
-export async function initializeSchema(db: SqlExecutor, dialect: DialectName, logger?: Logger): Promise<void> {
+export async function initializeSchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
   if (dialect === "sqlite") {
     await db.execute(sql`pragma foreign_keys = on`);
     await db.execute(sql`pragma journal_mode = wal`);
@@ -12,9 +11,6 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName, lo
     if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
     if (dialect === "sqlite") await initializeSqlite(tx);
     else await initializePostgres(tx);
-    await backfillTelegramFileRefs(tx, logger);
-    await removeLegacyThreadSandboxColumns(tx, dialect);
-    await removeLegacyFilePathColumn(tx, dialect, logger);
   });
 }
 
@@ -239,111 +235,4 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
-}
-
-async function backfillTelegramFileRefs(db: SqlExecutor, logger?: Logger): Promise<void> {
-  const rows = await db.query<{
-    source_id: number;
-    file_id: number;
-    locator_json: string;
-    mime_type: string | null;
-    file_type: string;
-    message_role: string | null;
-    created_at: number;
-  }>(sql`
-    select
-      s.id as source_id,
-      s.file_id,
-      s.locator_json,
-      coalesce(s.mime_type, f.mime_type) as mime_type,
-      f.type as file_type,
-      m.role as message_role,
-      s.created_at
-    from file_sources s
-    join files f on f.id = s.file_id
-    left join messages m on m.id = f.message_id
-    where s.transport = 'telegram'
-      and not exists (
-        select 1 from telegram_file_refs r
-        where r.file_id = s.file_id
-      )
-  `);
-  let restored = 0;
-  let malformed = 0;
-  for (const row of rows) {
-    try {
-      const locator = JSON.parse(row.locator_json) as Record<string, unknown>;
-      const telegramFileId = typeof locator.file_id === "string" ? locator.file_id.trim() : "";
-      if (!telegramFileId) throw new Error("missing file_id");
-      const uniqueId = typeof locator.file_unique_id === "string" && locator.file_unique_id.trim()
-        ? locator.file_unique_id.trim()
-        : null;
-      await db.execute(sql`
-        insert into telegram_file_refs(
-          file_id, telegram_file_id, telegram_file_unique_id, direction, media_kind,
-          telegram_message_id, width, height, telegram_size, is_primary, first_seen_at, last_seen_at
-        ) values (
-          ${row.file_id}, ${telegramFileId}, ${uniqueId},
-          ${row.message_role === "assistant" ? "outbound" : "inbound"},
-          ${row.file_type === "image" && row.mime_type === "image/jpeg" ? "photo" : "document"},
-          ${null}, ${null}, ${null}, ${null}, 1, ${row.created_at}, ${row.created_at}
-        )
-        on conflict(file_id, telegram_file_id) do nothing
-      `);
-      restored += 1;
-    } catch (error) {
-      malformed += 1;
-      logger?.warn("telegram file reference backfill skipped malformed source", {
-        sourceId: row.source_id,
-        fileId: row.file_id,
-        error: String(error),
-      });
-    }
-  }
-  if (restored || malformed) {
-    logger?.info("telegram file reference backfill complete", { restored, malformed });
-  }
-}
-
-async function removeLegacyFilePathColumn(
-  db: SqlExecutor,
-  dialect: DialectName,
-  logger?: Logger,
-): Promise<void> {
-  const columns = dialect === "sqlite"
-    ? await db.query<{ name: string }>(sql.raw("pragma table_info(files)"))
-    : await db.query<{ name: string }>(sql`
-        select column_name as name
-        from information_schema.columns
-        where table_schema = current_schema() and table_name = 'files'
-      `);
-  if (!columns.some((column) => column.name === "path")) return;
-  const unavailable = await db.query<{ count: number }>(sql`
-    select count(*) as count
-    from files f
-    where f.path is not null
-      and not exists (select 1 from file_sources s where s.file_id = f.id)
-  `);
-  if ((unavailable[0]?.count ?? 0) > 0) {
-    logger?.warn("legacy host-only file records have no durable byte source", {
-      files: unavailable[0]!.count,
-    });
-  }
-  await db.execute(sql.raw("alter table files drop column path"));
-}
-
-async function removeLegacyThreadSandboxColumns(db: SqlExecutor, dialect: DialectName): Promise<void> {
-  const columns = dialect === "sqlite"
-    ? await db.query<{ name: string }>(sql.raw("pragma table_info(thread_sandboxes)"))
-    : await db.query<{ name: string }>(sql`
-        select column_name as name
-        from information_schema.columns
-        where table_schema = current_schema() and table_name = 'thread_sandboxes'
-      `);
-  const names = new Set(columns.map((column) => column.name));
-  for (const legacyName of ["template", "layout_version", "continuous_started_at"]) {
-    if (names.has(legacyName)) {
-      await db.execute(sql.raw(`alter table thread_sandboxes drop column ${legacyName}`));
-    }
-  }
 }
