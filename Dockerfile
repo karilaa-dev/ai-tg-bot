@@ -31,8 +31,6 @@ RUN apt-get update \
         ca-certificates \
         gzip \
         tar \
-        tini \
-        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -43,8 +41,6 @@ ENV NODE_ENV=production \
     E2B_DEPLOYMENT_ID=ai-tg-bot \
     TELEGRAM_FILE_RESTORE_TIMEOUT_MS=300000 \
     TELEGRAM_FILE_RESTORE_CONCURRENCY=4 \
-    APP_UID=1000 \
-    APP_GID=1000 \
     PI_CODING_AGENT_DIR=/app/data/pi
 
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
@@ -53,12 +49,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/locales ./locales
 COPY --from=build --chown=node:node /app/skills ./skills
 COPY --from=build --chown=node:node /app/system_prompt.md ./system_prompt.md
-COPY docker/entrypoint.sh /usr/local/bin/ai-tg-bot-entrypoint
-
-RUN chmod 0755 /usr/local/bin/ai-tg-bot-entrypoint \
-    && install -d -o 1000 -g 1000 /app/data /app/data/pi
 
 VOLUME ["/app/data"]
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/ai-tg-bot-entrypoint"]
 CMD ["node", "dist/src/main.js"]

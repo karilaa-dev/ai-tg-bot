@@ -74,7 +74,22 @@ export function isBrowserUseConfigured(
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  return ConfigSchema.parse(env);
+  return ConfigSchema.parse(resolveDatabaseEnvironment(env));
+}
+
+function resolveDatabaseEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const password = env.POSTGRES_PASSWORD;
+  if (!password) return env;
+
+  const databaseUrl = env.DB_URL;
+  if (databaseUrl && databaseUrl !== "sqlite:/app/data/bot.db" && databaseUrl !== "sqlite:./data/bot.db") {
+    return env;
+  }
+
+  return {
+    ...env,
+    DB_URL: `postgres://aibot:${encodeURIComponent(password)}@postgres:5432/aibot`,
+  };
 }
 
 export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {

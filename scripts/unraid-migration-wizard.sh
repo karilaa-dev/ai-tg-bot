@@ -404,19 +404,19 @@ if [[ -n "$PI_MOUNT_LINE" ]]; then
   [[ -n "$PI_MOUNT_SOURCE" ]] || fail "The selected Pi mount has no usable source."
 fi
 
-APP_UID=$(container_env_value "$BOT_CONTAINER" APP_UID || true)
-APP_GID=$(container_env_value "$BOT_CONTAINER" APP_GID || true)
+SOURCE_APP_UID=$(container_env_value "$BOT_CONTAINER" APP_UID || true)
+SOURCE_APP_GID=$(container_env_value "$BOT_CONTAINER" APP_GID || true)
 E2B_DEPLOYMENT_ID=$(container_env_value "$BOT_CONTAINER" E2B_DEPLOYMENT_ID || true)
 if [[ -z "$E2B_DEPLOYMENT_ID" ]]; then
   E2B_DEPLOYMENT_ID=$(container_env_value "$BOT_CONTAINER" OPEN_SANDBOX_DEPLOYMENT_ID || true)
 fi
 BROWSER_USE_DEPLOYMENT_ID=$(container_env_value "$BOT_CONTAINER" BROWSER_USE_DEPLOYMENT_ID || true)
-: "${APP_UID:=1000}"
-: "${APP_GID:=1000}"
+: "${SOURCE_APP_UID:=1000}"
+: "${SOURCE_APP_GID:=1000}"
 : "${E2B_DEPLOYMENT_ID:=ai-tg-bot}"
 : "${BROWSER_USE_DEPLOYMENT_ID:=ai-tg-bot}"
-[[ "$APP_UID" =~ ^[1-9][0-9]*$ ]] || fail "The source APP_UID must be a positive number."
-[[ "$APP_GID" =~ ^[1-9][0-9]*$ ]] || fail "The source APP_GID must be a positive number."
+[[ "$SOURCE_APP_UID" =~ ^[1-9][0-9]*$ ]] || fail "The source application UID must be a positive number."
+[[ "$SOURCE_APP_GID" =~ ^[1-9][0-9]*$ ]] || fail "The source application GID must be a positive number."
 [[ "$E2B_DEPLOYMENT_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
   || fail "The source E2B deployment identity is invalid."
 [[ "$BROWSER_USE_DEPLOYMENT_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
@@ -458,7 +458,7 @@ if [[ -n "$LEGACY_DATA_LINE" ]]; then
   LEGACY_DATA_SOURCE=${LEGACY_DATA_LINE##*|}
   say "Legacy managed-file source excluded from export: $LEGACY_DATA_SOURCE"
 fi
-say "Application identity: UID $APP_UID, GID $APP_GID"
+say "Source application identity: UID $SOURCE_APP_UID, GID $SOURCE_APP_GID"
 
 stage "Create ready-to-run app data"
 say "This can take several minutes. The source bot will remain stopped."
@@ -479,7 +479,7 @@ docker run --rm \
     chmod 750 /run/secrets
     chown "$3:$2" /run/secrets/bot-token
     chmod 440 /run/secrets/bot-token
-  ' sh "$HOST_UID" "$APP_GID" "$APP_UID"
+  ' sh "$HOST_UID" "$SOURCE_APP_GID" "$SOURCE_APP_UID"
 
 mkdir "$EXPORT_DIR"
 docker run --rm \
@@ -491,10 +491,10 @@ docker run --rm \
     mkdir -p /backup/app-data/pi
     chown -R "$3:$2" /backup/app-data
     chmod 700 /backup/app-data /backup/app-data/pi
-  ' sh "$HOST_UID" "$APP_GID" "$APP_UID"
+  ' sh "$HOST_UID" "$SOURCE_APP_GID" "$SOURCE_APP_UID"
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   "${SOURCE_READONLY_MOUNTS[@]}" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   -e DB_URL=sqlite:/source/bot.db \
@@ -503,14 +503,14 @@ docker run --rm \
   dist/scripts/upgrade-export-sqlite.js --out /backup/app-data/bot.db
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   "${SOURCE_READONLY_MOUNTS[@]}" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
   tar -C "$SOURCE_PI_PATH" -czpf /backup/.pi-copy.tgz .
 
 if ! docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup,readonly" \
   "$ARCHIVE_IMAGE" \
   sh -eu -c '
@@ -522,7 +522,7 @@ if ! docker run --rm \
 fi
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
   tar -C /backup/app-data/pi -xzpf /backup/.pi-copy.tgz
@@ -530,7 +530,7 @@ rm -f -- "$EXPORT_DIR/.pi-copy.tgz"
 
 TARGET_APPDATA_MOUNT="type=bind,source=$EXPORT_DIR/app-data,target=/app/data"
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "$TARGET_APPDATA_MOUNT" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
@@ -544,14 +544,14 @@ docker run --rm \
   dist/scripts/upgrade-audit.js snapshot --out /backup/.baseline.json
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "$TARGET_APPDATA_MOUNT" \
   --entrypoint node \
   "$AUDIT_IMAGE" \
   dist/scripts/prepare-migration-data.js --data /app/data
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "$TARGET_APPDATA_MOUNT" \
   --mount "type=bind,source=$EXPORT_DIR,target=/audit,readonly" \
   --mount "type=bind,source=$SECRET_DIR,target=/run/secrets,readonly" \
@@ -565,13 +565,13 @@ docker run --rm \
   dist/scripts/upgrade-audit.js verify --against /audit/.baseline.json
 
 docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup" \
   "$ARCHIVE_IMAGE" \
   tar -C /backup/app-data -czpf /backup/.app-data.tgz.partial .
 
 if ! docker run --rm \
-  --user "$APP_UID:$APP_GID" \
+  --user "$SOURCE_APP_UID:$SOURCE_APP_GID" \
   --mount "type=bind,source=$EXPORT_DIR,target=/backup,readonly" \
   "$ARCHIVE_IMAGE" \
   sh -eu -c '
@@ -617,8 +617,6 @@ printf '  DB_URL=sqlite:/app/data/bot.db\n'
 printf '  PI_CODING_AGENT_DIR=/app/data/pi\n'
 printf '  E2B_DEPLOYMENT_ID=%s\n' "$E2B_DEPLOYMENT_ID"
 printf '  BROWSER_USE_DEPLOYMENT_ID=%s\n' "$BROWSER_USE_DEPLOYMENT_ID"
-printf '  APP_UID=%s\n' "$APP_UID"
-printf '  APP_GID=%s\n' "$APP_GID"
 printf '\n'
 say "Unpack app-data.tgz into the empty /app/data volume, then start the bot normally."
 warn "Do not restart the old bot while the Dokploy bot is running with the same token."

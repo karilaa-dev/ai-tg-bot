@@ -37,3 +37,41 @@ describe("Browser Use configuration", () => {
     expect(() => loadConfig({ ...required, BROWSER_USE_DEFAULT_TIMEOUT_MINUTES: "241" })).toThrow();
   });
 });
+
+describe("database configuration", () => {
+  it("URL-encodes the Compose PostgreSQL password", () => {
+    const config = loadConfig({
+      ...required,
+      POSTGRES_PASSWORD: "complex:/?#[]@!$&'()*+,;=% password",
+    });
+
+    expect(config.DB_URL).toBe(
+      "postgres://aibot:complex%3A%2F%3F%23%5B%5D%40!%24%26'()*%2B%2C%3B%3D%25%20password@postgres:5432/aibot",
+    );
+  });
+
+  it("preserves an explicit external database URL", () => {
+    const databaseUrl = "postgresql://dokploy:secret@dokploy-postgres:5432/aibot";
+    const config = loadConfig({
+      ...required,
+      DB_URL: databaseUrl,
+      POSTGRES_PASSWORD: "compose-only",
+    });
+
+    expect(config.DB_URL).toBe(databaseUrl);
+  });
+
+  it.each([
+    undefined,
+    "sqlite:/app/data/bot.db",
+    "sqlite:./data/bot.db",
+  ])("uses Compose PostgreSQL when DB_URL is %s", (databaseUrl) => {
+    const config = loadConfig({
+      ...required,
+      ...(databaseUrl === undefined ? {} : { DB_URL: databaseUrl }),
+      POSTGRES_PASSWORD: "compose-password",
+    });
+
+    expect(config.DB_URL).toBe("postgres://aibot:compose-password@postgres:5432/aibot");
+  });
+});
