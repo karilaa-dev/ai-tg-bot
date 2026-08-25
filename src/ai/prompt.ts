@@ -18,7 +18,7 @@ export interface PromptFileContext {
   id: number;
   name: string;
   type: string;
-  mode: "chat reference" | "inline" | "searchable";
+  mode: "chat reference" | "inline" | "searchable" | "sandbox source";
   summary?: string | null;
 }
 
@@ -26,15 +26,18 @@ export async function renderThreadSessionContext(input: {
   repos: Repos;
   user: UserRow;
   thread: ThreadRow;
+  maxMessageId?: number;
   now?: Date;
 }): Promise<string> {
-  const scope = await threadChainScope(input.repos, input.thread);
+  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
   const files = await input.repos.files.listByIds(scope.fileIds);
   const promptFiles: PromptFileContext[] = files.map((file) => ({
     id: file.id,
     name: file.name,
     type: file.type,
-    mode: file.type === "image"
+    mode: file.type === "pdf" || file.type === "docx"
+      ? "sandbox source"
+      : file.type === "image"
       ? "chat reference"
       : file.is_inline ? "inline" : "searchable",
     summary: file.summary,

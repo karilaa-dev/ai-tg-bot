@@ -13,7 +13,7 @@
 | Browser Use Cloud | Adds optional interactive browsing, screenshots, downloads, and Office previews. |
 | Tavily | Handles `web_search` and the stateless `web_extract` tool. |
 
-Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and embeddings.
+Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference and image generation.
 
 ## Requirements
 
@@ -22,7 +22,7 @@ Pi uses Codex OAuth when valid credentials are available. If Codex is not config
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
 - Optional Browser Use Cloud API key
-- Optional Docling service for DOCX, scanned PDF, and image-only PDF extraction
+- An E2B template with PDF Inspector, Poppler, ImageMagick, and OfficeCLI
 
 ## Local setup
 
@@ -53,13 +53,14 @@ Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
-Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use and Docling remain optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
+Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use remains optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
 ## E2B sandbox behavior
 
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
 - `/home/user/workspace` is writable and persists across pause and resume.
-- `/home/user/telegram-files` contains thread-visible Telegram files. The bot owns this directory and makes it read-only to agent commands. Copy a file into the workspace before editing it.
+- `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
+- `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
@@ -73,14 +74,15 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 `E2B_TEMPLATE=ai-tg-bot-tools:production` selects the private template in [`e2b-template`](e2b-template/README.md). It uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
-Build, validate, and promote a new immutable version:
+Build and validate an immutable version, smoke-test that exact tag, then promote it:
 
 ```bash
 npm run e2b:template:build
-npm run e2b:template:check
+E2B_TEMPLATE=ai-tg-bot-tools:<version-tag> npm run live:e2b-check
+E2B_PROMOTE_TAG=<version-tag> npm run e2b:template:promote
 ```
 
-The build command promotes `production` only after the contract, internet access, and pause/resume checks pass. Moving the tag affects new sandboxes only.
+The build command never changes `production`. Promotion revalidates the immutable build and moves the tag only after the separate live runtime smoke succeeds. Moving the tag affects new sandboxes only.
 
 ### E2B settings
 

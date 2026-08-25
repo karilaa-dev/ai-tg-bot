@@ -8,6 +8,17 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type MessageKind = "text" | "image" | "file" | "system";
 
+export type TurnRunStatus =
+  | "queued"
+  | "running"
+  | "awaiting_delivery"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type TurnDeliveryStatus = "pending" | "delivered" | "unknown" | "failed";
+
 export type ThreadTitleSource = "placeholder" | "explicit" | "generated";
 
 interface UsersTable {
@@ -49,6 +60,37 @@ interface MessagesTable {
   created_at: number;
 }
 
+interface TurnRunsTable {
+  id: number;
+  user_id: number;
+  thread_id: number;
+  user_message_id: number;
+  chat_id: number;
+  message_thread_id: number | null;
+  locale: Locale;
+  status: TurnRunStatus;
+  delivery_status: TurnDeliveryStatus;
+  result_message_id: number | null;
+  provider: string | null;
+  model: string | null;
+  usage_json: string | null;
+  failure_code: string | null;
+  owner_id: string | null;
+  lease_expires_at: number | null;
+  cancel_requested_at: number | null;
+  accepted_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  updated_at: number;
+}
+
+interface TurnRunSourcesTable {
+  turn_run_id: number;
+  telegram_update_id: number;
+  telegram_message_id: number | null;
+  created_at: number;
+}
+
 interface FilesTable {
   id: number;
   user_id: number;
@@ -57,7 +99,7 @@ interface FilesTable {
   type: StoredFileType;
   content_sha256: string | null;
   mime_type: string | null;
-  extraction_status: "pending" | "ready" | "failed";
+  extraction_status: "pending" | "ready" | "failed" | "source_only";
   name: string;
   size: number;
   content_md: string | null;
@@ -151,6 +193,8 @@ interface EmbeddingsTable {
 export type UserRow = UsersTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
+export type TurnRunRow = TurnRunsTable;
+export type TurnRunSourceRow = TurnRunSourcesTable;
 export type FileRow = FilesTable;
 export type ThreadSandboxRow = ThreadSandboxesTable;
 export type BrowserUseProfileRow = BrowserUseProfilesTable;

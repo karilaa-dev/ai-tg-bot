@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
 export function createPublishWebsiteTool(input: ToolBuildInput) {
@@ -15,14 +14,12 @@ export function createPublishWebsiteTool(input: ToolBuildInput) {
     execute: async ({ port, site_dir: siteDirectory, path = "/" }, signal) => {
       try {
         if (!input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
-        const threadFiles = await resolveThreadFileDescriptors(input, signal);
         const published = await input.commandRuntime.publishWebsite({
           userId: input.user.tg_id,
           threadId: input.thread.id,
           port,
           siteDirectory,
           path,
-          threadFiles,
           signal,
         });
         input.registerPublishedWebsite?.(published);

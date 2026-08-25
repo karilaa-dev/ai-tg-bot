@@ -15,7 +15,7 @@ const MAX_RELOADED_FILES = 5;
 export function createLoadMessageTool(input: ToolBuildInput) {
   return defineBotTool<{ message_id: number; file_ids?: number[] }, LoadMessageResult>({
     description:
-      "Load one previous chat message by numeric id from search_thread results or a user reference. Without file_ids this returns attachment metadata without loading bytes. Pass up to five attachment ids from that message only when their exact bytes or live image/document context is needed. Ready documents fall back to their durable extracted text if the chat source is unavailable.",
+      "Load one previous chat message and its attachment metadata. Pass file_ids only for image bytes or legacy extracted document context. For source-only PDF/DOCX files, this selects their metadata without downloading bytes; call materialize_chat_files next.",
     inputSchema: z.object({
       message_id: z.number(),
       file_ids: z.array(z.number().int().positive()).max(MAX_RELOADED_FILES).optional(),
@@ -23,7 +23,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
     execute: async ({ message_id, file_ids = [] }, signal): Promise<LoadMessageResult> => {
       input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
       const row = await input.repos.messages.get(message_id);
-      const scope = await threadChainScope(input.repos, input.thread);
+      const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
       if (!row || !scope.messageIds.includes(row.id)) {
         input.logger?.debug("tool load_message not found", { threadId: input.thread.id, messageId: message_id });
         return { error: "message not found in this thread" };
@@ -35,9 +35,14 @@ export function createLoadMessageTool(input: ToolBuildInput) {
       if (invalidIds.length) return { error: `files not attached to message #${row.id}: ${invalidIds.join(", ")}` };
       const materializedIds: number[] = [];
       const durableIds: number[] = [];
+      const sandboxIds: number[] = [];
       if (requestedIds.length) {
         for (const fileId of requestedIds) {
           const file = byId.get(fileId)!;
+          if (file.type === "pdf" || file.type === "docx") {
+            sandboxIds.push(fileId);
+            continue;
+          }
           try {
             if (!input.resolveFile) throw new Error("chat attachment byte access is unavailable");
             await input.resolveFile(file, signal);
@@ -54,6 +59,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           }
         }
         input.selectContextFiles?.(materializedIds);
+        input.selectContextFiles?.(sandboxIds);
         (input.selectDurableContextFiles ?? input.selectContextFiles)?.(durableIds);
       }
       input.logger?.info("tool load_message complete", {
@@ -62,6 +68,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
         files: files.length,
         materializedFiles: materializedIds,
         durableFiles: durableIds,
+        sandboxFiles: sandboxIds,
       });
       return {
         message_id: row.id,
@@ -77,6 +84,10 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           summary: file.summary,
           inline: Boolean(file.is_inline),
           bash_input_file_id: file.id,
+          source_only: file.extraction_status === "source_only",
+          recommended_tool: file.type === "pdf" || file.type === "docx"
+            ? "materialize_chat_files" as const
+            : "load_message" as const,
         })),
         images: files
           .filter((file) => file.type === "image")
@@ -91,6 +102,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           })),
         materialized_file_ids: materializedIds,
         durable_file_ids: durableIds,
+        sandbox_file_ids: sandboxIds,
       };
     },
   });

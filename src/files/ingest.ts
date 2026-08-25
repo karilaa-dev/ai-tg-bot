@@ -1,25 +1,19 @@
 import { parse } from "csv-parse/sync";
 import type { AppConfig } from "../config.js";
-import type { EmbeddingsRepo } from "../db/repos/embeddings.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import type { TextEmbedder } from "../memory/embeddings.js";
-import { EMBEDDING_BATCH_SIZE } from "../pi/retrievalExtension.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
 import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { chatFileMarker } from "./contextMarker.js";
-import { convertWithDocling } from "./docling.js";
 import { sha256Hex } from "./hash.js";
-import { extractPdfText } from "./pdfText.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
-const MIN_NATIVE_PDF_TEXT_CHARS = 500;
 const FILE_SUMMARY_MAX_CHARS = 180;
 const OUTLINE_PREVIEW_HEADINGS = 5;
 
 export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image";
-type FileIngestStage = "extracting" | "indexing" | "embedding";
+type FileIngestStage = "extracting" | "indexing";
 export interface FileIngestProgress {
   stage: FileIngestStage;
   completed?: number;
@@ -48,8 +42,6 @@ export interface FileIngestInput {
   name: string;
   mime?: string;
   imageSummary?: string | null;
-  embeddings?: EmbeddingsRepo;
-  embedder?: TextEmbedder;
   logger?: Logger;
   signal?: AbortSignal;
   onStage?: FileIngestStageReporter;
@@ -68,8 +60,6 @@ export interface FileRefreshInput {
   file: FileRow;
   bytes: Buffer | Uint8Array;
   mime?: string | null;
-  embeddings?: EmbeddingsRepo;
-  embedder?: TextEmbedder;
   logger?: Logger;
   signal?: AbortSignal;
   onStage?: FileIngestStageReporter;
@@ -109,6 +99,31 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   }
+  if (type === "pdf" || type === "docx") {
+    throwIfAborted(input.signal);
+    const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
+    const file = await input.repo.insertFile({
+      userId: input.userId,
+      threadId: input.threadId,
+      messageId: input.messageId ?? null,
+      contentSha256: input.contentSha256 ?? sha256Hex(bytes),
+      mimeType: input.mime ?? null,
+      extractionStatus: "source_only",
+      type,
+      name: input.name,
+      size: bytes.length,
+      summary: sandboxDocumentSummary(type),
+      isInline: false,
+    });
+    input.logger?.info("sandbox document registered", {
+      fileId: file.id,
+      name: input.name,
+      type,
+      bytes: bytes.length,
+      ms: Date.now() - startedAt,
+    });
+    return { fileId: file.id, card: cardForFile(file, [], input.name), inline: false, type };
+  }
   let fileId: number | undefined;
   const chunkIds: number[] = [];
   let completed = false;
@@ -117,7 +132,6 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       const existingChunkIds = await input.repo.deleteFile(fileId);
       if (!chunkIds.length) chunkIds.push(...existingChunkIds);
     }
-    if (input.embeddings && chunkIds.length) await input.embeddings.deleteRefs("chunk", chunkIds);
   };
   const finish = async (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): Promise<FileIngestResult> => {
     completed = true;
@@ -138,7 +152,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     throwIfAborted(input.signal);
 
     await reportStage(input.onStage, { stage: "extracting" }, input.signal);
-    const content = await contentFor(type, input.name, bytes, input.config, input.logger, input.signal);
+    const content = await contentFor(type, input.name, bytes, input.logger, input.signal);
     throwIfAborted(input.signal);
     const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
     const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
@@ -212,7 +226,20 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  const content = await contentFor(type, input.file.name, bytes, input.config, input.logger, input.signal);
+  if (type === "pdf" || type === "docx") {
+    return input.repo.updateExtraction(input.file.id, {
+      contentSha256,
+      mimeType: input.mime ?? input.file.mime_type,
+      size: bytes.length,
+      contentMd: null,
+      summary: sandboxDocumentSummary(type),
+      outline: null,
+      isInline: false,
+      status: "source_only",
+    });
+  }
+
+  const content = await contentFor(type, input.file.name, bytes, input.logger, input.signal);
   throwIfAborted(input.signal);
   const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
   const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
@@ -223,20 +250,6 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
       total: chunks.length,
     }, input.signal);
   }
-  const vectors = input.embeddings && input.embedder && chunks.length
-    ? await embedChunksStrict({
-        chunks: chunks.map((chunk) => chunk.content),
-        embedder: input.embedder,
-        embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-        logger: input.logger,
-        signal: input.signal,
-        onProgress: (completed, total) => reportStage(input.onStage, {
-          stage: "embedding",
-          completed,
-          total,
-        }, input.signal),
-      })
-    : undefined;
   throwIfAborted(input.signal);
   const refreshed = await input.repo.replaceDocumentExtraction(input.file.id, {
     contentSha256,
@@ -245,13 +258,11 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     contentMd: inline ? content : null,
     summary: firstLine(content),
     isInline: inline,
-    chunks: chunks.map((chunk, index) => ({
+    chunks: chunks.map((chunk) => ({
       idx: chunk.idx,
       headingPath: chunk.headingPath,
       content: chunk.content,
-      vector: vectors?.[index],
     })),
-    embeddingModel: vectors ? input.config.OPENROUTER_EMBEDDING_MODEL : null,
   });
   input.logger?.info("chat file extracted content refreshed", {
     fileId: refreshed.id,
@@ -287,7 +298,6 @@ async function indexDocumentChunks(
   chunkIds: number[],
 ): Promise<Array<{ chunk_index: number; heading_path: string | null }>> {
   const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
-  const insertedChunks: Array<{ id: number; content: string }> = [];
   const totalIndexingSteps = Math.max(1, chunks.length);
   let completedIndexingSteps = 0;
   for (let index = 0; index < chunks.length; index += 1) {
@@ -295,7 +305,6 @@ async function indexDocumentChunks(
     throwIfAborted(input.signal);
     const inserted = await input.repo.insertChunk({ fileId: file.id, idx: chunk.idx, headingPath: chunk.headingPath, content: chunk.content });
     chunkIds.push(inserted.id);
-    insertedChunks.push({ id: inserted.id, content: inserted.content });
     outline.push({ chunk_index: inserted.idx, heading_path: inserted.heading_path });
     completedIndexingSteps += 1;
     await reportStage(input.onStage, {
@@ -303,31 +312,6 @@ async function indexDocumentChunks(
       completed: completedIndexingSteps,
       total: totalIndexingSteps,
     }, input.signal);
-  }
-  if (input.embeddings && input.embedder && insertedChunks.length) {
-    input.logger?.debug("file chunk embedding starting", {
-      fileId: file.id,
-      chunks: insertedChunks.length,
-      model: input.config.OPENROUTER_EMBEDDING_MODEL,
-    });
-    await reportStage(input.onStage, {
-      stage: "embedding",
-      completed: 0,
-      total: insertedChunks.length,
-    }, input.signal);
-    await persistChunkEmbeddings({
-      embeddings: input.embeddings,
-      chunks: insertedChunks,
-      embedder: input.embedder,
-      embeddingModel: input.config.OPENROUTER_EMBEDDING_MODEL,
-      logger: input.logger,
-      signal: input.signal,
-      onProgress: (completed, total) => reportStage(input.onStage, {
-        stage: "embedding",
-        completed,
-        total,
-      }, input.signal),
-    });
   }
   return outline;
 }
@@ -339,6 +323,9 @@ export function cardForFile(
 ): string {
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
+  if (file.extraction_status === "source_only") {
+    return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "OfficeCLI"}.`;
+  }
   if (file.is_inline) {
     return [
       `${marker} File #${file.id}: ${displayName} (${file.type}, inline).`,
@@ -358,87 +345,10 @@ export function cardForFile(
   ].filter(Boolean).join(" ");
 }
 
-async function embedChunksStrict(input: {
-  chunks: string[];
-  embedder: TextEmbedder;
-  embeddingModel: string;
-  logger?: Logger;
-  signal?: AbortSignal;
-  onProgress?: (completed: number, total: number) => void | Promise<void>;
-}): Promise<Float32Array[]> {
-  throwIfAborted(input.signal);
-  const vectors: Float32Array[] = [];
-  await input.onProgress?.(0, input.chunks.length);
-  for (let start = 0; start < input.chunks.length; start += EMBEDDING_BATCH_SIZE) {
-    const batch = input.chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
-    input.logger?.debug("replacement chunk embedding batch starting", {
-      start,
-      count: batch.length,
-      total: input.chunks.length,
-      model: input.embeddingModel,
-    });
-    const batchVectors = await input.embedder.embed(batch, input.signal);
-    throwIfAborted(input.signal);
-    if (batchVectors.length !== batch.length || batchVectors.some((vector) => !vector)) {
-      throw new Error("Replacement chunk embedding returned an incomplete vector batch.");
-    }
-    vectors.push(...batchVectors);
-    await input.onProgress?.(vectors.length, input.chunks.length);
-  }
-  return vectors;
-}
-
-async function persistChunkEmbeddings(input: {
-  embeddings: EmbeddingsRepo;
-  chunks: Array<{ id: number; content: string }>;
-  embedder: TextEmbedder;
-  embeddingModel: string;
-  logger?: Logger;
-  signal?: AbortSignal;
-  onProgress?: (completed: number, total: number) => void | Promise<void>;
-}): Promise<void> {
-  throwIfAborted(input.signal);
-  try {
-    const batchSize = EMBEDDING_BATCH_SIZE;
-    let completed = 0;
-    input.logger?.debug("chunk embedding persistence starting", {
-      chunks: input.chunks.length,
-      batchSize,
-      model: input.embeddingModel,
-    });
-    for (let start = 0; start < input.chunks.length; start += batchSize) {
-      const batch = input.chunks.slice(start, start + batchSize);
-      input.logger?.debug("chunk embedding batch starting", {
-        start,
-        count: batch.length,
-        total: input.chunks.length,
-      });
-      const vectors = await input.embedder.embed(batch.map((chunk) => chunk.content), input.signal);
-      throwIfAborted(input.signal);
-      for (let i = 0; i < batch.length; i += 1) {
-        const chunk = batch[i]!;
-        const vector = vectors[i];
-        if (vector) await input.embeddings.upsert("chunk", chunk.id, vector, input.embeddingModel);
-        else input.logger?.warn("chunk embedding missing vector", { chunkId: chunk.id, model: input.embeddingModel });
-        completed += 1;
-        await input.onProgress?.(completed, input.chunks.length);
-      }
-    }
-    input.logger?.debug("chunk embedding persistence complete", { chunks: input.chunks.length });
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    input.logger?.warn("chunk embedding persistence failed", {
-      chunks: input.chunks.length,
-      err: String(err),
-    });
-  }
-}
-
 async function contentFor(
   type: AcceptedFileType,
   name: string,
   bytes: Buffer,
-  config: AppConfig,
   logger?: Logger,
   signal?: AbortSignal,
 ): Promise<string> {
@@ -455,45 +365,13 @@ async function contentFor(
     logger?.debug("csv file content extracted", { name, rows: Math.max(0, rows.length - 1), columns: rows[0]?.length ?? 0 });
     return `columns: ${columns} · ${Math.max(0, rows.length - 1)} rows\n\n${raw}`;
   }
-  if (type === "pdf") {
-    try {
-      logger?.debug("native PDF text extraction starting", { name, bytes: bytes.length });
-      const native = await extractPdfText({ bytes, signal });
-      const nativeContent = [
-        `# ${name}`,
-        `Extracted with native PDF text extraction (${native.pages} pages, ${native.textChars} text characters).`,
-        native.markdown,
-      ].join("\n\n");
-      if (native.textChars >= MIN_NATIVE_PDF_TEXT_CHARS) {
-        logger?.info("native PDF text extraction complete", {
-          name,
-          pages: native.pages,
-          textChars: native.textChars,
-        });
-        return nativeContent;
-      }
-      if (!config.DOCLING_URL && native.textChars > 0) {
-        logger?.info("keeping short native PDF text because Docling is disabled", {
-          name,
-          pages: native.pages,
-          textChars: native.textChars,
-        });
-        return nativeContent;
-      }
-      logger?.warn("native PDF text extraction returned little text; falling back to docling", {
-        name,
-        pages: native.pages,
-        textChars: native.textChars,
-      });
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      logger?.warn("native PDF text extraction failed; falling back to docling", { err: String(err), name });
-    }
-  }
-  logger?.info("docling conversion starting", { name, type, bytes: bytes.length });
-  const converted = await convertWithDocling({ config, filename: name, bytes, signal });
-  logger?.info("docling conversion complete", { name, type, chars: converted.length });
-  return converted;
+  throw new Error(`${type} content must be inspected in the sandbox`);
+}
+
+function sandboxDocumentSummary(type: "pdf" | "docx"): string {
+  return type === "pdf"
+    ? "Original PDF available for PDF Inspector or model vision in the sandbox."
+    : "Original DOCX available for OfficeCLI in the sandbox.";
 }
 
 async function reportStage(

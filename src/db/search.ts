@@ -17,8 +17,13 @@ export interface TextSearch {
   indexChunk(id: number, fileId: number, text: string): Promise<void>;
   removeMessage(id: number): Promise<void>;
   removeChunksForFile(fileId: number): Promise<void>;
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]>;
+  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]>;
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]>;
+}
+
+export interface MessageSearchScope {
+  threadId: number;
+  maxMessageId?: number;
 }
 
 interface SearchTarget {
@@ -56,8 +61,8 @@ class SqliteTextSearch implements TextSearch {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.message, threadIds, q, limit);
+  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
+    return this.search(TARGETS.message, threadIds, q, limit, scopes);
   }
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
@@ -86,8 +91,14 @@ class SqliteTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
   }
 
-  private search(target: SearchTarget, scopeIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    if (!scopeIds.length) return Promise.resolve([]);
+  private search(
+    target: SearchTarget,
+    scopeIds: number[],
+    q: string,
+    limit: number,
+    scopes?: MessageSearchScope[],
+  ): Promise<SearchHit[]> {
+    if (!scopeIds.length || scopes?.length === 0) return Promise.resolve([]);
     const query = sqliteQuery(q);
     const table = sql.raw(target.sqliteTable);
     const idColumn = sql.raw(target.idColumn);
@@ -96,7 +107,7 @@ class SqliteTextSearch implements TextSearch {
       select ${idColumn} as id, snippet(${table}, 0, '<b>', '</b>', '...', ${sql.raw(String(SNIPPET_MAX_WORDS))}) as snippet, bm25(${table}) as rank
       from ${table}
       where ${table} match ${query}
-        and ${scopeColumn} in (${valueList(scopeIds)})
+        and ${messageScopePredicate(scopeColumn, idColumn, scopeIds, scopes)}
       order by rank
       limit ${limit}
     `);
@@ -122,8 +133,8 @@ class PgTextSearch implements TextSearch {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    return this.search(TARGETS.message, threadIds, q, limit);
+  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
+    return this.search(TARGETS.message, threadIds, q, limit, scopes);
   }
 
   searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
@@ -156,8 +167,14 @@ class PgTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
   }
 
-  private search(target: SearchTarget, scopeIds: number[], q: string, limit: number): Promise<SearchHit[]> {
-    if (!scopeIds.length) return Promise.resolve([]);
+  private search(
+    target: SearchTarget,
+    scopeIds: number[],
+    q: string,
+    limit: number,
+    scopes?: MessageSearchScope[],
+  ): Promise<SearchHit[]> {
+    if (!scopeIds.length || scopes?.length === 0) return Promise.resolve([]);
     const table = sql.raw(target.pgTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
@@ -167,12 +184,27 @@ class PgTextSearch implements TextSearch {
              ts_headline('simple', text, websearch_to_tsquery('simple', ${q}), ${maxWords}) as snippet,
              ts_rank(ts, websearch_to_tsquery('simple', ${q})) as rank
       from ${table}
-      where ${scopeColumn} in (${valueList(scopeIds)})
+      where ${messageScopePredicate(scopeColumn, idColumn, scopeIds, scopes)}
         and ts @@ websearch_to_tsquery('simple', ${q})
       order by rank desc
       limit ${limit}
     `);
   }
+}
+
+function messageScopePredicate(
+  scopeColumn: ReturnType<typeof sql.raw>,
+  idColumn: ReturnType<typeof sql.raw>,
+  scopeIds: number[],
+  scopes?: MessageSearchScope[],
+) {
+  if (!scopes) return sql`${scopeColumn} in (${valueList(scopeIds)})`;
+  const allowedThreadIds = new Set(scopeIds);
+  const effectiveScopes = scopes.filter((scope) => allowedThreadIds.has(scope.threadId));
+  if (!effectiveScopes.length) return sql`1 = 0`;
+  return sql`(${sql.join(effectiveScopes.map((scope) => scope.maxMessageId === undefined
+    ? sql`(${scopeColumn} = ${scope.threadId})`
+    : sql`(${scopeColumn} = ${scope.threadId} and ${idColumn} <= ${scope.maxMessageId})`), sql` or `)})`;
 }
 
 function sqliteQuery(q: string): string {

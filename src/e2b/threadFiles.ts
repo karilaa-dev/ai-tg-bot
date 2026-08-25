@@ -3,13 +3,17 @@ import { threadChainScope } from "../memory/retrieval.js";
 import type { SandboxThreadFile } from "../sandbox/types.js";
 
 export async function resolveThreadFileDescriptors(
-  input: Pick<ToolBuildInput, "repos" | "thread">,
+  input: Pick<ToolBuildInput, "repos" | "thread" | "maxMessageId">,
   _signal?: AbortSignal,
+  selectedFileIds?: number[],
 ): Promise<SandboxThreadFile[]> {
-  const scope = await threadChainScope(input.repos, input.thread);
+  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
+  const selected = selectedFileIds
+    ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
+    : scope.fileIds;
   const [files, refs] = await Promise.all([
-    input.repos.files.listByIds(scope.fileIds),
-    input.repos.files.listTelegramFileRefs(scope.fileIds),
+    input.repos.files.listByIds(selected),
+    input.repos.files.listTelegramFileRefs(selected),
   ]);
   const refsByFile = new Map<number, typeof refs>();
   for (const ref of refs) {

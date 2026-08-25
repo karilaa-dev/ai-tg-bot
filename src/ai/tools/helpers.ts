@@ -6,7 +6,6 @@ import { sha256Hex } from "../../files/hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
 import { e2bFileSource } from "../../e2b/fileSource.js";
-import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { threadChainScope } from "../../memory/retrieval.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
@@ -43,7 +42,7 @@ function assertPhotoDeliverable(type: string | null, name: string): void {
 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
-  const scope = await threadChainScope(input.repos, input.thread);
+  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
   const isCurrentTurnAttachment = input.createdFiles?.some((attachment) => attachment.fileId === fileId) ?? false;
   if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
   return file;
@@ -79,8 +78,6 @@ export async function prepareCreatedFile(
         bytes,
         name: displayName,
         mime: file.mime,
-        embeddings: input.repos.embeddings,
-        embedder: input.embedder,
         logger: input.logger,
         signal,
       });
@@ -167,8 +164,6 @@ export async function prepareDirectCreatedFile(
         name: displayName,
         mime: file.mime,
         imageSummary: file.summary,
-        embeddings: input.repos.embeddings,
-        embedder: input.embedder,
         logger: input.logger,
         signal,
       });
@@ -227,14 +222,12 @@ async function exportSandboxFile(
   signal?: AbortSignal,
 ) {
   if (!input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
-  const threadFiles = await resolveThreadFileDescriptors(input, signal);
   return input.commandRuntime.readWorkspaceFile({
     userId: input.user.tg_id,
     threadId: input.thread.id,
     virtualPath,
     maxBytes: MAX_FILE_BYTES,
     preserveSource: true,
-    threadFiles,
     signal,
   });
 }

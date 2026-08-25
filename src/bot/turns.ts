@@ -1,7 +1,9 @@
-import type { MessageKind, MessageRow } from "../db/types.js";
+import type { MessageKind } from "../db/types.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
+import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
+import type { DurableTurnAttachment } from "../db/repos/turnRuns.js";
 
 export async function handleUserText(
   ctx: BotContext,
@@ -9,62 +11,49 @@ export async function handleUserText(
   options: {
     userMessageKind?: MessageKind;
     userMessageContent?: unknown;
-    onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
+    attachments?: DurableTurnAttachment[];
+    sources?: TelegramTurnSource[];
   } = {},
 ): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
-  const busyThreads = ctx.services.routerState.busyThreads;
-  if (busyThreads.has(ctx.thread.id)) {
-    ctx.services.logger.info("turn queued while thread busy", ctxLogMeta(ctx, {
-      kind: options.userMessageKind ?? "text",
-      textChars: text.length,
-    }));
-    const message = await ctx.services.repos.messages.insert({
-      threadId: ctx.thread.id,
-      role: "user",
-      kind: options.userMessageKind,
-      content: options.userMessageContent ?? { text },
-      textPlain: text,
-    });
-    await options.onUserMessagePersisted?.(message);
-    await replyWithThreadFallback(ctx, ctx.t("busy"), threadExtra(ctx.thread));
-    return;
-  }
-  busyThreads.add(ctx.thread.id);
   const startedAt = Date.now();
-  ctx.services.logger.info("turn dispatch starting", ctxLogMeta(ctx, {
+  const kind = options.userMessageKind ?? "text";
+  const content = options.userMessageContent ?? { text };
+  ctx.services.logger.info("turn durable acceptance starting", ctxLogMeta(ctx, {
     kind: options.userMessageKind ?? "text",
     textChars: text.length,
   }));
-  try {
-    await ctx.services.turnRunner({
-      api: ctx.api,
-      chatId: ctx.chat.id,
-      messageThreadId: ctx.thread.topic_id ?? undefined,
-      config: ctx.services.config,
-      db: ctx.services.db,
-      repos: ctx.services.repos,
-      logger: ctx.services.logger,
-      user: ctx.user,
-      thread: ctx.thread,
-      text,
-      userMessageKind: options.userMessageKind,
-      userMessageContent: options.userMessageContent,
-      onUserMessagePersisted: options.onUserMessagePersisted,
-      resolveFile: (file, signal) => ctx.services.fileResolver.resolveFile(file, signal),
-      pi: ctx.services.pi,
-      t: ctx.t,
-    });
-    ctx.services.threadTitles.schedule({
-      api: ctx.api,
-      chatId: ctx.chat.id,
-      threadId: ctx.thread.id,
-    });
-  } finally {
-    busyThreads.delete(ctx.thread.id);
-    ctx.services.logger.info("turn dispatch finished", ctxLogMeta(ctx, {
-      kind: options.userMessageKind ?? "text",
-      ms: Date.now() - startedAt,
-    }));
+  const accepted = await ctx.services.turnCoordinator.accept({
+    userId: ctx.user.tg_id,
+    threadId: ctx.thread.id,
+    chatId: ctx.chat.id,
+    messageThreadId: ctx.thread.topic_id,
+    locale: ctx.user.lang,
+    kind,
+    content,
+    textPlain: text,
+    sources: options.sources ?? [telegramTurnSource(ctx, { kind, content, textPlain: text })],
+    attachments: options.attachments,
+  });
+  if (accepted.created && accepted.queuedBehind) {
+    await replyWithThreadFallback(ctx, ctx.t("busy"), threadExtra(ctx.thread));
   }
+  ctx.services.logger.info("turn durable acceptance finished", ctxLogMeta(ctx, {
+    turnRunId: accepted.turnRun.id,
+    kind: options.userMessageKind ?? "text",
+    duplicate: !accepted.created || undefined,
+    queuedBehind: accepted.queuedBehind || undefined,
+    ms: Date.now() - startedAt,
+  }));
+}
+
+export function telegramTurnSource(
+  ctx: BotContext,
+  payload?: TelegramTurnSource["payload"],
+): TelegramTurnSource {
+  return {
+    updateId: ctx.update.update_id,
+    messageId: ctx.message?.message_id ?? null,
+    payload,
+  };
 }

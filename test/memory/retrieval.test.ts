@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
+import { telegramFileSource } from "../../src/files/telegramSource.js";
 import { clearRetrievalVectorCacheForTests, hybridSearch, threadChainScope } from "../../src/memory/retrieval.js";
 
 describe("Pi retrieval tools backend", () => {
@@ -44,6 +45,7 @@ describe("Pi retrieval tools backend", () => {
       search: db.search,
       repos,
       threadIds: scope.threadIds,
+      messageScopes: scope.messageScopes,
       messageIds: scope.messageIds,
       fileIds: scope.fileIds,
       query: "orchid",
@@ -56,7 +58,7 @@ describe("Pi retrieval tools backend", () => {
     ]));
   });
 
-  it("uses FTS for message-only search without invoking the embedder", async () => {
+  it("uses FTS for message-only search", async () => {
     const user = await repos.users.ensure({ tgId: 302, firstName: "Vector" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
     const message = await repos.messages.insert({
@@ -65,8 +67,6 @@ describe("Pi retrieval tools backend", () => {
       content: { text: "meaning probe available" },
       textPlain: "meaning probe available",
     });
-    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
-
     const hits = await hybridSearch({
       search: db.search,
       repos,
@@ -74,119 +74,9 @@ describe("Pi retrieval tools backend", () => {
       fileIds: [],
       query: "meaning probe",
       k: 3,
-      embedder: { model: "test-embed", embed },
-      embeddingModel: "test-embed",
     });
 
     expect(hits[0]).toMatchObject({ kind: "message", ref_id: message.id });
-    expect(embed).not.toHaveBeenCalled();
-  });
-
-  it("finds semantic file-chunk hits when current-model vectors exist", async () => {
-    const user = await repos.users.ensure({ tgId: 304, firstName: "ChunkVector" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    const message = await repos.messages.insert({
-      threadId: thread.id,
-      role: "user",
-      content: { text: "attached notes" },
-      textPlain: "attached notes",
-    });
-    const file = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      messageId: message.id,
-      type: "txt",
-      name: "notes.txt",
-      size: 10,
-      isInline: false,
-    });
-    const first = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "unrelated lexical text" });
-    const semantic = await repos.files.insertChunk({ fileId: file.id, idx: 1, content: "different wording" });
-    await repos.embeddings.upsert("chunk", first.id, new Float32Array([1, 0]), "test-embed");
-    await repos.embeddings.upsert("chunk", semantic.id, new Float32Array([0, 1]), "test-embed");
-    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
-
-    const hits = await hybridSearch({
-      search: db.search,
-      repos,
-      threadIds: [thread.id],
-      fileIds: [file.id],
-      query: "meaning probe",
-      k: 3,
-      embedder: { model: "test-embed", embed },
-      embeddingModel: "test-embed",
-    });
-
-    expect(hits[0]).toMatchObject({ kind: "chunk", ref_id: semantic.id });
-    expect(embed).toHaveBeenCalledOnce();
-  });
-
-  it("skips query embedding when only old-model chunk vectors exist", async () => {
-    const user = await repos.users.ensure({ tgId: 305, firstName: "OldVector" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    const file = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      type: "txt",
-      name: "old.txt",
-      size: 10,
-      isInline: false,
-    });
-    const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "orchid deployment detail" });
-    await repos.embeddings.upsert("chunk", chunk.id, new Float32Array([0, 1]), "old-embed");
-    const embed = vi.fn(async () => [new Float32Array([0, 1])]);
-
-    const hits = await hybridSearch({
-      search: db.search,
-      repos,
-      threadIds: [thread.id],
-      fileIds: [file.id],
-      query: "orchid",
-      k: 3,
-      embedder: { model: "new-embed", embed },
-      embeddingModel: "new-embed",
-    });
-
-    expect(hits[0]).toMatchObject({ kind: "chunk", ref_id: chunk.id });
-    expect(embed).not.toHaveBeenCalled();
-  });
-
-  it("returns lexical results when query embedding fails", async () => {
-    const user = await repos.users.ensure({ tgId: 306, firstName: "Fallback" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
-    const message = await repos.messages.insert({
-      threadId: thread.id,
-      role: "user",
-      content: { text: "orchid release checklist" },
-      textPlain: "orchid release checklist",
-    });
-    const file = await repos.files.insertFile({
-      userId: user.tg_id,
-      threadId: thread.id,
-      messageId: message.id,
-      type: "txt",
-      name: "fallback.txt",
-      size: 10,
-      isInline: false,
-    });
-    const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "orchid deployment detail" });
-    await repos.embeddings.upsert("chunk", chunk.id, new Float32Array([0, 1]), "test-embed");
-
-    const hits = await hybridSearch({
-      search: db.search,
-      repos,
-      threadIds: [thread.id],
-      fileIds: [file.id],
-      query: "orchid",
-      k: 3,
-      embedder: { model: "test-embed", embed: async () => { throw new Error("provider unavailable"); } },
-      embeddingModel: "test-embed",
-    });
-
-    expect(hits).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "message", ref_id: message.id }),
-      expect.objectContaining({ kind: "chunk", ref_id: chunk.id }),
-    ]));
   });
 
   it("keeps message and file retrieval inside a fork boundary", async () => {
@@ -246,11 +136,126 @@ describe("Pi retrieval tools backend", () => {
       search: db.search,
       repos,
       threadIds: scope.threadIds,
+      messageScopes: scope.messageScopes,
       messageIds: scope.messageIds,
       fileIds: scope.fileIds,
       query: "sentinel",
       k: 10,
     });
     expect(hits.some((hit) => hit.kind === "message" && hit.ref_id === after.id)).toBe(false);
+  });
+
+  it("applies message boundaries before the FTS limit", async () => {
+    const user = await repos.users.ensure({ tgId: 305, firstName: "Bounded FTS" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const allowed = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "boundaryneedle with deliberately weaker ranking filler filler filler filler" },
+      textPlain: "boundaryneedle with deliberately weaker ranking filler filler filler filler",
+    });
+    await repos.messages.insert({
+      threadId: thread.id,
+      role: "assistant",
+      content: { text: "boundaryneedle" },
+      textPlain: "boundaryneedle",
+    });
+
+    await expect(db.search.searchMessages(
+      [thread.id],
+      "boundaryneedle",
+      1,
+      [{ threadId: thread.id, maxMessageId: allowed.id }],
+    )).resolves.toEqual([expect.objectContaining({ id: allowed.id })]);
+  });
+
+  it("hides later queued messages and their attachments behind the active message boundary", async () => {
+    const user = await repos.users.ensure({ tgId: 304, firstName: "FIFO" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const activeFile = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "active.txt",
+      size: 6,
+      contentMd: "active",
+      isInline: true,
+    });
+    const queuedFile = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "txt",
+      name: "queued.txt",
+      size: 6,
+      contentMd: "queued",
+      isInline: true,
+    });
+    const active = await repos.turnRuns.accept({
+      userId: user.tg_id,
+      threadId: thread.id,
+      chatId: user.tg_id,
+      messageThreadId: null,
+      locale: "en",
+      kind: "file",
+      content: { text: "active" },
+      textPlain: "active",
+      sources: [{ updateId: 3041, messageId: 1 }],
+      attachments: [{ fileId: activeFile.id }],
+    });
+    const queued = await repos.turnRuns.accept({
+      userId: user.tg_id,
+      threadId: thread.id,
+      chatId: user.tg_id,
+      messageThreadId: null,
+      locale: "en",
+      kind: "file",
+      content: { text: "queued" },
+      textPlain: "queued",
+      sources: [{ updateId: 3042, messageId: 2 }],
+      attachments: [{ fileId: queuedFile.id }],
+    });
+
+    const scope = await threadChainScope(repos, thread, active.userMessage.id);
+    expect(scope.messageIds).toContain(active.userMessage.id);
+    expect(scope.messageIds).not.toContain(queued.userMessage.id);
+    expect(scope.fileIds).toContain(activeFile.id);
+    expect(scope.fileIds).not.toContain(queuedFile.id);
+  });
+
+  it("hides an inbound upload until durable turn acceptance attaches it", async () => {
+    const user = await repos.users.ensure({ tgId: 306, firstName: "Inbound Boundary" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const active = await repos.messages.insert({
+      threadId: thread.id,
+      role: "user",
+      content: { text: "active turn" },
+      textPlain: "active turn",
+    });
+    const pending = await repos.files.insertFile({
+      userId: user.tg_id,
+      threadId: thread.id,
+      type: "pdf",
+      extractionStatus: "source_only",
+      name: "later.pdf",
+      size: 100,
+      isInline: false,
+    });
+    await repos.files.rememberTelegramObservation(
+      pending.id,
+      telegramFileSource({ fileId: "pending-file", fileUniqueId: "pending-unique" }),
+      {
+        direction: "inbound",
+        mediaKind: "document",
+        telegramMessageId: 9001,
+        refs: [{ fileId: "pending-file", fileUniqueId: "pending-unique", primary: true }],
+      },
+    );
+
+    const beforeAcceptance = await threadChainScope(repos, thread, active.id);
+    expect(beforeAcceptance.fileIds).not.toContain(pending.id);
+
+    await repos.files.setMessageId(pending.id, active.id);
+    const afterAcceptance = await threadChainScope(repos, thread, active.id);
+    expect(afterAcceptance.fileIds).toContain(pending.id);
   });
 });

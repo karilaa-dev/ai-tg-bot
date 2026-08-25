@@ -97,7 +97,7 @@ describe("buffered Telegram attachment delivery", () => {
     }));
   });
 
-  it("delivers a generated image before assistant persistence can fail", async () => {
+  it("does not deliver a generated image when assistant persistence fails", async () => {
     const api = fakeApi();
     const input = turnInput(api);
     vi.mocked(input.repos.messages.insert).mockRejectedValueOnce(new Error("database unavailable"));
@@ -108,12 +108,69 @@ describe("buffered Telegram attachment delivery", () => {
     await expect(sendFinal(input, "Image generation details", "", 1000, [attachment]))
       .rejects.toThrow("database unavailable");
 
-    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
-    expect(attachment.telegramDelivery).toMatchObject({ messageId: 500, fileId: "photo-file" });
-    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0])
-      .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
-    expect(api.sendPhoto.mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0]!);
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(api.raw.sendRichMessage).not.toHaveBeenCalled();
+    expect(attachment.telegramDelivery).toBeUndefined();
+  });
+
+  it("persists the assistant result before delivery and does not retry an ambiguous final send", async () => {
+    const api = fakeApi();
+    api.raw.sendRichMessage.mockRejectedValueOnce(new Error("connection reset after write"));
+    const input = turnInput(api);
+    input.onDeliveryUnknown = vi.fn(async () => undefined);
+
+    await expect(sendFinal(input, "", "Persist me first"))
+      .rejects.toThrow("connection reset after write");
+
+    expect(input.repos.messages.insert).toHaveBeenCalledOnce();
+    expect(api.raw.sendRichMessage).toHaveBeenCalledOnce();
+    expect(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0])
+      .toBeLessThan(api.raw.sendRichMessage.mock.invocationCallOrder[0]!);
+    expect(input.onDeliveryUnknown).toHaveBeenCalledWith(expect.objectContaining({
+      assistantMessageId: 99,
+      failureCode: "telegram_delivery_unknown",
+    }));
+  });
+
+  it("retries finalized assistant content before confirming delivery", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryConfirmed = vi.fn(async () => undefined);
+    vi.mocked(input.repos.messages.setDeliveryContent)
+      .mockRejectedValueOnce(new Error("database temporarily unavailable"));
+
+    await sendFinal(input, "", "Persist after retry");
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledTimes(2);
+    expect(input.onDeliveryConfirmed).toHaveBeenCalledOnce();
+    expect(vi.mocked(input.repos.messages.setDeliveryContent).mock.invocationCallOrder.at(-1))
+      .toBeLessThan(vi.mocked(input.onDeliveryConfirmed).mock.invocationCallOrder[0]!);
+  });
+
+  it("does not confirm delivery when finalized assistant content exhausts retries", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryConfirmed = vi.fn(async () => undefined);
+    vi.mocked(input.repos.messages.setDeliveryContent)
+      .mockRejectedValue(new Error("database unavailable"));
+
+    await expect(sendFinal(input, "", "Cannot finalize"))
+      .rejects.toThrow("database unavailable");
+
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledTimes(3);
+    expect(input.onDeliveryConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("does not persist or send a final answer after cancellation wins the delivery barrier", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    input.onDeliveryStarting = vi.fn(() => false);
+
+    await expect(sendFinal(input, "", "cancelled"))
+      .rejects.toThrow("Turn cancellation won the delivery race");
+
+    expect(input.repos.messages.insert).not.toHaveBeenCalled();
+    expect(api.raw.sendRichMessage).not.toHaveBeenCalled();
   });
 
   it("sends a failure reply only when generated-image delivery is definitively rejected", async () => {
@@ -300,7 +357,7 @@ describe("buffered Telegram attachment delivery", () => {
     expect(third.telegramDelivery).toBeDefined();
   });
 
-  it("records a source-load failure without persisting the file as delivered", async () => {
+  it("sends a visible failure when a caption-only turn cannot load its only file", async () => {
     const api = fakeApi();
     const input = turnInput(api);
     const missing = imageAttachment(2, "missing.jpg", 100);
@@ -313,11 +370,13 @@ describe("buffered Telegram attachment delivery", () => {
     expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledWith(expect.objectContaining({
       messageId: 99,
       content: {
-        text: "",
+        text: "file-delivery-failed",
         attachment_failures: [{ file_id: 2, status: "source_unavailable" }],
       },
     }));
     expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(api.raw.sendRichMessage).toHaveBeenCalledOnce();
+    expect(JSON.stringify(api.raw.sendRichMessage.mock.calls[0])).toContain("file-delivery-failed");
   });
 
   it("continues pending delivery when bookkeeping for an earlier photo fails", async () => {
@@ -418,9 +477,6 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
         get: vi.fn(async () => undefined),
         listSources: vi.fn(async () => []),
         deleteFile: vi.fn(async () => []),
-      },
-      embeddings: {
-        deleteRefs: vi.fn(async () => undefined),
       },
     } as never,
     logger: {

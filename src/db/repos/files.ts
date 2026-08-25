@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
-import { createTextSearch, type TextSearch } from "../search.js";
+import { createTextSearch, type MessageSearchScope, type TextSearch } from "../search.js";
 import type {
   FileChunkRow,
   FileRow,
@@ -9,7 +9,6 @@ import type {
   TelegramFileRefRow,
 } from "../types.js";
 import type { ChatFileSource } from "../../files/source.js";
-import { vectorToBuffer } from "./embeddings.js";
 
 export class FilesRepo {
   constructor(
@@ -125,6 +124,24 @@ export class FilesRepo {
     `);
   }
 
+  listForMessageScopes(scopes: MessageSearchScope[]): Promise<FileRow[]> {
+    if (!scopes.length) return Promise.resolve([]);
+    const visibleMessage = sql`(${sql.join(scopes.map((scope) => scope.maxMessageId === undefined
+      ? sql`(m.thread_id = ${scope.threadId})`
+      : sql`(m.thread_id = ${scope.threadId} and m.id <= ${scope.maxMessageId})`), sql` or `)})`;
+    return this.db.query<FileRow>(sql`
+      select distinct f.*
+      from files f
+      left join message_files mf on mf.file_id = f.id
+      where exists (
+        select 1 from messages m
+        where (m.id = mf.message_id or m.id = f.message_id)
+          and ${visibleMessage}
+      )
+      order by f.id asc
+    `);
+  }
+
   listByIds(fileIds: number[]): Promise<FileRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
@@ -232,19 +249,11 @@ export class FilesRepo {
       idx: number;
       headingPath: string | null;
       content: string;
-      vector?: Float32Array;
     }>;
-    embeddingModel: string | null;
   }): Promise<FileRow> {
     return this.db.transaction(async (tx) => {
       const transactionalSearch = createTextSearch(tx, tx.dialect);
-      const oldChunks = await tx.query<FileChunkRow>(sql`
-        select * from file_chunks where file_id = ${fileId} order by idx asc
-      `);
       await transactionalSearch.removeChunksForFile(fileId);
-      if (oldChunks.length) {
-        await tx.execute(sql`delete from embeddings where kind = 'chunk' and ref_id in (${valueList(oldChunks.map((chunk) => chunk.id))})`);
-      }
       await tx.execute(sql`delete from file_chunks where file_id = ${fileId}`);
       const outline = input.chunks.map((chunk) => ({
         chunk_index: chunk.idx,
@@ -269,12 +278,6 @@ export class FilesRepo {
           returning *
         `);
         await transactionalSearch.indexChunk(inserted.id, fileId, inserted.content);
-        if (chunk.vector) {
-          await tx.execute(sql`
-            insert into embeddings(kind, ref_id, model, dim, vector, created_at)
-            values ('chunk', ${inserted.id}, ${input.embeddingModel}, ${chunk.vector.length}, ${vectorToBuffer(chunk.vector)}, ${Date.now()})
-          `);
-        }
       }
       const updated = await queryOne<FileRow>(tx, sql`select * from files where id = ${fileId}`);
       if (!updated) throw new Error(`File #${fileId} disappeared while replacing its extracted content.`);
@@ -440,6 +443,28 @@ export class FilesRepo {
          or m.thread_id in (${valueList(threadIds)})
       order by f.id asc
     `);
+  }
+
+  async listUnattachedInboundIds(fileIds: number[]): Promise<number[]> {
+    if (!fileIds.length) return [];
+    const rows = await this.db.query<{ id: number }>(sql`
+      select distinct f.id
+      from files f
+      where f.id in (${valueList(fileIds)})
+        and f.message_id is null
+        and (
+          exists (
+            select 1 from telegram_file_refs ref
+            where ref.file_id = f.id and ref.direction = 'inbound'
+          )
+          or exists (
+            select 1 from file_sources source
+            where source.file_id = f.id and source.transport = 'telegram'
+          )
+        )
+      order by f.id asc
+    `);
+    return rows.map((row) => row.id);
   }
 
   chunksForFiles(fileIds: number[]): Promise<FileChunkRow[]> {

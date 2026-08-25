@@ -5,7 +5,7 @@ required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
   sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
-  officecli
+  officecli pdf-inspector pdfinfo pdftoppm
 )
 
 missing=()
@@ -32,6 +32,7 @@ node --version >/dev/null
 npm --version >/dev/null
 officecli --version
 officecli help pptx >/dev/null
+[[ "$(pdf-inspector --version)" == "1.17.0" ]]
 
 pptx_skill=/usr/local/share/officecli/skills/officecli-pptx/SKILL.md
 docx_skill=/usr/local/share/officecli/skills/officecli-docx/SKILL.md
@@ -47,6 +48,69 @@ magick -size 2x2 xc:red "${tmp_dir}/image.png"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]
 magick "${tmp_dir}/image.png" -resize 1x1 -strip "${tmp_dir}/image.jpg"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.jpg")" == "1x1" ]]
+
+python3 - "${tmp_dir}/contract.pdf" <<'PY'
+import sys
+
+target = sys.argv[1]
+stream = "BT\n/F1 18 Tf\n72 720 Td\n(PDF Inspector contract) Tj\nET"
+objects = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    f"5 0 obj\n<< /Length {len(stream.encode())} >>\nstream\n{stream}\nendstream\nendobj\n",
+]
+pdf = "%PDF-1.4\n"
+offsets = []
+for obj in objects:
+    offsets.append(len(pdf.encode()))
+    pdf += obj
+xref = len(pdf.encode())
+pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
+pdf += "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
+pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+with open(target, "wb") as handle:
+    handle.write(pdf.encode())
+PY
+
+pdf-inspector detect "${tmp_dir}/contract.pdf" --json | jq -e '.pdfType == "TextBased" or .pdf_type == "text_based"' >/dev/null
+pdf-inspector "${tmp_dir}/contract.pdf" -o "${tmp_dir}/contract.md"
+grep -Fq 'PDF Inspector contract' "${tmp_dir}/contract.md"
+pdfinfo "${tmp_dir}/contract.pdf" | grep -Eq '^Pages:[[:space:]]+1$'
+
+python3 - "${tmp_dir}/scanned.pdf" <<'PY'
+import sys, zlib
+
+target = sys.argv[1]
+width = height = 64
+image = zlib.compress(bytes([255, 255, 255]) * width * height)
+content = b"q\n612 0 0 792 0 0 cm\n/Im0 Do\nQ\n"
+objects = [
+    b"<< /Type /Catalog /Pages 2 0 R >>",
+    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+    f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {len(image)} >>\nstream\n".encode() + image + b"\nendstream",
+    f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"endstream",
+]
+pdf = bytearray(b"%PDF-1.4\n")
+offsets = []
+for index, obj in enumerate(objects, 1):
+    offsets.append(len(pdf))
+    pdf += f"{index} 0 obj\n".encode() + obj + b"\nendobj\n"
+xref = len(pdf)
+pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+for offset in offsets:
+    pdf += f"{offset:010d} 00000 n \n".encode()
+pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+with open(target, "wb") as handle:
+    handle.write(pdf)
+PY
+
+pdf-inspector detect "${tmp_dir}/scanned.pdf" --json | jq -e '.pdfType == "Scanned"' >/dev/null
+pdftoppm -f 1 -l 1 -singlefile -r 72 -jpeg "${tmp_dir}/scanned.pdf" "${tmp_dir}/contract-page"
+[[ -s "${tmp_dir}/contract-page.jpg" ]]
+[[ "$(magick identify -format '%m' "${tmp_dir}/contract-page.jpg")" == "JPEG" ]]
 
 (
   cd "${tmp_dir}"
@@ -66,6 +130,8 @@ magick "${tmp_dir}/image.png" -resize 1x1 -strip "${tmp_dir}/image.jpg"
     --prop text="OfficeCLI contract" --prop style=Heading1
   officecli save contract.docx
   officecli validate contract.docx
+  officecli view contract.docx outline | grep -Fq 'OfficeCLI contract'
+  officecli view contract.docx text --max-lines 20 | grep -Fq 'OfficeCLI contract'
 )
 
 printf 'archive-ok' > "${tmp_dir}/archive-input"

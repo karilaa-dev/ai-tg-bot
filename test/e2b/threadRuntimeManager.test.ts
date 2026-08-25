@@ -129,6 +129,39 @@ describe("thread E2B runtime manager", () => {
       .toBe(true);
   });
 
+  it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    await runtime.execute(commandRequest(userId, threadId));
+
+    const toolboxChecks = client.onlySandbox().controlCommands.filter((command) =>
+      command.includes("@firecrawl/pdf-inspector@1.17.0")
+      && command.includes("command -v pdftoppm"));
+    expect(toolboxChecks).toHaveLength(1);
+  });
+
+  it("materializes requested files selectively and preserves earlier restorations additively", async () => {
+    client.telegramFiles.set("tg-first", Buffer.from("first"));
+    client.telegramFiles.set("tg-second", Buffer.from("second"));
+    const files: SandboxThreadFile[] = [
+      descriptor(8_001, "first.txt", "tg-first", 9_001, 5),
+      descriptor(8_002, "second.txt", "tg-second", 9_002, 6),
+    ];
+
+    const first = await runtime.materializeFiles({ userId, threadId, files: [files[0]!] });
+    const second = await runtime.materializeFiles({ userId, threadId, files: [files[1]!] });
+    const command = await runtime.execute(commandRequest(userId, threadId));
+
+    expect(first.files).toEqual([expect.objectContaining({ fileId: 8_001, status: "available" })]);
+    expect(second.files).toEqual([expect.objectContaining({ fileId: 8_002, status: "available" })]);
+    expect(client.telegramDownloadCalls).toBe(2);
+    const sandbox = client.onlySandbox();
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/8001--first.txt`)?.toString()).toBe("first");
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/8002--second.txt`)?.toString()).toBe("second");
+    const index = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
+    expect(index.files.map((file: { file_id: number }) => file.file_id)).toEqual([8_001, 8_002]);
+    expect(command.threadFiles.available).toBe(2);
+  });
+
   it("ignores traversal names read from a tampered sandbox index", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
@@ -194,7 +227,7 @@ describe("thread E2B runtime manager", () => {
     }]));
 
     expect(result.exitCode).toBe(0);
-    expect(result.threadFiles).toEqual({ directory: E2B_TELEGRAM_FILES, available: 0 });
+    expect(result.threadFiles).toMatchObject({ directory: E2B_TELEGRAM_FILES, available: 0 });
     expect(result.threadFiles).not.toHaveProperty("failed");
     const index = JSON.parse(await client.onlySandbox().readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
     expect(index).toMatchObject({
@@ -655,6 +688,25 @@ describe("thread E2B runtime manager", () => {
       user: "root",
       requestTimeoutMs: config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
     });
+  });
+
+  it("does not prune a fresh immutable source before its file row is registered", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const workspacePath = `${E2B_WORKSPACE}/pending.txt`;
+    sandbox.files.set(workspacePath, Buffer.from("pending registration"));
+
+    const exported = await runtime.readWorkspaceFile({
+      userId,
+      threadId,
+      virtualPath: "/pending.txt",
+      maxBytes: 100,
+      preserveSource: true,
+    });
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(sandbox.files.get(exported.sourceCanonicalPath!))
+      .toEqual(Buffer.from("pending registration"));
   });
 
   it("bounds unshared snapshots by least-recently-verified use and removes orphans", async () => {
@@ -1294,6 +1346,32 @@ function commandRequest(
   };
 }
 
+function descriptor(
+  fileId: number,
+  name: string,
+  telegramFileId: string,
+  refId: number,
+  size: number,
+): SandboxThreadFile {
+  return {
+    fileId,
+    messageId: null,
+    name,
+    mimeType: "text/plain",
+    expectedSize: size,
+    expectedSha256: null,
+    telegramRefs: [{
+      id: refId,
+      telegramFileId,
+      telegramSize: size,
+      direction: "inbound",
+      mediaKind: "document",
+      isPrimary: true,
+      lastSeenAt: Date.now(),
+    }],
+  };
+}
+
 class FakeClient implements E2BClient {
   readonly sandboxes = new Map<string, FakeSandbox>();
   readonly telegramFiles = new Map<string, Buffer>();
@@ -1371,6 +1449,7 @@ class FakeClient implements E2BClient {
 
 class FakeSandbox implements E2BSandbox {
   readonly files = new Map<string, Buffer>();
+  readonly fileModifiedAtMs = new Map<string, number>();
   readonly controlCommands: string[] = [];
   readonly timeoutCalls: number[] = [];
   readonly writeFileCalls: Array<{ path: string; user: string; requestTimeoutMs?: number }> = [];
@@ -1433,7 +1512,7 @@ class FakeSandbox implements E2BSandbox {
           if (!filePath.startsWith(prefix)) return [];
           const name = filePath.slice(prefix.length);
           if (name.includes("/") || !/^[0-9a-f]{64}$/i.test(name)) return [];
-          return [{ name, size: bytes.length }];
+          return [{ name, size: bytes.length, mtime_ms: this.fileModifiedAtMs.get(filePath) ?? 0 }];
         });
         return { stdout: JSON.stringify(inventory), stderr: "", exitCode: 0 };
       }
@@ -1480,11 +1559,15 @@ class FakeSandbox implements E2BSandbox {
       const bytes = this.files.get(source);
       if (bytes) {
         this.files.set(destination, bytes);
+        this.fileModifiedAtMs.set(destination, this.fileModifiedAtMs.get(source) ?? Date.now());
         this.files.delete(source);
+        this.fileModifiedAtMs.delete(source);
       }
     }
     for (const match of command.matchAll(/rm -f (?:-- )?('[^']*'|\S+)/g)) {
-      this.files.delete(unquote(match[1]!));
+      const filePath = unquote(match[1]!);
+      this.files.delete(filePath);
+      this.fileModifiedAtMs.delete(filePath);
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }
@@ -1523,6 +1606,7 @@ class FakeSandbox implements E2BSandbox {
       throw new Error("index write failed");
     }
     this.files.set(filePath, Buffer.from(data));
+    this.fileModifiedAtMs.set(filePath, Date.now());
   }
 
   async readFile(

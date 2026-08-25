@@ -128,6 +128,55 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`create index if not exists messages_thread_id_idx on messages(thread_id, id)`));
   await db.execute(sql.raw(`
+    create table if not exists thread_operation_barriers (
+      thread_id ${intType} primary key references threads(id) on delete cascade,
+      owner_id text not null,
+      operation text not null,
+      snapshot_message_id ${intType},
+      lease_expires_at ${intType} not null,
+      created_at ${intType} not null,
+      updated_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists turn_runs (
+      id ${idType},
+      user_id ${intType} not null references users(tg_id),
+      thread_id ${intType} not null references threads(id),
+      user_message_id ${intType} not null unique references messages(id),
+      chat_id ${intType} not null,
+      message_thread_id ${intType},
+      locale text not null,
+      status text not null,
+      delivery_status text not null default 'pending',
+      result_message_id ${intType},
+      provider text,
+      model text,
+      usage_json text,
+      failure_code text,
+      owner_id text,
+      lease_expires_at ${intType},
+      cancel_requested_at ${intType},
+      accepted_at ${intType} not null,
+      started_at ${intType},
+      finished_at ${intType},
+      updated_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists turn_runs_thread_fifo_idx on turn_runs(thread_id, status, id)`));
+  await db.execute(sql.raw(`create index if not exists turn_runs_status_idx on turn_runs(status, id)`));
+  await db.execute(sql.raw(`create unique index if not exists turn_runs_one_active_thread_idx on turn_runs(thread_id) where status in ('running', 'awaiting_delivery')`));
+  await db.execute(sql.raw(`
+    create table if not exists turn_run_sources (
+      turn_run_id ${intType} not null references turn_runs(id) on delete cascade,
+      telegram_update_id ${intType} not null unique,
+      telegram_message_id ${intType},
+      created_at ${intType} not null,
+      primary key(turn_run_id, telegram_update_id)
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists turn_run_sources_run_idx on turn_run_sources(turn_run_id)`));
+  await db.execute(sql.raw(`
     create table if not exists files (
       id ${idType},
       user_id ${intType} not null references users(tg_id),

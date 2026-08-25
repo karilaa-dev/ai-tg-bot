@@ -3,7 +3,6 @@ import path from "node:path";
 import { z } from "zod";
 import { sanitizeOfficeHtml } from "../../browserUse/html.js";
 import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../../e2b/paths.js";
-import { resolveThreadFileDescriptors } from "../../e2b/threadFiles.js";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
 import { normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
@@ -40,7 +39,6 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
       const sourcePath = sandboxWorkspaceFile(normalizedPath);
       const outputName = `.office-preview-${randomUUID()}.html`;
       const outputPath = path.posix.join(E2B_WORKSPACE, outputName);
-      const threadFiles = await resolveThreadFileDescriptors(input, signal);
       const script = [
         "if ! command -v officecli >/dev/null 2>&1; then printf 'MISSING:officecli\\n' >&2; exit 127; fi",
         "officecli view \"$1\" html --page \"$3\" --out \"$2\"",
@@ -61,7 +59,6 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
           workingDir: E2B_WORKSPACE,
           timeoutMs: input.config.BASH_TIMEOUT_MS,
           maxOutputChars: input.config.BASH_MAX_OUTPUT_CHARS,
-          threadFiles,
           signal,
         });
         if (rendered.exitCode === 127 && rendered.stderr.includes("MISSING:officecli")) {
@@ -82,7 +79,6 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
           threadId: input.thread.id,
           virtualPath: `/${outputName}`,
           maxBytes: MAX_FILE_BYTES,
-          threadFiles,
           signal,
         });
         let html: string;
@@ -136,7 +132,6 @@ export function createRenderOfficePreviewTool(input: ToolBuildInput) {
           workingDir: E2B_WORKSPACE,
           timeoutMs: Math.min(input.config.BASH_TIMEOUT_MS, 10_000),
           maxOutputChars: 1_000,
-          threadFiles,
           signal: AbortSignal.timeout(10_000),
         }).catch(() => undefined);
       }

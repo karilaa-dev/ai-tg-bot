@@ -16,8 +16,11 @@ const CURRENT_TABLES = [
   "messages_fts",
   "sandbox_file_restore_status",
   "telegram_file_refs",
+  "thread_operation_barriers",
   "thread_sandboxes",
   "threads",
+  "turn_run_sources",
+  "turn_runs",
   "users",
 ];
 
@@ -64,6 +67,19 @@ describe("SQLite schema initialization", () => {
     await expect(columns(database, "messages")).resolves.toEqual([
       "id", "thread_id", "role", "kind", "content_json", "text_plain", "thinking",
       "tg_message_id", "pi_entry_id", "created_at",
+    ]);
+    await expect(columns(database, "thread_operation_barriers")).resolves.toEqual([
+      "thread_id", "owner_id", "operation", "snapshot_message_id", "lease_expires_at",
+      "created_at", "updated_at",
+    ]);
+    await expect(columns(database, "turn_runs")).resolves.toEqual([
+      "id", "user_id", "thread_id", "user_message_id", "chat_id", "message_thread_id",
+      "locale", "status", "delivery_status", "result_message_id", "provider", "model",
+      "usage_json", "failure_code", "owner_id", "lease_expires_at", "cancel_requested_at",
+      "accepted_at", "started_at", "finished_at", "updated_at",
+    ]);
+    await expect(columns(database, "turn_run_sources")).resolves.toEqual([
+      "turn_run_id", "telegram_update_id", "telegram_message_id", "created_at",
     ]);
     await expect(columns(database, "files")).resolves.toEqual([
       "id", "user_id", "thread_id", "message_id", "type", "content_sha256", "mime_type",

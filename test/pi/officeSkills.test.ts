@@ -10,6 +10,7 @@ import {
 import {
   OFFICECLI_SKILLS,
   OFFICECLI_SKILLS_REVISION,
+  approvedSkillPaths,
   createOfficeSkillReadTool,
   officeSkillPaths,
   validateOfficeSkills,
@@ -42,6 +43,21 @@ describe("pinned OfficeCLI Pi skills", () => {
     ]);
     expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
 
+  });
+
+  it("loads the approved sandbox file routing skill", () => {
+    const loaded = loadSkills({
+      cwd: process.cwd(),
+      agentDir: path.resolve("data/pi"),
+      skillPaths: approvedSkillPaths(),
+      includeDefaults: false,
+    });
+    expect(loaded.diagnostics).toEqual([]);
+    expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
+      "officecli-docx",
+      "officecli-pptx",
+      "sandbox-files",
+    ]);
   });
 
   it("keeps explicit OfficeCLI skills when default skill discovery is disabled", async () => {

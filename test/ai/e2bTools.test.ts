@@ -87,6 +87,7 @@ function buildInput(runtime: CommandRuntime, registerPublishedWebsite?: (website
 
 function fakeRuntime(): CommandRuntime {
   return {
+    materializeFiles: async () => ({ directory: "/home/user/telegram-files", available: 0, files: [] }),
     execute: async () => commandResult(),
     readWorkspaceFile: async () => {
       throw new Error("not used");
@@ -109,7 +110,7 @@ function commandResult(overrides: Partial<SandboxCommandResult> = {}): SandboxCo
     timedOut: false,
     stdoutTruncated: false,
     stderrTruncated: false,
-    threadFiles: { directory: "/home/user/telegram-files", available: 0 },
+    threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
     ...overrides,
   };
 }

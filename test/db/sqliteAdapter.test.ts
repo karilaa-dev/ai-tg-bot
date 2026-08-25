@@ -55,4 +55,37 @@ describe("stable SQLite adapter", () => {
     expect(verifier.prepare("select tg_id from users order by tg_id").all()).toEqual([{ tg_id: 101 }]);
     verifier.close();
   });
+
+  it("serializes asynchronous transactions on the shared SQLite connection", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+    let secondEntered = false;
+    const first = database.db.transaction(async (tx) => {
+      firstStarted();
+      await holdFirst;
+      await tx.execute(sql`
+        insert into users(tg_id, first_name, lang, created_at)
+        values (201, 'First', 'en', 1)
+      `);
+    });
+    await started;
+    const second = database.db.transaction(async (tx) => {
+      secondEntered = true;
+      await tx.execute(sql`
+        insert into users(tg_id, first_name, lang, created_at)
+        values (202, 'Second', 'en', 1)
+      `);
+    });
+
+    await Promise.resolve();
+    expect(secondEntered).toBe(false);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(await database.db.query<{ tg_id: number }>(sql`select tg_id from users order by tg_id`))
+      .toEqual([{ tg_id: 201 }, { tg_id: 202 }]);
+  });
 });

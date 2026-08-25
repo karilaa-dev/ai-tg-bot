@@ -1,11 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
 
-const DEFAULT_OPENROUTER_EMBEDDING_MODEL = "perplexity/pplx-embed-v1-0.6b";
-
 const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-const OptionalUrlSchema = z.preprocess(normalizeOptionalUrl, z.url().optional());
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
 
 const ConfigSchema = z.object({
@@ -16,6 +13,10 @@ const ConfigSchema = z.object({
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
   PI_THINKING_LEVEL: PiThinkingLevelSchema.default("medium"),
   PI_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(900_000),
+  PI_MAX_MODEL_CYCLES: z.coerce.number().int().positive().default(20),
+  PI_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(40),
+  PI_MAX_CONSECUTIVE_TOOL_FAILURES: z.coerce.number().int().positive().default(5),
+  PI_MAX_IDENTICAL_TOOL_FAILURES: z.coerce.number().int().positive().default(3),
   THREAD_TITLE_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
   CODEX_MODEL: z.string().default("gpt-5.6-sol"),
   CODEX_HELPER_MODEL: z.string().default("gpt-5.6-luna"),
@@ -24,9 +25,6 @@ const ConfigSchema = z.object({
   OPENROUTER_IMAGE_MODEL: z.string().default("openai/gpt-5.4-image-2"),
   IMAGE_TIMEOUT_MS: z.coerce.number().int().min(0).default(300_000),
   OPENROUTER_API_KEY: z.string().min(1),
-  OPENROUTER_EMBEDDING_MODEL: z
-    .string()
-    .default(DEFAULT_OPENROUTER_EMBEDDING_MODEL),
   TAVILY_API_KEY: z.string().min(1),
   BROWSER_USE_API_KEY: OptionalStringSchema,
   BROWSER_USE_DEPLOYMENT_ID: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/).default("ai-tg-bot"),
@@ -34,8 +32,6 @@ const ConfigSchema = z.object({
   BROWSER_USE_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   BROWSER_USE_API_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   BROWSER_USE_NAVIGATION_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
-  DOCLING_URL: OptionalUrlSchema,
-  DOCLING_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
   E2B_API_KEY: z.string().min(1),
   E2B_TEMPLATE: z.string().min(1).default("ai-tg-bot-tools:production"),
@@ -50,12 +46,6 @@ const ConfigSchema = z.object({
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
-
-function normalizeOptionalUrl(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  const normalized = value.trim();
-  return normalized === "" ? undefined : normalized;
-}
 
 function normalizeOptionalString(value: unknown): unknown {
   if (typeof value !== "string") return value;

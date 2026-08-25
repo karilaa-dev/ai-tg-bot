@@ -17,7 +17,6 @@ import { Localizer } from "./i18n.js";
 import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
-import type { TextEmbedder } from "../memory/embeddings.js";
 import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
 import {
   clearInlineKeyboard,
@@ -27,7 +26,12 @@ import {
   threadExtra,
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
-import { enqueueUserText, flushPendingTextBurstForContext, isPlainUserText } from "./batching.js";
+import {
+  cancelPendingTextBurstForContext,
+  enqueueUserText,
+  flushPendingTextBurstForContext,
+  isPlainUserText,
+} from "./batching.js";
 import { handleTelegramFile, stopActiveFileProcessing } from "./files.js";
 import { initializeUserAndThread, isStopCommand, privateOnly } from "./auth.js";
 import { sendWelcome, timezoneConversation } from "./onboarding.js";
@@ -36,6 +40,7 @@ import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/tel
 import { E2BFileSourceAdapter } from "../e2b/fileSource.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
+import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -46,17 +51,17 @@ interface InstallOptions {
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
   fileResolver?: FileResolver;
-  embedder?: TextEmbedder;
   commandRuntime?: CommandRuntime;
   pi?: PiRuntimeService;
+  awaitTurnProcessingOnAccept?: boolean;
 }
 
 const moscowTimezoneOffsetMin = 180;
 
 export function createBot(options: InstallOptions): Bot<BotContext> {
   const bot = new Bot<BotContext>(options.config.BOT_TOKEN);
-  installBot(bot, options);
-  return bot;
+  const services = installBot(bot, options);
+  return Object.assign(bot, { services });
 }
 
 export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotServices {
@@ -64,7 +69,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     hasCustomRepos: Boolean(options.repos),
     hasCustomLocalizer: Boolean(options.localizer),
     hasCustomTurnRunner: Boolean(options.turnRunner),
-    hasEmbedder: Boolean(options.embedder),
     hasPiRuntime: Boolean(options.pi),
   });
   const repos = options.repos ?? createRepos(options.db.db, options.db.search);
@@ -74,7 +78,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     db: options.db,
     repos,
     logger: options.logger,
-    embedder: options.embedder,
     commandRuntime: options.commandRuntime,
   });
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
@@ -97,17 +100,36 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   ) {
     fileResolver.registry.register(new E2BFileSourceAdapter(options.config, options.commandRuntime));
   }
+  const threadTitles = new ThreadTitleCoordinator({ repos, pi, logger: options.logger });
+  const turnRunner = options.turnRunner ?? runTurn;
+  const turnCoordinator = new ThreadTurnCoordinator({
+    api: bot.api,
+    config: options.config,
+    db: options.db,
+    repos,
+    logger: options.logger,
+    pi,
+    fileResolver,
+    turnRunner,
+    t: (locale, key, params) => localizer.t(locale, key, params),
+    scheduleThreadTitle: (input) => threadTitles.schedule({
+      api: bot.api,
+      chatId: input.chatId,
+      threadId: input.threadId,
+    }),
+    awaitProcessingOnAccept: options.awaitTurnProcessingOnAccept,
+  });
   const services: BotServices = {
     config: options.config,
     db: options.db,
     repos,
     logger: options.logger,
-    turnRunner: options.turnRunner ?? runTurn,
+    turnRunner,
+    turnCoordinator,
     fileResolver,
     commandRuntime: options.commandRuntime,
-    embedder: options.embedder,
     pi,
-    threadTitles: new ThreadTitleCoordinator({ repos, pi, logger: options.logger }),
+    threadTitles,
     routerState: createRouterState(),
   };
 
@@ -123,7 +145,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
   bot.use(async (ctx, next) => {
-    if (!isPlainUserText(ctx)) {
+    if (!isPlainUserText(ctx) && !isStopCommand(ctx)) {
       await flushPendingTextBurstForContext(ctx);
     }
     await next();
@@ -139,12 +161,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
+    const textStopped = cancelPendingTextBurstForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
-    const turnStopped = ctx.thread ? await ctx.services.pi.abort(ctx.thread.id) : false;
-    if (!fileStopped && !turnStopped) {
+    const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
+    if (!textStopped && !fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-stopping"), threadExtra(ctx.thread));
+    } else if (textStopped) {
+      await replyWithThreadFallback(ctx, ctx.t("turn-pending-cancelled"), threadExtra(ctx.thread));
     }
   });
   bot.command("lang", async (ctx) => {
@@ -207,37 +232,73 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("compact", async (ctx) => {
     logCommand(ctx, "compact");
-    if (!ctx.thread) return;
-    const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(ctx.thread));
-    const count = await runCompaction(ctx, ctx.thread);
+    const thread = ctx.thread;
+    if (!thread) return;
+    const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
+    const count = await ctx.services.turnCoordinator.withThreadBarrier(
+      thread.id,
+      "compact",
+      async (_snapshotMessageId, signal) => runCompaction(ctx, thread, signal),
+    );
     await ctx.api
       .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
       .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");
-    if (!ctx.thread || !ctx.user || !ctx.chat) return;
+    const { thread, user, chat } = ctx;
+    if (!thread || !user || !chat) return;
     const me = await ctx.api.getMe();
     if (!me.has_topics_enabled) {
-      await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(ctx.thread));
+      await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(thread));
       return;
     }
-    const topic = await ctx.api.raw.createForumTopic({
-      chat_id: ctx.chat.id,
-      name: `Fork: ${ctx.thread.title}`,
+    const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId, signal) => {
+      let topicId: number | undefined;
+      let created: ThreadRow | undefined;
+      try {
+        signal.throwIfAborted();
+        const topic = await ctx.api.raw.createForumTopic({
+          chat_id: chat.id,
+          name: `Fork: ${thread.title}`,
+        });
+        topicId = topic.message_thread_id;
+        signal.throwIfAborted();
+        const latest = snapshotMessageId === null
+          ? undefined
+          : await ctx.services.repos.messages.get(snapshotMessageId);
+        signal.throwIfAborted();
+        created = await ctx.services.repos.threads.create({
+          userId: user.tg_id,
+          topicId,
+          title: `Fork: ${thread.title}`,
+          parentThreadId: thread.id,
+          forkPointMessageId: snapshotMessageId,
+        });
+        signal.throwIfAborted();
+        await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id, signal);
+        signal.throwIfAborted();
+        return created;
+      } catch (error) {
+        const cleanup = await Promise.allSettled([
+          created ? ctx.services.repos.threads.archive(created.id) : Promise.resolve(),
+          topicId === undefined
+            ? Promise.resolve()
+            : ctx.api.raw.deleteForumTopic({ chat_id: chat.id, message_thread_id: topicId }),
+        ]);
+        const cleanupFailures = cleanup.filter((result) => result.status === "rejected");
+        ctx.services.logger.warn("partial thread fork rolled back", ctxLogMeta(ctx, {
+          forkThreadId: created?.id,
+          topicId,
+          cleanupFailures: cleanupFailures.length,
+          error: String(error),
+        }));
+        throw error;
+      }
     });
-    const latest = await ctx.services.repos.messages.latest(ctx.thread.id);
-    const fork = await ctx.services.repos.threads.create({
-      userId: ctx.user.tg_id,
-      topicId: topic.message_thread_id ?? null,
-      title: `Fork: ${ctx.thread.title}`,
-      parentThreadId: ctx.thread.id,
-      forkPointMessageId: latest?.id ?? null,
-    });
-    await ctx.services.pi.fork(ctx.thread, fork, ctx.user, latest?.pi_entry_id);
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
       forkThreadId: fork.id,
-      parentThreadId: ctx.thread.id,
+      parentThreadId: thread.id,
       topicId: fork.topic_id,
     }));
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
@@ -356,9 +417,10 @@ function threadSequentializationKey(ctx: BotContext): string | undefined {
   return `${ctx.chat.id}:${messageThreadId(ctx) ?? "general"}`;
 }
 
-async function runCompaction(ctx: BotContext, thread: ThreadRow): Promise<number> {
+async function runCompaction(ctx: BotContext, thread: ThreadRow, signal: AbortSignal): Promise<number> {
   if (!ctx.user) return 0;
-  const count = await ctx.services.pi.compact(thread, ctx.user);
+  const count = await ctx.services.pi.compact(thread, ctx.user, signal);
+  signal.throwIfAborted();
   ctx.thread = (await ctx.services.repos.threads.get(thread.id)) ?? thread;
   return count;
 }

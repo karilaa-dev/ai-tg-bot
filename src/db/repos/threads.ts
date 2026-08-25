@@ -115,6 +115,10 @@ export class ThreadsRepo {
     `);
   }
 
+  async archive(id: number): Promise<void> {
+    await this.db.execute(sql`update threads set archived = 1 where id = ${id}`);
+  }
+
   async chain(thread: ThreadRow): Promise<ThreadRow[]> {
     const chain: ThreadRow[] = [thread];
     let current = thread;

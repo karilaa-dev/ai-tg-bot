@@ -44,6 +44,8 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     expect(await tableExists("users")).toBe(true);
     expect(await tableExists("message_search")).toBe(true);
     expect(await tableExists("chunk_search")).toBe(true);
+    expect(await tableExists("turn_runs")).toBe(true);
+    expect(await tableExists("turn_run_sources")).toBe(true);
     expect(await tableExists("schema_migrations")).toBe(false);
     expect(await tableExists("invites")).toBe(false);
     expect(await tableExists("summaries")).toBe(false);

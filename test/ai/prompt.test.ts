@@ -6,6 +6,7 @@ import {
   MAX_PROMPT_USER_NAME_CHARS,
   MAX_SYSTEM_PROMPT_FILES,
   renderPromptTemplate,
+  renderThreadSessionContext,
   renderSessionContext,
   renderSystemPrompt,
   type PromptFileContext,
@@ -64,6 +65,9 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("treat downloading or saving publicly accessible images");
     expect(prompt).toContain("This does not cover bypassing paywalls or access controls");
     expect(prompt).toContain("Create an archive only when explicitly requested");
+    expect(prompt).toContain("prefer original image URLs over thumbnails or sample URLs");
+    expect(prompt).toContain("`inspect_workspace_images`");
+    expect(prompt).toContain("inspect every final collage");
     expect(prompt).toContain("E2B may reach private or local addresses");
     expect(prompt).toContain("Published E2B URLs are public");
     expect(prompt).toContain("public and unauthenticated");
@@ -163,6 +167,35 @@ describe("renderSystemPrompt", () => {
       Array.from({ length: MAX_SYSTEM_PROMPT_FILES }, (_, index) => index + 16),
     );
     expect(context.omitted_file_count).toBe(15);
+  });
+
+  it("labels source-only documents as sandbox sources", async () => {
+    const config = loadTestConfig();
+    const database = (await import("../../src/db/index.js")).createDatabase(config);
+    await database.initialize();
+    try {
+      const repos = (await import("../../src/db/repos/index.js")).createRepos(database.db, database.search);
+      const user = await repos.users.ensure({ tgId: 901, firstName: "PDF", lang: "en" });
+      const ownedThread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      await repos.files.insertFile({
+        userId: user.tg_id,
+        threadId: ownedThread.id,
+        type: "pdf",
+        extractionStatus: "source_only",
+        name: "scan.pdf",
+        size: 1,
+        contentMd: "legacy fallback",
+        isInline: false,
+      });
+      const context = parseSessionContext(await renderThreadSessionContext({
+        repos,
+        user,
+        thread: ownedThread,
+      })) as { files: Array<{ mode: string }> };
+      expect(context.files[0]?.mode).toBe("sandbox source");
+    } finally {
+      await database.destroy();
+    }
   });
 
   it("adds current Browser Use and Office visual-QA guidance when configured", async () => {

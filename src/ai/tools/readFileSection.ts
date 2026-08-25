@@ -24,6 +24,13 @@ export function createReadFileSectionTool(input: ToolBuildInput) {
         input.logger?.debug("tool read_file_section not found", { threadId: input.thread.id, fileId: file_id });
         return { error: "file not found in this thread" };
       }
+      if (file.extraction_status === "source_only") {
+        return {
+          error: "sandbox_required",
+          file_id,
+          message: "This PDF or DOCX is source-only. Call materialize_chat_files, then use PDF Inspector, render_pdf_pages, or OfficeCLI.",
+        };
+      }
       const chunks = await input.repos.files.chunks(file_id);
       if (chunk_index === -1) {
         const outline = decodeOutline(file.outline_json) ??

@@ -11,6 +11,9 @@ const BASE_BOT_TOOL_NAMES = [
   "load_message",
   "search_in_file",
   "read_file_section",
+  "materialize_chat_files",
+  "render_pdf_pages",
+  "inspect_workspace_images",
   "create_file",
   "publish_website",
   "bash",
@@ -57,6 +60,9 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
       description: definition.description,
       parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
       executionMode: name === "bash"
+        || name === "materialize_chat_files"
+        || name === "render_pdf_pages"
+        || name === "inspect_workspace_images"
         || name === "create_file"
         || name === "publish_website"
         || name === "render_office_preview"

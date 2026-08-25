@@ -50,6 +50,7 @@ stream-state-off = 📴 выкл
 thinking-placeholder = 💭 Думаю...
 thinking-done = ✅ Готово.
 image-delivery-failed = Не удалось отправить созданное изображение. Попробуйте ещё раз.
+file-delivery-failed = Не удалось отправить созданный файл. Попробуйте ещё раз.
 thinking-summary-running = 🧠 Думаю уже { $time }
 thinking-summary-generating-image = 🖼️ Генерирую изображение уже { $time }
 thinking-summary-final = 🧠 Думал { $time }
@@ -72,16 +73,14 @@ file-processing-extracting = 📄 Извлекаю данные из <code>{ $na
 file-processing-captioning = 🖼️ Описываю <code>{ $name }</code>...
 file-processing-indexing = 🔎 Индексирую <code>{ $name }</code>...
     { $percent }%
-file-processing-embedding = 🧠 Создаю векторный индекс для <code>{ $name }</code>...
-    { $percent }%
 file-processing-stopping = 🛑 Останавливаю обработку файла...
 file-processing-cancelled = 🛑 Обработка файла отменена.
 stop-none = ℹ️ В этом треде нет активной задачи.
 turn-stopping = 🛑 Останавливаю активный ход агента...
+turn-pending-cancelled = 🛑 Отложенное сообщение отменено.
 file-processed = ✅ Файл <code>{ $name }</code> обработан.
+file-source-registered = ✅ Файл <code>{ $name }</code> зарегистрирован для анализа в песочнице.
 file-reused = ♻️ Использую сохраненный файл <code>{ $name }</code>.
-docling-unavailable = ⚠️ Для обработки этого документа нужен Docling, но он отключен или недоступен. Настройте DOCLING_URL на внешний сервер Docling и повторите попытку.
-docling-conversion-failed = ⚠️ Docling не смог обработать этот документ. Проверьте, что файл исправен и поддерживается, затем повторите попытку.
 fork-created = 🌱 Форк создан. Контекст перенесен в новую тему.
 fork-need-topics = 🧵 Темы не включены для этого бота. Сначала включите Topics в BotFather.
 help = 🧭 Команды: /lang, /timezone, /stream, /stop, /fork, /compact, /help. Для чистого треда начните новую тему Telegram; /fork переносит контекст Pi в новую тему. /stop отменяет активный ход агента или обработку файла.
