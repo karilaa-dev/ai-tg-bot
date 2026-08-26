@@ -53,6 +53,18 @@ if [[ "\${OPENSCAD_STUB_ERROR_EXTENSION:-}" == "$extension" ]]; then
   printf 'ERROR: stub reported an error for %s\n' "$extension" >&2
 fi
 `);
+  await writeExecutable(path.join(binDir, "mv"), `#!/usr/bin/env bash
+set -euo pipefail
+destination="\${!#}"
+if [[ -n "\${OPENSCAD_STUB_FAIL_MOVE_DEST:-}" \
+  && "$destination" == "$OPENSCAD_STUB_FAIL_MOVE_DEST" \
+  && ! -e "\${OPENSCAD_STUB_MOVE_MARKER:?}" ]]; then
+  : > "$OPENSCAD_STUB_MOVE_MARKER"
+  printf 'stub move failure for %s\n' "$destination" >&2
+  exit 1
+fi
+exec /usr/bin/mv "$@"
+`);
 });
 
 afterEach(async () => {
@@ -86,6 +98,20 @@ describe("openscad-build", () => {
 
     await expect(runWrapper("final", { OPENSCAD_STUB_FAIL_EXTENSION: "3mf" }))
       .rejects.toMatchObject({ stderr: expect.stringContaining("3mf failed") });
+
+    for (const name of targets) {
+      await expect(fs.readFile(path.join(modelDir, name), "utf8")).resolves.toBe(`old ${name}\n`);
+    }
+  });
+
+  it("restores all previous final outputs when replacement fails partway", async () => {
+    const targets = ["model.stl", "model.3mf", "model.final.png"];
+    await Promise.all(targets.map((name) => fs.writeFile(path.join(modelDir, name), `old ${name}\n`)));
+
+    await expect(runWrapper("final", {
+      OPENSCAD_STUB_FAIL_MOVE_DEST: path.join(modelDir, "model.3mf"),
+      OPENSCAD_STUB_MOVE_MARKER: path.join(tempRoot, "move-failed"),
+    })).rejects.toMatchObject({ stderr: expect.stringContaining("stub move failure") });
 
     for (const name of targets) {
       await expect(fs.readFile(path.join(modelDir, name), "utf8")).resolves.toBe(`old ${name}\n`);

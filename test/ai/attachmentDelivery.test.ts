@@ -280,6 +280,34 @@ describe("buffered Telegram attachment delivery", () => {
     }));
   });
 
+  it("shows a photo delivery failure when a photo_only outcome is unknown", async () => {
+    const api = fakeApi();
+    api.sendPhoto.mockRejectedValue(new Error("request timed out after upload"));
+    const input = turnInput(api);
+    const source = {
+      ...imageAttachment(1, "model.stl", 100),
+      type: "other" as const,
+      mimeType: "model/stl",
+      delivery: "document" as const,
+    };
+    const preview = imageAttachment(2, "model.final.png", 100);
+    preview.photoFallback = "none";
+
+    await sendFinal(input, "", "", 0, [source, preview]);
+
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(preview.telegramDeliveryUnknown).toBe(true);
+    expect(JSON.stringify(api.raw.sendRichMessage.mock.calls)).toContain("image-delivery-failed");
+    expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 99,
+      content: expect.objectContaining({
+        text: "image-delivery-failed",
+        attachment_delivery_unknown: [{ file_id: 2, status: "delivery_unknown" }],
+      }),
+    }));
+  });
+
   it("does not retry a media group after an ambiguous transport failure", async () => {
     const api = fakeApi();
     api.sendMediaGroup.mockRejectedValue(new Error("request timed out after upload"));

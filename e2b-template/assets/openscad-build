@@ -39,13 +39,45 @@ source_name="$(basename -- "$source_arg")"
 source_path="${source_dir}/${source_name}"
 stem="${source_name%.scad}"
 temporary_files=()
+backup_dir=""
+final_commit_started=0
+final_commit_complete=0
+backed_up_targets=()
+absent_targets=()
 
 cleanup() {
+  local exit_status=$?
+  local rollback_failed=0
+  set +e
+  if [[ "$final_commit_started" == 1 && "$final_commit_complete" != 1 ]]; then
+    local target backup
+    for target in "${absent_targets[@]}"; do
+      rm -f -- "$target"
+    done
+    for target in "${backed_up_targets[@]}"; do
+      backup="${backup_dir}/$(basename -- "$target")"
+      rm -f -- "$target"
+      if ! mv -f -- "$backup" "$target"; then
+        rollback_failed=1
+      fi
+    done
+  fi
+  if [[ -n "$backup_dir" ]]; then
+    if [[ "$rollback_failed" == 1 ]]; then
+      printf 'ERROR: failed to restore previous outputs; backups remain at %s\n' "$backup_dir" >&2
+    else
+      rm -rf -- "$backup_dir"
+    fi
+  fi
   if ((${#temporary_files[@]})); then
     rm -f -- "${temporary_files[@]}"
   fi
+  return "$exit_status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 new_temporary_file() {
   local variable_name="$1"
@@ -111,9 +143,22 @@ run_openscad final_png "$final_png_tmp" \
   --autocenter \
   --projection=perspective
 
+backup_dir="$(mktemp -d "${source_dir}/.${stem}.final-backup.XXXXXX")"
+for target in "$stl_target" "$three_mf_target" "$final_png_target"; do
+  if [[ -e "$target" ]]; then
+    cp -a -- "$target" "${backup_dir}/$(basename -- "$target")"
+    backed_up_targets+=("$target")
+  else
+    absent_targets+=("$target")
+  fi
+done
+final_commit_started=1
 mv -f -- "$stl_tmp" "$stl_target"
 mv -f -- "$three_mf_tmp" "$three_mf_target"
 mv -f -- "$final_png_tmp" "$final_png_target"
+final_commit_complete=1
+rm -rf -- "$backup_dir"
+backup_dir=""
 
 printf 'scad=%s\n' "$source_path"
 printf 'stl=%s\n' "$stl_target"

@@ -1014,8 +1014,11 @@ async function sendFinalVisible(
   const generatedDeliveryFailed = generatedAttachments.length > 0
     && generatedAttachments.every((attachment) =>
       !attachment.telegramDelivery && !attachment.telegramDeliveryUnknown);
-  const strictPhotoDeliveryFailed = attachmentFailures.some((attachment) =>
-    attachment.delivery === "photo" && attachment.photoFallback === "none");
+  const strictPhotoDeliveryFailed = outboundAttachments.some((attachment) =>
+    attachment.delivery === "photo"
+    && attachment.photoFallback === "none"
+    && !attachment.telegramDelivery
+    && Boolean(attachment.telegramDeliveryFailure || attachment.telegramDeliveryUnknown));
   if (generatedDeliveryFailed || strictPhotoDeliveryFailed) {
     deliveredAnswer = input.t("image-delivery-failed");
     try {
