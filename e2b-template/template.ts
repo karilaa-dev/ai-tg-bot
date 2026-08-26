@@ -50,6 +50,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "libfontconfig1-dev",
   "libfreetype6-dev",
   "libgcc-s1",
+  "libgl1-mesa-dri",
   "libheif-dev",
   "libjpeg62-turbo-dev",
   "libpng-dev",
@@ -59,6 +60,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "libtool",
   "libwebp-dev",
   "libxml2-dev",
+  "openscad",
   "openssh-client",
   "patch",
   "pkg-config",
@@ -72,6 +74,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "tree",
   "unzip",
   "wget",
+  "xvfb",
   "xz-utils",
   "zip",
   "zstd",
@@ -94,6 +97,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .copyItems([
       { src: "assets/tool-contract.sh", dest: "/usr/local/bin/tool-contract.sh", user: "root", mode: 0o755 },
       { src: "assets/officecli", dest: "/usr/local/bin/officecli", user: "root", mode: 0o755 },
+      { src: "assets/openscad-build", dest: "/usr/local/bin/openscad-build", user: "root", mode: 0o755 },
     ])
     .makeSymlink("/usr/bin/fdfind", "/usr/local/bin/fd", { user: "root", force: true })
     .makeSymlink("/usr/local/bin/python3", "/usr/local/bin/python", { user: "root", force: true })

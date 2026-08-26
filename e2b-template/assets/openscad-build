@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: openscad-build preview FILE.scad\n' >&2
+  printf '       openscad-build final FILE.scad\n' >&2
+  exit 2
+}
+
+if [[ $# -ne 2 ]]; then
+  usage
+fi
+
+mode="$1"
+source_arg="$2"
+if [[ "$mode" != "preview" && "$mode" != "final" ]]; then
+  printf 'openscad-build: mode must be preview or final: %s\n' "$mode" >&2
+  usage
+fi
+if [[ "$source_arg" != *.scad ]]; then
+  printf 'openscad-build: input must have a .scad extension: %s\n' "$source_arg" >&2
+  exit 2
+fi
+if [[ ! -f "$source_arg" ]]; then
+  printf 'openscad-build: input file not found: %s\n' "$source_arg" >&2
+  exit 2
+fi
+if ! command -v openscad >/dev/null 2>&1; then
+  printf 'openscad-build: openscad is not installed\n' >&2
+  exit 2
+fi
+if ! command -v xvfb-run >/dev/null 2>&1; then
+  printf 'openscad-build: xvfb-run is not installed\n' >&2
+  exit 2
+fi
+
+source_dir="$(cd -- "$(dirname -- "$source_arg")" && pwd -P)"
+source_name="$(basename -- "$source_arg")"
+source_path="${source_dir}/${source_name}"
+stem="${source_name%.scad}"
+temporary_files=()
+
+cleanup() {
+  if ((${#temporary_files[@]})); then
+    rm -f -- "${temporary_files[@]}"
+  fi
+}
+trap cleanup EXIT
+
+new_temporary_file() {
+  local variable_name="$1"
+  local label="$2"
+  local extension="$3"
+  local temporary
+  temporary="$(mktemp "${source_dir}/.${stem}.${label}.XXXXXX.${extension}")"
+  temporary_files+=("$temporary")
+  printf -v "$variable_name" '%s' "$temporary"
+}
+
+run_openscad() {
+  local label="$1"
+  local output="$2"
+  shift 2
+  local log
+  new_temporary_file log "${label}.log" txt
+  rm -f -- "$output"
+  if ! env LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a openscad "$@" -o "$output" "$source_path" >"$log" 2>&1; then
+    printf 'openscad-build: %s failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  if grep -Eq '(^|[[:space:]])ERROR:' "$log"; then
+    printf 'openscad-build: %s reported an OpenSCAD error\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  if [[ ! -s "$output" ]]; then
+    printf 'openscad-build: %s produced no output: %s\n' "$label" "$output" >&2
+    return 1
+  fi
+}
+
+preview_target="${source_dir}/${stem}.preview.png"
+final_png_target="${source_dir}/${stem}.final.png"
+stl_target="${source_dir}/${stem}.stl"
+three_mf_target="${source_dir}/${stem}.3mf"
+
+if [[ "$mode" == "preview" ]]; then
+  new_temporary_file preview_tmp preview png
+  run_openscad preview "$preview_tmp" \
+    --preview=throwntogether \
+    --imgsize=1200,900 \
+    --viewall \
+    --autocenter \
+    --projection=perspective
+  mv -f -- "$preview_tmp" "$preview_target"
+  printf 'preview_png=%s\n' "$preview_target"
+  exit 0
+fi
+
+new_temporary_file stl_tmp final stl
+new_temporary_file three_mf_tmp final 3mf
+new_temporary_file final_png_tmp final png
+
+run_openscad stl "$stl_tmp"
+run_openscad 3mf "$three_mf_tmp"
+run_openscad final_png "$final_png_tmp" \
+  --render \
+  --imgsize=1200,900 \
+  --viewall \
+  --autocenter \
+  --projection=perspective
+
+mv -f -- "$stl_tmp" "$stl_target"
+mv -f -- "$three_mf_tmp" "$three_mf_target"
+mv -f -- "$final_png_tmp" "$final_png_target"
+
+printf 'scad=%s\n' "$source_path"
+printf 'stl=%s\n' "$stl_target"
+printf '3mf=%s\n' "$three_mf_target"
+printf 'final_png=%s\n' "$final_png_target"

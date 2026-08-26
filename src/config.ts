@@ -40,7 +40,7 @@ const ConfigSchema = z.object({
   E2B_FILE_SOURCE_MAX_BYTES: z.coerce.number().int().positive().default(2 * 1024 * 1024 * 1024),
   TELEGRAM_FILE_RESTORE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
   TELEGRAM_FILE_RESTORE_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
-  BASH_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  BASH_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   BASH_MAX_OUTPUT_CHARS: z.coerce.number().int().positive().default(12_000),
   DRAFT_UPDATE_MS: z.coerce.number().int().min(0).default(0),
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),

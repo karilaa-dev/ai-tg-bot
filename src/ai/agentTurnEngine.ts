@@ -18,7 +18,7 @@ import {
   withThreadNotFoundFallback,
   type InputRichMessage,
 } from "../telegram/richApi.js";
-import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
+import { MAX_CREATED_FILES_PER_ANSWER, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { FileRow } from "../db/types.js";
 import type { CreatedFileAttachment, PendingCreatedFile } from "./tools/index.js";
@@ -40,7 +40,6 @@ const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
 const TG_MEDIA_GROUP_LIMIT = 10;
 const MAX_BUFFERED_MEDIA_GROUP_BYTES = 40 * 1024 * 1024;
-const TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const MIN_SPLIT_RATIO = 0.5;
 
 export interface TurnInput {
@@ -1015,7 +1014,9 @@ async function sendFinalVisible(
   const generatedDeliveryFailed = generatedAttachments.length > 0
     && generatedAttachments.every((attachment) =>
       !attachment.telegramDelivery && !attachment.telegramDeliveryUnknown);
-  if (generatedDeliveryFailed) {
+  const strictPhotoDeliveryFailed = attachmentFailures.some((attachment) =>
+    attachment.delivery === "photo" && attachment.photoFallback === "none");
+  if (generatedDeliveryFailed || strictPhotoDeliveryFailed) {
     deliveredAnswer = input.t("image-delivery-failed");
     try {
       for (const rich of renderFinalAnswer({ answerMd: deliveredAnswer })) {
@@ -1233,7 +1234,11 @@ export function normalizeTelegramAttachmentDeliveries(
   attachments: CreatedFileAttachment[],
 ): void {
   for (const attachment of attachments) {
-    if (attachment.delivery === "photo" && attachment.size > TG_PHOTO_MAX_BYTES) {
+    if (
+      attachment.delivery === "photo"
+      && attachment.size > TG_PHOTO_MAX_BYTES
+      && attachment.photoFallback !== "none"
+    ) {
       attachment.delivery = "document";
     }
   }
@@ -1269,6 +1274,7 @@ async function sendGeneratedImageAttachmentsBeforePersistence(
           sent = await sendPhotoWithThreadFallback(input, attachment);
         } catch (error) {
           if (!isDefinitiveTelegramRejection(error)) throw error;
+          if (attachment.photoFallback === "none") throw error;
           sent = await sendDocumentWithThreadFallback(input, attachment);
           attachment.delivery = "document";
         }
@@ -1496,7 +1502,7 @@ async function sendOneBufferedAttachment(
     });
     return;
   }
-  if (strategy === photoSendStrategy) {
+  if (strategy === photoSendStrategy && attachment.photoFallback !== "none") {
     try {
       const sent = await documentSendStrategy.sendOne(input, attachment);
       attachment.delivery = "document";

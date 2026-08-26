@@ -40,6 +40,7 @@ export interface CreatedFileAttachment {
   inline: boolean;
   card: string;
   delivery?: "document" | "photo";
+  photoFallback?: "document" | "none";
   origin?: "created_file" | "generated_image";
   telegramDeliveryUnknown?: boolean;
   telegramDeliveryFailure?: "source_unavailable" | "telegram_rejected";
@@ -59,7 +60,7 @@ export interface CreatedFileAttachment {
 }
 
 export type PendingCreatedFile = Promise<{ attachment?: CreatedFileAttachment; revisedPrompt?: string | null; error?: string }>;
-export type CreatedFileDeliveryPreference = "auto" | "photo" | "document";
+export type CreatedFileDeliveryPreference = "auto" | "photo" | "photo_only" | "document";
 export const MAX_LOADED_MESSAGE_CHARS = 8000;
 export const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 

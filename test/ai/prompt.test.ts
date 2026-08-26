@@ -75,13 +75,15 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("pass it as `site_dir`");
     expect(prompt).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(prompt).toContain("call `read` on its advertised `SKILL.md` before acting");
+    expect(prompt).toContain("read the approved `openscad` skill before acting");
+    expect(prompt).toContain("final PNG must use `photo_only`");
     expect(prompt).toContain("never execute them");
     expect(prompt).not.toContain("# Browser Use Cloud");
     expect(prompt).not.toMatch(/<session_context[^>]*>\n\{/u);
     expect(prompt).not.toContain(baseUser.first_name);
     expect(prompt).not.toContain(thread.title);
     expect(prompt).not.toContain("{{");
-    expect(prompt.length).toBeLessThanOrEqual(7_000);
+    expect(prompt.length).toBeLessThanOrEqual(7_300);
   });
 
   it("renders current time and the stored timezone as structured context", () => {

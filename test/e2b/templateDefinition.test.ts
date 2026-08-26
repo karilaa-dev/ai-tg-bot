@@ -30,7 +30,7 @@ describe("E2B toolbox template definition", () => {
   it("contains the missing non-browser toolbox packages", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES).toEqual(expect.arrayContaining([
       "build-essential", "curl", "dnsutils", "fd-find", "git", "gnupg", "iproute2", "jq", "openssh-client", "procps", "ripgrep",
-      "poppler-utils", "sqlite3", "tree", "unzip", "zip", "zstd",
+      "libgl1-mesa-dri", "openscad", "poppler-utils", "sqlite3", "tree", "unzip", "xvfb", "zip", "zstd",
     ]));
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);
   });
@@ -55,6 +55,18 @@ describe("E2B toolbox template definition", () => {
     expect(contract).toContain('.pdfType == "Scanned"');
     expect(contract).toContain("pdftoppm");
     expect(contract).toContain("officecli view contract.docx text");
+  });
+
+  it("installs and smoke-tests the headless OpenSCAD build command", async () => {
+    const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
+    expect(dockerfile).toContain("openscad-build");
+    const contract = await fs.readFile("e2b-template/assets/tool-contract.sh", "utf8");
+    expect(contract).toContain("openscad-build preview");
+    expect(contract).toContain("openscad-build final");
+    expect(contract).toContain("test.preview.png");
+    expect(contract).toContain("test.final.png");
+    expect(contract).toContain("test.stl");
+    expect(contract).toContain("test.3mf");
   });
 
   it("keeps immutable builds separate from production promotion", async () => {

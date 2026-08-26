@@ -76,6 +76,54 @@ describe("create_file", () => {
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
   });
 
+  it("marks photo_only images so Telegram cannot fall back to document delivery", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 804, firstName: "Strict", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Images" });
+    const bytes = Buffer.from("image bytes");
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const createdFiles: Array<{ type: string; delivery: string; photoFallback?: string }> = [];
+    const tool = createCreateFileTool({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles,
+      commandRuntime: fileRuntime(bytes, contentSha256),
+    } as never);
+
+    await expect(tool.execute({ path: "/model.final.png", mime: "image/png", delivery: "photo_only" }))
+      .resolves.toMatchObject({ type: "image" });
+
+    expect(createdFiles).toMatchObject([{
+      type: "image",
+      delivery: "photo",
+      photoFallback: "none",
+    }]);
+  });
+
+  it("rejects oversized photo_only images instead of downgrading them", async () => {
+    const config = loadTestConfig();
+    const user = await repos.users.ensure({ tgId: 805, firstName: "Strict", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Images" });
+    const bytes = Buffer.alloc(10 * 1024 * 1024 + 1);
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const tool = createCreateFileTool({
+      config,
+      db,
+      repos,
+      user,
+      thread,
+      createdFiles: [],
+      commandRuntime: fileRuntime(bytes, contentSha256),
+    });
+
+    await expect(tool.execute({ path: "/model.final.png", mime: "image/png", delivery: "photo_only" }))
+      .resolves.toMatchObject({ error: expect.stringContaining("photo_only requires an image no larger") });
+    expect(await repos.files.listForThreads([thread.id])).toHaveLength(0);
+  });
+
   it("blocks an executable extension before a long file name is truncated", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 803, firstName: "Blocked", lang: "en" });

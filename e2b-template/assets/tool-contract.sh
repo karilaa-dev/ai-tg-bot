@@ -5,7 +5,7 @@ required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
   sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
-  officecli pdf-inspector pdfinfo pdftoppm
+  officecli pdf-inspector pdfinfo pdftoppm openscad openscad-build xvfb-run
 )
 
 missing=()
@@ -48,6 +48,20 @@ magick -size 2x2 xc:red "${tmp_dir}/image.png"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]
 magick "${tmp_dir}/image.png" -resize 1x1 -strip "${tmp_dir}/image.jpg"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.jpg")" == "1x1" ]]
+
+mkdir "${tmp_dir}/openscad"
+cat > "${tmp_dir}/openscad/test.scad" <<'SCAD'
+difference() {
+  cube([20, 20, 10], center = true);
+  cylinder(h = 12, d = 8, center = true, $fn = 48);
+}
+SCAD
+openscad-build preview "${tmp_dir}/openscad/test.scad"
+openscad-build final "${tmp_dir}/openscad/test.scad"
+[[ -s "${tmp_dir}/openscad/test.preview.png" ]]
+[[ -s "${tmp_dir}/openscad/test.final.png" ]]
+[[ -s "${tmp_dir}/openscad/test.stl" ]]
+[[ -s "${tmp_dir}/openscad/test.3mf" ]]
 
 python3 - "${tmp_dir}/contract.pdf" <<'PY'
 import sys
