@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { z } from "zod";
+import { E2B_TOOLBOX_RELEASE_REF } from "./e2b/templateIdentity.js";
 
 const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -34,7 +35,7 @@ const ConfigSchema = z.object({
   BROWSER_USE_NAVIGATION_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
   FILE_INLINE_TOKENS: z.coerce.number().int().positive().default(6000),
   E2B_API_KEY: z.string().min(1),
-  E2B_TEMPLATE: z.string().min(1).default("ai-tg-bot-tools:production"),
+  E2B_TEMPLATE: z.string().min(1).default(E2B_TOOLBOX_RELEASE_REF),
   E2B_DEPLOYMENT_ID: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/).default("ai-tg-bot"),
   E2B_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   E2B_FILE_SOURCE_MAX_BYTES: z.coerce.number().int().positive().default(2 * 1024 * 1024 * 1024),

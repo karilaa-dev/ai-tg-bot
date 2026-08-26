@@ -18,10 +18,16 @@ import {
   createE2BToolboxTemplate,
   e2bToolboxBuildRef,
 } from "../../e2b-template/template.js";
+import {
+  E2B_TOOLBOX_RELEASE_REF,
+  E2B_TOOLBOX_RELEASE_TAG,
+} from "../../src/e2b/templateIdentity.js";
 
 describe("E2B toolbox template definition", () => {
-  it("uses E2B Base with the fixed production identity and resources", () => {
+  it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.0");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.0");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -77,7 +83,7 @@ describe("E2B toolbox template definition", () => {
     const source = await fs.readFile("e2b-template/build.ts", "utf8");
     expect(source).toContain("const exactRef = e2bToolboxBuildRef(buildTag)");
     expect(source.indexOf("const exactRef = e2bToolboxBuildRef(buildTag)"))
-      .toBeLessThan(source.indexOf("Template.build"));
+      .toBeLessThan(source.indexOf("const buildInfo = await buildE2BToolboxTemplate"));
     expect(source).toContain("process.env.E2B_BUILD_TAG");
     expect(source).not.toContain("Template.assignTags");
     expect(source).not.toContain("buildInfo.buildId}`");
@@ -86,5 +92,18 @@ describe("E2B toolbox template definition", () => {
     expect(promotion).toContain("process.env.E2B_PROMOTE_TAG");
     expect(promotion.indexOf("validateE2BToolboxTemplate"))
       .toBeLessThan(promotion.indexOf("Template.assignTags"));
+  });
+
+  it("packages template assets for runtime releases", async () => {
+    const packageJson = JSON.parse(await fs.readFile("package.json", "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts.build).toContain("copy-e2b-template-assets");
+    expect(packageJson.scripts["e2b:release"]).toBe("tsx e2b-template/release.ts");
+
+    const copySource = await fs.readFile("scripts/copy-e2b-template-assets.ts", "utf8");
+    expect(copySource).toContain("e2b-template/assets");
+    expect(copySource).toContain("dist/e2b-template/assets");
+    expect(copySource).toContain("openscad-build");
   });
 });

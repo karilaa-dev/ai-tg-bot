@@ -139,6 +139,22 @@ describe("thread E2B runtime manager", () => {
     expect(toolboxChecks).toHaveLength(1);
   });
 
+  it("reconnects a mapped sandbox after the configured template version changes", async () => {
+    const originalTemplateRef = config.E2B_TEMPLATE;
+    await runtime.execute(commandRequest(userId, threadId));
+    const originalSandbox = client.onlySandbox();
+    await runtime.dispose();
+
+    config = { ...config, E2B_TEMPLATE: "ai-tg-bot-tools:v3.0.0" };
+    runtime = createRuntime();
+    await runtime.execute(commandRequest(userId, threadId));
+
+    expect(client.createCalls).toBe(1);
+    expect(client.connectCalls).toBe(1);
+    expect(client.onlySandbox().id).toBe(originalSandbox.id);
+    expect(client.onlySandbox().metadata.template_ref).toBe(originalTemplateRef);
+  });
+
   it("materializes requested files selectively and preserves earlier restorations additively", async () => {
     client.telegramFiles.set("tg-first", Buffer.from("first"));
     client.telegramFiles.set("tg-second", Buffer.from("second"));

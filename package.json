@@ -1,25 +1,23 @@
 {
   "name": "ai-tg-bot",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/src/main.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node dist/scripts/copy-e2b-template-assets.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-image-check": "tsx scripts/live-pi-image-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
     "live:e2b-check": "tsx scripts/live-e2b-check.ts",
-    "live:e2b-sandbox-files-v2": "E2B_TEMPLATE=ai-tg-bot-tools:sandbox-files-v2 tsx scripts/live-e2b-check.ts",
     "live:browser-use-check": "tsx scripts/live-browser-use-check.ts",
     "e2b:template:build": "tsx e2b-template/build.ts",
-    "e2b:template:build:sandbox-files-v2": "E2B_BUILD_TAG=sandbox-files-v2 tsx e2b-template/build.ts",
     "e2b:template:promote": "tsx e2b-template/promote.ts",
-    "e2b:template:promote:sandbox-files-v2": "E2B_PROMOTE_TAG=sandbox-files-v2 tsx e2b-template/promote.ts",
-    "e2b:template:check": "tsx e2b-template/check.ts"
+    "e2b:template:check": "tsx e2b-template/check.ts",
+    "e2b:release": "tsx e2b-template/release.ts"
   },
   "engines": {
     "node": ">=24.18.0"

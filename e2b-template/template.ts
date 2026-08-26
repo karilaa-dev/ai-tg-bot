@@ -1,9 +1,16 @@
 import { fileURLToPath } from "node:url";
 import { Template, type TemplateClass } from "e2b";
+import {
+  E2B_TOOLBOX_PRODUCTION_REF,
+  E2B_TOOLBOX_PRODUCTION_TAG,
+  E2B_TOOLBOX_TEMPLATE_NAME,
+} from "../src/e2b/templateIdentity.js";
 
-export const E2B_TOOLBOX_TEMPLATE_NAME = "ai-tg-bot-tools";
-export const E2B_TOOLBOX_PRODUCTION_TAG = "production";
-export const E2B_TOOLBOX_PRODUCTION_REF = `${E2B_TOOLBOX_TEMPLATE_NAME}:${E2B_TOOLBOX_PRODUCTION_TAG}`;
+export {
+  E2B_TOOLBOX_PRODUCTION_REF,
+  E2B_TOOLBOX_PRODUCTION_TAG,
+  E2B_TOOLBOX_TEMPLATE_NAME,
+};
 export const E2B_TOOLBOX_CPU_COUNT = 2;
 export const E2B_TOOLBOX_MEMORY_MB = 2048;
 

@@ -16,12 +16,17 @@ describe("Browser Use configuration", () => {
 
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
-    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:production");
+    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.0");
     expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(config.BASH_TIMEOUT_MS).toBe(120_000);
     expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);
     expect(config.BROWSER_USE_IDLE_TIMEOUT_MS).toBe(300_000);
     expect(isBrowserUseConfigured(config)).toBe(false);
+  });
+
+  it("preserves an explicit E2B template override", () => {
+    expect(loadConfig({ ...required, E2B_TEMPLATE: "ai-tg-bot-tools:rollback-v1" }).E2B_TEMPLATE)
+      .toBe("ai-tg-bot-tools:rollback-v1");
   });
 
   it("enables Browser Use with only an API key", () => {
