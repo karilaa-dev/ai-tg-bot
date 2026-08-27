@@ -64,11 +64,19 @@ openscad-build final "${tmp_dir}/openscad/test.scad"
 [[ -s "${tmp_dir}/openscad/test.preview.png" ]]
 [[ -s "${tmp_dir}/openscad/test.final.png" ]]
 [[ -s "${tmp_dir}/openscad/test.stl" ]]
-[[ -s "${tmp_dir}/openscad/test.3mf" ]]
+[[ ! -e "${tmp_dir}/openscad/test.3mf" ]]
 [[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.preview.png")" == "PNG 900 675" ]]
 [[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.final.png")" == "PNG 1200 900" ]]
-head -n 1 "${tmp_dir}/openscad/test.stl" | grep -Fq 'solid OpenSCAD_Model'
-[[ "$(head -c 2 "${tmp_dir}/openscad/test.3mf")" == "PK" ]]
+node - "${tmp_dir}/openscad/test.stl" <<'NODE'
+const fs = require("node:fs");
+const bytes = fs.readFileSync(process.argv[2]);
+if (bytes.length < 84) throw new Error("STL is shorter than its binary header");
+const triangles = bytes.readUInt32LE(80);
+if (triangles < 1 || bytes.length !== 84 + triangles * 50) {
+  throw new Error("STL does not have a valid binary triangle table");
+}
+if (bytes.length > 20 * 1024 * 1024) throw new Error("STL exceeds the bot delivery limit");
+NODE
 
 python3 - "${tmp_dir}/contract.pdf" <<'PY'
 import sys

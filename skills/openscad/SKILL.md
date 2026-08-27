@@ -1,6 +1,6 @@
 ---
 name: openscad
-description: Create or edit parametric OpenSCAD models and deliver the editable SCAD, STL, 3MF, and an inline rendered photo.
+description: Create or edit parametric OpenSCAD models and deliver a print-ready STL with one inline exact render, plus SCAD source only when requested.
 ---
 
 # OpenSCAD models
@@ -27,15 +27,13 @@ Build the exact outputs after the preview is correct:
 openscad-build final model.scad
 ```
 
-This produces and validates `model.stl`, `model.3mf`, and `model.final.png` together. Do not run separate existence, format, dimension, or mesh-validation commands after a successful build. Call `inspect_workspace_images` once on `/model.final.png`; fix and rebuild only if it exposes a problem.
+This produces and validates a binary `model.stl` and `model.final.png` together. Do not run separate existence, format, dimension, size, or mesh-validation commands after a successful build. If the wrapper reports that the STL exceeds the delivery limit, reduce excessive facet counts and rebuild without silently changing the model's dimensions. Call `inspect_workspace_images` once on `/model.final.png`; fix and rebuild only if it exposes a problem.
 
 ## Delivery gate
 
-Every completed model requires four `create_file` calls:
+Do not call `create_file` until the final build and final inspection have both succeeded. By default, queue exactly two deliverables, once each:
 
-1. `/model.scad` with `delivery: "document"`
-2. `/model.stl` with `delivery: "document"`
-3. `/model.3mf` with `delivery: "document"`
-4. `/model.final.png` with `mime: "image/png"` and `delivery: "photo_only"`
+1. `/model.stl` with `delivery: "document"`
+2. `/model.final.png` with `mime: "image/png"` and `delivery: "photo_only"`
 
-Never deliver `model.preview.png`. Never send the final PNG as a document. If any build, inspection, or attachment step fails, report the failure instead of claiming the model is complete.
+Queue `/model.scad` with `delivery: "document"` only when the user explicitly asks for the SCAD or editable source. Do not generate or deliver 3MF. Never deliver `model.preview.png`, attach draft revisions, or send the final PNG as a document. If any build, inspection, or attachment step fails, report the failure instead of claiming the model is complete.

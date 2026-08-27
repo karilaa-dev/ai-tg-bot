@@ -31,8 +31,8 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.1");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.1");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.2");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.2");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -88,12 +88,14 @@ describe("E2B toolbox template definition", () => {
     expect(contract).toContain("test.preview.png");
     expect(contract).toContain("test.final.png");
     expect(contract).toContain("test.stl");
-    expect(contract).toContain("test.3mf");
+    expect(contract).toContain('[[ ! -e "${tmp_dir}/openscad/test.3mf" ]]');
     expect(contract).toContain("PNG 900 675");
     expect(contract).toContain("PNG 1200 900");
     expect(contract).toContain("Xvfb xvfb-run");
     const wrapper = await fs.readFile("e2b-template/assets/openscad-build", "utf8");
     expect(wrapper).not.toMatch(/xvfb|DISPLAY|LIBGL/iu);
+    expect(wrapper).toContain("binstl");
+    expect(wrapper).not.toContain("3mf");
   });
 
   it("keeps immutable builds separate from production promotion", async () => {

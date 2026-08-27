@@ -113,7 +113,10 @@ describe("pinned OfficeCLI Pi skills", () => {
     const openscadText = openscadResult.content[0]?.type === "text" ? openscadResult.content[0].text : "";
     expect(openscadText).toContain("# OpenSCAD models");
     expect(openscadText).toContain("Do not probe for, install, or replace OpenSCAD");
-    expect(openscadText).toContain("Do not run separate existence, format, dimension, or mesh-validation commands");
+    expect(openscadText).toContain("Do not call `create_file` until the final build and final inspection");
+    expect(openscadText).toContain("Queue `/model.scad`");
+    expect(openscadText).toContain("only when the user explicitly asks");
+    expect(openscadText).toContain("Do not generate or deliver 3MF");
     expect(openscadText).toContain("delivery: \"photo_only\"");
     await expect(tool.execute(
       "read-source",

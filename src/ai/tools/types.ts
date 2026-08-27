@@ -31,6 +31,7 @@ export interface ToolBuildInput {
 
 export interface CreatedFileAttachment {
   fileId: number;
+  sourceVirtualPath?: string;
   type: StoredFileType;
   name: string;
   mimeType?: string | null;

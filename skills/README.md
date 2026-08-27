@@ -5,7 +5,7 @@ The bot advertises these reviewed local Pi skills:
 - `officecli-docx` for Word files
 - `officecli-pptx` for PowerPoint files
 - `sandbox-files` for attachment routing and inspection
-- `openscad` for SCAD modeling, preview inspection, exact STL and 3MF export, and inline final-image delivery
+- `openscad` for SCAD modeling, preview inspection, binary STL export, and one inline exact render
 
 Both started from [`iOfficeAI/OfficeCLI`](https://github.com/iOfficeAI/OfficeCLI/tree/main/skills) commit `b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412`. The local copies are adapted to this bot's preinstalled-tool and Browser Use preview rules, so they are no longer byte-for-byte upstream files.
 

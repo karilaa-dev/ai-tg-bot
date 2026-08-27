@@ -19,9 +19,9 @@ import { deferred } from "../helpers/async.js";
 
 describe("versioned E2B template identity", () => {
   it("derives the release tag from package.json", () => {
-    expect(APP_VERSION).toBe("2.0.1");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.1");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.1");
+    expect(APP_VERSION).toBe("2.0.2");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.2");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.2");
   });
 
   it("accepts only tagged references owned by this bot", () => {
@@ -140,7 +140,7 @@ function buildInfo(): BuildInfo {
   return {
     alias: "ai-tg-bot-tools",
     name: "ai-tg-bot-tools",
-    tags: ["v2.0.1"],
+    tags: ["v2.0.2"],
     templateId: "template-id",
     buildId: "build-id",
   };

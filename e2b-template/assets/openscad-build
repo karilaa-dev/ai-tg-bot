@@ -34,6 +34,7 @@ for required_command in openscad povray node magick; do
 done
 
 pov_renderer="${OPENSCAD_POV_RENDERER:-/usr/local/libexec/openscad-pov-render.mjs}"
+max_stl_bytes=$((20 * 1024 * 1024))
 if [[ ! -r "$pov_renderer" ]]; then
   printf 'openscad-build: POV scene renderer is not installed: %s\n' "$pov_renderer" >&2
   exit 2
@@ -103,6 +104,30 @@ require_nonempty() {
   fi
 }
 
+validate_binary_stl() {
+  local output="$1"
+  node - "$output" "$max_stl_bytes" <<'NODE'
+const fs = require("node:fs");
+const [filePath, maxBytesText] = process.argv.slice(2);
+const bytes = fs.readFileSync(filePath);
+const maxBytes = Number(maxBytesText);
+if (bytes.length < 84) {
+  throw new Error(`openscad-build: binary STL is too short: ${bytes.length} bytes`);
+}
+const triangles = bytes.readUInt32LE(80);
+if (triangles < 1) {
+  throw new Error("openscad-build: binary STL contains no triangles");
+}
+const expectedBytes = 84 + triangles * 50;
+if (!Number.isSafeInteger(expectedBytes) || bytes.length !== expectedBytes) {
+  throw new Error(`openscad-build: malformed binary STL: expected ${expectedBytes} bytes for ${triangles} triangles, got ${bytes.length}`);
+}
+if (bytes.length > maxBytes) {
+  throw new Error(`openscad-build: binary STL is ${bytes.length} bytes, above the ${maxBytes}-byte delivery limit; reduce excessive facet counts and rebuild`);
+}
+NODE
+}
+
 run_openscad() {
   local label="$1"
   local summary="$2"
@@ -163,10 +188,9 @@ render_png() {
 preview_target="${source_dir}/${stem}.preview.png"
 final_png_target="${source_dir}/${stem}.final.png"
 stl_target="${source_dir}/${stem}.stl"
-three_mf_target="${source_dir}/${stem}.3mf"
 
 if [[ "$mode" == "preview" ]]; then
-  new_temporary_file preview_stl preview stl
+  new_temporary_file preview_stl preview binstl
   new_temporary_file preview_pov preview pov
   new_temporary_file preview_summary preview-summary json
   new_temporary_file preview_scene preview-scene pov
@@ -183,8 +207,7 @@ if [[ "$mode" == "preview" ]]; then
   exit 0
 fi
 
-new_temporary_file stl_tmp final stl
-new_temporary_file three_mf_tmp final 3mf
+new_temporary_file stl_tmp final binstl
 new_temporary_file final_pov_tmp final pov
 new_temporary_file final_summary final-summary json
 new_temporary_file final_scene final-scene pov
@@ -192,15 +215,14 @@ new_temporary_file final_png_tmp final png
 
 run_openscad final "$final_summary" \
   -o "$stl_tmp" \
-  -o "$three_mf_tmp" \
   -o "$final_pov_tmp"
 require_nonempty "final STL" "$stl_tmp"
-require_nonempty "final 3MF" "$three_mf_tmp"
+validate_binary_stl "$stl_tmp"
 require_nonempty "final POV" "$final_pov_tmp"
 render_png final_png "$final_pov_tmp" "$final_summary" "$final_scene" "$final_png_tmp" 1200 900 +Q7 +A0.2 +AM2 +R3
 
 backup_dir="$(mktemp -d "${source_dir}/.${stem}.final-backup.XXXXXX")"
-for target in "$stl_target" "$three_mf_target" "$final_png_target"; do
+for target in "$stl_target" "$final_png_target"; do
   if [[ -e "$target" ]]; then
     cp -a -- "$target" "${backup_dir}/$(basename -- "$target")"
     backed_up_targets+=("$target")
@@ -210,13 +232,10 @@ for target in "$stl_target" "$three_mf_target" "$final_png_target"; do
 done
 final_commit_started=1
 mv -f -- "$stl_tmp" "$stl_target"
-mv -f -- "$three_mf_tmp" "$three_mf_target"
 mv -f -- "$final_png_tmp" "$final_png_target"
 final_commit_complete=1
 rm -rf -- "$backup_dir"
 backup_dir=""
 
-printf 'scad=%s\n' "$source_path"
 printf 'stl=%s\n' "$stl_target"
-printf '3mf=%s\n' "$three_mf_target"
 printf 'final_png=%s\n' "$final_png_target"

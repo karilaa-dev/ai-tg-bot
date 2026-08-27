@@ -114,6 +114,7 @@ export async function prepareCreatedFile(
       await rememberE2BFileSource(input, stored.id, exported, file.mime);
       return {
         fileId: stored.id,
+        sourceVirtualPath: virtualPath,
         type: ingested.type,
         name: stored.name,
         mimeType: stored.mime_type,
@@ -137,6 +138,7 @@ export async function prepareCreatedFile(
   await rememberE2BFileSource(input, stored.id, exported, file.mime);
   return {
     fileId: stored.id,
+    sourceVirtualPath: virtualPath,
     type: stored.type,
     name: displayName,
     mimeType: stored.mime_type,

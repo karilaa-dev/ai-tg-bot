@@ -55,19 +55,24 @@ describe("openscad-build", () => {
     expect(scene).not.toContain("rad_def.inc");
   });
 
-  it("creates STL, 3MF, and a 1200x900 PNG with one OpenSCAD evaluation", async () => {
+  it("creates a binary STL and 1200x900 PNG with one OpenSCAD evaluation", async () => {
     const result = await runWrapper("final");
 
-    expect(result.stdout).toContain(`scad=${modelPath}`);
     expect(result.stdout).toContain(`stl=${path.join(modelDir, "model.stl")}`);
-    expect(result.stdout).toContain(`3mf=${path.join(modelDir, "model.3mf")}`);
     expect(result.stdout).toContain(`final_png=${path.join(modelDir, "model.final.png")}`);
-    await expect(fs.readFile(path.join(modelDir, "model.stl"), "utf8")).resolves.toBe("rendered stl final\n");
-    await expect(fs.readFile(path.join(modelDir, "model.3mf"), "utf8")).resolves.toBe("rendered 3mf final\n");
+    expect(result.stdout).not.toContain("scad=");
+    expect(result.stdout).not.toContain("3mf=");
+    const stl = await fs.readFile(path.join(modelDir, "model.stl"));
+    expect(stl.subarray(0, 14).toString("ascii")).toBe("OpenSCAD Model");
+    expect(stl.readUInt32LE(80)).toBe(1);
+    expect(stl).toHaveLength(134);
+    await expect(fs.access(path.join(modelDir, "model.3mf"))).rejects.toThrow();
     await expect(fs.readFile(path.join(modelDir, "model.final.png"), "utf8")).resolves.toBe("rendered png 1200x900\n");
     const openscadCalls = await readLogLines(openscadArgsLog);
     expect(openscadCalls).toHaveLength(1);
-    expect(openscadCalls[0]?.match(/ -o /gu)).toHaveLength(3);
+    expect(openscadCalls[0]?.match(/ -o /gu)).toHaveLength(2);
+    expect(openscadCalls[0]).toContain(".binstl");
+    expect(openscadCalls[0]).not.toContain(".3mf");
     expect(await fs.readFile(povrayArgsLog, "utf8")).toContain("+W1200 +H900");
     expect(await fs.readFile(povrayArgsLog, "utf8")).toContain("+Q7 +A0.2 +AM2 +R3");
   });
@@ -75,7 +80,7 @@ describe("openscad-build", () => {
   it("preserves all previous final outputs when a staged OpenSCAD export fails", async () => {
     await writeOldFinalOutputs();
 
-    await expect(runWrapper("final", { OPENSCAD_STUB_FAIL_EXTENSION: "3mf" }))
+    await expect(runWrapper("final", { OPENSCAD_STUB_FAIL_EXTENSION: "binstl" }))
       .rejects.toMatchObject({ stderr: expect.stringContaining("final failed") });
 
     await expectOldFinalOutputs();
@@ -94,7 +99,7 @@ describe("openscad-build", () => {
     await writeOldFinalOutputs();
 
     await expect(runWrapper("final", {
-      OPENSCAD_STUB_FAIL_MOVE_DEST: path.join(modelDir, "model.3mf"),
+      OPENSCAD_STUB_FAIL_MOVE_DEST: path.join(modelDir, "model.final.png"),
       OPENSCAD_STUB_MOVE_MARKER: path.join(tempRoot, "move-failed"),
     })).rejects.toMatchObject({ stderr: expect.stringContaining("stub move failure") });
 
@@ -115,6 +120,14 @@ describe("openscad-build", () => {
       .rejects.toMatchObject({ stderr: expect.stringContaining("three-dimensional geometry") });
     await expect(runWrapper("preview", { MAGICK_STUB_INVALID: "1" }))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unexpected image properties") });
+  });
+
+  it("rejects malformed and oversized binary STL outputs before rendering", async () => {
+    await expect(runWrapper("final", { OPENSCAD_STUB_INVALID_BINARY_STL: "1" }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("binary STL is too short") });
+    await expect(runWrapper("final", { OPENSCAD_STUB_OVERSIZED_BINARY_STL: "1" }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("above the 20971520-byte delivery limit") });
+    await expect(fs.access(povrayArgsLog)).rejects.toThrow();
   });
 });
 
@@ -168,12 +181,12 @@ async function runWrapper(mode: "preview" | "final", extraEnv: NodeJS.ProcessEnv
 }
 
 async function writeOldFinalOutputs(): Promise<void> {
-  await Promise.all(["model.stl", "model.3mf", "model.final.png"]
+  await Promise.all(["model.stl", "model.final.png"]
     .map((name) => fs.writeFile(path.join(modelDir, name), `old ${name}\n`)));
 }
 
 async function expectOldFinalOutputs(): Promise<void> {
-  for (const name of ["model.stl", "model.3mf", "model.final.png"]) {
+  for (const name of ["model.stl", "model.final.png"]) {
     await expect(fs.readFile(path.join(modelDir, name), "utf8")).resolves.toBe(`old ${name}\n`);
   }
 }
@@ -231,6 +244,23 @@ for output in "\${outputs[@]}"; do
   if [[ "$extension" == pov ]]; then
     cat > "$output" <<'POV'
 ${rawPov}POV
+  elif [[ "$extension" == binstl ]]; then
+    node - "$output" <<'NODE'
+const fs = require("node:fs");
+const output = process.argv[2];
+if (process.env.OPENSCAD_STUB_INVALID_BINARY_STL === "1") {
+  fs.writeFileSync(output, Buffer.from("invalid"));
+  process.exit(0);
+}
+const limit = 20 * 1024 * 1024;
+const triangles = process.env.OPENSCAD_STUB_OVERSIZED_BINARY_STL === "1"
+  ? Math.floor((limit - 84) / 50) + 1
+  : 1;
+const bytes = Buffer.alloc(84 + triangles * 50);
+Buffer.from("OpenSCAD Model\\n").copy(bytes);
+bytes.writeUInt32LE(triangles, 80);
+fs.writeFileSync(output, bytes);
+NODE
   else
     printf 'rendered %s %s\\n' "$extension" "$mode" > "$output"
   fi

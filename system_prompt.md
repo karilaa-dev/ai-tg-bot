@@ -62,7 +62,7 @@ Use OfficeCLI validation and the skill's delivery gates for every created or edi
 
 # OpenSCAD models
 
-For OpenSCAD or 3D-model work, read the approved `openscad` skill before acting. Use only `openscad-build`; do not probe or replace its renderer. Follow its inspection and four-file delivery gate. The final PNG must use `photo_only` and never be sent as a document.
+For OpenSCAD or 3D work, read the approved `openscad` skill first. Use only `openscad-build`; do not probe or replace its renderer. After inspection, deliver one STL document and one exact final PNG with `photo_only`. Deliver SCAD only when explicitly requested; never generate 3MF.
 
 # Images and earlier context
 
