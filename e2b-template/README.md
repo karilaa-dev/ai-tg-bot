@@ -8,15 +8,13 @@ The image contains the shell tools listed in `template.ts`, ImageMagick, OfficeC
 
 The default tag comes from the application version in `package.json`. Version `2.0.0` uses `ai-tg-bot-tools:v2.0.0`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
-The bot releases a missing managed tag automatically when a new sandbox creation returns a 404. It builds the current template, runs the template contract and validation, then retries sandbox creation once. Existing mapped sandboxes reconnect without checking the current tag.
-
-To prebuild the versioned image and run the full live runtime smoke before deployment, use:
+Build the versioned image and run the full live runtime smoke before deployment:
 
 ```sh
 npm run e2b:release
 ```
 
-If the version tag already exists, the command reuses and validates it instead of rebuilding it. The command prints the exact `E2B_TEMPLATE` reference after the smoke passes.
+If the version tag already exists, the command reuses and validates it instead of rebuilding it. The command prints the exact `E2B_TEMPLATE` reference after the smoke passes. A bot process never builds a missing image during sandbox creation. It fails with the missing reference and this command instead.
 
 Low-level commands remain available for diagnostics and manual recovery:
 

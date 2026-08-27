@@ -2,10 +2,13 @@ import { SandboxError, type BuildInfo } from "e2b";
 import { describe, expect, it, vi } from "vitest";
 import {
   E2BTemplateReleaseManager,
-  createWithMissingTemplateRecovery,
-  isE2BNotFoundError,
   type E2BTemplateReleaseDependencies,
 } from "../../src/e2b/templateRelease.js";
+import {
+  E2BTemplateNotFoundError,
+  createWithTemplateNotFoundError,
+  isE2BNotFoundError,
+} from "../../src/e2b/templateNotFound.js";
 import {
   E2B_TOOLBOX_RELEASE_REF,
   E2B_TOOLBOX_RELEASE_TAG,
@@ -30,7 +33,7 @@ describe("versioned E2B template identity", () => {
   });
 });
 
-describe("automatic E2B template release", () => {
+describe("manual E2B template release", () => {
   it("builds and validates a missing managed tag", async () => {
     const dependencies = fakeDependencies({ exists: false });
     const manager = new E2BTemplateReleaseManager("e2b_test", undefined, dependencies);
@@ -52,7 +55,7 @@ describe("automatic E2B template release", () => {
     expect(dependencies.validate).toHaveBeenCalledTimes(1);
   });
 
-  it("shares one release while concurrent sandbox creations recover", async () => {
+  it("shares one release while concurrent callers prewarm the same tag", async () => {
     const gate = deferred<void>();
     const dependencies = fakeDependencies({ exists: false });
     dependencies.build.mockImplementation(async () => {
@@ -60,14 +63,15 @@ describe("automatic E2B template release", () => {
       return buildInfo();
     });
     const manager = new E2BTemplateReleaseManager("e2b_test", undefined, dependencies);
-    const missing = new SandboxError("404: template not found");
-
-    const first = manager.recoverMissingTemplate(E2B_TOOLBOX_RELEASE_REF, missing);
-    const second = manager.recoverMissingTemplate(E2B_TOOLBOX_RELEASE_REF, missing);
+    const first = manager.ensure(E2B_TOOLBOX_RELEASE_REF);
+    const second = manager.ensure(E2B_TOOLBOX_RELEASE_REF);
     await vi.waitFor(() => expect(dependencies.build).toHaveBeenCalledTimes(1));
     gate.resolve();
 
-    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ status: "built" }),
+      expect.objectContaining({ status: "built" }),
+    ]);
     expect(dependencies.exists).toHaveBeenCalledTimes(1);
     expect(dependencies.validate).toHaveBeenCalledTimes(1);
   });
@@ -93,49 +97,34 @@ describe("automatic E2B template release", () => {
     expect(dependencies.validate).not.toHaveBeenCalled();
   });
 
-  it("recovers only SDK 404 errors for managed tags", async () => {
-    const dependencies = fakeDependencies({ exists: true });
-    const manager = new E2BTemplateReleaseManager("e2b_test", undefined, dependencies);
-
-    await expect(manager.recoverMissingTemplate(E2B_TOOLBOX_RELEASE_REF, new Error("404 from proxy")))
-      .resolves.toBe(false);
-    await expect(manager.recoverMissingTemplate(E2B_TOOLBOX_RELEASE_REF, new SandboxError("500: unavailable")))
-      .resolves.toBe(false);
-    await expect(manager.recoverMissingTemplate("foreign:v2.0.0", new SandboxError("404: missing")))
-      .resolves.toBe(false);
-    expect(dependencies.exists).not.toHaveBeenCalled();
-    expect(isE2BNotFoundError(new SandboxError("404: missing"))).toBe(true);
-  });
 });
 
-describe("sandbox creation retry", () => {
-  it("retries once after successful missing-template recovery", async () => {
-    const created = { id: "sandbox" };
-    const create = vi.fn()
-      .mockRejectedValueOnce(new SandboxError("404: missing"))
-      .mockResolvedValueOnce(created);
-    const recover = vi.fn().mockResolvedValue(true);
+describe("missing sandbox image failure", () => {
+  it("fails once with a release instruction when the configured image is missing", async () => {
+    const create = vi.fn().mockRejectedValue(new SandboxError("404: template not found"));
 
-    await expect(createWithMissingTemplateRecovery(create, recover)).resolves.toBe(created);
-    expect(create).toHaveBeenCalledTimes(2);
+    await expect(createWithTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, create))
+      .rejects.toEqual(expect.objectContaining({
+        name: "E2BTemplateNotFoundError",
+        templateRef: E2B_TOOLBOX_RELEASE_REF,
+        message: expect.stringContaining("npm run e2b:release"),
+      }));
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(isE2BNotFoundError(new SandboxError("404: missing"))).toBe(true);
   });
 
-  it("does not loop when the retry fails", async () => {
-    const retryError = new Error("retry failed");
-    const create = vi.fn()
-      .mockRejectedValueOnce(new SandboxError("404: missing"))
-      .mockRejectedValueOnce(retryError);
-
-    await expect(createWithMissingTemplateRecovery(create, async () => true)).rejects.toBe(retryError);
-    expect(create).toHaveBeenCalledTimes(2);
-  });
-
-  it("preserves the original error when recovery declines it", async () => {
+  it("preserves authentication, rate-limit, network, and unrelated errors", async () => {
     const original = new Error("authentication failed");
     const create = vi.fn().mockRejectedValue(original);
 
-    await expect(createWithMissingTemplateRecovery(create, async () => false)).rejects.toBe(original);
+    await expect(createWithTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, create)).rejects.toBe(original);
     expect(create).toHaveBeenCalledTimes(1);
+    expect(isE2BNotFoundError(new SandboxError("500: unavailable"))).toBe(false);
+  });
+
+  it("retains the SDK failure as the missing-image error cause", () => {
+    const cause = new SandboxError("404: template not found");
+    expect(new E2BTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, cause).cause).toBe(cause);
   });
 });
 

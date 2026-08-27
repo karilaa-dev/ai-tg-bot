@@ -81,6 +81,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "tree",
   "unzip",
   "wget",
+  "xauth",
   "xvfb",
   "xz-utils",
   "zip",

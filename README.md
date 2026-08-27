@@ -74,15 +74,13 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 The bot derives its default private template from the application version. Version `2.0.0` uses `ai-tg-bot-tools:v2.0.0`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, OpenSCAD with `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
-No manual image release is required. When creation of a new sandbox reports that a managed template tag is missing, the bot builds and validates that tag, then retries creation once. Existing thread mappings reconnect their original sandboxes and never trigger a rebuild.
-
-Prebuild and run the full live smoke when you want to warm the image before deploying:
+Release the versioned image before deploying a bot version that can create new sandboxes:
 
 ```bash
 npm run e2b:release
 ```
 
-The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. Generic build and promotion commands remain available for manual recovery.
+The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. If a configured image is missing, sandbox creation fails once with this release command in the error. The bot does not build images during a user turn. Existing thread mappings still reconnect their original sandboxes.
 
 ### E2B settings
 

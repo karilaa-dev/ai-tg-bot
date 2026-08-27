@@ -7,11 +7,7 @@ import {
   type SandboxInfo,
 } from "e2b";
 import type { AppConfig } from "../config.js";
-import type { Logger } from "../logger.js";
-import {
-  E2BTemplateReleaseManager,
-  createWithMissingTemplateRecovery,
-} from "./templateRelease.js";
+import { createWithTemplateNotFoundError } from "./templateNotFound.js";
 
 export const E2B_IDLE_PAUSE_MS = 3 * 60_000;
 export const E2B_WEBSITE_IDLE_PAUSE_MS = 15 * 60_000;
@@ -72,15 +68,12 @@ export interface E2BClient {
   kill(sandboxId: string, signal?: AbortSignal): Promise<boolean>;
 }
 
-export function createE2BClient(config: AppConfig, logger?: Logger): E2BClient {
-  return new SdkE2BClient(config, new E2BTemplateReleaseManager(config.E2B_API_KEY, logger));
+export function createE2BClient(config: AppConfig): E2BClient {
+  return new SdkE2BClient(config);
 }
 
 class SdkE2BClient implements E2BClient {
-  constructor(
-    private readonly config: AppConfig,
-    private readonly templateRelease: E2BTemplateReleaseManager,
-  ) {}
+  constructor(private readonly config: AppConfig) {}
 
   async list(metadata: Record<string, string>, signal?: AbortSignal): Promise<SandboxInfo[]> {
     const paginator = Sandbox.list({
@@ -124,10 +117,7 @@ class SdkE2BClient implements E2BClient {
         allowPublicTraffic: true,
       },
     });
-    const sandbox = await createWithMissingTemplateRecovery(
-      create,
-      (error) => this.templateRelease.recoverMissingTemplate(this.config.E2B_TEMPLATE, error),
-    );
+    const sandbox = await createWithTemplateNotFoundError(this.config.E2B_TEMPLATE, create);
     return new SdkE2BSandbox(sandbox, this.config);
   }
 

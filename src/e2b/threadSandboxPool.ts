@@ -155,7 +155,7 @@ export class ThreadSandboxPool {
   private shuttingDown = false;
 
   constructor(private readonly input: ThreadSandboxPoolInput) {
-    this.client = input.client ?? createE2BClient(input.config, input.logger);
+    this.client = input.client ?? createE2BClient(input.config);
     if (input.downloadTelegramBytes) {
       this.downloadTelegramBytes = input.downloadTelegramBytes;
     } else {

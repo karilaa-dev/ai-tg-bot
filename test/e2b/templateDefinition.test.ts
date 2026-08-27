@@ -36,7 +36,7 @@ describe("E2B toolbox template definition", () => {
   it("contains the missing non-browser toolbox packages", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES).toEqual(expect.arrayContaining([
       "build-essential", "curl", "dnsutils", "fd-find", "git", "gnupg", "iproute2", "jq", "openssh-client", "procps", "ripgrep",
-      "libgl1-mesa-dri", "openscad", "poppler-utils", "sqlite3", "tree", "unzip", "xvfb", "zip", "zstd",
+      "libgl1-mesa-dri", "openscad", "poppler-utils", "sqlite3", "tree", "unzip", "xauth", "xvfb", "zip", "zstd",
     ]));
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);
   });
@@ -94,7 +94,7 @@ describe("E2B toolbox template definition", () => {
       .toBeLessThan(promotion.indexOf("Template.assignTags"));
   });
 
-  it("packages template assets for runtime releases", async () => {
+  it("packages template assets for the manual release command", async () => {
     const packageJson = JSON.parse(await fs.readFile("package.json", "utf8")) as {
       scripts: Record<string, string>;
     };

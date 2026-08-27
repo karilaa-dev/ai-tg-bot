@@ -1,4 +1,4 @@
-import { SandboxError, Template, defaultBuildLogger, type BuildInfo } from "e2b";
+import { Template, defaultBuildLogger, type BuildInfo } from "e2b";
 import { buildE2BToolboxTemplate } from "../../e2b-template/builder.js";
 import { validateE2BToolboxTemplate } from "../../e2b-template/validate.js";
 import type { Logger } from "../logger.js";
@@ -39,16 +39,10 @@ export class E2BTemplateReleaseManager {
     };
   }
 
-  async recoverMissingTemplate(templateRef: string, error: unknown): Promise<boolean> {
-    if (!isE2BNotFoundError(error) || !parseManagedE2BTemplateRef(templateRef)) return false;
-    await this.ensure(templateRef);
-    return true;
-  }
-
   ensure(templateRef: string): Promise<E2BTemplateReleaseResult> {
     if (!parseManagedE2BTemplateRef(templateRef)) {
       return Promise.reject(new Error(
-        `Automatic E2B releases require ${E2B_TOOLBOX_TEMPLATE_NAME}:<tag>; received ${templateRef}`,
+        `E2B releases require ${E2B_TOOLBOX_TEMPLATE_NAME}:<tag>; received ${templateRef}`,
       ));
     }
     const running = this.active.get(templateRef);
@@ -68,7 +62,7 @@ export class E2BTemplateReleaseManager {
       return { templateRef, status: "reused" };
     }
 
-    this.logger?.warn("E2B template is missing; building it before retry", { templateRef });
+    this.logger?.info("building missing E2B template for an explicit release", { templateRef });
     let buildInfo: BuildInfo;
     try {
       buildInfo = await this.dependencies.build(templateRef, this.apiKey);
@@ -92,20 +86,4 @@ export class E2BTemplateReleaseManager {
       buildId: buildInfo.buildId,
     };
   }
-}
-
-export async function createWithMissingTemplateRecovery<T>(
-  create: () => Promise<T>,
-  recover: (error: unknown) => Promise<boolean>,
-): Promise<T> {
-  try {
-    return await create();
-  } catch (error) {
-    if (!await recover(error)) throw error;
-    return create();
-  }
-}
-
-export function isE2BNotFoundError(error: unknown): boolean {
-  return error instanceof SandboxError && /^404(?:\s|:)/u.test(error.message);
 }
