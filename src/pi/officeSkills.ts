@@ -31,7 +31,7 @@ export const OPENSCAD_SKILLS = [
   {
     name: "openscad",
     relativePath: "skills/openscad/SKILL.md",
-    sha256: "3cbe704be62be73f0d95ce91c031567ac13e67b1f6707a0f2b10288c3ccc40a6",
+    sha256: "5ed238b549a07cc08f2ade2f98d41beb118d188f0789c48f040a609616de54e9",
   },
 ] as const;
 

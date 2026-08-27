@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec node /usr/local/libexec/openscad/openscad.js "$@"

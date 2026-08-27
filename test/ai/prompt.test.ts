@@ -76,6 +76,7 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("nohup command </dev/null >server.log 2>&1 &");
     expect(prompt).toContain("call `read` on its advertised `SKILL.md` before acting");
     expect(prompt).toContain("read the approved `openscad` skill before acting");
+    expect(prompt).toContain("Use only `openscad-build`; do not probe or replace its renderer");
     expect(prompt).toContain("final PNG must use `photo_only`");
     expect(prompt).toContain("never execute them");
     expect(prompt).not.toContain("# Browser Use Cloud");

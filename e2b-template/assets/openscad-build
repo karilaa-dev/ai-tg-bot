@@ -25,12 +25,17 @@ if [[ ! -f "$source_arg" ]]; then
   printf 'openscad-build: input file not found: %s\n' "$source_arg" >&2
   exit 2
 fi
-if ! command -v openscad >/dev/null 2>&1; then
-  printf 'openscad-build: openscad is not installed\n' >&2
-  exit 2
-fi
-if ! command -v xvfb-run >/dev/null 2>&1; then
-  printf 'openscad-build: xvfb-run is not installed\n' >&2
+
+for required_command in openscad povray node magick; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    printf 'openscad-build: %s is not installed\n' "$required_command" >&2
+    exit 2
+  fi
+done
+
+pov_renderer="${OPENSCAD_POV_RENDERER:-/usr/local/libexec/openscad-pov-render.mjs}"
+if [[ ! -r "$pov_renderer" ]]; then
+  printf 'openscad-build: POV scene renderer is not installed: %s\n' "$pov_renderer" >&2
   exit 2
 fi
 
@@ -89,14 +94,22 @@ new_temporary_file() {
   printf -v "$variable_name" '%s' "$temporary"
 }
 
-run_openscad() {
+require_nonempty() {
   local label="$1"
   local output="$2"
+  if [[ ! -s "$output" ]]; then
+    printf 'openscad-build: %s produced no output: %s\n' "$label" "$output" >&2
+    return 1
+  fi
+}
+
+run_openscad() {
+  local label="$1"
+  local summary="$2"
   shift 2
   local log
-  new_temporary_file log "${label}.log" txt
-  rm -f -- "$output"
-  if ! env LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a openscad "$@" -o "$output" "$source_path" >"$log" 2>&1; then
+  new_temporary_file log "${label}.openscad-log" txt
+  if ! openscad --summary=all --summary-file "$summary" "$@" "$source_path" >"$log" 2>&1; then
     printf 'openscad-build: %s failed\n' "$label" >&2
     sed 's/^/  /' "$log" >&2
     return 1
@@ -106,8 +119,43 @@ run_openscad() {
     sed 's/^/  /' "$log" >&2
     return 1
   fi
-  if [[ ! -s "$output" ]]; then
-    printf 'openscad-build: %s produced no output: %s\n' "$label" "$output" >&2
+  require_nonempty "${label} summary" "$summary"
+}
+
+render_png() {
+  local label="$1"
+  local raw_pov="$2"
+  local summary="$3"
+  local scene="$4"
+  local output="$5"
+  local width="$6"
+  local height="$7"
+  shift 7
+  local log image_info
+  new_temporary_file log "${label}.povray-log" txt
+  if ! node "$pov_renderer" "$raw_pov" "$summary" "$scene" >"$log" 2>&1; then
+    printf 'openscad-build: %s scene preparation failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  require_nonempty "${label} scene" "$scene"
+  rm -f -- "$output"
+  if ! (
+    cd -- "$source_dir"
+    povray "+I${scene}" "+O${output}" +FN "+W${width}" "+H${height}" -D -V -P "$@"
+  ) >>"$log" 2>&1; then
+    printf 'openscad-build: %s render failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  require_nonempty "$label" "$output"
+  if ! image_info="$(magick identify -quiet -format '%m %w %h' "$output" 2>>"$log")"; then
+    printf 'openscad-build: %s is not a readable PNG\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  if [[ "$image_info" != "PNG ${width} ${height}" ]]; then
+    printf 'openscad-build: %s has unexpected image properties: %s\n' "$label" "$image_info" >&2
     return 1
   fi
 }
@@ -118,13 +166,18 @@ stl_target="${source_dir}/${stem}.stl"
 three_mf_target="${source_dir}/${stem}.3mf"
 
 if [[ "$mode" == "preview" ]]; then
+  new_temporary_file preview_stl preview stl
+  new_temporary_file preview_pov preview pov
+  new_temporary_file preview_summary preview-summary json
+  new_temporary_file preview_scene preview-scene pov
   new_temporary_file preview_tmp preview png
-  run_openscad preview "$preview_tmp" \
-    --preview=throwntogether \
-    --imgsize=1200,900 \
-    --viewall \
-    --autocenter \
-    --projection=perspective
+  run_openscad preview "$preview_summary" \
+    -D '$preview=true' \
+    -o "$preview_stl" \
+    -o "$preview_pov"
+  require_nonempty "preview STL" "$preview_stl"
+  require_nonempty "preview POV" "$preview_pov"
+  render_png preview "$preview_pov" "$preview_summary" "$preview_scene" "$preview_tmp" 900 675 +Q5 -A
   mv -f -- "$preview_tmp" "$preview_target"
   printf 'preview_png=%s\n' "$preview_target"
   exit 0
@@ -132,16 +185,19 @@ fi
 
 new_temporary_file stl_tmp final stl
 new_temporary_file three_mf_tmp final 3mf
+new_temporary_file final_pov_tmp final pov
+new_temporary_file final_summary final-summary json
+new_temporary_file final_scene final-scene pov
 new_temporary_file final_png_tmp final png
 
-run_openscad stl "$stl_tmp"
-run_openscad 3mf "$three_mf_tmp"
-run_openscad final_png "$final_png_tmp" \
-  --render \
-  --imgsize=1200,900 \
-  --viewall \
-  --autocenter \
-  --projection=perspective
+run_openscad final "$final_summary" \
+  -o "$stl_tmp" \
+  -o "$three_mf_tmp" \
+  -o "$final_pov_tmp"
+require_nonempty "final STL" "$stl_tmp"
+require_nonempty "final 3MF" "$three_mf_tmp"
+require_nonempty "final POV" "$final_pov_tmp"
+render_png final_png "$final_pov_tmp" "$final_summary" "$final_scene" "$final_png_tmp" 1200 900 +Q7 +A0.2 +AM2 +R3
 
 backup_dir="$(mktemp -d "${source_dir}/.${stem}.final-backup.XXXXXX")"
 for target in "$stl_target" "$three_mf_target" "$final_png_target"; do

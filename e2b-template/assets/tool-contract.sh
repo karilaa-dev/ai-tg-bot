@@ -5,7 +5,7 @@ required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
   sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
-  officecli pdf-inspector pdfinfo pdftoppm openscad openscad-build xvfb-run
+  officecli pdf-inspector pdfinfo pdftoppm openscad openscad-build povray
 )
 
 missing=()
@@ -30,6 +30,9 @@ python3 -m venv "${tmp_dir}/venv"
 
 node --version >/dev/null
 npm --version >/dev/null
+openscad_version="$(openscad --version 2>&1 || true)"
+grep -Fxq "OpenSCAD version 2026.08.23" <<<"$openscad_version"
+dpkg-query -W -f='${Version}\n' povray | grep -Fq '3.7.0.10'
 officecli --version
 officecli help pptx >/dev/null
 [[ "$(pdf-inspector --version)" == "1.17.0" ]]
@@ -62,6 +65,10 @@ openscad-build final "${tmp_dir}/openscad/test.scad"
 [[ -s "${tmp_dir}/openscad/test.final.png" ]]
 [[ -s "${tmp_dir}/openscad/test.stl" ]]
 [[ -s "${tmp_dir}/openscad/test.3mf" ]]
+[[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.preview.png")" == "PNG 900 675" ]]
+[[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.final.png")" == "PNG 1200 900" ]]
+head -n 1 "${tmp_dir}/openscad/test.stl" | grep -Fq 'solid OpenSCAD_Model'
+[[ "$(head -c 2 "${tmp_dir}/openscad/test.3mf")" == "PK" ]]
 
 python3 - "${tmp_dir}/contract.pdf" <<'PY'
 import sys
@@ -187,7 +194,7 @@ source /etc/os-release
 [[ "${HOME}" == /home/user ]]
 [[ -w /home/user/workspace ]]
 
-for forbidden_command in docker dockerd sshd chromium chromium-browser google-chrome playwright; do
+for forbidden_command in docker dockerd sshd chromium chromium-browser google-chrome playwright Xvfb xvfb-run; do
   if command -v "${forbidden_command}" >/dev/null 2>&1; then
     printf 'Forbidden command is installed: %s\n' "${forbidden_command}" >&2
     exit 1

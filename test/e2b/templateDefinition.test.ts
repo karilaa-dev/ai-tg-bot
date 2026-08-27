@@ -14,7 +14,12 @@ import {
   OFFICECLI_PPTX_SKILL_SHA256,
   OFFICECLI_SOURCE_REVISION,
   OFFICECLI_VERSION,
+  OPENSCAD_LICENSE_SHA256,
+  OPENSCAD_NODE_SHA256,
+  OPENSCAD_SOURCE_REVISION,
+  OPENSCAD_VERSION,
   PDF_INSPECTOR_VERSION,
+  POVRAY_VERSION,
   createE2BToolboxTemplate,
   e2bToolboxBuildRef,
 } from "../../e2b-template/template.js";
@@ -26,8 +31,8 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.0");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.0");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.1");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.1");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -36,7 +41,10 @@ describe("E2B toolbox template definition", () => {
   it("contains the missing non-browser toolbox packages", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES).toEqual(expect.arrayContaining([
       "build-essential", "curl", "dnsutils", "fd-find", "git", "gnupg", "iproute2", "jq", "openssh-client", "procps", "ripgrep",
-      "libgl1-mesa-dri", "openscad", "poppler-utils", "sqlite3", "tree", "unzip", "xauth", "xvfb", "zip", "zstd",
+      "poppler-utils", "povray", "sqlite3", "tree", "unzip", "zip", "zstd",
+    ]));
+    expect(E2B_TOOLBOX_APT_PACKAGES).not.toEqual(expect.arrayContaining([
+      "libgl1-mesa-dri", "openscad", "xauth", "xvfb",
     ]));
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);
   });
@@ -65,6 +73,14 @@ describe("E2B toolbox template definition", () => {
 
   it("installs and smoke-tests the headless OpenSCAD build command", async () => {
     const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
+    expect(OPENSCAD_VERSION).toBe("2026.08.23");
+    expect(OPENSCAD_SOURCE_REVISION).toBe("3da45dd566ef5710138d33e80758cfa068bd0304");
+    expect(OPENSCAD_NODE_SHA256).toBe("c01f08d087bf85582682d92ee9f4d9ca55e71d3f4f4e86e465e02c392ad322f8");
+    expect(OPENSCAD_LICENSE_SHA256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(POVRAY_VERSION).toBe("3.7.0.10");
+    expect(dockerfile).toContain(`OpenSCAD-${OPENSCAD_VERSION}-WebAssembly-node.zip`);
+    expect(dockerfile).toContain(OPENSCAD_NODE_SHA256);
+    expect(dockerfile).toContain("openscad-pov-render.mjs");
     expect(dockerfile).toContain("openscad-build");
     const contract = await fs.readFile("e2b-template/assets/tool-contract.sh", "utf8");
     expect(contract).toContain("openscad-build preview");
@@ -73,6 +89,11 @@ describe("E2B toolbox template definition", () => {
     expect(contract).toContain("test.final.png");
     expect(contract).toContain("test.stl");
     expect(contract).toContain("test.3mf");
+    expect(contract).toContain("PNG 900 675");
+    expect(contract).toContain("PNG 1200 900");
+    expect(contract).toContain("Xvfb xvfb-run");
+    const wrapper = await fs.readFile("e2b-template/assets/openscad-build", "utf8");
+    expect(wrapper).not.toMatch(/xvfb|DISPLAY|LIBGL/iu);
   });
 
   it("keeps immutable builds separate from production promotion", async () => {

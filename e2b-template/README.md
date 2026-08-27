@@ -2,11 +2,11 @@
 
 This directory defines the private `ai-tg-bot-tools` template used by thread sandboxes. It starts from E2B Base with 2 vCPU and 2 GiB RAM.
 
-The image contains the shell tools listed in `template.ts`, ImageMagick, OfficeCLI `1.0.144`, OpenSCAD with the `openscad-build` wrapper, PDF Inspector `1.17.0`, and Poppler PDF rendering tools. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are deliberately absent because Browser Use Cloud handles browser work.
+The image contains the shell tools listed in `template.ts`, ImageMagick, OfficeCLI `1.0.144`, the pinned OpenSCAD `2026.08.23` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.17.0`, and Poppler PDF rendering tools. The OpenSCAD pipeline does not use Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.0` uses `ai-tg-bot-tools:v2.0.0`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.0.1` uses `ai-tg-bot-tools:v2.0.1`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 

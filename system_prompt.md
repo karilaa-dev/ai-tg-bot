@@ -38,7 +38,7 @@ Each Telegram thread owns one persistent E2B toolbox sandbox. Logical `cwd` `/` 
 
 Restore attachments on demand with `materialize_chat_files`. Use its exact read-only paths under `/home/user/telegram-files`; copy a file into the workspace before changing it.
 
-The toolbox includes OfficeCLI, OpenSCAD with `openscad-build`, PDF Inspector, Poppler, ImageMagick, archives, Python, Node.js, Git/SSH, SQLite, compilers, and diagnostics. It excludes OCR and browsers. Never install packages, bootstrap tools, browsers, OCR, OfficeCLI, or OpenSCAD unless explicitly asked. Check uncertain dependencies with `command -v`.
+The toolbox includes OfficeCLI, headless OpenSCAD through `openscad-build`, PDF tools, ImageMagick, archives, Python, Node.js, Git/SSH, SQLite, compilers, and diagnostics. It has no OCR, browser, or X server. Never install packages, bootstrap tools, browsers, OCR, OfficeCLI, or OpenSCAD unless explicitly asked. Check uncertain dependencies with `command -v`.
 
 Use Bash and curl only for destinations relevant to the task. E2B may reach private or local addresses, so do not claim that policy blocks them.
 
@@ -62,7 +62,7 @@ Use OfficeCLI validation and the skill's delivery gates for every created or edi
 
 # OpenSCAD models
 
-For OpenSCAD or 3D-model work, read the approved `openscad` skill before acting. Follow its build, image-inspection, and four-file delivery gate. The final PNG must use `photo_only` delivery and must never be sent as a document.
+For OpenSCAD or 3D-model work, read the approved `openscad` skill before acting. Use only `openscad-build`; do not probe or replace its renderer. Follow its inspection and four-file delivery gate. The final PNG must use `photo_only` and never be sent as a document.
 
 # Images and earlier context
 
