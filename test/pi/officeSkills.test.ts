@@ -10,9 +10,11 @@ import {
 import {
   OFFICECLI_SKILLS,
   OFFICECLI_SKILLS_REVISION,
+  OPENSCAD_SKILLS,
   approvedSkillPaths,
-  createOfficeSkillReadTool,
+  createApprovedSkillReadTool,
   officeSkillPaths,
+  validateApprovedSkills,
   validateOfficeSkills,
 } from "../../src/pi/officeSkills.js";
 
@@ -45,7 +47,10 @@ describe("pinned OfficeCLI Pi skills", () => {
 
   });
 
-  it("loads the approved sandbox file routing skill", () => {
+  it("loads every approved local skill", async () => {
+    await expect(validateApprovedSkills()).resolves.toBeUndefined();
+    expect(OPENSCAD_SKILLS.map((skill) => skill.sha256))
+      .toEqual([expect.stringMatching(/^[a-f0-9]{64}$/u)]);
     const loaded = loadSkills({
       cwd: process.cwd(),
       agentDir: path.resolve("data/pi"),
@@ -56,6 +61,7 @@ describe("pinned OfficeCLI Pi skills", () => {
     expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
       "officecli-docx",
       "officecli-pptx",
+      "openscad",
       "sandbox-files",
     ]);
   });
@@ -82,7 +88,7 @@ describe("pinned OfficeCLI Pi skills", () => {
   });
 
   it("reads a complete advertised skill but rejects all other host files", async () => {
-    const tool = createOfficeSkillReadTool();
+    const tool = createApprovedSkillReadTool();
     const result = await tool.execute(
       "read-skill",
       { path: officeSkillPaths()[0]! },
@@ -96,6 +102,22 @@ describe("pinned OfficeCLI Pi skills", () => {
     expect(text).toContain("## Scope");
     expect(text).toContain("### Delivery gate");
     expect(result.details).toMatchObject({ truncated: false, start_line: 1 });
+
+    const openscadResult = await tool.execute(
+      "read-openscad",
+      { path: path.resolve(OPENSCAD_SKILLS[0].relativePath) },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    const openscadText = openscadResult.content[0]?.type === "text" ? openscadResult.content[0].text : "";
+    expect(openscadText).toContain("# OpenSCAD models");
+    expect(openscadText).toContain("Do not probe for, install, or replace OpenSCAD");
+    expect(openscadText).toContain("Do not call `create_file` until the final build and final inspection");
+    expect(openscadText).toContain("Queue `/model.scad`");
+    expect(openscadText).toContain("only when the user explicitly asks");
+    expect(openscadText).toContain("Do not generate or deliver 3MF");
+    expect(openscadText).toContain("delivery: \"photo_only\"");
     await expect(tool.execute(
       "read-source",
       { path: path.resolve("package.json") },
@@ -121,7 +143,7 @@ describe("pinned OfficeCLI Pi skills", () => {
     await fs.mkdir(pptxRoot, { recursive: true });
     await fs.symlink(path.resolve("package.json"), path.join(docxRoot, "SKILL.md"));
 
-    const tool = createOfficeSkillReadTool(root);
+    const tool = createApprovedSkillReadTool(root);
     await expect(tool.execute(
       "read-escape",
       { path: path.join(docxRoot, "SKILL.md") },

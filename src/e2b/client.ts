@@ -7,6 +7,7 @@ import {
   type SandboxInfo,
 } from "e2b";
 import type { AppConfig } from "../config.js";
+import { createWithTemplateNotFoundError } from "./templateNotFound.js";
 
 export const E2B_IDLE_PAUSE_MS = 3 * 60_000;
 export const E2B_WEBSITE_IDLE_PAUSE_MS = 15 * 60_000;
@@ -100,7 +101,7 @@ class SdkE2BClient implements E2BClient {
   }
 
   async create(metadata: Record<string, string>, signal?: AbortSignal): Promise<E2BSandbox> {
-    const sandbox = await Sandbox.create(this.config.E2B_TEMPLATE, {
+    const create = () => Sandbox.create(this.config.E2B_TEMPLATE, {
       apiKey: this.config.E2B_API_KEY,
       requestTimeoutMs: this.config.E2B_REQUEST_TIMEOUT_MS,
       signal,
@@ -116,6 +117,7 @@ class SdkE2BClient implements E2BClient {
         allowPublicTraffic: true,
       },
     });
+    const sandbox = await createWithTemplateNotFoundError(this.config.E2B_TEMPLATE, create);
     return new SdkE2BSandbox(sandbox, this.config);
   }
 

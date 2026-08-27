@@ -27,7 +27,15 @@ export const SANDBOX_FILE_SKILLS = [
   },
 ] as const;
 
-export const APPROVED_PI_SKILLS = [...OFFICECLI_SKILLS, ...SANDBOX_FILE_SKILLS] as const;
+export const OPENSCAD_SKILLS = [
+  {
+    name: "openscad",
+    relativePath: "skills/openscad/SKILL.md",
+    sha256: "3985efc1fdfee1a615dd3be067f181f2b64c187d6e385d8496a5b9c15cea21e5",
+  },
+] as const;
+
+export const APPROVED_PI_SKILLS = [...OFFICECLI_SKILLS, ...SANDBOX_FILE_SKILLS, ...OPENSCAD_SKILLS] as const;
 
 const MAX_SKILL_READ_LINES = 2_000;
 const validationPromises = new Map<string, Promise<void>>();
@@ -57,7 +65,7 @@ export function validateApprovedSkills(cwd = process.cwd()): Promise<void> {
   return validateSkills(cwd, APPROVED_PI_SKILLS);
 }
 
-export function createOfficeSkillReadTool(cwd = process.cwd()): ToolDefinition {
+export function createApprovedSkillReadTool(cwd = process.cwd()): ToolDefinition {
   const roots = APPROVED_PI_SKILLS.map((skill) => path.dirname(path.resolve(cwd, skill.relativePath)));
   return {
     name: "read",

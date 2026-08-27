@@ -22,7 +22,7 @@ Pi uses Codex OAuth when valid credentials are available. If Codex is not config
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
 - Optional Browser Use Cloud API key
-- An E2B template with PDF Inspector, Poppler, ImageMagick, and OfficeCLI
+- An E2B API key that can build the versioned toolbox template
 
 ## Local setup
 
@@ -72,33 +72,35 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-`E2B_TEMPLATE=ai-tg-bot-tools:production` selects the private template in [`e2b-template`](e2b-template/README.md). It uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
+The bot derives its default private template from the application version. Version `2.0.2` uses `ai-tg-bot-tools:v2.0.2`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, the OpenSCAD `2026.08.23` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
-Build and validate an immutable version, smoke-test that exact tag, then promote it:
+Release the versioned image before deploying a bot version that can create new sandboxes:
 
 ```bash
-npm run e2b:template:build
-E2B_TEMPLATE=ai-tg-bot-tools:<version-tag> npm run live:e2b-check
-E2B_PROMOTE_TAG=<version-tag> npm run e2b:template:promote
+npm run e2b:release
 ```
 
-The build command never changes `production`. Promotion revalidates the immutable build and moves the tag only after the separate live runtime smoke succeeds. Moving the tag affects new sandboxes only.
+The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. If a configured image is missing, sandbox creation fails once with this release command in the error. The bot does not build images during a user turn. Existing thread mappings still reconnect their original sandboxes.
 
 ### E2B settings
 
 ```dotenv
 E2B_API_KEY=<secret>
-E2B_TEMPLATE=ai-tg-bot-tools:production
+# Optional override. The default for version 2.0.2 is ai-tg-bot-tools:v2.0.2.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.2
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
 TELEGRAM_FILE_RESTORE_TIMEOUT_MS=300000
 TELEGRAM_FILE_RESTORE_CONCURRENCY=4
+BASH_TIMEOUT_MS=120000
 ```
 
-Use a different `E2B_DEPLOYMENT_ID` for every deployment that shares an E2B account. The value is part of sandbox ownership and recovery.
+Use a different `E2B_DEPLOYMENT_ID` for each independently active bot deployment and database that share an E2B account. The value is part of sandbox ownership and recovery.
 
-`E2B_REQUEST_TIMEOUT_MS` covers short control requests. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` covers Telegram restoration and large E2B file transfers. `E2B_FILE_SOURCE_MAX_BYTES` caps immutable snapshots for files that do not yet have a Telegram recovery source. The bot removes or evicts old snapshots without touching the workspace copy.
+Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Do not delete `thread_sandboxes` mappings during a version change.
+
+`E2B_REQUEST_TIMEOUT_MS` covers short control requests. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` covers Telegram restoration and large E2B file transfers. `E2B_FILE_SOURCE_MAX_BYTES` caps immutable snapshots for files that do not yet have a Telegram recovery source. `BASH_TIMEOUT_MS` allows exact OpenSCAD renders and other sandbox commands to run for up to two minutes. The bot removes or evicts old snapshots without touching the workspace copy.
 
 The bot creates secure sandboxes with outbound internet and public port traffic enabled. Their lifecycle action is `pause`, memory is kept, and automatic resume is disabled. Ordinary services should bind to `127.0.0.1`. A requested public site may bind to `0.0.0.0` and must pass through `publish_website`.
 

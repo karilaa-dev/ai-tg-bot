@@ -5,7 +5,7 @@ required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
   sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
-  officecli pdf-inspector pdfinfo pdftoppm
+  officecli pdf-inspector pdfinfo pdftoppm openscad openscad-build povray
 )
 
 missing=()
@@ -30,6 +30,9 @@ python3 -m venv "${tmp_dir}/venv"
 
 node --version >/dev/null
 npm --version >/dev/null
+openscad_version="$(openscad --version 2>&1 || true)"
+grep -Fxq "OpenSCAD version 2026.08.23" <<<"$openscad_version"
+dpkg-query -W -f='${Version}\n' povray | grep -Fq '3.7.0.10'
 officecli --version
 officecli help pptx >/dev/null
 [[ "$(pdf-inspector --version)" == "1.17.0" ]]
@@ -48,6 +51,32 @@ magick -size 2x2 xc:red "${tmp_dir}/image.png"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]
 magick "${tmp_dir}/image.png" -resize 1x1 -strip "${tmp_dir}/image.jpg"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.jpg")" == "1x1" ]]
+
+mkdir "${tmp_dir}/openscad"
+cat > "${tmp_dir}/openscad/test.scad" <<'SCAD'
+difference() {
+  cube([20, 20, 10], center = true);
+  cylinder(h = 12, d = 8, center = true, $fn = 48);
+}
+SCAD
+openscad-build preview "${tmp_dir}/openscad/test.scad"
+openscad-build final "${tmp_dir}/openscad/test.scad"
+[[ -s "${tmp_dir}/openscad/test.preview.png" ]]
+[[ -s "${tmp_dir}/openscad/test.final.png" ]]
+[[ -s "${tmp_dir}/openscad/test.stl" ]]
+[[ ! -e "${tmp_dir}/openscad/test.3mf" ]]
+[[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.preview.png")" == "PNG 900 675" ]]
+[[ "$(magick identify -quiet -format '%m %w %h' "${tmp_dir}/openscad/test.final.png")" == "PNG 1200 900" ]]
+node - "${tmp_dir}/openscad/test.stl" <<'NODE'
+const fs = require("node:fs");
+const bytes = fs.readFileSync(process.argv[2]);
+if (bytes.length < 84) throw new Error("STL is shorter than its binary header");
+const triangles = bytes.readUInt32LE(80);
+if (triangles < 1 || bytes.length !== 84 + triangles * 50) {
+  throw new Error("STL does not have a valid binary triangle table");
+}
+if (bytes.length > 20 * 1024 * 1024) throw new Error("STL exceeds the bot delivery limit");
+NODE
 
 python3 - "${tmp_dir}/contract.pdf" <<'PY'
 import sys
@@ -173,7 +202,7 @@ source /etc/os-release
 [[ "${HOME}" == /home/user ]]
 [[ -w /home/user/workspace ]]
 
-for forbidden_command in docker dockerd sshd chromium chromium-browser google-chrome playwright; do
+for forbidden_command in docker dockerd sshd chromium chromium-browser google-chrome playwright Xvfb xvfb-run; do
   if command -v "${forbidden_command}" >/dev/null 2>&1; then
     printf 'Forbidden command is installed: %s\n' "${forbidden_command}" >&2
     exit 1

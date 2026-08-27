@@ -1,24 +1,18 @@
 import "dotenv/config";
-import { Template, defaultBuildLogger } from "e2b";
+import { defaultBuildLogger } from "e2b";
 import {
   E2B_TOOLBOX_CPU_COUNT,
   E2B_TOOLBOX_MEMORY_MB,
   E2B_TOOLBOX_TEMPLATE_NAME,
   e2bToolboxBuildRef,
-  e2bToolboxTemplate,
 } from "./template.js";
+import { buildE2BToolboxTemplate } from "./builder.js";
 import { requireE2BApiKey, validateE2BToolboxTemplate } from "./validate.js";
 
 const buildTag = process.env.E2B_BUILD_TAG?.trim() || buildTimestampTag(new Date());
 const exactRef = e2bToolboxBuildRef(buildTag);
 const apiKey = requireE2BApiKey();
-const buildInfo = await Template.build(e2bToolboxTemplate, E2B_TOOLBOX_TEMPLATE_NAME, {
-  apiKey,
-  tags: [buildTag],
-  cpuCount: E2B_TOOLBOX_CPU_COUNT,
-  memoryMB: E2B_TOOLBOX_MEMORY_MB,
-  onBuildLogs: defaultBuildLogger(),
-});
+const buildInfo = await buildE2BToolboxTemplate(exactRef, apiKey, defaultBuildLogger());
 
 await validateE2BToolboxTemplate(exactRef, apiKey);
 

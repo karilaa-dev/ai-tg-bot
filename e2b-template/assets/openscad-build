@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: openscad-build preview FILE.scad\n' >&2
+  printf '       openscad-build final FILE.scad\n' >&2
+  exit 2
+}
+
+if [[ $# -ne 2 ]]; then
+  usage
+fi
+
+mode="$1"
+source_arg="$2"
+if [[ "$mode" != "preview" && "$mode" != "final" ]]; then
+  printf 'openscad-build: mode must be preview or final: %s\n' "$mode" >&2
+  usage
+fi
+if [[ "$source_arg" != *.scad ]]; then
+  printf 'openscad-build: input must have a .scad extension: %s\n' "$source_arg" >&2
+  exit 2
+fi
+if [[ ! -f "$source_arg" ]]; then
+  printf 'openscad-build: input file not found: %s\n' "$source_arg" >&2
+  exit 2
+fi
+
+for required_command in openscad povray node magick; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    printf 'openscad-build: %s is not installed\n' "$required_command" >&2
+    exit 2
+  fi
+done
+
+pov_renderer="${OPENSCAD_POV_RENDERER:-/usr/local/libexec/openscad-pov-render.mjs}"
+max_stl_bytes=$((20 * 1024 * 1024))
+if [[ ! -r "$pov_renderer" ]]; then
+  printf 'openscad-build: POV scene renderer is not installed: %s\n' "$pov_renderer" >&2
+  exit 2
+fi
+
+source_dir="$(cd -- "$(dirname -- "$source_arg")" && pwd -P)"
+source_name="$(basename -- "$source_arg")"
+source_path="${source_dir}/${source_name}"
+stem="${source_name%.scad}"
+temporary_files=()
+backup_dir=""
+final_commit_started=0
+final_commit_complete=0
+backed_up_targets=()
+absent_targets=()
+
+cleanup() {
+  local exit_status=$?
+  local rollback_failed=0
+  set +e
+  if [[ "$final_commit_started" == 1 && "$final_commit_complete" != 1 ]]; then
+    local target backup
+    for target in "${absent_targets[@]}"; do
+      rm -f -- "$target"
+    done
+    for target in "${backed_up_targets[@]}"; do
+      backup="${backup_dir}/$(basename -- "$target")"
+      rm -f -- "$target"
+      if ! mv -f -- "$backup" "$target"; then
+        rollback_failed=1
+      fi
+    done
+  fi
+  if [[ -n "$backup_dir" ]]; then
+    if [[ "$rollback_failed" == 1 ]]; then
+      printf 'ERROR: failed to restore previous outputs; backups remain at %s\n' "$backup_dir" >&2
+    else
+      rm -rf -- "$backup_dir"
+    fi
+  fi
+  if ((${#temporary_files[@]})); then
+    rm -f -- "${temporary_files[@]}"
+  fi
+  return "$exit_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+new_temporary_file() {
+  local variable_name="$1"
+  local label="$2"
+  local extension="$3"
+  local temporary
+  temporary="$(mktemp "${source_dir}/.${stem}.${label}.XXXXXX.${extension}")"
+  temporary_files+=("$temporary")
+  printf -v "$variable_name" '%s' "$temporary"
+}
+
+require_nonempty() {
+  local label="$1"
+  local output="$2"
+  if [[ ! -s "$output" ]]; then
+    printf 'openscad-build: %s produced no output: %s\n' "$label" "$output" >&2
+    return 1
+  fi
+}
+
+validate_binary_stl() {
+  local output="$1"
+  node - "$output" "$max_stl_bytes" <<'NODE'
+const fs = require("node:fs");
+const [filePath, maxBytesText] = process.argv.slice(2);
+const bytes = fs.readFileSync(filePath);
+const maxBytes = Number(maxBytesText);
+if (bytes.length < 84) {
+  throw new Error(`openscad-build: binary STL is too short: ${bytes.length} bytes`);
+}
+const triangles = bytes.readUInt32LE(80);
+if (triangles < 1) {
+  throw new Error("openscad-build: binary STL contains no triangles");
+}
+const expectedBytes = 84 + triangles * 50;
+if (!Number.isSafeInteger(expectedBytes) || bytes.length !== expectedBytes) {
+  throw new Error(`openscad-build: malformed binary STL: expected ${expectedBytes} bytes for ${triangles} triangles, got ${bytes.length}`);
+}
+if (bytes.length > maxBytes) {
+  throw new Error(`openscad-build: binary STL is ${bytes.length} bytes, above the ${maxBytes}-byte delivery limit; reduce excessive facet counts and rebuild`);
+}
+NODE
+}
+
+run_openscad() {
+  local label="$1"
+  local summary="$2"
+  shift 2
+  local log
+  new_temporary_file log "${label}.openscad-log" txt
+  if ! openscad --summary=all --summary-file "$summary" "$@" "$source_path" >"$log" 2>&1; then
+    printf 'openscad-build: %s failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  if grep -Eq '(^|[[:space:]])ERROR:' "$log"; then
+    printf 'openscad-build: %s reported an OpenSCAD error\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  require_nonempty "${label} summary" "$summary"
+}
+
+render_png() {
+  local label="$1"
+  local raw_pov="$2"
+  local summary="$3"
+  local scene="$4"
+  local output="$5"
+  local width="$6"
+  local height="$7"
+  shift 7
+  local log image_info
+  new_temporary_file log "${label}.povray-log" txt
+  if ! node "$pov_renderer" "$raw_pov" "$summary" "$scene" >"$log" 2>&1; then
+    printf 'openscad-build: %s scene preparation failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  require_nonempty "${label} scene" "$scene"
+  rm -f -- "$output"
+  if ! (
+    cd -- "$source_dir"
+    povray "+I${scene}" "+O${output}" +FN "+W${width}" "+H${height}" -D -V -P "$@"
+  ) >>"$log" 2>&1; then
+    printf 'openscad-build: %s render failed\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  require_nonempty "$label" "$output"
+  if ! image_info="$(magick identify -quiet -format '%m %w %h' "$output" 2>>"$log")"; then
+    printf 'openscad-build: %s is not a readable PNG\n' "$label" >&2
+    sed 's/^/  /' "$log" >&2
+    return 1
+  fi
+  if [[ "$image_info" != "PNG ${width} ${height}" ]]; then
+    printf 'openscad-build: %s has unexpected image properties: %s\n' "$label" "$image_info" >&2
+    return 1
+  fi
+}
+
+preview_target="${source_dir}/${stem}.preview.png"
+final_png_target="${source_dir}/${stem}.final.png"
+stl_target="${source_dir}/${stem}.stl"
+
+if [[ "$mode" == "preview" ]]; then
+  new_temporary_file preview_stl preview binstl
+  new_temporary_file preview_pov preview pov
+  new_temporary_file preview_summary preview-summary json
+  new_temporary_file preview_scene preview-scene pov
+  new_temporary_file preview_tmp preview png
+  run_openscad preview "$preview_summary" \
+    -D '$preview=true' \
+    -o "$preview_stl" \
+    -o "$preview_pov"
+  require_nonempty "preview STL" "$preview_stl"
+  require_nonempty "preview POV" "$preview_pov"
+  render_png preview "$preview_pov" "$preview_summary" "$preview_scene" "$preview_tmp" 900 675 +Q5 -A
+  mv -f -- "$preview_tmp" "$preview_target"
+  printf 'preview_png=%s\n' "$preview_target"
+  exit 0
+fi
+
+new_temporary_file stl_tmp final binstl
+new_temporary_file final_pov_tmp final pov
+new_temporary_file final_summary final-summary json
+new_temporary_file final_scene final-scene pov
+new_temporary_file final_png_tmp final png
+
+run_openscad final "$final_summary" \
+  -o "$stl_tmp" \
+  -o "$final_pov_tmp"
+require_nonempty "final STL" "$stl_tmp"
+validate_binary_stl "$stl_tmp"
+require_nonempty "final POV" "$final_pov_tmp"
+render_png final_png "$final_pov_tmp" "$final_summary" "$final_scene" "$final_png_tmp" 1200 900 +Q7 +A0.2 +AM2 +R3
+
+backup_dir="$(mktemp -d "${source_dir}/.${stem}.final-backup.XXXXXX")"
+for target in "$stl_target" "$final_png_target"; do
+  if [[ -e "$target" ]]; then
+    cp -a -- "$target" "${backup_dir}/$(basename -- "$target")"
+    backed_up_targets+=("$target")
+  else
+    absent_targets+=("$target")
+  fi
+done
+final_commit_started=1
+mv -f -- "$stl_tmp" "$stl_target"
+mv -f -- "$final_png_tmp" "$final_png_target"
+final_commit_complete=1
+rm -rf -- "$backup_dir"
+backup_dir=""
+
+printf 'stl=%s\n' "$stl_target"
+printf 'final_png=%s\n' "$final_png_target"

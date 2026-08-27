@@ -3,7 +3,7 @@ import type { Repos } from "../../db/repos/index.js";
 import type { FileRow, StoredFileType } from "../../db/types.js";
 import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { sha256Hex } from "../../files/hash.js";
-import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../../files/limits.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "../../files/limits.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
 import { e2bFileSource } from "../../e2b/fileSource.js";
 import { threadChainScope } from "../../memory/retrieval.js";
@@ -40,6 +40,19 @@ function assertPhotoDeliverable(type: string | null, name: string): void {
   }
 }
 
+function assertStrictPhotoDeliverable(
+  type: string | null,
+  name: string,
+  size: number,
+  preference: CreatedFileDeliveryPreference,
+): void {
+  if (preference !== "photo_only") return;
+  assertPhotoDeliverable(type, name);
+  if (size > TG_PHOTO_MAX_BYTES) {
+    throw new Error(`delivery photo_only requires an image no larger than ${TG_PHOTO_MAX_BYTES} bytes: ${name}`);
+  }
+}
+
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
   const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
@@ -64,6 +77,7 @@ export async function prepareCreatedFile(
   const classified = classifyFile(displayName, file.mime ?? "");
   const requestedDelivery = file.delivery ?? "auto";
   if (requestedDelivery === "photo") assertPhotoDeliverable(classified, displayName);
+  assertStrictPhotoDeliverable(classified, displayName, bytes.length, requestedDelivery);
   if (classified && classified !== "legacy-doc") {
     let ingestedFile: {
       result: Awaited<ReturnType<typeof ingestFileBytes>>;
@@ -100,6 +114,7 @@ export async function prepareCreatedFile(
       await rememberE2BFileSource(input, stored.id, exported, file.mime);
       return {
         fileId: stored.id,
+        sourceVirtualPath: virtualPath,
         type: ingested.type,
         name: stored.name,
         mimeType: stored.mime_type,
@@ -108,6 +123,7 @@ export async function prepareCreatedFile(
         inline: ingested.inline,
         card: ingested.card,
         delivery: createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name),
+        ...(requestedDelivery === "photo_only" ? { photoFallback: "none" as const } : {}),
         origin: "created_file",
       };
     }
@@ -122,6 +138,7 @@ export async function prepareCreatedFile(
   await rememberE2BFileSource(input, stored.id, exported, file.mime);
   return {
     fileId: stored.id,
+    sourceVirtualPath: virtualPath,
     type: stored.type,
     name: displayName,
     mimeType: stored.mime_type,
@@ -130,6 +147,7 @@ export async function prepareCreatedFile(
     inline: Boolean(stored.is_inline),
     card: `${chatFileMarker(stored.id)} File #${stored.id}: ${displayName} (${formatBytes(stored.size)}).`,
     delivery: createdFileDeliveryFor(stored.type, requestedDelivery, displayName),
+    ...(requestedDelivery === "photo_only" ? { photoFallback: "none" as const } : {}),
     origin: "created_file",
   };
 }
@@ -152,6 +170,7 @@ export async function prepareDirectCreatedFile(
   const classified = classifyFile(displayName, file.mime ?? "");
   const requestedDelivery = file.delivery ?? "auto";
   if (requestedDelivery === "photo") assertPhotoDeliverable(classified, displayName);
+  assertStrictPhotoDeliverable(classified, displayName, file.bytes.length, requestedDelivery);
 
   if (classified && classified !== "legacy-doc") {
     try {
@@ -181,6 +200,7 @@ export async function prepareDirectCreatedFile(
         inline: ingested.inline,
         card: ingested.card,
         delivery: createdFileDeliveryFor(ingested.type, requestedDelivery, stored.name),
+        ...(requestedDelivery === "photo_only" ? { photoFallback: "none" as const } : {}),
         origin: "created_file",
       };
     } catch (err) {
@@ -212,6 +232,7 @@ export async function prepareDirectCreatedFile(
     inline: Boolean(stored.is_inline),
     card: `${chatFileMarker(stored.id)} File #${stored.id}: ${displayName} (${formatBytes(stored.size)}).`,
     delivery: createdFileDeliveryFor(stored.type, requestedDelivery, displayName),
+    ...(requestedDelivery === "photo_only" ? { photoFallback: "none" as const } : {}),
     origin: "created_file",
   };
 }
@@ -262,8 +283,8 @@ function createdFileDeliveryFor(
   name: string,
 ): "document" | "photo" {
   if (preference === "document") return "document";
-  if (preference === "photo") assertPhotoDeliverable(type, name);
-  if (preference === "photo" || (preference === "auto" && type === "image")) return "photo";
+  if (preference === "photo" || preference === "photo_only") assertPhotoDeliverable(type, name);
+  if (preference === "photo" || preference === "photo_only" || (preference === "auto" && type === "image")) return "photo";
   return "document";
 }
 

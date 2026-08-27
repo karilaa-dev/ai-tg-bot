@@ -1,9 +1,16 @@
 import { fileURLToPath } from "node:url";
 import { Template, type TemplateClass } from "e2b";
+import {
+  E2B_TOOLBOX_PRODUCTION_REF,
+  E2B_TOOLBOX_PRODUCTION_TAG,
+  E2B_TOOLBOX_TEMPLATE_NAME,
+} from "../src/e2b/templateIdentity.js";
 
-export const E2B_TOOLBOX_TEMPLATE_NAME = "ai-tg-bot-tools";
-export const E2B_TOOLBOX_PRODUCTION_TAG = "production";
-export const E2B_TOOLBOX_PRODUCTION_REF = `${E2B_TOOLBOX_TEMPLATE_NAME}:${E2B_TOOLBOX_PRODUCTION_TAG}`;
+export {
+  E2B_TOOLBOX_PRODUCTION_REF,
+  E2B_TOOLBOX_PRODUCTION_TAG,
+  E2B_TOOLBOX_TEMPLATE_NAME,
+};
 export const E2B_TOOLBOX_CPU_COUNT = 2;
 export const E2B_TOOLBOX_MEMORY_MB = 2048;
 
@@ -23,6 +30,12 @@ export const OFFICECLI_ARM64_SHA256 = "56ec2c3114b66f6490888b6778cbb8413a65911a2
 export const OFFICECLI_DOCX_SKILL_SHA256 = "1da56ed53a308222ab2516a2974ae98c6703b7d504fa5158348c39a18e85a4f1";
 export const OFFICECLI_PPTX_SKILL_SHA256 = "0d53192751d5770984f16f3c34f9923377651555c667150d7f96e16e8c9757b3";
 export const PDF_INSPECTOR_VERSION = "1.17.0";
+
+export const OPENSCAD_VERSION = "2026.08.23";
+export const OPENSCAD_SOURCE_REVISION = "3da45dd566ef5710138d33e80758cfa068bd0304";
+export const OPENSCAD_NODE_SHA256 = "c01f08d087bf85582682d92ee9f4d9ca55e71d3f4f4e86e465e02c392ad322f8";
+export const OPENSCAD_LICENSE_SHA256 = "1805a29c3bccbc0428ce0048a1dfdeb9b1867677410e99c89c3c30932ae8c7d5";
+export const POVRAY_VERSION = "3.7.0.10";
 
 const IMAGEMAGICK_VERSION = "7.1.2-30";
 export const IMAGEMAGICK_COMMIT = "344e9056f43764bfdf82456faf3bc2feee98a6fe";
@@ -64,6 +77,7 @@ export const E2B_TOOLBOX_APT_PACKAGES = [
   "pkg-config",
   "procps",
   "poppler-utils",
+  "povray",
   "python3-pip",
   "python3-venv",
   "ripgrep",
@@ -86,23 +100,44 @@ export function createE2BToolboxTemplate(): TemplateClass {
   })
     .fromBaseImage()
     .aptInstall([...E2B_TOOLBOX_APT_PACKAGES], { noInstallRecommends: true })
-    .makeDir(["/usr/local/libexec", "/usr/local/share/officecli/skills/officecli-docx", "/usr/local/share/officecli/skills/officecli-pptx", "/usr/local/share/licenses/officecli"], {
+    .makeDir(["/usr/local/libexec", "/usr/local/libexec/openscad", "/usr/local/share/officecli/skills/officecli-docx", "/usr/local/share/officecli/skills/officecli-pptx", "/usr/local/share/licenses/officecli", "/usr/local/share/licenses/openscad"], {
       user: "root",
       mode: 0o755,
     })
+    .makeDir(["/cache/fontconfig", "/home/web_user/.cache/fontconfig"], { user: "root", mode: 0o777 })
     .makeDir("/home/user/workspace", { user: "user", mode: 0o700 })
     .copyItems([
       { src: "assets/tool-contract.sh", dest: "/usr/local/bin/tool-contract.sh", user: "root", mode: 0o755 },
       { src: "assets/officecli", dest: "/usr/local/bin/officecli", user: "root", mode: 0o755 },
+      { src: "assets/openscad", dest: "/usr/local/bin/openscad", user: "root", mode: 0o755 },
+      { src: "assets/openscad-build", dest: "/usr/local/bin/openscad-build", user: "root", mode: 0o755 },
+      { src: "assets/openscad-pov-render.mjs", dest: "/usr/local/libexec/openscad-pov-render.mjs", user: "root", mode: 0o755 },
     ])
     .makeSymlink("/usr/bin/fdfind", "/usr/local/bin/fd", { user: "root", force: true })
     .makeSymlink("/usr/local/bin/python3", "/usr/local/bin/python", { user: "root", force: true })
+    .runCmd(installOpenScadCommand(), { user: "root" })
     .runCmd(installImageMagickCommand(), { user: "root" })
     .runCmd(installOfficeCliCommand(), { user: "root" })
     .runCmd(installPdfInspectorCommand(), { user: "root" })
     .runCmd("/usr/local/bin/tool-contract.sh", { user: "user" })
     .setWorkdir("/home/user/workspace")
     .setUser("user");
+}
+
+function installOpenScadCommand(): string {
+  return `set -euo pipefail
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+curl -fsSL "https://files.openscad.org/snapshots/OpenSCAD-${OPENSCAD_VERSION}-WebAssembly-node.zip" -o "$tmp_dir/openscad-node.zip"
+printf '%s  %s\n' '${OPENSCAD_NODE_SHA256}' "$tmp_dir/openscad-node.zip" | sha256sum -c -
+unzip -p "$tmp_dir/openscad-node.zip" openscad.js > "$tmp_dir/openscad.js"
+install -Dm0755 "$tmp_dir/openscad.js" /usr/local/libexec/openscad/openscad.js
+curl -fsSL "https://raw.githubusercontent.com/openscad/openscad/${OPENSCAD_SOURCE_REVISION}/COPYING" -o "$tmp_dir/COPYING"
+printf '%s  %s\n' '${OPENSCAD_LICENSE_SHA256}' "$tmp_dir/COPYING" | sha256sum -c -
+install -Dm0644 "$tmp_dir/COPYING" /usr/local/share/licenses/openscad/COPYING
+openscad_version="$(openscad --version 2>&1 || true)"
+grep -Fxq 'OpenSCAD version ${OPENSCAD_VERSION}' <<<"$openscad_version"
+dpkg-query -W -f='\${Version}\n' povray | grep -F '${POVRAY_VERSION}'`;
 }
 
 function installImageMagickCommand(): string {

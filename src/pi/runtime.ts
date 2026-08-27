@@ -41,7 +41,7 @@ import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
 import {
   APPROVED_PI_SKILLS,
   approvedSkillPaths,
-  createOfficeSkillReadTool,
+  createApprovedSkillReadTool,
   validateApprovedSkills,
 } from "./officeSkills.js";
 import { createTurnPromptContextExtension, type TurnPromptContextSource } from "./turnContext.js";
@@ -213,7 +213,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     await resourceLoader.reload();
     const loadedSkills = resourceLoader.getSkills();
     if (loadedSkills.diagnostics.length) {
-      throw new Error(`OfficeCLI skill loading failed: ${JSON.stringify(loadedSkills.diagnostics)}`);
+      throw new Error(`Approved Pi skill loading failed: ${JSON.stringify(loadedSkills.diagnostics)}`);
     }
     const expectedSkillNames = APPROVED_PI_SKILLS.map((skill) => skill.name).sort();
     const loadedSkillNames = loadedSkills.skills.map((skill) => skill.name).sort();
@@ -222,7 +222,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     }
     const sessionManager = await this.openSessionManager(thread);
     const customTools = [
-      createOfficeSkillReadTool(),
+      createApprovedSkillReadTool(),
       ...createPiToolAdapters(bridge),
       createGenerateImagePiTool(bridge),
     ];
