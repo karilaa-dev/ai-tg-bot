@@ -31,8 +31,8 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.2");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.2");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.3");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.3");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -50,7 +50,7 @@ describe("E2B toolbox template definition", () => {
   });
 
   it("pins OfficeCLI and ImageMagick supply-chain inputs", () => {
-    expect(OFFICECLI_VERSION).toBe("1.0.144");
+    expect(OFFICECLI_VERSION).toBe("1.0.145");
     expect(OFFICECLI_SOURCE_REVISION).toMatch(/^[a-f0-9]{40}$/);
     expect(OFFICECLI_AMD64_SHA256).toMatch(/^[a-f0-9]{64}$/);
     expect(OFFICECLI_ARM64_SHA256).toMatch(/^[a-f0-9]{64}$/);
@@ -73,9 +73,9 @@ describe("E2B toolbox template definition", () => {
 
   it("installs and smoke-tests the headless OpenSCAD build command", async () => {
     const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
-    expect(OPENSCAD_VERSION).toBe("2026.08.23");
-    expect(OPENSCAD_SOURCE_REVISION).toBe("3da45dd566ef5710138d33e80758cfa068bd0304");
-    expect(OPENSCAD_NODE_SHA256).toBe("c01f08d087bf85582682d92ee9f4d9ca55e71d3f4f4e86e465e02c392ad322f8");
+    expect(OPENSCAD_VERSION).toBe("2026.08.27");
+    expect(OPENSCAD_SOURCE_REVISION).toBe("8020f9208e6c023086837ea07deaa9210bf50729");
+    expect(OPENSCAD_NODE_SHA256).toBe("6fb5a3bfd5580b6c65d559552b79d6c4bac456d2956864e0b5432a1a28ee4508");
     expect(OPENSCAD_LICENSE_SHA256).toMatch(/^[a-f0-9]{64}$/u);
     expect(POVRAY_VERSION).toBe("3.7.0.10");
     expect(dockerfile).toContain(`OpenSCAD-${OPENSCAD_VERSION}-WebAssembly-node.zip`);

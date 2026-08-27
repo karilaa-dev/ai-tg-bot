@@ -31,7 +31,7 @@ python3 -m venv "${tmp_dir}/venv"
 node --version >/dev/null
 npm --version >/dev/null
 openscad_version="$(openscad --version 2>&1 || true)"
-grep -Fxq "OpenSCAD version 2026.08.23" <<<"$openscad_version"
+grep -Fxq "OpenSCAD version 2026.08.27" <<<"$openscad_version"
 dpkg-query -W -f='${Version}\n' povray | grep -Fq '3.7.0.10'
 officecli --version
 officecli help pptx >/dev/null
