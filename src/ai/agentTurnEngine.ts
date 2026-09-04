@@ -122,7 +122,7 @@ export const runTurn: TurnRunner = async (input) => {
       sessionId: runtime.session.sessionId,
     });
     streamer?.update({ thinkingMd: "", answerMd: "" });
-    const stats = createPiStreamLoop(input, shaper, streamer, status, () => runtime.bridge.attachments);
+    const stats = createPiStreamLoop(input, shaper, streamer, status);
     const existingEntryIds = new Set(runtime.session.sessionManager.getEntries().map((entry) => entry.id));
     const usageBefore = runtime.session.getSessionStats().tokens;
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
@@ -524,15 +524,14 @@ class TurnDraftStreamer {
     this.answer = new DraftStreamer({ ...common, answerOnly: true });
   }
 
-  update(frame: { thinkingMd: string; answerMd: string }, finalThinkingMd = ""): void {
-    if (frame.answerMd.trim()) {
-      this.latestAnswerMd = frame.answerMd;
-      if (!this.answerStarted) this.startAnswer(finalThinkingMd);
-      if (this.answerReady) this.updateAnswerDraft();
-      return;
-    }
+  update(frame: { thinkingMd: string; answerMd: string }): void {
     if (this.answerStarted) return;
-    this.thinking.update({ thinkingMd: frame.thinkingMd, answerMd: "" });
+    // Text can precede more tool calls. Keep it inside the running draft until
+    // the prompt completes and finish() can publish the final answer.
+    this.thinking.update({
+      thinkingMd: [frame.thinkingMd, frame.answerMd].filter((text) => text.trim()).join("\n\n"),
+      answerMd: "",
+    });
   }
 
   async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
@@ -614,7 +613,6 @@ function createPiStreamLoop(
   shaper: StreamShaper,
   streamer: TurnDraftStreamer | undefined,
   status: TurnStatusMessage | undefined,
-  attachments: () => CreatedFileAttachment[],
 ): { counts: TurnStreamStats; onEvent: (event: AgentSessionEvent) => void } {
   const counts: TurnStreamStats = {
     contentEvents: 0,
@@ -629,7 +627,7 @@ function createPiStreamLoop(
     streamer?.update({
       thinkingMd: shaper.streamingThinkingMd(),
       answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), counts.generateImageToolCalls > 0),
-    }, buildFinalThinkingSummary({ t: input.t, shaper, attachments: attachments() }));
+    });
   };
   const updateStatus = () => {
     void status?.update(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd())).catch((err) =>
