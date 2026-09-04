@@ -5,8 +5,10 @@ import { classifyFile, ingestFileBytes } from "../../files/ingest.js";
 import { sha256Hex } from "../../files/hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "../../files/limits.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
+import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../../e2b/paths.js";
 import { e2bFileSource } from "../../e2b/fileSource.js";
 import { threadChainScope } from "../../memory/retrieval.js";
+import type { OutgoingReservation } from "../../files/outgoingBuffers.js";
 import { arrayField, asRecord, numberField, rawStringField as stringField, stringArrayField } from "../../util/records.js";
 import {
   type CreatedFileAttachment,
@@ -55,10 +57,14 @@ function assertStrictPhotoDeliverable(
 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
   const file = await input.repos.files.get(fileId);
-  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
+  const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const isCurrentTurnAttachment = input.createdFiles?.some((attachment) => attachment.fileId === fileId) ?? false;
   if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
   return file;
+}
+
+export function normalizeCreatedFilePath(value: string): string {
+  return `/${path.posix.relative(E2B_WORKSPACE, sandboxWorkspaceFile(normalizeBashCwd(value)))}`;
 }
 
 export async function prepareCreatedFile(
@@ -66,7 +72,34 @@ export async function prepareCreatedFile(
   file: { virtualPath: string; name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference },
   signal?: AbortSignal,
 ): Promise<CreatedFileAttachment> {
-  const virtualPath = normalizeBashCwd(file.virtualPath);
+  const startedAt = Date.now();
+  const reservation = await input.outgoingBuffers?.reserve(MAX_FILE_BYTES, signal);
+  let prepared: CreatedFileAttachment | undefined;
+  try {
+    prepared = await prepareCreatedFileBytes(input, file, signal);
+    signal?.throwIfAborted();
+    if (reservation && prepared.data) reservation.commit(prepared, prepared.data);
+    else prepared.data = undefined;
+    input.logger?.info("outgoing file prepared", {
+      threadId: input.thread.id, fileId: prepared.fileId, bytes: prepared.size,
+      preparationMs: Date.now() - startedAt, ...input.outgoingBuffers?.snapshot(),
+    });
+    return prepared;
+  } catch (error) {
+    if (prepared) {
+      input.outgoingBuffers?.release(prepared);
+      await input.repos.files.deleteFile(prepared.fileId).catch(() => undefined);
+    }
+    throw error;
+  } finally { reservation?.release(); }
+}
+
+async function prepareCreatedFileBytes(
+  input: ToolBuildInput,
+  file: { virtualPath: string; name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference },
+  signal?: AbortSignal,
+): Promise<CreatedFileAttachment> {
+  const virtualPath = normalizeCreatedFilePath(file.virtualPath);
   const exported = await exportSandboxFile(input, virtualPath, signal);
   const bytes = exported.bytes;
   const requestedName = file.name ?? path.posix.basename(virtualPath);
@@ -115,6 +148,7 @@ export async function prepareCreatedFile(
       return {
         fileId: stored.id,
         sourceVirtualPath: virtualPath,
+        data: bytes,
         type: ingested.type,
         name: stored.name,
         mimeType: stored.mime_type,
@@ -139,6 +173,7 @@ export async function prepareCreatedFile(
   return {
     fileId: stored.id,
     sourceVirtualPath: virtualPath,
+    data: bytes,
     type: stored.type,
     name: displayName,
     mimeType: stored.mime_type,
@@ -153,6 +188,31 @@ export async function prepareCreatedFile(
 }
 
 export async function prepareDirectCreatedFile(
+  input: ToolBuildInput,
+  file: { bytes: Buffer; name: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference; summary?: string },
+  signal?: AbortSignal,
+  reserved?: OutgoingReservation,
+): Promise<CreatedFileAttachment> {
+  const reservation = reserved ?? await input.outgoingBuffers?.reserve(file.bytes.length, signal);
+  let attachment: CreatedFileAttachment | undefined;
+  try {
+    attachment = await prepareDirectCreatedFileBytes(input, file, signal);
+    if (reservation) {
+      await input.outgoingBuffers!.spool(attachment, file.bytes);
+      signal?.throwIfAborted();
+      reservation.commit(attachment, file.bytes);
+    }
+    return attachment;
+  } catch (error) {
+    if (attachment) {
+      input.outgoingBuffers?.release(attachment);
+      await input.repos.files.deleteFile(attachment.fileId).catch(() => undefined);
+    }
+    throw error;
+  } finally { reservation?.release(); }
+}
+
+async function prepareDirectCreatedFileBytes(
   input: ToolBuildInput,
   file: {
     bytes: Buffer;

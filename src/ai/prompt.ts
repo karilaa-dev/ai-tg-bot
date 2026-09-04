@@ -27,10 +27,11 @@ export async function renderThreadSessionContext(input: {
   user: UserRow;
   thread: ThreadRow;
   maxMessageId?: number;
+  fileIds?: number[];
   now?: Date;
 }): Promise<string> {
-  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
-  const files = await input.repos.files.listByIds(scope.fileIds);
+  const fileIds = input.fileIds ?? (await threadChainScope(input.repos, input.thread, input.maxMessageId)).fileIds;
+  const files = await input.repos.files.listByIds(fileIds);
   const promptFiles: PromptFileContext[] = files.map((file) => ({
     id: file.id,
     name: file.name,
@@ -143,13 +144,8 @@ function browserGuidance(
 ): string {
   if (!config || !isBrowserUseConfigured(config)) return "";
   return [
-    "# Browser Use Cloud",
-    "",
-    "- Use `web_extract` for one stateless read of known readable pages. Use `browser_*` for screenshots, visual verification, scrolling, clicks, forms, login, downloads, or continued page actions; do not substitute Bash browsers, curl, or `create_file` for those tasks.",
-    "- Browser screenshots and files go directly to Telegram. Use `browser_screenshot` for a requested screenshot, full-page capture only when explicitly requested, and document delivery only when explicitly requested as a file/document.",
-    "- Cookies and persistent storage are shared through the user's private profile; tabs are thread-owned. Element refs expire after navigation, so snapshot again before interacting.",
-    `- Sessions use a configured default of ${config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES} minutes. Request or extend a longer session only for clearly long tasks; extension preserves profile, URLs, tab IDs, and scroll positions but not transient form or JavaScript state.`,
-    "- When the current browser task is complete, call `browser_close_session` as the final browser action. Use `browser_close_tab` only while the same task still needs other tabs. If closure reports `session_busy`, do not force or repeatedly retry it; automatic idle cleanup is the fallback.",
+    "Use browser_* for interactive pages, screenshots, login, and downloads. Snapshot after navigation before using element refs. Close the browser session when finished; let idle cleanup handle session_busy.",
+    `New sessions default to ${config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES} minutes. Extend only for long tasks; transient form state is lost on extension.`,
   ].join("\n");
 }
 
@@ -157,9 +153,5 @@ function officePreviewGuidance(
   config: Pick<AppConfig, "BROWSER_USE_API_KEY"> | undefined,
 ): string {
   if (!config || !isBrowserUseConfigured(config)) return "";
-  return [
-    "- For every created or materially edited PPTX, call `render_office_preview` for every slide. For every created or materially edited DOCX, preview every rendered page.",
-    "- Inspect each image for overlap, clipping, overflow, wrapping, contrast, cropping, margins, gaps, alignment, density, placeholders, and narrative order. Fix failures, save and validate again, then re-preview changed pages; stop after three unsuccessful fix cycles and report the blocker.",
-    "- Do not attach the Office file until structural validation and required visual QA pass. Preview images are model-only and are not sent to Telegram.",
-  ].join("\n");
+  return "For Office delivery, validate structure and use render_office_preview to inspect every page or slide. Fix visible defects and re-preview changed pages; after three unsuccessful fixes, report the blocker.";
 }

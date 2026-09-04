@@ -27,7 +27,7 @@ try {
   await pi.initialize();
   if (process.env.PI_SMOKE_FORCE_OPENROUTER === "1") pi.providerRouter.circuit.recordFailure();
   const runtime = await pi.runtime(thread, user);
-  runtime.bridge.beginTurn({
+  await runtime.bridge.beginTurn({
     api: {} as never,
     chatId: user.tg_id,
     resolveFile: async () => {

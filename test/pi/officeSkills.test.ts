@@ -113,7 +113,7 @@ describe("pinned OfficeCLI Pi skills", () => {
     const openscadText = openscadResult.content[0]?.type === "text" ? openscadResult.content[0].text : "";
     expect(openscadText).toContain("# OpenSCAD models");
     expect(openscadText).toContain("Do not probe for, install, or replace OpenSCAD");
-    expect(openscadText).toContain("Do not call `create_file` until the final build and final inspection");
+    expect(openscadText).toContain("Do not call `finish_response` until the final build and final inspection");
     expect(openscadText).toContain("Queue `/model.scad`");
     expect(openscadText).toContain("only when the user explicitly asks");
     expect(openscadText).toContain("Do not generate or deliver 3MF");

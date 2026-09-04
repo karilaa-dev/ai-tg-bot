@@ -14,7 +14,7 @@ export function createSearchThreadTool(input: ToolBuildInput) {
         limit,
         queryChars: query.length,
       });
-      const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
+      const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
       const hits = await hybridSearch({
         search: input.db.search,
         repos: input.repos,

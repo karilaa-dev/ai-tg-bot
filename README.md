@@ -15,6 +15,16 @@
 
 Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference and image generation.
 
+## Agent harness
+
+The core prompt, including optional browser guidance and runtime model identity, stays below 4,500 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Each provider request receives the selected model's display name, such as `Model: GPT-6 Astra`; this line is absent from persistent conversation history.
+
+`bash.inspect_images` combines command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends inference without another model request. It must be the only tool in its response. Partial failures retain successful attachments for repair. The normal OpenSCAD sequence is four model cycles: read the skill, build and inspect the preview, build and inspect final outputs, then finish with the STL and final photo.
+
+Final text precedes attachments. Two preparation workers prefetch files while text or the previous batch uploads; sends preserve queue order. Only adjacent compatible files form albums. Export reservations, cached file bodies, prefetch, and uploads share a 40 MiB budget per turn. Workspace exports retain immutable E2B recovery sources; browser and generated image bytes can spill to private temporary files that are removed after the turn.
+
+Turn logs include model-cycle latency, token/cache usage, peak request context, file preparation latency, and first-text/first-file/last-file delivery times. Snapshot pruning runs at most once per minute during ordinary operations; source-preserving exports still force a check.
+
 ## Requirements
 
 - Node.js 24.18 or newer
@@ -66,13 +76,13 @@ Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser 
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
 - Public traffic does not resume a paused sandbox. A later bot operation reconnects it.
 
-There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Telegram bytes pass through the bot during intake, sandbox restoration, and delivery.
+There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Temporary outgoing spools last only for the current turn. Telegram bytes pass through the bot during intake, sandbox restoration, and delivery.
 
 The implementation follows E2B's current documentation for [sandboxes](https://e2b.dev/docs/sandbox), [persistence](https://e2b.dev/docs/sandbox/persistence), and [auto-resume](https://e2b.dev/docs/sandbox/auto-resume).
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.4` uses `ai-tg-bot-tools:v2.0.4`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.5` uses `ai-tg-bot-tools:v2.0.5`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -86,8 +96,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.4 is ai-tg-bot-tools:v2.0.4.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.4
+# Optional override. The default for version 2.0.5 is ai-tg-bot-tools:v2.0.5.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.5
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -110,7 +120,7 @@ The bot creates secure sandboxes with outbound internet and public port traffic 
 - `[[chat-file:<id>]]` markers are persistent Pi references.
 - `load_message` can add selected attachment bytes to model context.
 - Before sandbox work, the bot restores visible Telegram files into `/home/user/telegram-files`.
-- Agent-created files get an E2B source locator. The bot reads them through the E2B SDK before delivery.
+- Agent-created files get an E2B source locator. Delivery reuses buffered export bytes when available and reloads the durable source after eviction.
 - DOCX, PDF, CSV, and text content is extracted and either placed inline or split into searchable chunks. Images receive model-generated captions.
 - The per-file limit is 20 MiB. One answer can attach at most 25 created files.
 
@@ -200,3 +210,14 @@ npm run live:browser-use-check
 ```
 
 Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to cover Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation.
+
+## Harness benchmark
+
+Run the CAD benchmark with real inference and E2B while all Telegram delivery is mocked:
+
+```bash
+node --import tsx scripts/benchmark-harness.ts --provider codex --runs 3 --out data/benchmark-codex.jsonl
+node --import tsx scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/benchmark-openrouter.jsonl
+```
+
+`--repo /path/to/checkout` measures another version with the same driver. That checkout needs its dependencies and released E2B image. The script uses a temporary SQLite database and Pi directory, and a separate E2B deployment namespace. Each pair uses a new sandbox for the cold run and the same sandbox with a cleared workspace and fresh model session for the warm run. Provider-side prompt caching is measured but cannot be reset. It removes its own sandboxes and temporary sessions afterward. These are live API calls and use the configured accounts.

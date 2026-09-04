@@ -6,7 +6,7 @@ The image contains the shell tools listed in `template.ts`, ImageMagick, OfficeC
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.4` uses `ai-tg-bot-tools:v2.0.4`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.0.5` uses `ai-tg-bot-tools:v2.0.5`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 

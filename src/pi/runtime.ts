@@ -25,11 +25,11 @@ import type { Logger } from "../logger.js";
 import { detectImageMediaType, imageMediaTypeFromName } from "../files/mediaType.js";
 import { createGenerateImagePiTool, type ChatImageBridge } from "./imageExtension.js";
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
-import { createPiToolAdapters, type PiToolBridge } from "./toolAdapter.js";
+import { createPiToolAdapters, createFinishResponseGuard, type PiToolBridge } from "./toolAdapter.js";
 import type { ResolvedChatFile } from "../files/source.js";
 import type { CommandRuntime, PublishedWebsite, SandboxActivityLease } from "../sandbox/types.js";
 import { chatFileIdsFromText } from "../files/contextMarker.js";
-import { threadChainScope } from "../memory/retrieval.js";
+import { threadChainScope, threadVisibilityScope, type ThreadScope } from "../memory/retrieval.js";
 import { refreshExtractedFileBytes } from "../files/ingest.js";
 import {
   buildThreadTitlePrompt,
@@ -52,6 +52,7 @@ import {
   resolveCodexAuthFile,
 } from "./codexCliCredentials.js";
 import { createTurnBudgetExtension, TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
+import { OutgoingBuffers } from "../files/outgoingBuffers.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -199,6 +200,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       agentDir: this.agentDir,
       settingsManager,
       extensionFactories: [
+        createFinishResponseGuard(),
         createTurnBudgetExtension(bridge),
         createTurnPromptContextExtension(bridge),
         createChatFileContextExtension(bridge),
@@ -430,9 +432,12 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   readonly modelRegistry: ModelRegistry;
   readonly providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[] = [];
+  private createdFileOrder: string[] = [];
   pendingCreatedFiles: PendingCreatedFile[] = [];
   publishedWebsites: PublishedWebsite[] = [];
   activeMessageId?: number;
+  outgoingBuffers = new OutgoingBuffers();
+  private visibilityScope?: ThreadScope;
   private transport?: PiTurnTransport;
   private readonly turnFileCache = new Map<number, ResolvedChatFile>();
   private readonly contextFileIds = new Set<number>();
@@ -471,6 +476,9 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
     if (this.turnActive) await this.endTurn();
+    this.visibilityScope = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);
+    this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
+    const fileIds = await this.repos.files.listRecoverableIds(this.visibilityScope.fileIds);
     const [turnSystemPrompt, turnSessionContext] = await Promise.all([
       renderSystemPrompt({ user: this.user, config: this.config }),
       renderThreadSessionContext({
@@ -478,6 +486,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
         user: this.user,
         thread: this.thread,
         maxMessageId: input.userMessageId,
+        fileIds,
       }),
     ]);
     await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
@@ -487,6 +496,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.transport = input;
     this.activeMessageId = input.userMessageId;
     this.attachments = [];
+    this.createdFileOrder = [];
+    this.outgoingBuffers = new OutgoingBuffers();
     this.pendingCreatedFiles = [];
     this.publishedWebsites = [];
     this.turnBudget = new TurnBudget({
@@ -516,6 +527,9 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.turnSessionContext = undefined;
     this.transport = undefined;
     this.activeMessageId = undefined;
+    this.visibilityScope = undefined;
+    this.turnFileCache.clear();
+    await this.outgoingBuffers.dispose();
     if (wasActive) await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
   }
 
@@ -539,6 +553,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       user: this.user,
       thread: this.thread,
       maxMessageId: this.activeMessageId,
+      currentScope: () => this.currentScope(),
+      outgoingBuffers: this.outgoingBuffers,
       logger: this.logger,
       commandRuntime: this.commandRuntime,
       browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
@@ -546,6 +562,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),
       selectDurableContextFiles: (fileIds) => this.selectDurableContextFiles(fileIds),
       createdFiles: this.attachments,
+      createdFileOrder: this.createdFileOrder,
       pendingCreatedFiles: this.pendingCreatedFiles,
       publishedWebsites: this.publishedWebsites,
       registerPublishedWebsite: (website) => {
@@ -556,13 +573,20 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     };
   }
 
+  async currentScope(): Promise<ThreadScope> {
+    const scope = this.visibilityScope ?? await threadVisibilityScope(this.repos, this.thread, this.activeMessageId);
+    // Visibility is fixed at acceptance; source recoverability is checked live.
+    const fileIds = await this.repos.files.listRecoverableIds(scope.fileIds);
+    return { ...scope, fileIds: [...new Set([...fileIds, ...this.attachments.map((file) => file.fileId)])] };
+  }
+
   async resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile> {
     const cached = this.turnFileCache.get(file.id);
     if (cached) return cached;
-    const currentAttachment = this.attachments.find((attachment) =>
-      attachment.fileId === file.id && attachment.data);
-    if (currentAttachment?.data) {
-      const bytes = Buffer.from(currentAttachment.data);
+    const currentAttachment = this.attachments.find((attachment) => attachment.fileId === file.id);
+    const currentBytes = currentAttachment?.data ?? (currentAttachment ? await this.outgoingBuffers.readSpool(currentAttachment, signal) : undefined);
+    if (currentAttachment && currentBytes) {
+      const bytes = currentBytes;
       const resolved: ResolvedChatFile = {
         bytes,
         mimeType: currentAttachment.mimeType ?? file.mime_type,
@@ -576,7 +600,6 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
           mimeType: currentAttachment.mimeType ?? file.mime_type,
         },
       };
-      this.turnFileCache.set(file.id, resolved);
       return resolved;
     }
     if (!this.transport) throw new Error(`File #${file.id} has no active chat transport resolver.`);
@@ -622,7 +645,9 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
     factory: (pi) => {
       pi.on("context", async (event) => {
         const messages = event.messages.map((message) => cloneMessage(message));
-        const scope = await threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId);
+        const scope = bridge.currentScope
+          ? await bridge.currentScope()
+          : await threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId);
         const allowedIds = new Set([
           ...scope.fileIds,
           ...bridge.attachments.map((attachment) => attachment.fileId),

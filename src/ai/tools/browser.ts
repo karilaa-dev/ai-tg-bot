@@ -4,6 +4,8 @@ import { BrowserUseRuntimeError } from "../../browserUse/runtime.js";
 import { redactBrowserUseError } from "../../browserUse/client.js";
 import { downloadPublicBrowserFile } from "../../browserUse/download.js";
 import { isAbortError } from "../../files/cancel.js";
+import { MAX_FILE_BYTES } from "../../files/limits.js";
+import type { OutgoingReservation } from "../../files/outgoingBuffers.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
 import { safeJson } from "../../util/records.js";
 import { assertCreatedFileCapacity, prepareDirectCreatedFile, toToolError } from "./helpers.js";
@@ -145,9 +147,11 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         caption: z.string().max(1024).optional(),
       }),
       execute: async ({ tab_id, full_page, delivery, caption }, signal) => {
+        let reservation: OutgoingReservation | undefined;
         try {
           if (!input.createdFiles) throw new Error("Telegram attachment delivery is unavailable.");
           const usedBefore = assertCreatedFileCapacity(input);
+          reservation = await input.outgoingBuffers?.reserve(MAX_FILE_BYTES, signal);
           const screenshot = await runtime().screenshot(tab_id, full_page, signal);
           const extension = screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
           const attached = await prepareDirectCreatedFile(input, {
@@ -157,7 +161,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             caption,
             delivery,
             summary: "Screenshot captured through Browser Use Cloud.",
-          }, signal);
+          }, signal, reservation);
           input.createdFiles.push(attached);
           return {
             tab_id,
@@ -177,7 +181,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
           };
         } catch (error) {
           return browserToolError(input, "browser_screenshot", error, { tabId: tab_id }, signal);
-        }
+        } finally { reservation?.release(); }
       },
       toModelOutput: ({ output }) => browserImageOutput(output, "Browser screenshot"),
       toToolDetails: ({ output }) => withoutImageData(output),
@@ -210,9 +214,11 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
         }
       }),
       execute: async ({ tab_id, download_index, ref, url, name, caption, delivery }, signal) => {
+        let reservation: OutgoingReservation | undefined;
         try {
           if (!input.createdFiles) throw new Error("Telegram attachment delivery is unavailable.");
           const usedBefore = assertCreatedFileCapacity(input);
+          reservation = await input.outgoingBuffers?.reserve(MAX_FILE_BYTES, signal);
           const sessionRemainingSeconds = await runtime().sessionRemaining(tab_id, true, signal);
           let sourceUrl: string;
           let sourceName: string | undefined;
@@ -241,7 +247,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             caption,
             delivery,
             summary: "File downloaded through Browser Use Cloud.",
-          }, signal);
+          }, signal, reservation);
           input.createdFiles.push(attached);
           return {
             tab_id,
@@ -259,7 +265,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
           };
         } catch (error) {
           return browserToolError(input, "browser_send_file", error, { tabId: tab_id }, signal);
-        }
+        } finally { reservation?.release(); }
       },
     }),
     browser_close_tab: defineBotTool({

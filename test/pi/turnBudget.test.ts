@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { TurnBudget } from "../../src/pi/turnBudget.js";
+import { toolResultFailed } from "../../src/pi/toolOutcome.js";
+import { createTurnBudgetExtension, TurnBudget } from "../../src/pi/turnBudget.js";
 
 describe("TurnBudget", () => {
+  it.each([{ status: "failed" }, { exit_code: 7 }, { exit_code: null }, { timed_out: true }, { error: "failed" }])("counts structured failures without depending on an error string: %j", async (details) => {
+    const budget = createBudget();
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const extension = createTurnBudgetExtension({ currentTurnBudget: () => budget });
+    if (typeof extension === "function") throw new Error("Expected named extension");
+    await extension.factory({ on: (name: string, handler: (...args: any[]) => any) => { handlers[name] = handler; } } as never);
+    let aborted = false;
+    for (let index = 0; index < 3; index++) {
+      handlers.tool_call!({ toolCallId: String(index), toolName: "bash", input: { script: "exit 7" } });
+      expect(handlers.tool_result!({ toolCallId: String(index), details, isError: false }, { abort: () => { aborted = true; } })).toEqual({ isError: true });
+    }
+    expect(aborted).toBe(true);
+    expect(budget.snapshot().terminationReason).toBe("identical_tool_failures");
+    expect(toolResultFailed({ exit_code: 0, timed_out: false })).toBe(false);
+  });
+
   it("blocks calls after the configured tool-call maximum", () => {
     const budget = createBudget({ maxToolCalls: 2 });
 

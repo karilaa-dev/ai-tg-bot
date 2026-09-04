@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { loadSkills, type InlineExtension } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -177,6 +177,32 @@ describe("ThreadBridge turn prompt lifecycle", () => {
     } finally {
       await db.destroy();
     }
+  });
+
+  it("reuses acceptance visibility, admits current attachments, and checks source availability live", async () => {
+    const config = loadTestConfig();
+    const db = createDatabase(config);
+    await db.initialize();
+    try {
+      const repos = createRepos(db.db, db.search);
+      const user = await repos.users.ensure({ tgId: 987_699, firstName: "Scope", lang: "en" });
+      const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      const accepted = await repos.messages.insert({ threadId: thread.id, role: "user", content: { text: "accepted" }, textPlain: "accepted" });
+      const file = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, name: "current.txt", type: "txt", size: 4, isInline: true, contentMd: "body" });
+      await repos.files.setMessageId(file.id, accepted.id);
+      const chain = vi.spyOn(repos.threads, "chain");
+      const bridge = new ThreadBridge({ config, db, repos, user, thread, logger: createLogger(config), modelRegistry: {} as never, providerRouter: {} as never });
+      await bridge.beginTurn({ ...turnTransport(), userMessageId: accepted.id, currentFileIds: [file.id] });
+      const future = await repos.messages.insert({ threadId: thread.id, role: "user", content: { text: "future" }, textPlain: "future" });
+      expect(bridge.currentTurnSessionContext()).toContain("current.txt");
+      expect((await bridge.currentScope()).messageIds).not.toContain(future.id);
+      expect((await bridge.currentScope()).fileIds).toContain(file.id);
+      expect(chain).toHaveBeenCalledOnce();
+      vi.spyOn(repos.files, "listRecoverableIds").mockResolvedValue([]);
+      expect((await bridge.currentScope()).fileIds).not.toContain(file.id);
+      expect(chain).toHaveBeenCalledOnce();
+      await bridge.endTurn();
+    } finally { await db.destroy(); }
   });
 
   it("clears an earlier snapshot and aborts when next-turn preparation fails", async () => {

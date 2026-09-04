@@ -3,6 +3,7 @@ import { createLoadMessageTool } from "./loadMessage.js";
 import { createSearchInFileTool } from "./searchInFile.js";
 import { createReadFileSectionTool } from "./readFileSection.js";
 import { createCreateFileTool } from "./createFile.js";
+import { createFinishResponseTool } from "./finishResponse.js";
 import { createBashTool } from "./bash.js";
 import { createWebSearchTool } from "./webSearch.js";
 import { createWebExtractTool } from "./webExtract.js";
@@ -32,6 +33,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     render_pdf_pages: createRenderPdfPagesTool(input),
     inspect_workspace_images: createInspectWorkspaceImagesTool(input),
     create_file: createCreateFileTool(input),
+    finish_response: createFinishResponseTool(input),
     publish_website: createPublishWebsiteTool(input),
     bash: createBashTool(input),
     web_search: createWebSearchTool(input),

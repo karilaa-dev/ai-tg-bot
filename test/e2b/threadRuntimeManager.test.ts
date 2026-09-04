@@ -47,6 +47,47 @@ describe("thread E2B runtime manager", () => {
     await db.destroy();
   });
 
+  it("throttles ordinary pruning, forces export checks, and renews each prepared operation once", async () => {
+    const lease = runtime.acquireActivityLease(userId, threadId);
+    try {
+      await runtime.execute(commandRequest(userId, threadId));
+      const sandbox = client.onlySandbox();
+      const scans = () => sandbox.controlCommands.filter((command) => command.includes("source_root=sys.argv[1]")).length;
+      expect(scans()).toBe(1);
+      const timeoutCalls = sandbox.timeoutCalls.length;
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(1);
+      expect(sandbox.timeoutCalls).toHaveLength(timeoutCalls + 1);
+      sandbox.files.set(`${E2B_WORKSPACE}/export.stl`, Buffer.from("export"));
+      await runtime.readWorkspaceFile({ userId, threadId, virtualPath: "/export.stl", maxBytes: 100, preserveSource: true });
+      expect(scans()).toBe(2);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(2);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(3);
+    } finally { lease.release(); }
+  });
+
+  it("reads captured stdout and stderr concurrently", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.readFile.bind(sandbox);
+    const both = deferred<void>();
+    const started = new Set<string>();
+    vi.spyOn(sandbox, "readFile").mockImplementation(async (...args) => {
+      if (/\/(stdout|stderr)$/u.test(args[0])) {
+        started.add(args[0].split("/").at(-1)!);
+        if (started.size === 2) both.resolve();
+        await both.promise;
+      }
+      return original(...args);
+    });
+    const result = await runtime.execute(commandRequest(userId, threadId));
+    expect(started).toEqual(new Set(["stdout", "stderr"]));
+    expect(result.stdout).toBe("ok");
+  });
+
   it("creates one sandbox per thread and synchronizes Telegram files once as read-only", async () => {
     client.telegramFiles.set("tg-hello", Buffer.from("hello"));
     const stored = await repos.files.insertFile({
@@ -766,6 +807,7 @@ describe("thread E2B runtime manager", () => {
     const orphanHash = "f".repeat(64);
     const orphanPath = `${E2B_FILE_SOURCES}/${orphanHash}`;
     sandbox.files.set(orphanPath, Buffer.from("orphan"));
+    now += 60_000;
 
     await runtime.execute(commandRequest(userId, threadId));
 
@@ -830,6 +872,9 @@ describe("thread E2B runtime manager", () => {
 
     expect(client.telegramDownloadCalls).toBe(0);
     expect(original.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+    // An ordinary scan runs after the one-minute throttle window.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    await runtime.execute(commandRequest(userId, threadId, [descriptor]));
     expect(original.files.has(`${E2B_FILE_SOURCES}/${hash}`)).toBe(false);
     await expect(repos.files.listSources(stored.id)).resolves.toEqual([]);
 

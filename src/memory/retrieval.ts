@@ -58,12 +58,19 @@ export async function hybridSearch(input: {
   return results;
 }
 
-export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<{
+export type ThreadScope = {
   threadIds: number[];
   messageScopes: MessageSearchScope[];
   messageIds: number[];
   fileIds: number[];
-}> {
+};
+
+export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<ThreadScope> {
+  const scope = await threadVisibilityScope(repos, thread, maxMessageId);
+  return { ...scope, fileIds: await repos.files.listRecoverableIds(scope.fileIds) };
+}
+
+export async function threadVisibilityScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<ThreadScope> {
   const chain = await repos.threads.chain(thread);
   const threadIds = chain.map((row) => row.id);
   const messageScopes = messageSearchScopesForChain(chain, maxMessageId);
@@ -87,9 +94,7 @@ export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessa
         .map((file) => file.id),
     ]),
   ];
-  const recoverableIds = new Set(await repos.files.listRecoverableIds(candidateFileIds));
-  const fileIds = candidateFileIds.filter((fileId) => recoverableIds.has(fileId));
-  return { threadIds, messageScopes, messageIds, fileIds };
+  return { threadIds, messageScopes, messageIds, fileIds: candidateFileIds };
 }
 
 export function clearRetrievalVectorCacheForTests(): void {

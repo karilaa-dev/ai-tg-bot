@@ -3,6 +3,14 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
 
 describe("currentTurnAssistantResult", () => {
+  it("preserves terminal caption-only completion instead of reviving provisional text", () => {
+    const result: AgentMessage = {
+      role: "toolResult", toolCallId: "finish", toolName: "finish_response", isError: false,
+      content: [{ type: "text", text: "completed" }], details: { completed: true, text: "", file_ids: [1] }, timestamp: 2,
+    };
+    expect(currentTurnAssistantResult([assistantMessage("Working...", "toolUse", ""), result]))
+      .toEqual({ completed: true, text: "", stopReason: "stop" });
+  });
   it("returns no answer when the current turn created no assistant message", () => {
     const current = [userMessage("new request")];
     expect(currentTurnAssistantResult(current)).toEqual({ text: "" });

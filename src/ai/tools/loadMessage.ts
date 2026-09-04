@@ -23,7 +23,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
     execute: async ({ message_id, file_ids = [] }, signal): Promise<LoadMessageResult> => {
       input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
       const row = await input.repos.messages.get(message_id);
-      const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
+      const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
       if (!row || !scope.messageIds.includes(row.id)) {
         input.logger?.debug("tool load_message not found", { threadId: input.thread.id, messageId: message_id });
         return { error: "message not found in this thread" };

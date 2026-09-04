@@ -63,6 +63,7 @@ type RuntimeState = {
   sandboxId?: string;
   continuousStartedAt?: number;
   toolboxValidatedSandboxId?: string;
+  sourcePruning?: { sandboxId: string; at: number };
   renewTimer?: NodeJS.Timeout;
 };
 
@@ -240,6 +241,7 @@ export class ThreadSandboxPool {
         request.threadFiles ?? [],
         ROTATION_GUARD_MS,
         request.signal,
+        request.preserveSource,
       );
       const candidate = sandboxWorkspaceFile(request.virtualPath);
       const result = await this.readCanonicalFile(prepared.sandbox, candidate, request.maxBytes, request.signal);
@@ -383,6 +385,7 @@ export class ThreadSandboxPool {
     files: SandboxThreadFile[],
     requestedDurationMs: number,
     signal?: AbortSignal,
+    forcePrune = false,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
     const previousSync = state.threadFilesSync;
@@ -426,13 +429,16 @@ export class ThreadSandboxPool {
     await this.ensureSandboxToolbox(state, scope, sandbox, signal);
     await this.ensureLayout(sandbox, signal);
     const threadFiles = await this.syncThreadFiles(state, scope, sandbox, files, signal);
-    await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
-      this.input.logger?.warn("failed to prune E2B file sources", {
-        ...scope,
-        sandboxId: sandbox.id,
-        error: String(error),
+    if (forcePrune || state.sourcePruning?.sandboxId !== sandbox.id || Date.now() - state.sourcePruning.at >= 60_000) {
+      state.sourcePruning = { sandboxId: sandbox.id, at: Date.now() };
+      await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
+        this.input.logger?.warn("failed to prune E2B file sources", {
+          ...scope,
+          sandboxId: sandbox.id,
+          error: String(error),
+        });
       });
-    });
+    }
     return { sandbox, threadFiles };
   }
 
@@ -443,7 +449,6 @@ export class ThreadSandboxPool {
     signal?: AbortSignal,
   ): Promise<E2BSandbox> {
     if (state.connection && await state.connection.isRunning(signal).catch(() => false)) {
-      await state.connection.setTimeout(timeoutMs, signal);
       return state.connection;
     }
 
@@ -537,7 +542,6 @@ export class ThreadSandboxPool {
     }
     const continuousStartedAt = resumed ? Date.now() : acquired.info.startedAt.getTime();
     this.rememberConnection(state, sandbox, continuousStartedAt);
-    await sandbox.setTimeout(timeoutMs, signal);
     this.input.logger?.info(acquired.created ? "E2B sandbox created" : resumed ? "E2B sandbox resumed" : "E2B sandbox connected", {
       ...scope,
       sandboxId: sandbox.id,
@@ -1271,8 +1275,10 @@ export class ThreadSandboxPool {
         timedOut = commandError.timedOut;
         errorText = commandError.error;
       }
-      const stdoutBytes = await readIfExists(sandbox, stdoutPath, request.signal);
-      const stderrBytes = await readIfExists(sandbox, stderrPath, request.signal);
+      const [stdoutBytes, stderrBytes] = await Promise.all([
+        readIfExists(sandbox, stdoutPath, request.signal),
+        readIfExists(sandbox, stderrPath, request.signal),
+      ]);
       const stdout = truncateUtf8(stdoutBytes, request.maxOutputChars);
       const stderr = truncateUtf8(stderrBytes, request.maxOutputChars);
       const readLimit = commandOutputReadLimit(request.maxOutputChars);

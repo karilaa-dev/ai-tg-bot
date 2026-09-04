@@ -10,7 +10,7 @@ const MAX_IMAGES_PER_CALL = 4;
 const MAX_IMAGE_DIMENSION = 2_000;
 const JPEG_QUALITY = 90;
 
-type InspectWorkspaceImagesResult =
+export type InspectWorkspaceImagesResult =
   | { error: string; error_code?: string; missing?: string[]; template?: string }
   | {
       inspected: true;
@@ -24,7 +24,7 @@ type InspectWorkspaceImagesResult =
       }>;
     };
 
-const ImagePathsSchema = z.array(
+export const ImagePathsSchema = z.array(
   z.string().regex(/^\//, "path must be an absolute virtual path"),
 ).min(1).max(MAX_IMAGES_PER_CALL).superRefine((paths, context) => {
   const normalized = paths.map((value) => sandboxWorkspaceFile(normalizeBashCwd(value)));
@@ -73,7 +73,7 @@ export function createInspectWorkspaceImagesTool(input: ToolBuildInput) {
             template: input.config.E2B_TEMPLATE,
           };
         }
-        if (rendered.exitCode !== 0) {
+        if (rendered.exitCode !== 0 || rendered.timedOut || rendered.error) {
           return {
             error: rendered.error || rendered.stderr.trim() || `Image inspection exited with ${String(rendered.exitCode)}.`,
             error_code: "inspection_failed",
@@ -110,6 +110,7 @@ export function createInspectWorkspaceImagesTool(input: ToolBuildInput) {
         });
         return { inspected: true, images };
       } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
         input.logger?.warn("tool inspect_workspace_images failed", {
           threadId: input.thread.id,
           images: normalizedPaths.length,

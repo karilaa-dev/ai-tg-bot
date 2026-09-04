@@ -4,6 +4,8 @@ import type { SandboxThreadFileSyncResult } from "../../sandbox/types.js";
 import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
+import { createInspectWorkspaceImagesTool, ImagePathsSchema, type InspectWorkspaceImagesResult } from "./inspectWorkspaceImages.js";
+import { toolResultFailed } from "../../pi/toolOutcome.js";
 
 type BashToolResult = {
   stdout: string;
@@ -15,6 +17,7 @@ type BashToolResult = {
   cwd: string;
   thread_files: SandboxThreadFileSyncResult;
   error?: string;
+  inspection?: InspectWorkspaceImagesResult;
 };
 
 const EMPTY_THREAD_FILES: SandboxThreadFileSyncResult = {
@@ -24,17 +27,19 @@ const EMPTY_THREAD_FILES: SandboxThreadFileSyncResult = {
 };
 
 export function createBashTool(input: ToolBuildInput) {
+  const inspector = createInspectWorkspaceImagesTool(input);
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Run Bash in this thread's persistent E2B toolbox; logical cwd / is /home/user/workspace. Telegram files are not restored automatically: call materialize_chat_files first, then use its read-only paths under /home/user/telegram-files. Workspace state persists across pause/resume, nothing is shared with other sandboxes, missing tools are not installed automatically, and network requests must remain relevant to the user's task. Bind local or diagnostic services to 127.0.0.1; bind to 0.0.0.0 only for a user-requested website whose next action is publish_website. Start long-lived background processes with stdin and output detached, for example: nohup command </dev/null >server.log 2>&1 &. A bare background '&' can keep this tool waiting for inherited output pipes.",
+      "Run Bash in the persistent thread workspace. Logical cwd / maps to /home/user/workspace. Bind diagnostics to 127.0.0.1, requested published websites to 0.0.0.0. Optional inspect_images returns up to four workspace images after a successful command. If inspection fails, retry only inspect_workspace_images; command output is retained.",
     inputSchema: z.object({
       script: z.string().min(1).max(20_000),
       cwd: z.string().regex(/^\//, "cwd must be an absolute virtual path").default("/"),
       stdin: z.string().max(100_000).default(""),
       args: z.array(z.string().max(4096)).max(32).default([]),
+      inspect_images: ImagePathsSchema.optional(),
     }),
-    execute: async ({ script, cwd = "/", stdin = "", args = [] }, signal) => {
+    execute: async ({ script, cwd = "/", stdin = "", args = [], inspect_images }, signal) => {
       const logicalCwd = normalizeLogicalCwd(cwd);
       input.logger?.info("tool bash starting", {
         threadId: input.thread.id,
@@ -69,6 +74,7 @@ export function createBashTool(input: ToolBuildInput) {
           ...(executed.error ? { error: executed.error } : {}),
         };
       } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
         result = {
           stdout: "",
           stderr: "",
@@ -80,6 +86,12 @@ export function createBashTool(input: ToolBuildInput) {
           thread_files: EMPTY_THREAD_FILES,
           error: String(error),
         };
+      }
+      if (inspect_images && !toolResultFailed(result)) {
+        result.inspection = await inspector.execute({ paths: inspect_images }, signal);
+        if ("error" in result.inspection) {
+          result.error = `Command succeeded; image inspection failed: ${result.inspection.error}. Retry inspect_workspace_images only.`;
+        }
       }
       input.logger?.info("tool bash complete", {
         threadId: input.thread.id,
@@ -96,17 +108,29 @@ export function createBashTool(input: ToolBuildInput) {
       const result = asRecord(output);
       if (!result) return { type: "json", value: output };
       const hint = bashModelHint(result, toolInput);
-      const readOnlyReminder =
-        "Telegram files are read-only in /home/user/telegram-files. Call materialize_chat_files first, then copy a returned path to /home/user/workspace before editing.";
+      const { inspection, ...command } = output;
+      const summary = { ...command, ...(hint ? { model_hint: hint } : {}) };
+      if (inspection && "images" in inspection) {
+        return {
+          type: "content",
+          value: [
+            { type: "text", text: JSON.stringify(summary) },
+            { type: "text", text: `Inspected: ${inspection.images.map((image) => image.path).join(", ")}` },
+            ...inspection.images.map((image) => ({ type: "image-data", data: image.image_base64, mediaType: image.media_type })),
+          ],
+        };
+      }
       return {
         type: "json",
-        value: {
-          ...result,
-          read_only_files_notice: readOnlyReminder,
-          ...(hint ? { model_hint: hint } : {}),
-        },
+        value: summary,
       };
     },
+    toToolDetails: ({ output }) => ({
+      ...output,
+      ...(output.inspection && "images" in output.inspection ? {
+        inspection: { inspected: true, images: output.inspection.images.map(({ image_base64: _data, ...metadata }) => metadata) },
+      } : {}),
+    }),
   });
 }
 

@@ -1,6 +1,6 @@
 import type { ImageContent, TextContent, TSchema } from "@earendil-works/pi-ai";
 import { z } from "zod";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { buildToolRegistry } from "../ai/tools/index.js";
 import type { ToolBuildInput } from "../ai/tools/types.js";
 import { raceWithAbort } from "../files/cancel.js";
@@ -15,6 +15,7 @@ const BASE_BOT_TOOL_NAMES = [
   "render_pdf_pages",
   "inspect_workspace_images",
   "create_file",
+  "finish_response",
   "publish_website",
   "bash",
   "web_search",
@@ -64,6 +65,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
         || name === "render_pdf_pages"
         || name === "inspect_workspace_images"
         || name === "create_file"
+        || name === "finish_response"
         || name === "publish_website"
         || name === "render_office_preview"
         || name.startsWith("browser_")
@@ -103,10 +105,30 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
             details = { details_unavailable: true };
           }
         }
-        return { content, details };
+        return { content, details, ...(name === "finish_response" && asRecord(output)?.completed === true ? { terminate: true } : {}) };
       },
     } as ToolDefinition;
   });
+}
+
+export function createFinishResponseGuard(): InlineExtension {
+  return {
+    name: "finish-response-guard",
+    factory: (pi) => {
+      let blocked = new Set<string>();
+      pi.on("turn_start", () => { blocked.clear(); });
+      pi.on("message_end", (event) => {
+        if (event.message.role !== "assistant") return;
+        const calls = event.message.content.filter((part) => part.type === "toolCall");
+        if (calls.length > 1 && calls.some((call) => call.name === "finish_response")) {
+          blocked = new Set(calls.map((call) => call.id));
+        }
+      });
+      pi.on("tool_call", (event) => blocked.has(event.toolCallId)
+        ? { block: true, reason: "finish_response must be the sole tool in its response. No tools in this batch ran; finish other work first." }
+        : undefined);
+    },
+  };
 }
 
 function piContentFromModelOutput(modelOutput: unknown): Array<TextContent | ImageContent> {

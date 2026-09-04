@@ -9,6 +9,8 @@ import type { CommandRuntime } from "../../sandbox/types.js";
 import type { PublishedWebsite } from "../../sandbox/types.js";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
 import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
+import type { OutgoingBuffers } from "../../files/outgoingBuffers.js";
+import type { ThreadScope } from "../../memory/retrieval.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -17,6 +19,8 @@ export interface ToolBuildInput {
   user: UserRow;
   thread: ThreadRow;
   maxMessageId?: number;
+  currentScope?: () => Promise<ThreadScope>;
+  outgoingBuffers?: OutgoingBuffers;
   logger?: Logger;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
@@ -24,6 +28,7 @@ export interface ToolBuildInput {
   selectContextFiles?: (fileIds: number[]) => void;
   selectDurableContextFiles?: (fileIds: number[]) => void;
   createdFiles?: CreatedFileAttachment[];
+  createdFileOrder?: string[];
   pendingCreatedFiles?: PendingCreatedFile[];
   publishedWebsites?: PublishedWebsite[];
   registerPublishedWebsite?: (website: PublishedWebsite) => void;

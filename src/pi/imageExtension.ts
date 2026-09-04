@@ -9,9 +9,12 @@ import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { CreatedFileAttachment } from "../ai/tools/types.js";
 import { chatFileMarker } from "../files/contextMarker.js";
-import { threadChainScope } from "../memory/retrieval.js";
+import { threadChainScope, type ThreadScope } from "../memory/retrieval.js";
 import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
+
+import type { OutgoingBuffers } from "../files/outgoingBuffers.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES } from "../files/limits.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -27,6 +30,8 @@ export interface ChatImageBridge {
   providerRouter: PiProviderRouter;
   attachments: CreatedFileAttachment[];
   activeMessageId?: number;
+  outgoingBuffers?: OutgoingBuffers;
+  currentScope?(): Promise<ThreadScope>;
   resolveImage(file: FileRow, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType: string }>;
 }
 
@@ -91,56 +96,74 @@ export function createGenerateImagePiTool(bridge: ChatImageBridge): ToolDefiniti
         content: [{ type: "text", text: "Generating image..." }],
         details: { reference_file_ids: referenceIds },
       });
-      const generated = await generateWithFallback(bridge, {
-        prompt,
-        mode,
-        outputFormat,
-        references,
-        signal,
-      });
-      const extension = outputFormat === "jpeg" ? "jpg" : outputFormat;
-      const name = `generated-${randomUUID().slice(0, 8)}.${extension}`;
-      const file = await bridge.repos.files.insertFile({
-        userId: bridge.user.tg_id,
-        threadId: bridge.thread.id,
-        type: "image",
-        name,
-        size: generated.bytes.length,
-        contentSha256: createHash("sha256").update(generated.bytes).digest("hex"),
-        mimeType: generated.mimeType,
-        summary: generated.revisedPrompt ?? prompt,
-        isInline: false,
-      });
-      bridge.attachments.push({
-        fileId: file.id,
-        type: "image",
-        name,
-        mimeType: generated.mimeType,
-        data: generated.bytes,
-        size: generated.bytes.length,
-        caption: generatedImageCaption(params.caption, generated.revisedPrompt, prompt),
-        inline: false,
-        card: `${chatFileMarker(file.id)} [Generated image #${file.id}: ${generated.revisedPrompt ?? prompt}]`,
-        delivery: "photo",
-        origin: "generated_image",
-      });
-      const result = {
-        generated_image: true,
-        file_id: file.id,
-        marker: chatFileMarker(file.id),
-        name,
-        provider: generated.provider,
-        model: generated.model,
-        mode,
-        output_format: outputFormat,
-        reference_file_ids: referenceIds,
-        revised_prompt: generated.revisedPrompt ?? null,
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        details: result,
-        terminate: true,
-      };
+      if (bridge.attachments.length >= MAX_CREATED_FILES_PER_ANSWER) throw new Error("Attachment limit reached.");
+      const reservation = await bridge.outgoingBuffers?.reserve(MAX_FILE_BYTES, signal);
+      let preparedFileId: number | undefined;
+      try {
+        const generated = await generateWithFallback(bridge, {
+          prompt,
+          mode,
+          outputFormat,
+          references,
+          signal,
+        });
+        if (generated.bytes.length > MAX_FILE_BYTES) throw new Error("Generated image exceeds the file delivery limit.");
+        const extension = outputFormat === "jpeg" ? "jpg" : outputFormat;
+        const name = `generated-${randomUUID().slice(0, 8)}.${extension}`;
+        const file = await bridge.repos.files.insertFile({
+          userId: bridge.user.tg_id,
+          threadId: bridge.thread.id,
+          type: "image",
+          name,
+          size: generated.bytes.length,
+          contentSha256: createHash("sha256").update(generated.bytes).digest("hex"),
+          mimeType: generated.mimeType,
+          summary: generated.revisedPrompt ?? prompt,
+          isInline: false,
+        });
+        preparedFileId = file.id;
+        const attachment: CreatedFileAttachment = {
+          fileId: file.id,
+          type: "image",
+          name,
+          mimeType: generated.mimeType,
+          data: generated.bytes,
+          size: generated.bytes.length,
+          caption: generatedImageCaption(params.caption, generated.revisedPrompt, prompt),
+          inline: false,
+          card: `${chatFileMarker(file.id)} [Generated image #${file.id}: ${generated.revisedPrompt ?? prompt}]`,
+          delivery: "photo",
+          origin: "generated_image",
+        };
+        signal?.throwIfAborted();
+        if (reservation) {
+          await bridge.outgoingBuffers!.spool(attachment, generated.bytes);
+          reservation.commit(attachment, generated.bytes);
+        }
+        bridge.attachments.push(attachment);
+        const result = {
+          generated_image: true,
+          file_id: file.id,
+          marker: chatFileMarker(file.id),
+          name,
+          provider: generated.provider,
+          model: generated.model,
+          mode,
+          output_format: outputFormat,
+          reference_file_ids: referenceIds,
+          revised_prompt: generated.revisedPrompt ?? null,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          details: result,
+          terminate: true,
+        };
+      } catch (error) {
+        if (preparedFileId !== undefined && !bridge.attachments.some((file) => file.fileId === preparedFileId)) {
+          await bridge.repos.files.deleteFile(preparedFileId).catch(() => undefined);
+        }
+        throw error;
+      } finally { reservation?.release(); }
     },
   } as ToolDefinition;
 }
@@ -152,7 +175,7 @@ async function loadReferences(
 ): Promise<ImageContent[]> {
   if (!referenceIds.length) return [];
   const allowedFiles = new Set([
-    ...(await threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId)).fileIds,
+    ...(await (bridge.currentScope?.() ?? threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId))).fileIds,
     ...bridge.attachments.map((attachment) => attachment.fileId),
   ]);
   const rows = await bridge.repos.files.listByIds(referenceIds);
