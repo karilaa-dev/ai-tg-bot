@@ -1,17 +1,40 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { audioFormat, EmptyTranscriptError, transcribeAudio } from "../../src/audio/transcription.js";
 import { loadTestConfig } from "../../src/config.js";
+import { audioFixture } from "../helpers/audio.js";
 import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OpenRouter transcription", () => {
+  it.each(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"] as const)("accepts a real %s byte signature", async (format) => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ text: "test transcript" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(format), format })).resolves.toMatchObject({ text: "test transcript" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"] as const)("refuses non-audio bytes labeled as %s before upload", async (format) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transcribeAudio(loadTestConfig(), { bytes: Buffer.from("harmless text, not audio"), format })).rejects.toThrow("supported audio format");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched and truncated audio signatures before upload", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "mp3" })).rejects.toThrow("format mismatch");
+    await expect(transcribeAudio(loadTestConfig(), { bytes: Buffer.from("OggS"), format: "ogg" })).rejects.toThrow("supported audio format");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("sends base64 audio to the STT endpoint with the default model and returns text and usage", async () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({
       text: "  Please help me plan tomorrow.  ", usage: { seconds: 4.2, cost: 0.001 },
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const bytes = Buffer.from("OggS voice bytes");
+    const bytes = audioFixture();
     const result = await transcribeAudio(loadTestConfig(), { bytes, format: "ogg" });
     const [url, request] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
@@ -26,24 +49,24 @@ describe("OpenRouter transcription", () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({ text: "Привет" }));
     vi.stubGlobal("fetch", fetchMock);
     await transcribeAudio(loadTestConfig({ OPENROUTER_TRANSCRIPTION_MODEL: "vendor/custom-stt" }), {
-      bytes: Buffer.from("audio"), format: "mp3", language: "ru",
+      bytes: audioFixture("mp3"), format: "mp3", language: "ru",
     });
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({ model: "vendor/custom-stt", language: "ru" });
   });
 
   it.each([null, {}, { text: 12 }, { error: { message: "provider failed" } }])("rejects malformed provider responses: %j", async (body) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(body)));
-    await expect(transcribeAudio(loadTestConfig(), { bytes: Buffer.from("audio"), format: "wav" })).rejects.toThrow("invalid transcription response");
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture("wav"), format: "wav" })).rejects.toThrow("invalid transcription response");
   });
 
   it("rejects empty transcripts without inventing a prompt", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ text: " \n " })));
-    await expect(transcribeAudio(loadTestConfig(), { bytes: Buffer.from("audio"), format: "wav" })).rejects.toBeInstanceOf(EmptyTranscriptError);
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture("wav"), format: "wav" })).rejects.toBeInstanceOf(EmptyTranscriptError);
   });
 
   it("reports HTTP failures without exposing provider response bodies", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("private provider diagnostics", { status: 429 })));
-    await expect(transcribeAudio(loadTestConfig(), { bytes: Buffer.from("audio"), format: "wav" })).rejects.toThrow("OpenRouter transcription failed: HTTP 429");
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture("wav"), format: "wav" })).rejects.toThrow("OpenRouter transcription failed: HTTP 429");
   });
 
   it("rejects empty and oversized files before sending a request", async () => {
@@ -61,7 +84,7 @@ describe("OpenRouter transcription", () => {
       options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
     })));
     const promise = transcribeAudio(loadTestConfig({ TRANSCRIPTION_TIMEOUT_MS: reason === "timeout" ? 10 : 120_000 }), {
-      bytes: Buffer.from("audio"), format: "wav", signal: controller.signal,
+      bytes: audioFixture("wav"), format: "wav", signal: controller.signal,
     });
     if (reason === "stop") controller.abort();
     await expect(promise).rejects.toMatchObject({ name: reason === "stop" ? "AbortError" : "TimeoutError" });
@@ -71,7 +94,7 @@ describe("OpenRouter transcription", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await expect(transcribeAudio(loadTestConfig(), {
-      bytes: Buffer.from("audio"), format: "ogg", signal: AbortSignal.abort(),
+      bytes: audioFixture(), format: "ogg", signal: AbortSignal.abort(),
     })).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchMock).not.toHaveBeenCalled();
   });

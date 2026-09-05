@@ -11,7 +11,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
     inputSchema: z.object({
       file_id: z.number().int().positive().optional(),
       path: z.string().startsWith("/").optional(),
-      format: AudioFormatSchema.optional().describe("Override format detection for files without a recognized extension or MIME type."),
+      format: AudioFormatSchema.optional().describe("Format hint for files without a recognized name or MIME type. Must match the audio byte signature."),
       language: z.string().regex(/^[a-z]{2}$/).optional().describe("Optional ISO-639-1 language hint; omit to auto-detect."),
     }).refine((value) => (value.file_id !== undefined) !== (value.path !== undefined), {
       message: "Supply exactly one of file_id or path.",

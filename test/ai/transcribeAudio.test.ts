@@ -6,6 +6,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
+import { audioFixture } from "../helpers/audio.js";
 import { workspaceRuntime } from "../helpers/workspaceRuntime.js";
 
 describe("transcribe_audio", () => {
@@ -26,17 +27,17 @@ describe("transcribe_audio", () => {
     messageId = message.id;
     const file = await repos.files.insertFile({
       userId: user.tg_id, threadId: thread.id, messageId, type: "audio", mimeType: "audio/ogg",
-      extractionStatus: "source_only", name: "recording.ogg", size: 9, isInline: false,
+      extractionStatus: "source_only", name: "recording.ogg", size: audioFixture().length, isInline: false,
     });
     fileId = file.id;
     await repos.files.rememberTelegramObservation(file.id, telegramFileSource({ fileId: "remote-file", fileUniqueId: "unique-audio" }), {
       direction: "inbound", mediaKind: "audio", telegramMessageId: 7,
-      refs: [{ fileId: "remote-file", fileUniqueId: "unique-audio", size: 9, primary: true }],
+      refs: [{ fileId: "remote-file", fileUniqueId: "unique-audio", size: audioFixture().length, primary: true }],
     });
     input = {
       config, db, repos, user, thread,
       resolveFile: vi.fn(async () => ({
-        bytes: Buffer.from("OggS data"), size: 9, contentSha256: "hash", mimeType: "audio/ogg",
+        bytes: audioFixture(), size: audioFixture().length, contentSha256: "hash", mimeType: "audio/ogg",
         source: telegramFileSource({ fileId: "remote-file" }),
       })),
     };
@@ -74,7 +75,7 @@ describe("transcribe_audio", () => {
 
   it("reads workspace audio with a bounded size and passes cancellation through", async () => {
     const runtime = workspaceRuntime();
-    runtime.put("/memo.m4a", Buffer.from("audio"));
+    runtime.put("/memo.m4a", audioFixture("m4a"));
     const controller = new AbortController();
     const result = await createTranscribeAudioTool({ ...input, commandRuntime: runtime }).execute({ path: "/memo.m4a", language: "en" }, controller.signal);
     expect(result).toMatchObject({ text: "Words from the recording." });
@@ -90,6 +91,30 @@ describe("transcribe_audio", () => {
       expect(schema.safeParse(value).success).toBe(false);
     }
     expect(schema.safeParse({ path: "/recording", format: "ogg" }).success).toBe(true);
+  });
+
+  it.each([
+    { path: "/notes.txt", format: "wav" as const },
+    { path: "/pretend.wav" },
+  ])("does not upload non-audio workspace content with %j", async (args) => {
+    const runtime = workspaceRuntime();
+    runtime.put(args.path, Buffer.from("harmless non-audio content"));
+    const tool = createTranscribeAudioTool({ ...input, commandRuntime: runtime });
+    expect(await tool.execute(tool.inputSchema.parse(args))).toMatchObject({ error: expect.stringContaining("supported audio format") });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-audio chat bytes even with an audio MIME type and format override", async () => {
+    const resolved = await input.resolveFile!((await input.repos.files.get(fileId))!);
+    input.resolveFile = vi.fn(async () => ({ ...resolved, bytes: Buffer.from("harmless non-audio content") }));
+    expect(await createTranscribeAudioTool(input).execute({ file_id: fileId, format: "ogg" })).toMatchObject({ error: expect.stringContaining("supported audio format") });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts an extensionless recording when the format hint matches its bytes", async () => {
+    const runtime = workspaceRuntime();
+    runtime.put("/recording", audioFixture());
+    expect(await createTranscribeAudioTool({ ...input, commandRuntime: runtime }).execute({ path: "/recording", format: "ogg" })).toMatchObject({ text: "Words from the recording." });
   });
 
   it("returns actionable errors and propagates cancellation", async () => {

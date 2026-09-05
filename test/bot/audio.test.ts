@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
+import { audioFixture } from "../helpers/audio.js";
 import { deferred } from "../helpers/async.js";
 import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { createTranscribeAudioTool } from "../../src/ai/tools/transcribeAudio.js";
+import { sql } from "drizzle-orm";
+import { telegramFileSource } from "../../src/files/telegramSource.js";
 
 describe("Telegram audio prompts", () => {
   let env: GrammyEmulator;
@@ -25,9 +28,15 @@ describe("Telegram audio prompts", () => {
 
   function voiceUpdate(options: { caption?: string; fileSize?: number; content?: Buffer } = {}) {
     const voice = env.bot.server.fileState.storeVoice(4, {
-      mimeType: "audio/ogg", content: options.content ?? Buffer.from("OggS voice data"), fileSize: options.fileSize,
+      mimeType: "audio/ogg", content: options.content ?? audioFixture(), fileSize: options.fileSize,
     });
     return env.bot.server.updateFactory.createVoiceMessage(env.user, env.chat, voice, { caption: options.caption });
+  }
+
+  async function expectNoAudioRecords() {
+    expect(await env.db.db.query(sql`select id from files`)).toEqual([]);
+    expect(await env.db.db.query(sql`select id from file_sources`)).toEqual([]);
+    expect(await env.db.db.query(sql`select id from telegram_file_refs`)).toEqual([]);
   }
 
   it("uses a voice transcript as a prompt, stores its source, and keeps it available to the tool", async () => {
@@ -54,7 +63,7 @@ describe("Telegram audio prompts", () => {
 
   it("preserves an audio message's caption and detected format", async () => {
     const audio = env.bot.server.fileState.storeAudio(4, {
-      fileName: "memo.m4a", mimeType: "audio/mp4", content: Buffer.from("m4a audio"),
+      fileName: "memo.m4a", mimeType: "audio/mp4", content: audioFixture("m4a"),
     });
     await processUpdate(env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio, { caption: "Reply in Russian" }));
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
@@ -77,7 +86,7 @@ describe("Telegram audio prompts", () => {
     expect(await env.repos.files.listForThreads([thread.id])).toEqual([expect.objectContaining({ type: "audio", extraction_status: "source_only" })]);
   });
 
-  it.each(["provider", "no speech"])("does not start a turn after %s failure", async (failure) => {
+  it.each(["provider", "no speech"])("leaves no turn or audio records after %s failure", async (failure) => {
     fetchMock.mockResolvedValue(failure === "provider"
       ? new Response("unavailable", { status: 503 })
       : Response.json({ text: "  " }));
@@ -87,6 +96,7 @@ describe("Telegram audio prompts", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
     expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    await expectNoAudioRecords();
   });
 
   it.each(["metadata", "download"])("rejects oversized audio from %s before transcription", async (source) => {
@@ -97,6 +107,7 @@ describe("Telegram audio prompts", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
+    await expectNoAudioRecords();
   });
 
   it("lets /stop cancel transcription and accepts the next voice message", async () => {
@@ -112,13 +123,81 @@ describe("Telegram audio prompts", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
     expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    await expectNoAudioRecords();
     await processUpdate(voiceUpdate());
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(2);
   });
 
+  it("leaves no audio records when downloading fails", async () => {
+    vi.spyOn(env.services.fileResolver, "resolveSource").mockRejectedValueOnce(new Error("Download failed"));
+    await processUpdate(voiceUpdate());
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expectNoAudioRecords();
+  });
+
+  it("leaves no audio records when /stop cancels downloading", async () => {
+    const started = deferred<void>();
+    vi.spyOn(env.services.fileResolver, "resolveSource").mockImplementationOnce((_source, signal) => new Promise((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+      started.resolve();
+    }));
+    const pending = processUpdate(voiceUpdate());
+    await started.promise;
+    await env.bot.sendCommand(env.user, env.chat, "/stop");
+    await pending;
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expectNoAudioRecords();
+  });
+
+  it("does not register malformed audio before rejecting it", async () => {
+    await processUpdate(voiceUpdate({ content: Buffer.from("harmless text with an audio MIME type") }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expectNoAudioRecords();
+  });
+
+  it("preserves an attached cached file and its observations when retranscription fails", async () => {
+    const original = voiceUpdate();
+    await processUpdate(original);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    const sources = await env.repos.files.listSources(file!.id);
+    const refs = await env.repos.files.listTelegramFileRefs([file!.id]);
+    fetchMock.mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    const resend = env.bot.server.updateFactory.createVoiceMessage(env.user, env.chat, original.message!.voice!);
+    await processUpdate(resend);
+    expect(await env.repos.files.get(file!.id)).toEqual(file);
+    expect(await env.repos.files.listSources(file!.id)).toEqual(sources);
+    expect(await env.repos.files.listTelegramFileRefs([file!.id])).toEqual(refs);
+    expect(await env.repos.files.listForMessage(file!.message_id!)).toHaveLength(1);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(2);
+  });
+
+  it("preserves a concurrent successful upload of the same audio when another transcription fails", async () => {
+    const failedRequest = deferred<Response>();
+    const started = deferred<void>();
+    fetchMock.mockImplementationOnce(() => {
+      started.resolve();
+      return failedRequest.promise;
+    });
+    const original = voiceUpdate();
+    const first = processUpdate(original);
+    await started.promise;
+    const other = env.bot.createUser({ id: 1002, first_name: "Bob", language_code: "en" });
+    const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" });
+    await processUpdate(env.bot.server.updateFactory.createVoiceMessage(other, otherChat, original.message!.voice!));
+    const source = telegramFileSource({ fileId: original.message!.voice!.file_id, fileUniqueId: original.message!.voice!.file_unique_id });
+    const shared = await env.repos.files.findBySource(source);
+    failedRequest.resolve(new Response("unavailable", { status: 503 }));
+    await first;
+    expect(shared).toMatchObject({ message_id: expect.any(Number) });
+    expect(await env.repos.files.findBySource(source)).toEqual(shared);
+    expect(await env.repos.files.listForMessage(shared!.message_id!)).toHaveLength(1);
+    expect(await env.db.db.query(sql`select id from files`)).toHaveLength(1);
+  });
+
   it("batches an audio album into one prompt with its transcripts and caption", async () => {
     const updates = [1, 2].map((n) => {
-      const audio = env.bot.server.fileState.storeAudio(4, { fileName: `part-${n}.mp3`, content: Buffer.from(`audio-${n}`) });
+      const audio = env.bot.server.fileState.storeAudio(4, { fileName: `part-${n}.mp3`, content: audioFixture("mp3") });
       const update = env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio, { caption: n === 1 ? "Use both parts" : undefined });
       update.message!.media_group_id = "audio-album";
       return update;

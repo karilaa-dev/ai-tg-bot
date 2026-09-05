@@ -37,6 +37,7 @@
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "e2b": "2.46.0",
+    "file-type": "22.0.2",
     "grammy": "^1.46.0",
     "pg": "^8.23.0",
     "playwright-core": "1.62.1",

@@ -291,12 +291,8 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   };
   const releaseMediaGroup = holdPendingMediaGroup(ctx, input.mediaGroupId);
   try {
-    const result = await ingestTelegramFile(ctx, input, {
-      signal: controller.signal,
-      status,
-      logLabel: "file",
-    });
-    if (result === "too-big" || result === undefined) return;
+    let transcript: string | undefined;
+    // Failed or cancelled transcription must not create or claim durable file records.
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
       const format = audioFormat(input.name, input.mime);
       if (!format) throw new Error("Unsupported audio format.");
@@ -305,14 +301,24 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
         fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
       }), controller.signal);
       await status.updateKey("audio-transcribing");
-      const transcript = await transcribeAudio(ctx.services.config, {
+      const transcribed = await transcribeAudio(ctx.services.config, {
         bytes: downloaded.bytes, format, signal: controller.signal,
       });
       throwIfAborted(controller.signal);
-      result.prepared.card = `${transcript.text}\n\n${chatFileMarker(result.prepared.fileId)} [Audio message transcribed above]`;
       await status.clear();
       throwIfAborted(controller.signal);
+      transcript = transcribed.text;
+      // Transcription is complete; hand off to file registration and turn acceptance.
       clearJob();
+    }
+    const result = await ingestTelegramFile(ctx, input, {
+      signal: controller.signal,
+      status,
+      logLabel: "file",
+    });
+    if (result === "too-big" || result === undefined) return;
+    if (transcript !== undefined) {
+      result.prepared.card = `${transcript}\n\n${chatFileMarker(result.prepared.fileId)} [Audio message transcribed above]`;
       await handlePreparedTelegramFile(ctx, input, result.prepared);
       return;
     }
