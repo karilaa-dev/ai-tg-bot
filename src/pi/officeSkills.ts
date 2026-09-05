@@ -15,7 +15,7 @@ export const OFFICE_SKILLS = [
   {
     "name": "pptxgenjs",
     "relativePath": "skills/pptxgenjs/SKILL.md",
-    "sha256": "836f37abf70cc906a3b2448f4624b1a7bf8ab1f68d0c394a95c7998e8bc56bfe"
+    "sha256": "ee9bfdd5d1d1d7aa55e5b5cd2af40584ac0c6941fb1cea12b2eda89570e922c4"
   },
   {
     "name": "pptx-edit",

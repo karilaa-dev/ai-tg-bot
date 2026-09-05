@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "vitest run",
     "live:pi-check": "tsx scripts/live-pi-check.ts",
     "live:pi-image-check": "tsx scripts/live-pi-image-check.ts",
+    "live:pi-image-intent-check": "tsx scripts/live-pi-image-intent-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 tsx scripts/live-pi-check.ts",
     "live:e2b-check": "tsx scripts/live-e2b-check.ts",
     "live:browser-use-check": "tsx scripts/live-browser-use-check.ts",

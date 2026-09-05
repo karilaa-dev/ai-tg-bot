@@ -17,14 +17,14 @@ When the brief leaves the style open, consider two genuinely different direction
 
 For visually grounded subjects such as places, architecture, products, history, nature, or travel, acquire relevant imagery before composing the deck. The user does not have to request photos explicitly. Make selected images large enough to reveal the subject. A city presentation should let the audience see that city; generic boxes, decorative skyline bars, and tiny thumbnails do not serve that purpose. Text-led or purely diagrammatic slides are appropriate when the content or requested style calls for them.
 
-Use generate_image when an original concept, future scenario, illustration, or otherwise unavailable visual would communicate the idea better. Give it an aspect ratio, focal point, useful crop space, and a brief specific to the slide. Inspect its preview and embed its saved original. Label speculative scenes where they could be mistaken for real places or evidence. Use retrieved images for factual photographs and logos.
+Use generate_image only when the user clearly asks for newly invented imagery or a generative edit, including artwork explicitly requested for the deck. A presentation topic, speculative subject, or need for decoration does not itself request image synthesis. Otherwise use retrieved or supplied images and editable diagrams. For requested synthesis, specify aspect ratio, focal point, and crop space, inspect the preview, and embed the saved original. Label speculative scenes where they could be mistaken for real places or evidence. Use retrieved images for factual photographs and logos.
 
 ## Find usable image assets
 
 - Call `web_search` with `include_images: true` and a precise subject query. It returns candidate image URLs with descriptions alongside reference pages. For a known page, `web_extract` with `include_images: true` can reveal its images. Official sources, museums, and Wikimedia Commons are useful starting points.
 - Download selected URLs into `assets/` using Bash. Use URLs actually returned by tools or a public API. Check the response is an image, inspect its dimensions, and call `inspect_workspace_images` before placing it. Descriptions and filenames do not establish what an image depicts.
 - Preserve source page URLs, image URLs, creator/license information when supplied, and attribution requirements in an asset manifest or speaker notes. Cite factual claims separately. Do not invent credits or assume that discovery grants unrestricted reuse.
-- If a download fails, try another credible source or its image API. Use an appropriate diagram or explicitly labeled original illustration when it improves the slide. A retrieval failure should lead to a useful visual alternative or a clear limitation, rather than silently turning the entire deck into text boxes.
+- If a download fails, try another credible source or its image API. Use an appropriate editable diagram or explain the missing asset when retrieval is exhausted. Failed retrieval does not authorize image generation.
 
 ## Compose for the material
 
