@@ -61,6 +61,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   private turnSessionContext?: string;
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private turnBudget?: TurnBudget;
+  private responseDraft = { text: "" };
 
   constructor(input: {
     config: AppConfig;
@@ -118,6 +119,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.activeMessageId = input.userMessageId;
     this.outgoingFiles = this.createOutgoingFiles();
     this.publishedWebsites = [];
+    this.responseDraft = { text: "" };
     this.turnBudget = new TurnBudget({
       maxModelCycles: this.config.PI_MAX_MODEL_CYCLES,
       maxToolCalls: this.config.PI_MAX_TOOL_CALLS,
@@ -147,6 +149,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.activeMessageId = undefined;
     this.visibilityScope = undefined;
     this.turnFileCache.clear();
+    this.responseDraft.text = "";
     await this.outgoingFiles?.dispose();
     if (wasActive) await this.browserRuntime?.endTurn(this.user.tg_id, this.thread.id);
   }
@@ -173,6 +176,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       maxMessageId: this.activeMessageId,
       currentScope: () => this.currentScope(),
       outgoingFiles: this.outgoingFiles,
+      responseDraft: this.responseDraft,
       logger: this.logger,
       commandRuntime: this.commandRuntime,
       browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),

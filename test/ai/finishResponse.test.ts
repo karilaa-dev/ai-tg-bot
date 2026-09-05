@@ -86,6 +86,23 @@ describe("finish_response", () => {
     expect(await input.repos.files.get(oldId)).toBeUndefined();
   });
 
+  it.each([
+    { retry: {}, expected: "Ready to print" },
+    { retry: { text: "Revised final text" }, expected: "Revised final text" },
+    { retry: { text: "" }, expected: "" },
+  ])("keeps the latest explicit text across file-only retries: $expected", async ({ retry, expected }) => {
+    const { input, read } = await setup();
+    read.mockRejectedValueOnce(new Error("missing STL"));
+    const partial = await finish(input, { text: " Ready to print ", files: [{ path: "/a.stl" }, { path: "/b.stl" }] });
+    expect(partial.terminate).not.toBe(true);
+    const incomplete = await finish(input, { ...retry, files: [{ path: "/c.stl" }] });
+    expect(incomplete.terminate).not.toBe(true);
+    const repaired = await finish(input, { files: [{ path: "/a.stl" }] });
+    expect(repaired.terminate).toBe(true);
+    expect(repaired.details).toMatchObject({ completed: true, text: expected });
+    expect(read.mock.calls.filter(([request]) => request.virtualPath === "/b.stl")).toHaveLength(1);
+  });
+
   it("reserves failed slots so other files cannot exhaust their repair capacity", async () => {
     const { input, read } = await setup();
     read.mockRejectedValueOnce(new Error("missing first"));
@@ -217,6 +234,46 @@ describe("finish_response", () => {
     expect(JSON.stringify(send.mock.calls)).toContain("Persisted final");
   });
 
+  it("persists and sends retained text before files after repair through create_file", async () => {
+    const { input, runtime, read, calls } = await setupPi([
+      [{ name: "finish_response", arguments: { text: "Ready to print", files: [{ path: "/model.stl" }, { path: "/model.final.png" }] } }],
+      [{ name: "create_file", arguments: { path: "/model.stl" } }],
+      [{ name: "finish_response", arguments: {} }],
+    ]);
+    read.mockRejectedValueOnce(new Error("missing STL"));
+    const sent: string[] = [];
+    await runTurn({ ...input, user: { ...input.user, stream_mode: 0 }, logger: input.logger!,
+      api: {
+        raw: { sendRichMessage: async (message: unknown) => {
+          if (JSON.stringify(message).includes("Ready to print")) sent.push("text");
+          return { message_id: 7 };
+        }, editMessageText: async () => true },
+        sendDocument: async () => { sent.push("STL"); return { message_id: 8, document: { file_id: "stl" } }; },
+        sendPhoto: async () => { sent.push("photo"); return { message_id: 9, photo: [{ file_id: "photo" }] }; },
+        sendChatAction: async () => true,
+      } as never,
+      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime }, t: (key) => key,
+    });
+
+    expect(calls()).toBe(3);
+    expect(sent).toEqual(["text", "STL", "photo"]);
+    expect(currentTurnAssistantResult(runtime.session.messages)).toMatchObject({ completed: true, text: "Ready to print" });
+    const messages = await input.repos.messages.listForThreadChain([input.thread]);
+    expect(messages.find((message) => message.role === "assistant")!.text_plain).toBe("Ready to print");
+    expect(read.mock.calls.filter(([request]) => request.virtualPath === "/model.final.png")).toHaveLength(1);
+  });
+
+  it("clears pending text when the turn ends so the next turn can send files without text", async () => {
+    const { input, runtime, read } = await setupPi([]);
+    read.mockRejectedValueOnce(new Error("missing STL"));
+    await finish(runtime.bridge.buildInput(), { text: "Abandoned final text", files: [{ path: "/a.stl" }] });
+    await runtime.bridge.endTurn();
+    await runtime.bridge.beginTurn({ api: {} as never, chatId: input.user.tg_id, resolveFile: async () => { throw new Error("Unexpected reload"); } });
+
+    const result = await finish(runtime.bridge.buildInput(), { files: [{ path: "/b.stl" }] });
+    expect(result.details).toMatchObject({ completed: true, text: "" });
+  });
+
   it.each(["confirmed", "ambiguous"])("preserves a %s send through turn cleanup when delivery metadata is unavailable", async (outcome) => {
     const { input, runtime } = await setupPi([[{ name: "finish_response", arguments: { files: [{ path: "/model.stl" }] } }]]);
     const metadata = vi.spyOn(input.repos.files, "rememberTelegramObservation").mockRejectedValue(new Error("metadata unavailable"));
@@ -274,6 +331,7 @@ async function setup() {
     threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
   }));
   const input: ToolBuildInput = { config, db, repos, user, thread,
+    responseDraft: { text: "" },
     commandRuntime: { execute, readWorkspaceFile: read, dispose: async () => undefined } as never,
     logger: createLogger({ LOG_LEVEL: "error" }),
   };

@@ -21,6 +21,7 @@ export interface ToolBuildInput {
   maxMessageId?: number;
   currentScope?: () => Promise<ThreadScope>;
   outgoingFiles?: OutgoingFiles;
+  responseDraft?: { text: string };
   logger?: Logger;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
