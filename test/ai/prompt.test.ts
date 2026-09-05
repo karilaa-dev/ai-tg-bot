@@ -220,12 +220,11 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("without sending the draft");
   });
 
-  it("routes existing-image retrieval and photo collages away from generation", async () => {
+  it("includes image intent guidance in the rendered prompt", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser });
 
-    expect(prompt).toContain("requested synthesis/edits or useful supporting artwork");
+    expect(prompt).toContain("only for clearly requested synthesis or generative edits");
     expect(prompt).toContain("Prefer original, high-resolution retrieved images");
-
   });
 
   it("is byte-identical when only per-turn metadata would change", async () => {

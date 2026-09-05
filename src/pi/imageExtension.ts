@@ -67,7 +67,7 @@ export function createGenerateImagePiTool(
     name: "generate_image",
     label: "Generate image",
     description:
-      "Generate or edit one image as a reusable workspace asset and return an image preview for your own inspection. Use for requested images or supporting artwork in documents and presentations. Retrieve real sources for factual photos and logos. Nothing is sent automatically and the turn continues. Inspect the returned image, then embed its path or send it with finish_response/create_file. Multiple calls are allowed within the turn budget. References can be current-thread image file IDs or workspace image paths, five total.",
+      "Synthesize one new image or generatively transform an image when the user clearly requests that operation. A request for a visual deliverable alone does not authorize synthesis. For existing content, use web_search/web_extract and assemble retrieved or supplied assets with installed tools; use those tools for cropping, resizing, labels, and layout. Do not generate incidental supporting artwork or replace failed retrieval. Returns a reusable workspace path and image preview for your inspection. Nothing is sent automatically and the turn continues. Inspect the result, then embed its path or send it with finish_response/create_file. References can be current-thread image file IDs or workspace image paths, five total.",
     parameters: Type.Object(
       {
         prompt: Type.String({ minLength: 1, maxLength: 4000 }),
