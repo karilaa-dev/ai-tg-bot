@@ -42,6 +42,7 @@ import { E2BFileSourceAdapter } from "../e2b/fileSource.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
+import { audioFormat } from "../audio/transcription.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -348,6 +349,33 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
         size: doc.file_size,
         primary: true,
       }],
+    });
+  });
+  bot.on(["message:voice", "message:audio"], async (ctx) => {
+    const voice = ctx.message.voice;
+    const audio = ctx.message.audio;
+    const media = voice ?? audio;
+    if (!media) return;
+    if ((media.file_size ?? 0) > MAX_FILE_BYTES) {
+      await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
+      return;
+    }
+    const mime = media.mime_type ?? (voice ? "audio/ogg" : "audio/mpeg");
+    const name = audio?.file_name ?? `${media.file_unique_id}.${audioFormat("", mime) ?? "bin"}`;
+    if (!audioFormat(name, mime)) {
+      await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
+      return;
+    }
+    await handleTelegramFile(ctx, {
+      fileId: media.file_id,
+      fileUniqueId: media.file_unique_id,
+      name,
+      mime,
+      caption: ctx.message.caption,
+      type: "audio",
+      mediaKind: voice ? "voice" : "audio",
+      size: media.file_size,
+      mediaGroupId: ctx.message.media_group_id,
     });
   });
   bot.on("message:photo", async (ctx) => {

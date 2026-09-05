@@ -1,4 +1,4 @@
-export type StoredFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "other";
+export type StoredFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "audio" | "other";
 
 export type DialectName = "sqlite" | "postgres";
 
@@ -138,7 +138,7 @@ interface TelegramFileRefsTable {
   telegram_file_id: string;
   telegram_file_unique_id: string | null;
   direction: "inbound" | "outbound";
-  media_kind: "document" | "photo";
+  media_kind: "document" | "photo" | "voice" | "audio";
   telegram_message_id: number | null;
   width: number | null;
   height: number | null;

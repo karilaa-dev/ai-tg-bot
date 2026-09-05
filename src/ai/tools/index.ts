@@ -16,6 +16,7 @@ import { createMaterializeChatFilesTool } from "./materializeChatFiles.js";
 import { createRenderPdfPagesTool } from "./renderPdfPages.js";
 import { createInspectWorkspaceImagesTool } from "./inspectWorkspaceImages.js";
 import type { BotToolRegistry, ToolBuildInput } from "./types.js";
+import { createTranscribeAudioTool } from "./transcribeAudio.js";
 
 export type {
   BotToolRegistry,
@@ -39,6 +40,7 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     bash: createBashTool(input),
     web_search: createWebSearchTool(input),
     web_extract: createWebExtractTool(input),
+    transcribe_audio: createTranscribeAudioTool(input),
     ...(isBrowserUseConfigured(input.config) && input.browserRuntime ? {
       ...createBrowserTools(input),
     } : {}),

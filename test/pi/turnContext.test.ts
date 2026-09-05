@@ -8,6 +8,7 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { officeSkillPaths } from "../../src/pi/officeSkills.js";
 import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/threadBridge.js";
+import { telegramFileSource } from "../../src/files/telegramSource.js";
 import {
   createTurnPromptContextExtension,
   prependSessionContext,
@@ -288,6 +289,35 @@ describe("ThreadBridge turn prompt lifecycle", () => {
     } finally {
       await db.destroy();
     }
+  });
+
+  it("keeps audio as metadata without downloading it again for model context", async () => {
+    const config = loadTestConfig();
+    const db = createDatabase(config);
+    await db.initialize();
+    try {
+      const repos = createRepos(db.db, db.search);
+      const user = await repos.users.ensure({ tgId: 987_658, lang: "en" });
+      const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      const file = await repos.files.insertFile({
+        userId: user.tg_id, threadId: thread.id, type: "audio", extractionStatus: "source_only",
+        mimeType: "audio/ogg", name: "voice.ogg", size: 100, isInline: false,
+      });
+      await repos.files.rememberTelegramObservation(file.id, telegramFileSource({ fileId: "voice-source" }), {
+        direction: "inbound", mediaKind: "voice", telegramMessageId: 5,
+        refs: [{ fileId: "voice-source", size: 100, primary: true }],
+      });
+      const bridge = new ThreadBridge({ config, db, repos, logger: createLogger(config), user, thread, modelRegistry: {} as never, providerRouter: {} as never });
+      await bridge.beginTurn({ ...turnTransport(), currentFileIds: [file.id] });
+      const resolve = vi.spyOn(bridge, "resolveFile");
+      const handlers = await inlineExtensionHandlers(createChatFileContextExtension(bridge));
+      const messages: AgentMessage[] = [{ role: "user", content: `Help me plan tomorrow. [[chat-file:${file.id}]]`, timestamp: 1 }];
+      const result = await handlers.context({ messages });
+      expect(JSON.stringify(result.messages)).toContain("Reuse the transcript");
+      expect(JSON.stringify(result.messages)).not.toContain("docx");
+      expect(resolve).not.toHaveBeenCalled();
+      await bridge.endTurn();
+    } finally { await db.destroy(); }
   });
 
   it("materializes a sourceless attachment from current-turn memory", async () => {

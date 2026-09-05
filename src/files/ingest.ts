@@ -7,12 +7,13 @@ import { isAbortError, throwIfAborted } from "./cancel.js";
 import { chunkCsv, chunkMarkdown } from "./chunker.js";
 import { chatFileMarker } from "./contextMarker.js";
 import { sha256Hex } from "./hash.js";
+import { audioFormat } from "../audio/transcription.js";
 
 const APPROX_CHARS_PER_TOKEN = 4;
 const FILE_SUMMARY_MAX_CHARS = 180;
 const OUTLINE_PREVIEW_HEADINGS = 5;
 
-export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image";
+export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "audio";
 type FileIngestStage = "extracting" | "indexing";
 export interface FileIngestProgress {
   stage: FileIngestStage;
@@ -28,6 +29,7 @@ export function classifyFile(name: string, mime = ""): AcceptedFileType | "legac
   if (/\.pdf$/i.test(name) || mime === "application/pdf") return "pdf";
   if (/\.docx$/i.test(name) || mime.includes("wordprocessingml.document")) return "docx";
   if (/\.(jpe?g|png|webp)$/i.test(name) || /^image\/(jpeg|png|webp)$/.test(mime)) return "image";
+  if (audioFormat(name, mime)) return "audio";
   return null;
 }
 
@@ -99,7 +101,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   }
-  if (type === "pdf" || type === "docx") {
+  if (type === "pdf" || type === "docx" || type === "audio") {
     throwIfAborted(input.signal);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
     const file = await input.repo.insertFile({
@@ -112,7 +114,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       type,
       name: input.name,
       size: bytes.length,
-      summary: sandboxDocumentSummary(type),
+      summary: sourceFileSummary(type),
       isInline: false,
     });
     input.logger?.info("sandbox document registered", {
@@ -226,13 +228,13 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  if (type === "pdf" || type === "docx") {
+  if (type === "pdf" || type === "docx" || type === "audio") {
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
       mimeType: input.mime ?? input.file.mime_type,
       size: bytes.length,
       contentMd: null,
-      summary: sandboxDocumentSummary(type),
+      summary: sourceFileSummary(type),
       outline: null,
       isInline: false,
       status: "source_only",
@@ -323,6 +325,7 @@ export function cardForFile(
 ): string {
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
+  if (file.type === "audio") return `${marker} Audio file #${file.id}: ${displayName}. Use transcribe_audio with file_id: ${file.id}.`;
   if (file.extraction_status === "source_only") {
     return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "docx-cli"}.`;
   }
@@ -368,7 +371,8 @@ async function contentFor(
   throw new Error(`${type} content must be inspected in the sandbox`);
 }
 
-function sandboxDocumentSummary(type: "pdf" | "docx"): string {
+export function sourceFileSummary(type: "pdf" | "docx" | "audio"): string {
+  if (type === "audio") return "Original audio available for transcribe_audio.";
   return type === "pdf"
     ? "Original PDF available for PDF Inspector or model vision in the sandbox."
     : "Original DOCX available for docx-cli in the sandbox.";

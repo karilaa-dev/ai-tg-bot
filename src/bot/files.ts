@@ -1,12 +1,14 @@
 import type { FileRow } from "../db/types.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
-import { cardForFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
+import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
+import { audioFormat, EmptyTranscriptError, transcribeAudio } from "../audio/transcription.js";
+import { chatFileMarker } from "../files/contextMarker.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
-import { enqueueMediaGroup } from "./batching.js";
+import { enqueueMediaGroup, holdPendingMediaGroup } from "./batching.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
@@ -19,7 +21,7 @@ interface TelegramFileInput {
   mime?: string;
   caption?: string;
   type: AcceptedFileType;
-  mediaKind: "document" | "photo";
+  mediaKind: "document" | "photo" | "voice" | "audio";
   size?: number;
   mediaGroupId?: string;
   telegramRefs?: Array<{
@@ -74,6 +76,17 @@ export class FileProcessingStatus {
 
   async updateKey(key: string, params: Record<string, string | number> = {}): Promise<void> {
     await this.updateText(this.ctx.t(key, { name: escapeHtml(this.name), ...params }));
+  }
+
+  async clear(): Promise<void> {
+    if (!this.messageId || !this.ctx.chat) return;
+    try {
+      await this.ctx.api.deleteMessage(this.ctx.chat.id, this.messageId);
+      this.messageId = undefined;
+      this.lastText = "";
+    } catch (err) {
+      this.ctx.services.logger.warn("failed to delete file status message", { err: String(err), name: this.name });
+    }
   }
 
   async updateText(text: string): Promise<void> {
@@ -140,7 +153,7 @@ async function ingestTelegramFile(
     : undefined;
   if (reused) return { outcome: "reused-cached", prepared: reused };
 
-  if (input.type === "pdf" || input.type === "docx") {
+  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
     throwIfAborted(signal);
     if ((input.size ?? 0) > MAX_FILE_BYTES) {
       if (status) await status.updateText(ctx.t("file-too-big"));
@@ -155,9 +168,7 @@ async function ingestTelegramFile(
       extractionStatus: "source_only",
       name: input.name,
       size: input.size ?? 0,
-      summary: input.type === "pdf"
-        ? "Original PDF available for PDF Inspector or model vision in the sandbox."
-        : "Original DOCX available for docx-cli in the sandbox.",
+      summary: sourceFileSummary(input.type),
       isInline: false,
     });
     const canonical = await claimTelegramSource(ctx, file, source, input);
@@ -278,6 +289,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     const current = activeFileJobs.get(jobKey);
     if (current?.controller === controller) activeFileJobs.delete(jobKey);
   };
+  const releaseMediaGroup = holdPendingMediaGroup(ctx, input.mediaGroupId);
   try {
     const result = await ingestTelegramFile(ctx, input, {
       signal: controller.signal,
@@ -285,6 +297,25 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       logLabel: "file",
     });
     if (result === "too-big" || result === undefined) return;
+    if (input.mediaKind === "voice" || input.mediaKind === "audio") {
+      const format = audioFormat(input.name, input.mime);
+      if (!format) throw new Error("Unsupported audio format.");
+      await status.updateKey("file-processing-downloading");
+      const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
+        fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
+      }), controller.signal);
+      await status.updateKey("audio-transcribing");
+      const transcript = await transcribeAudio(ctx.services.config, {
+        bytes: downloaded.bytes, format, signal: controller.signal,
+      });
+      throwIfAborted(controller.signal);
+      result.prepared.card = `${transcript.text}\n\n${chatFileMarker(result.prepared.fileId)} [Audio message transcribed above]`;
+      await status.clear();
+      throwIfAborted(controller.signal);
+      clearJob();
+      await handlePreparedTelegramFile(ctx, input, result.prepared);
+      return;
+    }
     if (result.outcome !== "ingested") {
       await status.updateKey("file-reused");
       clearJob();
@@ -296,7 +327,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       await handlePreparedTelegramFile(ctx, input, result.prepared);
       return;
     }
-    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx"
+    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio"
       ? "file-source-registered"
       : "file-processed");
     clearJob();
@@ -315,9 +346,12 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       return;
     }
     ctx.services.logger.warn("file ingestion failed", { err: String(err), name: input.name });
-    await status.updateText(ctx.t("error-generic"));
+    await status.updateText(ctx.t(err instanceof EmptyTranscriptError
+      ? "audio-no-speech"
+      : input.mediaKind === "voice" || input.mediaKind === "audio" ? "audio-transcription-failed" : "error-generic"));
   } finally {
     clearJob();
+    releaseMediaGroup();
   }
 }
 
@@ -445,7 +479,7 @@ function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): 
 
 function isCompatibleStoredFile(file: FileRow, input: TelegramFileInput): boolean {
   if (file.type !== input.type) return false;
-  if (input.type === "pdf" || input.type === "docx") {
+  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
     return file.extraction_status === "source_only" || file.extraction_status === "ready";
   }
   return file.extraction_status === "ready";

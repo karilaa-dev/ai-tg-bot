@@ -16,7 +16,7 @@ describe("Browser Use configuration", () => {
 
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
-    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.9");
+    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.10");
     expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(config.BASH_TIMEOUT_MS).toBe(120_000);
     expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);
@@ -55,5 +55,18 @@ describe("database configuration", () => {
     });
 
     expect(config.DB_URL).toBe(databaseUrl);
+  });
+});
+
+describe("transcription configuration", () => {
+  it("defaults to MAI-Transcribe-2 and supports an override", () => {
+    expect(loadConfig(required)).toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "microsoft/mai-transcribe-2", TRANSCRIPTION_TIMEOUT_MS: 120_000 });
+    expect(loadConfig({ ...required, OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: "60000" }))
+      .toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: 60_000 });
+  });
+
+  it("rejects an empty model and unbounded timeout", () => {
+    expect(() => loadConfig({ ...required, OPENROUTER_TRANSCRIPTION_MODEL: " " })).toThrow();
+    expect(() => loadConfig({ ...required, TRANSCRIPTION_TIMEOUT_MS: "0" })).toThrow();
   });
 });
