@@ -301,6 +301,28 @@ describe("StreamShaper", () => {
     expect(status).not.toContain("create_file");
   });
 
+  it("names loaded skills in live status, final thinking, and tool counts", () => {
+    const s = new StreamShaper();
+    s.onToolCall("read", { path: "/app/skills/pptxgenjs/SKILL.md" });
+    expect(s.toolStatusMd()).toBe("📚 Loading skill <code>pptxgenjs</code>");
+    s.onToolResult("read", "loaded");
+    s.onToolCall("read", { path: "skills/xlsx/SKILL.md" });
+    expect(s.thinkingMd()).toContain("📚 Loading skill <code>pptxgenjs</code> (loaded)");
+    expect(s.streamingThinkingMd()).toContain("📚 Loading skill <code>xlsx</code>");
+    expect(s.runSummary().toolCounts).toEqual([
+      { label: "📚 Loading skill <code>pptxgenjs</code>", count: 1 },
+      { label: "📚 Loading skill <code>xlsx</code>", count: 1 },
+    ]);
+  });
+
+  it("escapes skill names and treats supporting files as file reads", () => {
+    const s = new StreamShaper();
+    s.onToolCall("read", { path: "skills/<example>/SKILL.md" });
+    expect(s.toolStatusMd()).toContain("<code>&lt;example&gt;</code>");
+    s.onToolCall("read", { path: "skills/xlsx/references/formulas.md" });
+    expect(s.toolStatusMd()).toContain("📖 Reading file <code>skills/xlsx/references/formulas.md</code>");
+  });
+
   it("summarizes created file outputs as files", () => {
     const s = new StreamShaper();
     expect(handleStreamPart(s, { type: "tool-call", toolName: "create_file", input: { path: "/report.txt" } })).toBe("tool-call");

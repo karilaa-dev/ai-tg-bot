@@ -20,6 +20,12 @@ export async function privateOnly(ctx: BotContext, next: NextFunction): Promise<
 }
 
 export async function initializeUserAndThread(ctx: BotContext, next: NextFunction): Promise<void> {
+  if (ctx.from?.is_bot && ctx.msg?.forum_topic_edited) {
+    // Our service messages must not create a user/thread owned by the bot or
+    // promote its temporary activity marker to a permanent topic title.
+    await next();
+    return;
+  }
   if (!ctx.from) {
     ctx.services.logger.debug("update has no sender; skipping user initialization", ctxLogMeta(ctx));
     await next();
@@ -47,8 +53,15 @@ export async function initializeUserAndThread(ctx: BotContext, next: NextFunctio
 
     const editedTitle = ctx.msg?.forum_topic_edited?.name?.trim();
     const observedTitle = created?.name?.trim();
-    if (editedTitle) {
+    const activityEcho = topicId !== null && editedTitle
+      && (await ctx.services.threadTitles.isRequestedActivityTitle(ctx.chat.id, topicId, editedTitle)
+        || editedTitle === `⏳ ${Array.from(ctx.thread.title).slice(0, 126).join("")}`);
+    if (!activityEcho && topicId !== null && (editedTitle || observedTitle)) {
+      await ctx.services.threadTitles.observeTelegramTitle(ctx.chat.id, topicId, (editedTitle || observedTitle)!);
+    }
+    if (editedTitle && !activityEcho && editedTitle !== ctx.thread.title) {
       ctx.thread = await ctx.services.repos.threads.applyTelegramTopicTitle(ctx.thread.id, editedTitle, false) ?? ctx.thread;
+      void ctx.services.threadTitles.syncActivity({ api: ctx.api, chatId: ctx.chat.id, threadId: ctx.thread.id });
     } else if (observedTitle) {
       ctx.thread = await ctx.services.repos.threads.applyTelegramTopicTitle(
         ctx.thread.id,

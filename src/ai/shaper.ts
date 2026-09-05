@@ -53,11 +53,11 @@ export class StreamShaper {
 
   private registerTool(
     name: string,
-    display: { key: string; label: string },
+    display: { key: string; label: string; summaryLabel?: string },
     opts: { summary?: string; called: boolean },
   ): void {
     this.toolStatus.set(display.key, { label: display.label, summary: opts.summary });
-    this.toolCalls.push({ name, summaryLabel: toolLabel(name), summary: opts.summary, called: opts.called });
+    this.toolCalls.push({ name, summaryLabel: display.summaryLabel ?? toolLabel(name), summary: opts.summary, called: opts.called });
     if (opts.called) {
       const existing = this.thinking.find((item): item is ToolThinkingItem => item.kind === "tool" && item.key === display.key);
       if (existing) {
@@ -261,6 +261,7 @@ function toolLabel(name: string): string {
     case "search_in_file":
       return "📄 Searching file";
     case "read_file_section":
+    case "read":
       return "📖 Reading file";
     case "materialize_chat_files":
       return "📥 Restoring chat files";
@@ -284,7 +285,15 @@ function formatToolLine(label: string, summary?: string): string {
   return compact ? `${label} (${compact})` : label;
 }
 
-function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata = {}): { key: string; label: string } {
+function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata = {}): { key: string; label: string; summaryLabel?: string } {
+  if (name === "read") {
+    const path = stringField(asRecord(input), "path")?.replaceAll("\\", "/");
+    const skill = path?.match(/(?:^|\/)([^/]+)\/SKILL\.md$/)?.[1];
+    if (skill) {
+      const label = `📚 Loading skill <code>${escapeHtml(skill)}</code>`;
+      return { key: `skill:${path}`, label, summaryLabel: label };
+    }
+  }
   const subject = toolSubject(name, input, metadata);
   const label = subject ? `${toolLabel(name)} <code>${escapeHtml(subject)}</code>` : toolLabel(name);
   return { key: `${name}:${subject ?? ""}`, label };
@@ -293,6 +302,8 @@ function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata =
 function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata = {}): string | undefined {
   const record = asRecord(input);
   switch (name) {
+    case "read":
+      return truncateSubject(stringField(record, "path"), 64);
     case "web_search":
     case "search_thread":
       return truncateSubject(stringField(record, "query"), 64);

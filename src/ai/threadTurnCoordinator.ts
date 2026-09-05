@@ -10,6 +10,7 @@ import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { TurnRunner } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
+import { TurnActivityCoordinator } from "./turnActivity.js";
 
 interface ActiveTurn {
   run: TurnRunRow;
@@ -20,6 +21,7 @@ interface ActiveTurn {
 export class ThreadTurnCoordinator {
   private readonly draining = new Map<number, Promise<void>>();
   private readonly active = new Map<number, ActiveTurn>();
+  private readonly activity: TurnActivityCoordinator;
   private readonly recovery: Promise<number[]>;
   private readonly ownerId = randomUUID();
   private readonly lifecycle = new AbortController();
@@ -49,8 +51,10 @@ export class ThreadTurnCoordinator {
     turnRunner: TurnRunner;
     t(locale: Locale, key: string, params?: Record<string, string | number>): string;
     scheduleThreadTitle?(input: { threadId: number; chatId: number }): void;
+    syncThreadActivity?(input: { threadId: number; chatId: number; signal?: AbortSignal }): Promise<boolean | void>;
     awaitProcessingOnAccept?: boolean;
   }) {
+    this.activity = new TurnActivityCoordinator(input);
     this.recovery = this.recoverUntilReady();
     void this.recovery.then((threadIds) => {
       for (const threadId of threadIds) this.schedule(threadId);
@@ -76,6 +80,7 @@ export class ThreadTurnCoordinator {
     await this.recovery;
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     const accepted = await this.input.repos.turnRuns.accept(input);
+    if (accepted.created) this.activity.schedule(accepted.turnRun.id, accepted.turnRun.thread_id);
     if (accepted.created) {
       this.input.logger.info("turn accepted", {
         turnRunId: accepted.turnRun.id,
@@ -101,7 +106,10 @@ export class ThreadTurnCoordinator {
     if (active && !active.finalizer.canCancel()) return false;
     const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
     if (!requested) return false;
-    if (requested.status === "cancelled") this.schedule(threadId);
+    if (requested.status === "cancelled") {
+      this.activity.schedule(requested.id, threadId);
+      this.schedule(threadId);
+    }
     if (active) {
       if (active.finalizer.requestCancellation()) {
         active.controller.abort(new Error("Turn cancelled by user."));
@@ -119,7 +127,7 @@ export class ThreadTurnCoordinator {
     return true;
   }
 
-  async waitForIdle(threadId?: number): Promise<void> {
+  async waitForIdle(threadId?: number, includeActivity = true): Promise<void> {
     await this.recovery;
     while (true) {
       const tasks = threadId === undefined
@@ -144,6 +152,7 @@ export class ThreadTurnCoordinator {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
         continue;
       }
+      if (includeActivity) await this.activity.waitForIdle(threadId);
       return;
     }
   }
@@ -156,7 +165,7 @@ export class ThreadTurnCoordinator {
     await this.recovery;
     const barrierOwnerId = `${this.ownerId}:${randomUUID()}`;
     while (this.accepting) {
-      await this.waitForIdle(threadId);
+      await this.waitForIdle(threadId, false);
       if (!this.accepting) break;
       const barrierLeaseExpiresAt = Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS;
       const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
@@ -268,6 +277,7 @@ export class ThreadTurnCoordinator {
       }),
     ]);
     if (timer) clearTimeout(timer);
+    await this.activity.shutdown();
   }
 
   private async recoverUntilReady(): Promise<number[]> {
@@ -301,6 +311,7 @@ export class ThreadTurnCoordinator {
       legacyStaleBefore: this.legacyStaleBefore(now),
     });
     const threadIds = await this.input.repos.turnRuns.queuedThreadIds();
+    await this.activity.recover();
     const metadata = { interruptedTurns: interrupted, queuedThreads: threadIds.length };
     if (interrupted || threadIds.length) {
       this.input.logger.info("turn coordinator discovered durable work", metadata);
@@ -503,6 +514,7 @@ export class ThreadTurnCoordinator {
       queueWaitMs,
     });
     try {
+      this.activity.schedule(run.id, run.thread_id);
       const [user, thread, message] = await Promise.all([
         this.input.repos.users.get(run.user_id),
         this.input.repos.threads.get(run.thread_id),
@@ -558,6 +570,7 @@ export class ThreadTurnCoordinator {
       leaseDeadline.stop();
       clearInterval(cancellationTimer);
       this.active.delete(run.thread_id);
+      this.activity.schedule(run.id, run.thread_id);
       this.input.logger.info("queued turn execution finished", {
         turnRunId: run.id,
         threadId: run.thread_id,

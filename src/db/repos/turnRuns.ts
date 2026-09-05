@@ -53,6 +53,14 @@ export class TurnRunsRepo {
     private readonly search: TextSearch,
   ) {}
 
+  async telegramMessageIds(id: number): Promise<number[]> {
+    const rows = await this.db.query<{ telegram_message_id: number }>(sql`
+      select distinct telegram_message_id from turn_run_sources
+      where turn_run_id = ${id} and telegram_message_id is not null
+    `);
+    return rows.map((row) => row.telegram_message_id);
+  }
+
   async accept(input: TurnAcceptanceInput): Promise<AcceptedTurnRun> {
     const sources = uniqueSources(input.sources);
     const attachments = uniqueAttachments(input.attachments ?? []);
@@ -100,6 +108,7 @@ export class TurnRunsRepo {
             'queued', 'pending', ${now}, ${now}
           ) returning *
         `);
+        await tx.execute(sql`insert into turn_activity_sync(turn_run_id) values (${turnRun.id})`);
         await attachFilesToAcceptedMessage(
           tx,
           userMessage.id,

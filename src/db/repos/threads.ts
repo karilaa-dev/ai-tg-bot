@@ -9,6 +9,24 @@ export class ThreadsRepo {
     return queryOne<ThreadRow>(this.db, sql`select * from threads where id = ${id}`);
   }
 
+  telegramTitle(chatId: number, topicId: number): Promise<{ name: string | null; requested_activity_title: string | null } | undefined> {
+    return queryOne(this.db, sql`select name, requested_activity_title from telegram_topic_titles where chat_id = ${chatId} and topic_id = ${topicId}`);
+  }
+
+  async recordTelegramTitle(chatId: number, topicId: number, name: string | null): Promise<void> {
+    await this.db.execute(sql`
+      insert into telegram_topic_titles(chat_id, topic_id, name) values (${chatId}, ${topicId}, ${name})
+      on conflict(chat_id, topic_id) do update set name = excluded.name
+    `);
+  }
+
+  async recordActivityTitleRequest(chatId: number, topicId: number, name: string): Promise<void> {
+    await this.db.execute(sql`
+      insert into telegram_topic_titles(chat_id, topic_id, requested_activity_title) values (${chatId}, ${topicId}, ${name})
+      on conflict(chat_id, topic_id) do update set requested_activity_title = excluded.requested_activity_title
+    `);
+  }
+
   async activeForUserTopic(
     userId: number,
     topicId: number | null,
