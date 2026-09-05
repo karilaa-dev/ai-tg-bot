@@ -118,6 +118,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       chatId: input.chatId,
       threadId: input.threadId,
     }),
+    syncThreadActivity: (input) => threadTitles.syncActivity({ api: bot.api, ...input }),
     awaitProcessingOnAccept: options.awaitTurnProcessingOnAccept,
   });
   const services: BotServices = {

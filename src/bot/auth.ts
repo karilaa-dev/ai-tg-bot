@@ -47,6 +47,9 @@ export async function initializeUserAndThread(ctx: BotContext, next: NextFunctio
 
     const editedTitle = ctx.msg?.forum_topic_edited?.name?.trim();
     const observedTitle = created?.name?.trim();
+    if (topicId !== null && (editedTitle || observedTitle)) {
+      ctx.services.threadTitles.observeTelegramTitle(ctx.chat.id, topicId, (editedTitle || observedTitle)!);
+    }
     if (editedTitle) {
       ctx.thread = await ctx.services.repos.threads.applyTelegramTopicTitle(ctx.thread.id, editedTitle, false) ?? ctx.thread;
     } else if (observedTitle) {

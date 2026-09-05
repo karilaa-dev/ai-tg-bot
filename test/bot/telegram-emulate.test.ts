@@ -337,6 +337,25 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await env.repos.messages.listThread(thread.id)).map((row) => row.text_plain)).toContain("first question in manual topic");
   });
 
+  it("renames a topic only once when an accepted turn starts running", async () => {
+    await env.dispose();
+    env = await createGrammyEmulator({ privateTopics: true });
+    await createTopic(env, 89, "Presentation", false);
+    const names: string[] = [];
+    env.bot.api.config.use(async (prev, method, payload, signal) => {
+      if (method === "editForumTopic" && "name" in payload) names.push(String(payload.name));
+      return prev(method, payload, signal);
+    });
+
+    await env.bot.sendMessage(env.user, env.chat, "make a presentation", { messageThreadId: 89 });
+    await env.services.threadTitles.waitForIdle();
+
+    expect(names).toEqual(["⏳ Presentation", "Presentation"]);
+    await env.bot.sendMessage(env.user, env.chat, "revise the presentation", { messageThreadId: 89 });
+    await env.services.threadTitles.waitForIdle();
+    expect(names).toEqual(["⏳ Presentation", "Presentation", "⏳ Presentation", "Presentation"]);
+  });
+
   it("generates and synchronizes a short title for a new implicit topic", async () => {
     await env.dispose();
     let titleInput: { userText: string; assistantText?: string } | undefined;
@@ -399,6 +418,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.dispose();
     let helperCalls = 0;
     let editCalls = 0;
+    let rejectGeneratedTitle = true;
     env = await createGrammyEmulator({
       privateTopics: true,
       pi: piWithTitleGenerator(async () => {
@@ -408,9 +428,9 @@ describe("Telegram bot with grammy-emulate", () => {
     });
     await createTopic(env, 91, "New topic", true);
     env.bot.api.config.use(async (prev, method, payload, signal) => {
-      if (method === "editForumTopic") {
+      if (method === "editForumTopic" && "name" in payload && String(payload.name).includes("Durable Generated Topic")) {
         editCalls += 1;
-        if (editCalls === 1) {
+        if (rejectGeneratedTitle) {
           return { ok: false, error_code: 400, description: "Bad Request: forced title sync failure" } as never;
         }
       }
@@ -424,10 +444,12 @@ describe("Telegram bot with grammy-emulate", () => {
       topic_title_synced: 0,
     });
 
+    const failedEditCalls = editCalls;
+    rejectGeneratedTitle = false;
     await env.bot.sendMessage(env.user, env.chat, "retry the sync", { messageThreadId: 91 });
     await env.services.threadTitles.waitForIdle();
     expect(helperCalls).toBe(1);
-    expect(editCalls).toBe(2);
+    expect(editCalls).toBeGreaterThan(failedEditCalls);
     expect(await env.repos.threads.activeForUserTopic(env.user.id, 91)).toMatchObject({
       title: "Durable Generated Topic",
       topic_title_synced: 1,

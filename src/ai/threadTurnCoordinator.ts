@@ -20,6 +20,7 @@ interface ActiveTurn {
 export class ThreadTurnCoordinator {
   private readonly draining = new Map<number, Promise<void>>();
   private readonly active = new Map<number, ActiveTurn>();
+  private readonly activityUpdates = new Map<number, Promise<void>>();
   private readonly recovery: Promise<number[]>;
   private readonly ownerId = randomUUID();
   private readonly lifecycle = new AbortController();
@@ -49,6 +50,7 @@ export class ThreadTurnCoordinator {
     turnRunner: TurnRunner;
     t(locale: Locale, key: string, params?: Record<string, string | number>): string;
     scheduleThreadTitle?(input: { threadId: number; chatId: number }): void;
+    syncThreadActivity?(input: { threadId: number; chatId: number }): Promise<void>;
     awaitProcessingOnAccept?: boolean;
   }) {
     this.recovery = this.recoverUntilReady();
@@ -76,6 +78,7 @@ export class ThreadTurnCoordinator {
     await this.recovery;
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     const accepted = await this.input.repos.turnRuns.accept(input);
+    if (accepted.created) await this.syncActivity(accepted.turnRun.id);
     if (accepted.created) {
       this.input.logger.info("turn accepted", {
         turnRunId: accepted.turnRun.id,
@@ -101,7 +104,10 @@ export class ThreadTurnCoordinator {
     if (active && !active.finalizer.canCancel()) return false;
     const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
     if (!requested) return false;
-    if (requested.status === "cancelled") this.schedule(threadId);
+    if (requested.status === "cancelled") {
+      await this.syncActivity(requested.id);
+      this.schedule(threadId);
+    }
     if (active) {
       if (active.finalizer.requestCancellation()) {
         active.controller.abort(new Error("Turn cancelled by user."));
@@ -503,6 +509,7 @@ export class ThreadTurnCoordinator {
       queueWaitMs,
     });
     try {
+      await this.syncActivity(run.id);
       const [user, thread, message] = await Promise.all([
         this.input.repos.users.get(run.user_id),
         this.input.repos.threads.get(run.thread_id),
@@ -558,6 +565,7 @@ export class ThreadTurnCoordinator {
       leaseDeadline.stop();
       clearInterval(cancellationTimer);
       this.active.delete(run.thread_id);
+      await this.syncActivity(run.id);
       this.input.logger.info("queued turn execution finished", {
         turnRunId: run.id,
         threadId: run.thread_id,
@@ -566,6 +574,35 @@ export class ThreadTurnCoordinator {
         deliveryUnknown: finalizer.deliveryUnknown || undefined,
       });
     }
+  }
+
+  private async syncActivity(runId: number): Promise<void> {
+    const previous = this.activityUpdates.get(runId) ?? Promise.resolve();
+    const update = previous.then(async () => {
+      const run = await this.input.repos.turnRuns.get(runId);
+      if (!run) return;
+      const working = ["queued", "running", "awaiting_delivery"].includes(run.status);
+      const messageIds = await this.input.repos.turnRuns.telegramMessageIds(runId);
+      await Promise.all(messageIds.map(async (messageId) => {
+        try {
+          await this.input.api.raw.setMessageReaction({
+            chat_id: run.chat_id,
+            message_id: messageId,
+            reaction: working ? [{ type: "emoji", emoji: "👀" }] : [],
+          }, AbortSignal.timeout(5_000) as Parameters<Api["raw"]["setMessageReaction"]>[1]);
+        } catch (error) {
+          this.input.logger.warn("turn reaction could not be updated", {
+            turnRunId: runId, messageId, working, error: String(error),
+          });
+        }
+      }));
+      await this.input.syncThreadActivity?.({ threadId: run.thread_id, chatId: run.chat_id });
+    }).catch((error) => {
+      this.input.logger.warn("turn activity could not be updated", { turnRunId: runId, error: String(error) });
+    });
+    this.activityUpdates.set(runId, update);
+    await update;
+    if (this.activityUpdates.get(runId) === update) this.activityUpdates.delete(runId);
   }
 
   private legacyStaleBefore(now: number): number | undefined {
