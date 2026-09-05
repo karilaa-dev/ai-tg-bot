@@ -76,6 +76,45 @@ describe("Telegram audio prompts", () => {
     expect(await env.repos.files.listTelegramFileRefs([file!.id])).toEqual([expect.objectContaining({ media_kind: "audio" })]);
   });
 
+  it.each(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"] as const)("detects %s audio without metadata and keeps it usable by the tool", async (format) => {
+    const audio = env.bot.server.fileState.storeAudio(4, { content: audioFixture(format) });
+    const update = env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio, { caption: "Use this recording" });
+    delete update.message!.audio!.file_name;
+    delete update.message!.audio!.mime_type;
+    const res = await processUpdate(update);
+    expect(JSON.stringify(res.getLastApiCall("sendRichMessage")?.payload)).toContain("Help me plan tomorrow.");
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).input_audio.format).toBe(format);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [message] = await env.repos.messages.listThread(thread.id);
+    expect(message!.text_plain).toContain("Use this recording\n\nHelp me plan tomorrow.");
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    expect(file!.name).toBe(`${audio.file_unique_id}.${format}`);
+    const result = await createTranscribeAudioTool({
+      config: env.config, db: env.db, repos: env.repos,
+      user: (await env.repos.users.get(env.user.id))!, thread,
+      resolveFile: (stored, signal) => env.services.fileResolver.resolveFile(stored, signal),
+    }).execute({ file_id: file!.id });
+    expect(result).toMatchObject({ text: "Help me plan tomorrow." });
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body).input_audio.format).toBe(format);
+  });
+
+  it("rejects non-audio bytes even when audio metadata is absent", async () => {
+    const audio = env.bot.server.fileState.storeAudio(4, { content: Buffer.from("not an audio file") });
+    const update = env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio);
+    delete update.message!.audio!.file_name;
+    delete update.message!.audio!.mime_type;
+    await processUpdate(update);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expectNoAudioRecords();
+  });
+
+  it("stores the downloaded audio size when Telegram underreports it", async () => {
+    await processUpdate(voiceUpdate({ fileSize: 1 }));
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const [file] = await env.repos.files.listForThreads([thread.id]);
+    expect(file!.size).toBe(audioFixture().length);
+  });
+
   it("keeps audio sent as a document available for requested transcription", async () => {
     await env.bot.sendDocument(env.user, env.chat, {
       fileName: "interview.mp3", mimeType: "audio/mpeg", content: Buffer.from("recording"),
@@ -147,11 +186,15 @@ describe("Telegram audio prompts", () => {
     await expectNoAudioRecords();
   });
 
-  it.each(["metadata", "download"])("rejects oversized audio from %s before transcription", async (source) => {
+  it.each(["metadata", "download", "missing metadata"])("rejects oversized audio from %s before transcription", async (source) => {
     const update = voiceUpdate(source === "metadata"
       ? { fileSize: MAX_FILE_BYTES + 1 }
       : { fileSize: 1, content: Buffer.alloc(MAX_FILE_BYTES + 1) });
-    await processUpdate(update);
+    if (source === "missing metadata") delete update.message!.voice!.file_size;
+    const res = await processUpdate(update);
+    const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
+    expect(surface).toContain("This file is too large");
+    expect(surface).not.toContain("could not transcribe");
     expect(fetchMock).not.toHaveBeenCalled();
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
@@ -178,7 +221,10 @@ describe("Telegram audio prompts", () => {
 
   it("leaves no audio records when downloading fails", async () => {
     vi.spyOn(env.services.fileResolver, "resolveSource").mockRejectedValueOnce(new Error("Download failed"));
-    await processUpdate(voiceUpdate());
+    const res = await processUpdate(voiceUpdate());
+    const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
+    expect(surface).toContain("could not download this audio");
+    expect(surface).not.toContain("could not transcribe");
     expect(fetchMock).not.toHaveBeenCalled();
     await expectNoAudioRecords();
   });

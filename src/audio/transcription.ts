@@ -2,7 +2,7 @@ import path from "node:path";
 import { z } from "zod";
 import { fileTypeFromBuffer } from "file-type";
 import type { AppConfig } from "../config.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
 
 export const AudioFormatSchema = z.enum(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"]);
 export type AudioFormat = z.infer<typeof AudioFormatSchema>;
@@ -25,11 +25,12 @@ export function audioFormat(name: string, mime = ""): AudioFormat | undefined {
   return Object.hasOwn(mimeFormats, mediaType) ? mimeFormats[mediaType] : undefined;
 }
 
-async function validateAudioBytes(bytes: Buffer, expected: AudioFormat): Promise<void> {
+export async function detectAudioType(bytes: Buffer, expected?: AudioFormat): Promise<{ format: AudioFormat; mimeType: string }> {
   const detected = await fileTypeFromBuffer(bytes).catch(() => undefined);
   const actual = detected && audioFormat(`audio.${detected.ext}`, detected.mime);
   if (!actual) throw new Error("File does not contain a supported audio format.");
-  if (actual !== expected) throw new Error(`Audio format mismatch: expected ${expected}, detected ${actual}.`);
+  if (expected && actual !== expected) throw new Error(`Audio format mismatch: expected ${expected}, detected ${actual}.`);
+  return { format: actual, mimeType: detected.mime };
 }
 
 const TranscriptSchema = z.object({
@@ -105,8 +106,8 @@ export async function transcribeAudio(
 ) {
   input.signal?.throwIfAborted();
   if (!input.bytes.length) throw new Error("The audio file is empty.");
-  if (input.bytes.length > MAX_FILE_BYTES) throw new Error("Audio exceeds the 20 MB file size limit.");
-  await validateAudioBytes(input.bytes, input.format);
+  if (input.bytes.length > MAX_FILE_BYTES) throw new FileTooLargeError("Audio exceeds the 20 MB file size limit.");
+  await detectAudioType(input.bytes, input.format);
   input.signal?.throwIfAborted();
   const deadline = Date.now() + config.TRANSCRIPTION_TIMEOUT_MS;
   const signal = AbortSignal.any([

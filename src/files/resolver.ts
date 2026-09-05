@@ -3,7 +3,7 @@ import { sha256Hex } from "./hash.js";
 import type { FileRow, FileSourceRow } from "../db/types.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
-import { MAX_FILE_BYTES } from "./limits.js";
+import { FileTooLargeError, MAX_FILE_BYTES } from "./limits.js";
 import {
   type ChatFileSource,
   type ChatFileSourceAdapter,
@@ -54,7 +54,7 @@ export class FileResolver {
     const payload = await adapter.fetch(source, signal);
     throwIfAborted(signal);
     const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-    if (bytes.length > MAX_FILE_BYTES) throw new Error("File exceeds the configured size limit.");
+    if (bytes.length > MAX_FILE_BYTES) throw new FileTooLargeError();
     return {
       bytes,
       mimeType: source.mimeType ?? null,

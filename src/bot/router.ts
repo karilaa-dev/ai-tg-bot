@@ -360,12 +360,9 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
-    const mime = media.mime_type ?? (voice ? "audio/ogg" : "audio/mpeg");
-    const name = audio?.file_name ?? `${media.file_unique_id}.${audioFormat("", mime) ?? "bin"}`;
-    if (!audioFormat(name, mime)) {
-      await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
-      return;
-    }
+    const mime = media.mime_type;
+    const format = audioFormat("", mime);
+    const name = audio?.file_name ?? (format ? `${media.file_unique_id}.${format}` : media.file_unique_id);
     await handleTelegramFile(ctx, {
       fileId: media.file_id,
       fileUniqueId: media.file_unique_id,

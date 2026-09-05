@@ -2,9 +2,9 @@ import type { FileRow } from "../db/types.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
-import { audioFormat, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
+import { audioFormat, detectAudioType, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
 import { chatFileMarker } from "../files/contextMarker.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
@@ -290,15 +290,23 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     if (current?.controller === controller) activeFileJobs.delete(jobKey);
   };
   const releaseMediaGroup = holdPendingMediaGroup(ctx, input.mediaGroupId);
+  let failureKey = "error-generic";
   try {
     let transcript: string | undefined;
     // Failed or cancelled transcription must not create or claim durable file records.
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
-      const format = audioFormat(input.name, input.mime);
-      if (!format) throw new Error("Unsupported audio format.");
+      failureKey = "audio-download-failed";
       const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
         fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
       }), controller.signal);
+      input = { ...input, size: downloaded.size };
+      failureKey = "audio-transcription-failed";
+      let format = audioFormat(input.name, input.mime);
+      if (!format) {
+        const detected = await detectAudioType(downloaded.bytes);
+        format = detected.format;
+        input = { ...input, name: `${input.name}.${format}`, mime: detected.mimeType };
+      }
       await status.updateKey("audio-transcribing");
       const transcribed = await transcribeAudio(ctx.services.config, {
         bytes: downloaded.bytes, format, signal: controller.signal,
@@ -310,6 +318,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       // Transcription is complete; hand off to file registration and turn acceptance.
       clearJob();
     }
+    failureKey = "error-generic";
     const result = await ingestTelegramFile(ctx, input, {
       signal: controller.signal,
       status,
@@ -351,10 +360,10 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       return;
     }
     ctx.services.logger.warn("file ingestion failed", { err: String(err), name: input.name });
-    await status.updateText(ctx.t(err instanceof EmptyTranscriptError
-      ? "audio-no-speech"
+    await status.updateText(ctx.t(err instanceof FileTooLargeError ? "file-too-big"
+      : err instanceof EmptyTranscriptError ? "audio-no-speech"
       : err instanceof TranscriptionHttpError && err.status === 429 ? "audio-transcription-rate-limited"
-      : input.mediaKind === "voice" || input.mediaKind === "audio" ? "audio-transcription-failed" : "error-generic"));
+      : failureKey));
   } finally {
     clearJob();
     releaseMediaGroup();
