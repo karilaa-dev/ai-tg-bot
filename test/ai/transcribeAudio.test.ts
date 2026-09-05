@@ -118,7 +118,7 @@ describe("transcribe_audio", () => {
   });
 
   it("returns actionable errors and propagates cancellation", async () => {
-    fetchMock.mockResolvedValue(new Response("", { status: 503 }));
+    fetchMock.mockResolvedValue(new Response("", { status: 503, headers: { "Retry-After": "0" } }));
     expect(await createTranscribeAudioTool(input).execute({ file_id: fileId })).toEqual({ error: "Error: OpenRouter transcription failed: HTTP 503" });
     await expect(createTranscribeAudioTool(input).execute({ file_id: fileId }, AbortSignal.abort())).rejects.toMatchObject({ name: "AbortError" });
   });

@@ -2,7 +2,7 @@ import type { FileRow } from "../db/types.js";
 import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
-import { audioFormat, EmptyTranscriptError, transcribeAudio } from "../audio/transcription.js";
+import { audioFormat, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
 import { chatFileMarker } from "../files/contextMarker.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
@@ -296,7 +296,6 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
       const format = audioFormat(input.name, input.mime);
       if (!format) throw new Error("Unsupported audio format.");
-      await status.updateKey("file-processing-downloading");
       const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
         fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
       }), controller.signal);
@@ -354,6 +353,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     ctx.services.logger.warn("file ingestion failed", { err: String(err), name: input.name });
     await status.updateText(ctx.t(err instanceof EmptyTranscriptError
       ? "audio-no-speech"
+      : err instanceof TranscriptionHttpError && err.status === 429 ? "audio-transcription-rate-limited"
       : input.mediaKind === "voice" || input.mediaKind === "audio" ? "audio-transcription-failed" : "error-generic"));
   } finally {
     clearJob();

@@ -43,6 +43,7 @@ describe("Telegram audio prompts", () => {
     const update = voiceUpdate();
     const res = await processUpdate(update);
     expect(JSON.stringify(res.getLastApiCall("sendRichMessage")?.payload)).toContain("Echo: Help me plan tomorrow.");
+    expect(JSON.stringify(env.bot.getApiCalls())).not.toContain("Downloading");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const messages = await env.repos.messages.listThread(thread.id);
     expect(messages.map((row) => row.role)).toEqual(["user", "assistant"]);
@@ -66,6 +67,7 @@ describe("Telegram audio prompts", () => {
       fileName: "memo.m4a", mimeType: "audio/mp4", content: audioFixture("m4a"),
     });
     await processUpdate(env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio, { caption: "Reply in Russian" }));
+    expect(JSON.stringify(env.bot.getApiCalls())).not.toContain("Downloading");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [message] = await env.repos.messages.listThread(thread.id);
     expect(message!.text_plain).toContain("Reply in Russian\n\nHelp me plan tomorrow.");
@@ -86,9 +88,55 @@ describe("Telegram audio prompts", () => {
     expect(await env.repos.files.listForThreads([thread.id])).toEqual([expect.objectContaining({ type: "audio", extraction_status: "source_only" })]);
   });
 
+  it("recovers a rate-limited voice prompt without asking the user to resend", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("provider returned 429", { status: 429, headers: { "Retry-After": "0.01" } }));
+    const res = await processUpdate(voiceUpdate());
+    const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
+    expect(JSON.stringify(res.getLastApiCall("sendRichMessage")?.payload)).toContain("Echo: Help me plan tomorrow.");
+    expect(surface).not.toContain("could not transcribe");
+    expect(surface).not.toContain("Audio transcribed.");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body).model).toBe("microsoft/mai-transcribe-2");
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(2);
+    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(1);
+  });
+
+  it("explains persistent provider rate limits and leaves no audio records", async () => {
+    fetchMock.mockImplementation(async () => new Response("private provider diagnostics", { status: 429, headers: { "Retry-After": "0.01" } }));
+    const res = await processUpdate(voiceUpdate());
+    const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
+    expect(surface).toContain("Audio transcription is temporarily rate-limited");
+    expect(surface).not.toContain("private provider diagnostics");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
+    expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    await expectNoAudioRecords();
+  });
+
+  it("lets /stop cancel a retry wait and accepts the next voice message", async () => {
+    const started = deferred<void>();
+    fetchMock.mockImplementationOnce(async () => {
+      started.resolve();
+      return new Response("rate limited", { status: 429, headers: { "Retry-After": "60" } });
+    });
+    const pending = processUpdate(voiceUpdate());
+    await started.promise;
+    await env.bot.sendCommand(env.user, env.chat, "/stop");
+    const res = await pending;
+    expect(JSON.stringify([...res.messages, ...res.editedMessages])).toContain("File processing cancelled");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    await expectNoAudioRecords();
+    await processUpdate(voiceUpdate());
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(await env.repos.messages.listThread(thread.id)).toHaveLength(2);
+  });
+
   it.each(["provider", "no speech"])("leaves no turn or audio records after %s failure", async (failure) => {
     fetchMock.mockResolvedValue(failure === "provider"
-      ? new Response("unavailable", { status: 503 })
+      ? new Response("unavailable", { status: 503, headers: { "Retry-After": "0" } })
       : Response.json({ text: "  " }));
     const res = await processUpdate(voiceUpdate());
     const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
@@ -162,7 +210,7 @@ describe("Telegram audio prompts", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const sources = await env.repos.files.listSources(file!.id);
     const refs = await env.repos.files.listTelegramFileRefs([file!.id]);
-    fetchMock.mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    fetchMock.mockImplementation(async () => new Response("unavailable", { status: 503, headers: { "Retry-After": "0" } }));
     const resend = env.bot.server.updateFactory.createVoiceMessage(env.user, env.chat, original.message!.voice!);
     await processUpdate(resend);
     expect(await env.repos.files.get(file!.id)).toEqual(file);
@@ -187,7 +235,7 @@ describe("Telegram audio prompts", () => {
     await processUpdate(env.bot.server.updateFactory.createVoiceMessage(other, otherChat, original.message!.voice!));
     const source = telegramFileSource({ fileId: original.message!.voice!.file_id, fileUniqueId: original.message!.voice!.file_unique_id });
     const shared = await env.repos.files.findBySource(source);
-    failedRequest.resolve(new Response("unavailable", { status: 503 }));
+    failedRequest.resolve(new Response("invalid request", { status: 400 }));
     await first;
     expect(shared).toMatchObject({ message_id: expect.any(Number) });
     expect(await env.repos.files.findBySource(source)).toEqual(shared);

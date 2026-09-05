@@ -50,6 +50,55 @@ export class EmptyTranscriptError extends Error {
   }
 }
 
+export class TranscriptionHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`OpenRouter transcription failed: HTTP ${status}`);
+  }
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const value = response.headers.get("retry-after")?.trim();
+  if (value) {
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    if (!Number.isFinite(seconds)) {
+      const date = Date.parse(value);
+      if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+    }
+  }
+  return 1000 * 2 ** attempt;
+}
+
+function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function requestTranscription(request: RequestInit, signal: AbortSignal, deadline: number): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    const response = await fetch("https://openrouter.ai/api/v1/audio/transcriptions", request);
+    if (response.ok) return response;
+    await response.body?.cancel();
+    signal.throwIfAborted();
+    const delay = retryDelayMs(response, attempt);
+    if (attempt >= 2 || ![429, 502, 503, 504].includes(response.status) || Date.now() + delay >= deadline) {
+      throw new TranscriptionHttpError(response.status);
+    }
+    await waitForRetry(delay, signal);
+  }
+}
+
 export async function transcribeAudio(
   config: Pick<AppConfig, "OPENROUTER_API_KEY" | "OPENROUTER_TRANSCRIPTION_MODEL" | "TRANSCRIPTION_TIMEOUT_MS">,
   input: { bytes: Buffer; format: AudioFormat; language?: string; signal?: AbortSignal },
@@ -59,11 +108,12 @@ export async function transcribeAudio(
   if (input.bytes.length > MAX_FILE_BYTES) throw new Error("Audio exceeds the 20 MB file size limit.");
   await validateAudioBytes(input.bytes, input.format);
   input.signal?.throwIfAborted();
+  const deadline = Date.now() + config.TRANSCRIPTION_TIMEOUT_MS;
   const signal = AbortSignal.any([
     ...(input.signal ? [input.signal] : []),
     AbortSignal.timeout(config.TRANSCRIPTION_TIMEOUT_MS),
   ]);
-  const response = await fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
+  const response = await requestTranscription({
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.OPENROUTER_API_KEY}`,
@@ -75,11 +125,7 @@ export async function transcribeAudio(
       ...(input.language ? { language: input.language } : {}),
     }),
     signal,
-  });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`OpenRouter transcription failed: HTTP ${response.status}`);
-  }
+  }, signal, deadline);
   const parsed = TranscriptSchema.safeParse(await response.json());
   signal.throwIfAborted();
   if (!parsed.success) throw new Error("OpenRouter returned an invalid transcription response.");
