@@ -1,4 +1,6 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { officeFormat, type OfficeValidation } from "../office/validation.js";
 import type { AppConfig } from "../config.js";
 import type { Repos } from "../db/repos/index.js";
 import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
@@ -21,6 +23,7 @@ type Input = {
   user: UserRow;
   thread: ThreadRow;
   commandRuntime?: CommandRuntime;
+  officeValidation?: OfficeValidation;
   logger?: Logger;
   selectContextFiles?(ids: number[]): void;
 };
@@ -29,6 +32,7 @@ type Input = {
 export class OutgoingFiles {
   readonly buffers = new OutgoingBuffers();
   private readonly slots = new Map<string, string | undefined>();
+  private readonly officeHashes = new Map<CreatedFileAttachment, string>();
 
   constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {
     for (const file of items) this.slots.set(fileKey(file), undefined);
@@ -65,6 +69,9 @@ export class OutgoingFiles {
         const error = String(result.reason);
         this.slots.set(key, error);
         errors.push({ path: key, error });
+        const oldIndex = this.items.findIndex(file => file.sourceVirtualPath === key);
+        const oldFile = this.items[oldIndex];
+        if (oldFile && officeFormat(oldFile.name, oldFile.mimeType, oldFile.data ?? Buffer.alloc(0))) await this.remove(this.items.splice(oldIndex, 1)[0]!);
         continue;
       }
       this.slots.set(key, undefined);
@@ -90,6 +97,15 @@ export class OutgoingFiles {
     return attachment;
   }
 
+  async retainDrafts(paths: string[]): Promise<void> {
+    for (const source of paths) {
+      const key = normalizeCreatedFilePath(source);
+      this.slots.delete(key);
+      const index = this.items.findIndex(file => file.sourceVirtualPath === key);
+      if (index >= 0) await this.remove(this.items.splice(index, 1)[0]!);
+    }
+  }
+
   async dispose(): Promise<void> {
     try {
       for (const attachment of this.items.splice(0)) {
@@ -97,7 +113,33 @@ export class OutgoingFiles {
       }
     } finally {
       this.slots.clear();
+      this.officeHashes.clear();
       await this.buffers.dispose();
+    }
+  }
+
+  /** Recheck approval and mutable workspace sources immediately before final delivery. */
+  async verifyOfficeAttachments(signal?: AbortSignal): Promise<void> {
+    for (const attachment of [...this.items]) {
+      const hash = this.officeHashes.get(attachment);
+      if (!hash) continue;
+      try {
+        if (!this.input.officeValidation) throw new Error("Office validation is unavailable.");
+        this.input.officeValidation.assertApprovedHash(hash);
+        if (attachment.sourceVirtualPath) {
+          if (!this.input.commandRuntime) throw new Error("Office workspace is unavailable.");
+          const current = await this.input.commandRuntime.readWorkspaceFile({
+            userId: this.input.user.tg_id, threadId: this.input.thread.id,
+            virtualPath: attachment.sourceVirtualPath, maxBytes: MAX_FILE_BYTES, signal,
+          });
+          if (sha256Hex(current.bytes) !== hash) throw new Error("Office file changed after attachment preparation. Validate the current file and prepare it again.");
+        }
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? error;
+        this.slots.set(fileKey(attachment), String(error));
+        this.items.splice(this.items.indexOf(attachment), 1);
+        await this.remove(attachment);
+      }
     }
   }
 
@@ -118,7 +160,22 @@ export class OutgoingFiles {
       const { file, exported } = await load();
       signal?.throwIfAborted();
       if (file.bytes.length > MAX_FILE_BYTES) throw new Error(file.origin === "generated_image" ? "Generated image exceeds the file delivery limit." : "File exceeds the configured size limit.");
+      const office = officeFormat(file.name, file.mime, file.bytes);
+      if (office) {
+        try {
+          if (!this.input.officeValidation) throw new Error("Office validation is unavailable.");
+          this.input.officeValidation.assertApproved(file.bytes);
+        } catch (error) {
+          if (!exported && this.input.commandRuntime?.writeWorkspaceFile) {
+            const staged = `/office-imports/${randomUUID()}${office}`;
+            await this.input.commandRuntime.writeWorkspaceFile({userId:this.input.user.tg_id,threadId:this.input.thread.id,virtualPath:staged,bytes:file.bytes,signal});
+            throw new Error(`${String(error)} File staged at ${staged}; validate and deliver that workspace path.`);
+          }
+          throw error;
+        }
+      }
       attachment = await this.store(file, signal);
+      if (office) this.officeHashes.set(attachment, sha256Hex(file.bytes));
       if (exported) {
         if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
         await this.input.repos.files.rememberSource(attachment.fileId, e2bFileSource(this.input.config, {
@@ -182,6 +239,7 @@ export class OutgoingFiles {
   }
 
   private async remove(attachment: CreatedFileAttachment): Promise<void> {
+    this.officeHashes.delete(attachment);
     this.buffers.release(attachment);
     await this.input.repos.files.deleteFile(attachment.fileId).catch((error) => {
       this.input.logger?.warn("failed to remove unqueued created file", { fileId: attachment.fileId, error: String(error) });

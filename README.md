@@ -10,7 +10,7 @@
 | Pi | Keeps one conversation session per Telegram thread. |
 | Database | Uses SQLite by default. Set `DB_URL` for PostgreSQL. |
 | E2B | Gives each thread one isolated toolbox sandbox with a persistent filesystem and memory. |
-| Browser Use Cloud | Adds optional interactive browsing, screenshots, downloads, and Office previews. |
+| Browser Use Cloud | Adds optional interactive browsing, screenshots, and downloads. |
 | Tavily | Handles `web_search` and the stateless `web_extract` tool. |
 
 Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference and image generation.
@@ -21,11 +21,13 @@ The core prompt, including optional browser guidance and runtime model identity,
 
 `bash.inspect_images` combines command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends inference without another model request. It must be the only tool in its response. Partial failures retain successful attachments for repair. The normal OpenSCAD sequence is four model cycles: read the skill, build and inspect the preview, build and inspect final outputs, then finish with the STL and final photo.
 
-Final text precedes attachments. Two preparation workers prefetch files while text or the previous batch uploads; sends preserve queue order. Only adjacent compatible files form albums. Export reservations, cached file bodies, prefetch, and uploads share a 40 MiB budget per turn. Workspace exports retain immutable E2B recovery sources; browser and generated image bytes can spill to private temporary files that are removed after the turn.
+Final text precedes attachments. Two preparation workers prefetch files while text or the previous batch uploads; sends preserve queue order. Only adjacent compatible files form albums. Export reservations, cached file bodies, prefetch, and uploads share a 40 MiB budget per turn. Workspace exports retain immutable E2B recovery sources; browser download bytes can spill to private temporary files that are removed after the turn. Generated image originals remain in the thread workspace and enter this queue only when selected for delivery.
 
 Turn logs include model-cycle latency, token/cache usage, peak request context, file preparation latency, and first-text/first-file/last-file delivery times. Snapshot pruning runs at most once per minute during ordinary operations; source-preserving exports still force a check.
 
 The [2.0.5 simplification report](docs/simplification-2.0.5.md) describes internal ownership, code reduction, and before/after validation results.
+
+The [2.0.6 Office and image report](docs/office-tools-2.0.6.md) records replacement backends, delivery validation, live model workflows, sandbox upgrades, and measured resource usage.
 
 ## Requirements
 
@@ -72,7 +74,11 @@ Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser 
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
 - `/home/user/workspace` is writable and persists across pause and resume.
 - `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
+- `generate_image` creates or edits one workspace asset per call and returns a model-only image preview, path, dimensions, and provider metadata. It neither queues delivery nor ends inference. Use chat-file IDs or workspace paths as references, five total. The bot can generate supporting art, embed it in an Office file, and send only the finished document. Direct image requests use the same tool followed by normal file delivery.
+- `validate_office_file` returns named package, format, rendering, and formula checks plus visual review coverage. `render_office_preview` converts actual saved DOCX/PPTX/XLSX files through LibreOffice and Poppler, returning up to four model-only page images without Browser Use. Record per-page `visual_reviews` with the returned `source_sha256`; rendering alone does not approve delivery.
+- Office delivery requires every applicable check and every page review to pass for the exact exported bytes. Edits invalidate approval. Unvalidated browser downloads are staged in the workspace for review. Failed or incomplete checks withhold the file; successful delivery preserves the requested caption and keeps validation metadata internal. These checks do not certify Microsoft Office rendering, animations, or external workbook connections.
 - `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
+- `web_search` accepts `include_images: true` for image URLs and descriptions. The presentation skill uses this to find relevant photographs and illustrations, inspect downloaded originals, and retain source credits. It also supports generated artwork where the subject benefits from it.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
@@ -84,7 +90,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.5` uses `ai-tg-bot-tools:v2.0.5`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes OfficeCLI, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.6` uses `ai-tg-bot-tools:v2.0.6`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -98,8 +104,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.5 is ai-tg-bot-tools:v2.0.5.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.5
+# Optional override. The default for version 2.0.6 is ai-tg-bot-tools:v2.0.6.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.6
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -110,7 +116,7 @@ BASH_TIMEOUT_MS=120000
 
 Use a different `E2B_DEPLOYMENT_ID` for each independently active bot deployment and database that share an E2B account. The value is part of sandbox ownership and recovery.
 
-Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Do not delete `thread_sandboxes` mappings during a version change.
+Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Existing sandboxes receive the same pinned Office bundle through a locked, idempotent installer. It preserves their workspace and file sources and removes the previous Office tools only after replacement capability checks pass. Do not delete `thread_sandboxes` mappings during a version change.
 
 `E2B_REQUEST_TIMEOUT_MS` covers short control requests. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` covers Telegram restoration and large E2B file transfers. `E2B_FILE_SOURCE_MAX_BYTES` caps immutable snapshots for files that do not yet have a Telegram recovery source. `BASH_TIMEOUT_MS` allows exact OpenSCAD renders and other sandbox commands to run for up to two minutes. The bot removes or evicts old snapshots without touching the workspace copy.
 
@@ -203,6 +209,8 @@ Provider checks require live credentials:
 npm run live:pi-check
 npm run live:pi-fallback
 ```
+
+`npx tsx scripts/live-pi-presentation-check.ts` exercises a plain Russian request for a Tokyo presentation, without adding instructions about imagery or tools. It saves the PPTX, PDF, rendered slides, and trace to a temporary directory (or `PRESENTATION_OUTPUT_DIR`), checks substantial imagery on at least two slides, and verifies delivery approval without a technical caption. This live check uses the configured model, search, and E2B accounts and sends no Telegram messages. Review its rendered slides separately; image counts do not measure design quality.
 
 E2B and Browser Use each have an opt-in live check:
 

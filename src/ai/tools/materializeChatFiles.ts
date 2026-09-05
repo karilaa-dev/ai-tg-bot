@@ -10,7 +10,7 @@ export function createMaterializeChatFilesTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:
-      "Restore selected Telegram attachments into this thread's persistent E2B sandbox. Returns exact read-only paths and format-specific tool guidance. Call this before using bash, PDF Inspector, or OfficeCLI on an attachment. Pass only file ids shown in chat-file markers or load_message results.",
+      "Restore selected Telegram attachments into this thread's persistent E2B sandbox. Returns exact read-only paths and format-specific tool guidance. Call this before using bash, PDF Inspector, or docx-cli on an attachment. Pass only file ids shown in chat-file markers or load_message results.",
     inputSchema: z.object({
       file_ids: z.array(z.number().int().positive()).min(1).max(MAX_FILES_PER_CALL),
     }),
@@ -79,8 +79,8 @@ function recommendedTools(file: FileRow): string[] {
   }
   if (file.type === "docx") {
     return [
-      "officecli view <path> outline",
-      "officecli view <path> text --max-lines 200",
+      "docx outline <path>",
+      "docx read <path>",
     ];
   }
   if (file.type === "image") return ["load_message with this file id for model vision"];

@@ -1,3 +1,4 @@
+import { workspaceRuntime, TEST_PNG } from "../helpers/workspaceRuntime.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -28,7 +29,57 @@ describe("Pi generate_image extension", () => {
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  it("uses Telegram-backed references and persists the generated original without putting bytes in Pi results", async () => {
+  async function reusableBridge() {
+    const config=testConfig({DB_URL:"sqlite::memory:"});
+    db=createDatabase(config);await db.initialize();
+    const repos=createRepos(db.db,db.search);
+    const user=await repos.users.ensure({tgId:8299,firstName:"Reusable images"});
+    const thread=await repos.threads.create({userId:user.tg_id,topicId:null,title:"Images"});
+    const commandRuntime=workspaceRuntime();
+    const bridge:ChatImageBridge={config,repos,user,thread,commandRuntime,outgoingFiles:testOutgoingFiles({config,repos,user,thread,commandRuntime}),modelRegistry:{hasConfiguredAuth:()=>false} as unknown as ModelRegistry,providerRouter:providerRouter(backendModel()),resolveImage:async()=>({bytes:TEST_PNG,mimeType:"image/png"})};
+    vi.stubGlobal("fetch",vi.fn(async()=>Response.json({data:[{b64_json:TEST_PNG.toString("base64"),media_type:"image/png"}]})));
+    return {bridge,commandRuntime};
+  }
+
+  it("generates several assets, edits a saved asset, and queues only the selected result",async()=>{
+    const {bridge,commandRuntime}=await reusableBridge();
+    const tool=createGenerateImagePiTool(bridge);
+    const first=await tool.execute("one",{prompt:"blue circle"},undefined,undefined,{} as never);
+    const firstPath=(first.details as {path:string}).path;
+    const second=await tool.execute("two",{prompt:"make it green",mode:"edit",reference_paths:[firstPath]},undefined,undefined,{} as never);
+    expect(first.terminate).not.toBe(true);expect(second.terminate).not.toBe(true);
+    expect(bridge.outgoingFiles.items).toHaveLength(0);
+    expect(commandRuntime.writeWorkspaceFile).toHaveBeenCalledTimes(2);
+    const calls=vi.mocked(fetch).mock.calls;
+    const request=JSON.parse(String(calls[1]![1]!.body));
+    expect(request.input_references).toHaveLength(1);
+    expect(request.input_references[0].image_url.url).toBe(`data:image/png;base64,${TEST_PNG.toString("base64")}`);
+    const queued=await bridge.outgoingFiles.workspace([{path:(second.details as {path:string}).path}]);
+    expect(queued.errors).toEqual([]);expect(bridge.outgoingFiles.items).toHaveLength(1);
+  });
+
+  it("checks availability, combined reference limits, and thread scope before paying for generation",async()=>{
+    const {bridge}=await reusableBridge();
+    await expect(createGenerateImagePiTool({...bridge,commandRuntime:undefined}).execute("missing",{prompt:"draw"},undefined,undefined,{} as never)).rejects.toThrow("workspace support");
+    const tool=createGenerateImagePiTool(bridge);
+    await expect(tool.execute("too-many",{prompt:"draw",reference_file_ids:[1,2,3],reference_paths:["/a.png","/b.png","/c.png"]},undefined,undefined,{} as never)).rejects.toThrow("At most 5");
+    const other=await bridge.repos.threads.create({userId:bridge.user.tg_id,topicId:null,title:"Other"});
+    const ref=await bridge.repos.files.insertFile({userId:bridge.user.tg_id,threadId:other.id,type:"image",name:"private.png",size:TEST_PNG.length,isInline:false});
+    await expect(tool.execute("cross-thread",{prompt:"draw",reference_file_ids:[ref.id]},undefined,undefined,{} as never)).rejects.toThrow("not available in this thread");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not report success or queue an attachment after a failed write or cancellation",async()=>{
+    const {bridge,commandRuntime}=await reusableBridge();
+    commandRuntime.writeWorkspaceFile.mockRejectedValueOnce(new Error("write failed"));
+    await expect(createGenerateImagePiTool(bridge).execute("write",{prompt:"draw"},undefined,undefined,{} as never)).rejects.toThrow("write failed");
+    const controller=new AbortController();controller.abort(new Error("cancelled"));
+    await expect(createGenerateImagePiTool(bridge).execute("cancel",{prompt:"draw"},controller.signal,undefined,{} as never)).rejects.toThrow("cancelled");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(bridge.outgoingFiles.items).toHaveLength(0);
+  });
+
+  it("uses Telegram references, saves the original, returns vision, and leaves delivery to the model", async () => {
     const config = testConfig({ OPENROUTER_IMAGE_MODEL: "test/image-model" });
     db = createDatabase(config);
     await db.initialize();
@@ -52,7 +103,7 @@ describe("Pi generate_image extension", () => {
       locator: { file_id: "AgAC-reference", file_unique_id: "unique-reference" },
       mimeType: "image/png",
     });
-    const outputBytes = Buffer.from("generated-image-bytes");
+    const outputBytes = TEST_PNG;
     let requestBody: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -72,6 +123,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => false,
       } as unknown as ModelRegistry,
@@ -107,16 +159,13 @@ describe("Pi generate_image extension", () => {
     const inputReferences = requestBody?.input_references as Array<{ image_url: { url: string } }>;
     expect(inputReferences).toHaveLength(1);
     expect(inputReferences[0]?.image_url.url).toBe(`data:image/png;base64,${Buffer.from("reference-bytes").toString("base64")}`);
-    expect(bridge.outgoingFiles.items).toHaveLength(1);
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(outputBytes);
-    expect(bridge.outgoingFiles.items[0]?.caption).toBe("finished");
-    expect(result.terminate).toBe(true);
-    expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
-    const generated = await repos.files.get(bridge.outgoingFiles.items[0]!.fileId);
-    await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
-    const persisted = JSON.stringify({ generated, result });
-    expect(persisted).not.toContain(outputBytes.toString("base64"));
-    expect(persisted).not.toContain("reference-bytes");
+    expect(bridge.outgoingFiles.items).toHaveLength(0);
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:outputBytes,virtualPath:expect.stringMatching(/^\/assets\/generated-/)}));
+    expect(result.terminate).not.toBe(true);
+    expect(result.content.some(part=>part.type === "image")).toBe(true);
+    expect(result.details).toMatchObject({generated_image:true,width:1,height:1});
+    expect(JSON.stringify(result.details)).not.toContain(outputBytes.toString("base64"));
+
   });
 
   it("uses Pi Codex OAuth headers and the hosted image_generation payload", async () => {
@@ -136,7 +185,7 @@ describe("Pi generate_image extension", () => {
         type: "image_generation_call",
         id: "ig_123",
         status: "completed",
-        result: Buffer.from("codex-image").toString("base64"),
+        result: TEST_PNG.toString("base64"),
         revised_prompt: "Codex revised prompt",
       };
       return new Response(`data: ${JSON.stringify({ type: "response.output_item.done", item })}\n\n`, {
@@ -151,6 +200,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({
@@ -182,8 +232,8 @@ describe("Pi generate_image extension", () => {
       tool_choice: { type: "image_generation" },
       tools: [{ type: "image_generation", output_format: "webp", action: "generate" }],
     });
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("codex-image"));
-    expect(bridge.outgoingFiles.items[0]?.caption).toBe("Codex revised prompt");
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));
+    expect(bridge.outgoingFiles.items).toHaveLength(0);
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 
@@ -195,7 +245,7 @@ describe("Pi generate_image extension", () => {
     const user = await repos.users.ensure({ tgId: 819, firstName: "CodexStream" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex stream" });
     const accessToken = jwtWithAccount("account-stream");
-    const partial = Buffer.from("latest-codex-partial").toString("base64");
+    const partial = TEST_PNG.toString("base64");
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       `data: ${JSON.stringify({
         type: "response.image_generation_call.partial_image",
@@ -215,6 +265,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: accessToken }),
@@ -228,9 +279,8 @@ describe("Pi generate_image extension", () => {
       output_format: "jpeg",
     }, undefined, undefined, {} as never);
 
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("latest-codex-partial"));
-    const stored = await repos.files.get(bridge.outgoingFiles.items[0]!.fileId);
-    expect(stored?.mime_type).toBe("image/jpeg");
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));
+    expect(bridge.outgoingFiles.items).toHaveLength(0);
   });
 
   it("accepts the latest partial when the hosted stream completes without a completed image item", async () => {
@@ -240,7 +290,7 @@ describe("Pi generate_image extension", () => {
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 821, firstName: "CodexCompletedStream" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex completed stream" });
-    const partial = Buffer.from("latest-hosted-codex-partial").toString("base64");
+    const partial = TEST_PNG.toString("base64");
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       `data: ${JSON.stringify({
         type: "response.output_item.added",
@@ -265,6 +315,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-completed-stream") }),
@@ -278,7 +329,7 @@ describe("Pi generate_image extension", () => {
       output_format: "png",
     }, undefined, undefined, {} as never);
 
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("latest-hosted-codex-partial"));
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 
@@ -289,8 +340,8 @@ describe("Pi generate_image extension", () => {
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 820, firstName: "CodexDisconnect" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex disconnect" });
-    const partial = Buffer.from("incomplete-codex-partial").toString("base64");
-    const fallback = Buffer.from("complete-openrouter-image");
+    const partial = TEST_PNG.toString("base64");
+    const fallback = TEST_PNG;
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(`data: ${JSON.stringify({
         type: "response.image_generation_call.partial_image",
@@ -310,6 +361,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-disconnect") }),
@@ -325,7 +377,7 @@ describe("Pi generate_image extension", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.details).toMatchObject({ provider: "openrouter" });
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(fallback);
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:fallback}));
     expect(router.circuit.state().open).toBe(true);
   });
 
@@ -340,7 +392,7 @@ describe("Pi generate_image extension", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
       urls.push(String(url));
       if (urls.length === 1) return new Response("quota", { status: 429, headers: { "retry-after": "30" } });
-      return Response.json({ data: [{ b64_json: Buffer.from("fallback-image").toString("base64") }] });
+      return Response.json({ data: [{ b64_json: TEST_PNG.toString("base64") }] });
     }));
     const model = backendModel();
     const router = providerRouter(model);
@@ -350,6 +402,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-fallback") }),
@@ -368,7 +421,7 @@ describe("Pi generate_image extension", () => {
     ]);
     expect(result.details).toMatchObject({ provider: "openrouter" });
     expect(router.circuit.state().open).toBe(true);
-    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("fallback-image"));
+    expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));
   });
 
   it("closes a half-open circuit after a definitive Codex image rejection", async () => {
@@ -396,6 +449,7 @@ describe("Pi generate_image extension", () => {
       user,
       thread,
       outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
+      commandRuntime: workspaceRuntime(),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-rejected") }),

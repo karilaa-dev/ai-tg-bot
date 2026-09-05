@@ -28,7 +28,7 @@ export function createSearchInFileTool(input: ToolBuildInput) {
         return {
           error: "sandbox_required",
           file_id,
-          message: "This PDF or DOCX is read in E2B. Call materialize_chat_files, then use PDF Inspector or OfficeCLI.",
+          message: "This PDF or DOCX is read in E2B. Call materialize_chat_files, then use PDF Inspector or docx-cli.",
         };
       }
       const hits = await hybridSearch({

@@ -228,6 +228,35 @@ describe("thread E2B runtime manager", () => {
       .toBe(true);
   });
 
+  it("writes binary assets atomically into this thread workspace and cleans staging files", async () => {
+    const bytes = Buffer.from([0, 255, 12, 7]);
+    await runtime.writeWorkspaceFile({userId,threadId,virtualPath:"/assets/generated.png",bytes});
+    const sandbox = client.onlySandbox();
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/assets/generated.png`)).toEqual(bytes);
+    expect([...sandbox.files.keys()].some(name=>name.includes("/.write-"))).toBe(false);
+    expect(sandbox.writeFileCalls.some(call=>call.user === "user" && call.path.includes("/.write-"))).toBe(true);
+  });
+
+  it("rejects writes through a parent symlink outside the workspace", async () => {
+    await runtime.execute(commandRequest(userId,threadId));
+    const sandbox=client.onlySandbox();
+    const original=sandbox.run.bind(sandbox);
+    vi.spyOn(sandbox,"run").mockImplementation(async command=>command.startsWith("'realpath'") ? {stdout:"/etc\n",stderr:"",exitCode:0} : original(command));
+    await expect(runtime.writeWorkspaceFile({userId,threadId,virtualPath:"/escape/file.png",bytes:Buffer.from("image")})).rejects.toThrow("escapes");
+    expect(sandbox.writeFileCalls.some(call=>call.user === "user" && call.path.includes("/.write-"))).toBe(false);
+  });
+
+  it("upgrades Office once without replacing the sandbox or touching user files", async () => {
+    await runtime.execute(commandRequest(userId,threadId));
+    const sandbox=client.onlySandbox();
+    sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`,Buffer.from("keep"));
+    await runtime.execute(commandRequest(userId,threadId));
+    expect(sandbox.controlCommands.filter(command=>command === "'bash' '/usr/local/share/ai-tg-bot/office/install.sh'")).toHaveLength(1);
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("keep");
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
+  });
+
   it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     await runtime.execute(commandRequest(userId, threadId));
@@ -1671,6 +1700,11 @@ class FakeSandbox implements E2BSandbox {
       const destination = unquote(match[2]!);
       const bytes = this.files.get(source);
       if (bytes) this.files.set(destination, Buffer.from(bytes));
+    }
+    const atomicMove=command.match(/^'mv' '-T' '--' '([^']+)' '([^']+)'$/);
+    if(atomicMove) {
+      const bytes=this.files.get(atomicMove[1]!);
+      if(bytes) {this.files.set(atomicMove[2]!,bytes);this.files.delete(atomicMove[1]!);}
     }
     for (const match of command.matchAll(/mv -f ('[^']*'|\S+) ('[^']*'|\S+)/g)) {
       const source = unquote(match[1]!);

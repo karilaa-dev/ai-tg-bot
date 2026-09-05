@@ -53,7 +53,7 @@ export async function renderSystemPrompt(input: {
   const values: Record<string, string> = {
     language: input.user.lang === "ru" ? "Russian" : "English",
     browser_guidance: browserGuidance(input.config),
-    office_preview_guidance: officePreviewGuidance(input.config),
+    office_preview_guidance: officePreviewGuidance(),
   };
   return renderPromptTemplate(await loadTemplate(), values);
 }
@@ -149,9 +149,6 @@ function browserGuidance(
   ].join("\n");
 }
 
-function officePreviewGuidance(
-  config: Pick<AppConfig, "BROWSER_USE_API_KEY"> | undefined,
-): string {
-  if (!config || !isBrowserUseConfigured(config)) return "";
-  return "For Office delivery, validate structure and use render_office_preview to inspect every page or slide. Fix visible defects and re-preview changed pages; after three unsuccessful fixes, report the blocker.";
+function officePreviewGuidance(): string {
+  return "For Office delivery, call validate_office_file, use render_office_preview to inspect every page or slide, then record passing visual_reviews with the current source_sha256. All checks must pass before delivery. Edits invalidate the previous review. After three unsuccessful repair cycles explain the blocker without sending the draft.";
 }

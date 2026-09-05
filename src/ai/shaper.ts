@@ -252,6 +252,8 @@ function toolLabel(name: string): string {
       return "🧹 Closing browser session";
     case "render_office_preview":
       return "🖼️ Previewing Office file";
+    case "validate_office_file":
+      return "🔍 Validating Office file";
     case "search_thread":
       return "💬 Searching chat";
     case "load_message":
@@ -315,6 +317,7 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return minutes === undefined ? undefined : `${minutes}m`;
     }
     case "render_office_preview":
+    case "validate_office_file":
       return truncateSubject(stringField(record, "path"), 64);
     case "search_in_file":
     case "read_file_section":
@@ -358,7 +361,8 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
 function generateImageSubject(record: Record<string, unknown> | undefined): string | undefined {
   const prompt = truncateSubject(stringField(record, "prompt"), 64);
   const references = record?.reference_file_ids;
-  const referenceCount = Array.isArray(references) ? references.length : 0;
+  const referenceCount = (Array.isArray(references) ? references.length : 0)
+    + (Array.isArray(record?.reference_paths) ? record.reference_paths.length : 0);
   if (!prompt) return referenceCount ? `${referenceCount} reference${referenceCount === 1 ? "" : "s"}` : undefined;
   return referenceCount ? `${prompt} +${referenceCount} ref${referenceCount === 1 ? "" : "s"}` : prompt;
 }

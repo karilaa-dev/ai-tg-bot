@@ -11,6 +11,7 @@ import { MAX_FILE_BYTES } from "../../files/limits.js";
 import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
 import type { OutgoingFiles } from "../../files/outgoingFiles.js";
 import type { ThreadScope } from "../../memory/retrieval.js";
+import type { OfficeValidation } from "../../office/validation.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -21,6 +22,7 @@ export interface ToolBuildInput {
   maxMessageId?: number;
   currentScope?: () => Promise<ThreadScope>;
   outgoingFiles?: OutgoingFiles;
+  officeValidation?: OfficeValidation;
   responseDraft?: { text: string };
   logger?: Logger;
   commandRuntime?: CommandRuntime;

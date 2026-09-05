@@ -1,7 +1,7 @@
 import type { ThinkingDelivery } from "./types.js";
 import type { TurnInput, TurnRunner } from "./types.js";
 import { sendFinal, sendFinalVisible, refreshFinalThinkingVisible, normalizeTelegramAttachmentDeliveries, sendFinalThinkingVisible, sendPlainWithThreadFallback } from "./responseDelivery.js";
-import { formatMarkdownListItem, draftAnswerWhileGeneratingImage, normalizeGeneratedImageFinalText } from "./turnOutput.js";
+import { formatMarkdownListItem } from "./turnOutput.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { MessageRow, UserRow } from "../db/types.js";
@@ -127,7 +127,6 @@ export const runTurn: TurnRunner = async (input) => {
       toolResults: stats.counts.toolResults,
     });
     input.signal?.throwIfAborted();
-    const generateImageToolError = stats.counts.generateImageToolError;
     const assistantResult = currentTurnAssistantResult(currentTurnMessages);
     let answer = assistantResult.completed ? assistantResult.text : assistantResult.text || shaper.finalAnswer();
     const budgetSnapshot = runtime.bridge.currentTurnBudget()?.snapshot();
@@ -145,13 +144,12 @@ export const runTurn: TurnRunner = async (input) => {
     if (budgetReason) answer = appendBudgetNotice(answer, budgetReasonText(budgetReason, input.user.lang), input.user.lang);
     const assistantError = assistantResult.error;
     if (assistantError && !answer.trim()) throw new Error(assistantError);
+    await runtime.bridge.outgoingFiles.verifyOfficeAttachments(input.signal);
+    const pendingFileErrors = runtime.bridge.outgoingFiles.unresolved;
+    if (pendingFileErrors.length) answer += `\n\nFiles withheld; workspace drafts retained:\n${pendingFileErrors.map(item => `${item.path}: ${item.error}`).join("\n")}`;
     const createdFiles = runtime.bridge.attachments;
     normalizeTelegramAttachmentDeliveries(createdFiles);
-    const hasGeneratedImage = createdFiles.some((file) => file.origin === "generated_image");
-    if (stats.counts.generateImageToolCalls > 0 && !hasGeneratedImage) {
-      throw new Error(`Image generation failed${generateImageToolError ? `: ${generateImageToolError}` : ": no image attachment was produced"}`);
-    }
-    const finalText = normalizeGeneratedImageFinalText(hasGeneratedImage ? "" : answer, hasGeneratedImage);
+    const finalText = { answer };
     const resolvedAnswer = resolveTurnAnswer({
       answer: finalText.answer,
       attachmentCount: createdFiles.length,
@@ -176,7 +174,7 @@ export const runTurn: TurnRunner = async (input) => {
       // List only confirmed deliveries so the visible summary never promises a
       // pending source that may fail its lazy reload.
       attachments: createdFiles.filter((file) => file.telegramDelivery),
-      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
+      extraReasoning: [],
     });
     input.signal?.throwIfAborted();
     const thinkingDelivery = await streamer?.finish({ thinkingMd: finalThinking, answerMd: finalAnswer });
@@ -197,23 +195,12 @@ export const runTurn: TurnRunner = async (input) => {
       },
       () => { deliveryStarted = true; },
     );
-    if (hasGeneratedImage) {
-      const delivered = createdFiles.filter((file) =>
-        file.origin === "generated_image" && file.telegramDelivery).length;
-      input.logger.info("generated image delivered after final thinking", {
-        threadId: input.thread.id,
-        images: delivered,
-        postToolDeliveryMs: stats.counts.generateImageReadyAt
-          ? Math.max(0, Date.now() - stats.counts.generateImageReadyAt)
-          : undefined,
-      });
-    }
     const deliveredFinalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
       attachments: createdFiles.filter((file) => file.telegramDelivery),
       requestedAttachmentCount: createdFiles.length,
-      extraReasoning: finalText.demotedReasoning ? [finalText.demotedReasoning] : [],
+      extraReasoning: [],
     });
     if (deliveredFinalThinking !== finalThinking) {
       finalThinking = deliveredFinalThinking;
@@ -294,17 +281,6 @@ export const runTurn: TurnRunner = async (input) => {
       ...inferenceUsage,
     });
     await input.onExecutionFailure?.("agent_execution_failed");
-    const generatedImageDelivered = activeBridge?.attachments.some((file) =>
-      file.origin === "generated_image" && file.telegramDelivery);
-    if (generatedImageDelivered) {
-      streamer?.stop();
-      await status?.finish(shaper.toolStatusMd());
-      input.logger.warn("turn finalization failed after generated image delivery; suppressing misleading error reply", {
-        threadId: input.thread.id,
-        err: String(err),
-      });
-      return;
-    }
     await status?.finish(shaper.toolStatusMd());
     await streamer?.finish();
     if (deliveryStarted) {
@@ -581,7 +557,7 @@ function createPiStreamLoop(
   const updatePresenter = () => {
     streamer?.update({
       thinkingMd: shaper.streamingThinkingMd(),
-      answerMd: draftAnswerWhileGeneratingImage(shaper.visibleAnswer(), counts.generateImageToolCalls > 0),
+      answerMd: shaper.visibleAnswer(),
     });
   };
   const updateStatus = () => {
@@ -865,11 +841,15 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   if (toolName === "generate_image" && record) {
     if (record.pending === true) return "generating";
-    return record.file_id === undefined ? "done" : formatCount(1, "image");
+    return record.generated_image === true ? "image saved" : "done";
   }
 
   if (toolName === "render_office_preview" && record) {
-    return record.rendered === true ? formatCount(1, "preview") : "done";
+    return Array.isArray(record.images) ? formatCount(record.images.length, "page") : "done";
+  }
+
+  if (toolName === "validate_office_file" && record) {
+    return record.approved === true ? "approved" : "review required";
   }
 
   if (toolName === "inspect_workspace_images" && record && Array.isArray(record.images)) {

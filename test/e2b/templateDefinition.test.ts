@@ -8,12 +8,6 @@ import {
   E2B_TOOLBOX_PRODUCTION_REF,
   IMAGEMAGICK_COMMIT,
   IMAGEMAGICK_SOURCE_SHA256,
-  OFFICECLI_AMD64_SHA256,
-  OFFICECLI_ARM64_SHA256,
-  OFFICECLI_DOCX_SKILL_SHA256,
-  OFFICECLI_PPTX_SKILL_SHA256,
-  OFFICECLI_SOURCE_REVISION,
-  OFFICECLI_VERSION,
   OPENSCAD_LICENSE_SHA256,
   OPENSCAD_NODE_SHA256,
   OPENSCAD_SOURCE_REVISION,
@@ -31,8 +25,8 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.5");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.5");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.6");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.6");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -49,13 +43,7 @@ describe("E2B toolbox template definition", () => {
     expect(E2B_TOOLBOX_APT_PACKAGES.join(" ")).not.toMatch(/chrom|playwright|puppeteer|selenium|browserless|docker/i);
   });
 
-  it("pins OfficeCLI and ImageMagick supply-chain inputs", () => {
-    expect(OFFICECLI_VERSION).toBe("1.0.145");
-    expect(OFFICECLI_SOURCE_REVISION).toMatch(/^[a-f0-9]{40}$/);
-    expect(OFFICECLI_AMD64_SHA256).toMatch(/^[a-f0-9]{64}$/);
-    expect(OFFICECLI_ARM64_SHA256).toMatch(/^[a-f0-9]{64}$/);
-    expect(OFFICECLI_DOCX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
-    expect(OFFICECLI_PPTX_SKILL_SHA256).toMatch(/^[a-f0-9]{64}$/);
+  it("pins ImageMagick supply-chain inputs", () => {
     expect(PDF_INSPECTOR_VERSION).toBe("1.17.0");
     expect(IMAGEMAGICK_COMMIT).toMatch(/^[a-f0-9]{40}$/);
     expect(IMAGEMAGICK_SOURCE_SHA256).toMatch(/^[a-f0-9]{64}$/);
@@ -68,7 +56,7 @@ describe("E2B toolbox template definition", () => {
     expect(contract).toContain("pdf-inspector detect");
     expect(contract).toContain('.pdfType == "Scanned"');
     expect(contract).toContain("pdftoppm");
-    expect(contract).toContain("officecli view contract.docx text");
+    expect(contract).toContain("office-contract");
   });
 
   it("installs and smoke-tests the headless OpenSCAD build command", async () => {

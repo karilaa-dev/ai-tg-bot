@@ -311,8 +311,8 @@ describe("StreamShaper", () => {
   it("summarizes generated image outputs as images", () => {
     const s = new StreamShaper();
     expect(handleStreamPart(s, { type: "tool-call", toolName: "generate_image", input: { prompt: "red square" } })).toBe("tool-call");
-    expect(handleStreamPart(s, { type: "tool-result", toolName: "generate_image", output: { file_id: 12, name: "generated-image.png" } })).toBe("tool-result");
-    expect(s.thinkingMd()).toContain("🖼️ Generating image <code>red square</code> (1 image)");
+    expect(handleStreamPart(s, { type: "tool-result", toolName: "generate_image", output: { generated_image: true, path: "/assets/generated-image.png" } })).toBe("tool-result");
+    expect(s.thinkingMd()).toContain("🖼️ Generating image <code>red square</code> (image saved)");
     expect(s.runSummary()).toEqual({
       reasoningSummaries: [],
       toolCallCount: 1,

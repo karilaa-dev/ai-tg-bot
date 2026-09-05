@@ -35,7 +35,7 @@ describe("Browser Use Pi tools", () => {
   it("registers only when configured and makes every browser tool sequential", () => {
     const disabled = createPiToolAdapters(bridge(loadTestConfig()));
     expect(disabled.some((tool) => tool.name.startsWith("browser_"))).toBe(false);
-    expect(disabled.some((tool) => tool.name === "render_office_preview")).toBe(false);
+    expect(disabled.some((tool) => tool.name === "render_office_preview")).toBe(true);
     expect(disabled.find((tool) => tool.name === "inspect_workspace_images")?.executionMode).toBe("sequential");
 
     const enabled = createPiToolAdapters(bridge(browserConfig(), fakeBrowserRuntime()));

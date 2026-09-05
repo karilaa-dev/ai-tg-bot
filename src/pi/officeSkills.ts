@@ -4,26 +4,36 @@ import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-export const OFFICECLI_SKILLS_REVISION = "b2f30dd9eaa7459b4d5b5ecc2387402f8e01d412";
+export const DOCX_SKILL_REVISION = "e528738ed22d1294be7938d7614525b4a585fa56";
 
-export const OFFICECLI_SKILLS = [
+export const OFFICE_SKILLS = [
   {
-    name: "officecli-docx",
-    relativePath: "skills/officecli-docx/SKILL.md",
-    sha256: "e1540a821b78c6db605f8e676cd706cbba4f0f6136bc1a53a4f6df7229a104ae",
+    "name": "docx-cli",
+    "relativePath": "skills/docx-cli/SKILL.md",
+    "sha256": "b47e5fc83bc2186e02b3ae1ccaa4af7541c73f1ccd5ac3a8d44a77952f653632"
   },
   {
-    name: "officecli-pptx",
-    relativePath: "skills/officecli-pptx/SKILL.md",
-    sha256: "254306663523b4ae89e3086c7e9ed520bb3e469eb78404b2e65c333621c21a1e",
+    "name": "pptxgenjs",
+    "relativePath": "skills/pptxgenjs/SKILL.md",
+    "sha256": "836f37abf70cc906a3b2448f4624b1a7bf8ab1f68d0c394a95c7998e8bc56bfe"
   },
+  {
+    "name": "pptx-edit",
+    "relativePath": "skills/pptx-edit/SKILL.md",
+    "sha256": "ede764eb9a1f1d2fddb7e52736f29f165535ba3fa5d90b86f76a1094d0cd349d"
+  },
+  {
+    "name": "xlsx",
+    "relativePath": "skills/xlsx/SKILL.md",
+    "sha256": "c33eafaaf9d21ba5ebbd6d577f2859377c7fd764dbdf5ec45170a8ec90a41c23"
+  }
 ] as const;
 
 const SANDBOX_FILE_SKILLS = [
   {
     name: "sandbox-files",
     relativePath: "skills/sandbox-files/SKILL.md",
-    sha256: "7257f17ac529849b6efb15d97bcdcaa84f535457e29f7c6c13358b8e41a923ac",
+    sha256: "4540a0535723e4c9cd4c95b145f6ffe984609d56294feea5581acb2864e3f15c",
   },
 ] as const;
 
@@ -35,13 +45,13 @@ export const OPENSCAD_SKILLS = [
   },
 ] as const;
 
-export const APPROVED_PI_SKILLS = [...OFFICECLI_SKILLS, ...SANDBOX_FILE_SKILLS, ...OPENSCAD_SKILLS] as const;
+export const APPROVED_PI_SKILLS = [...OFFICE_SKILLS, ...SANDBOX_FILE_SKILLS, ...OPENSCAD_SKILLS] as const;
 
 const MAX_SKILL_READ_LINES = 2_000;
 const validationPromises = new Map<string, Promise<void>>();
 
 export function officeSkillPaths(cwd = process.cwd()): string[] {
-  return OFFICECLI_SKILLS.map((skill) => path.resolve(cwd, skill.relativePath));
+  return OFFICE_SKILLS.map((skill) => path.resolve(cwd, skill.relativePath));
 }
 
 export function approvedSkillPaths(cwd = process.cwd()): string[] {
@@ -118,7 +128,7 @@ export function createApprovedSkillReadTool(cwd = process.cwd()): ToolDefinition
 }
 
 async function validateOfficeSkillsUncached(cwd: string): Promise<void> {
-  await validateSkills(cwd, OFFICECLI_SKILLS);
+  await validateSkills(cwd, OFFICE_SKILLS);
 }
 
 async function validateSkills(

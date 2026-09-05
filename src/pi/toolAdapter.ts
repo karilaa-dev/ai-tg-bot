@@ -13,6 +13,8 @@ const BASE_BOT_TOOL_NAMES = [
   "read_file_section",
   "materialize_chat_files",
   "render_pdf_pages",
+  "render_office_preview",
+  "validate_office_file",
   "inspect_workspace_images",
   "create_file",
   "finish_response",
@@ -23,7 +25,6 @@ const BASE_BOT_TOOL_NAMES = [
 ] as const;
 
 const BROWSER_TOOL_NAMES = [
-  "render_office_preview",
   "browser_open",
   "browser_list_tabs",
   "browser_navigate",
@@ -68,6 +69,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
         || name === "finish_response"
         || name === "publish_website"
         || name === "render_office_preview"
+        || name === "validate_office_file"
         || name.startsWith("browser_")
         ? "sequential"
         : undefined,

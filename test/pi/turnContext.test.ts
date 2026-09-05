@@ -43,8 +43,8 @@ describe("turn prompt context extension", () => {
 
     expect(first.systemPrompt).toContain("English core");
     expect(first.systemPrompt.match(/<available_skills>/gu)).toHaveLength(1);
-    expect(first.systemPrompt).toContain("<name>officecli-docx</name>");
-    expect(first.systemPrompt).toContain("<name>officecli-pptx</name>");
+    expect(first.systemPrompt).toContain("<name>docx-cli</name>");
+    expect(first.systemPrompt).toContain("<name>pptxgenjs</name>");
     expect(second.systemPrompt).toContain("Russian core");
     expect(second.systemPrompt).not.toContain("English core");
   });

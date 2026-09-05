@@ -5,7 +5,7 @@ required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
   sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
-  officecli pdf-inspector pdfinfo pdftoppm openscad openscad-build povray
+  docx office-python pptxgenjs-run office-files libreoffice pdf-inspector pdfinfo pdftoppm openscad openscad-build povray
 )
 
 missing=()
@@ -33,19 +33,8 @@ npm --version >/dev/null
 openscad_version="$(openscad --version 2>&1 || true)"
 grep -Fxq "OpenSCAD version 2026.08.27" <<<"$openscad_version"
 dpkg-query -W -f='${Version}\n' povray | grep -Fq '3.7.0.10'
-officecli --version
-officecli help pptx >/dev/null
 [[ "$(pdf-inspector --version)" == "1.17.0" ]]
-
-pptx_skill=/usr/local/share/officecli/skills/officecli-pptx/SKILL.md
-docx_skill=/usr/local/share/officecli/skills/officecli-docx/SKILL.md
-[[ -r "${pptx_skill}" ]]
-[[ -r "${docx_skill}" ]]
-grep -Fq 'name: officecli-pptx' "${pptx_skill}"
-grep -Fq '## QA (Required)' "${pptx_skill}"
-grep -Fq 'Gate 3 — Visual audit (MANDATORY)' "${pptx_skill}"
-grep -Fq 'name: officecli-docx' "${docx_skill}"
-grep -Fq '## QA (Required)' "${docx_skill}"
+office-contract
 
 magick -size 2x2 xc:red "${tmp_dir}/image.png"
 [[ "$(magick identify -format '%wx%h' "${tmp_dir}/image.png")" == "2x2" ]]
@@ -140,28 +129,6 @@ pdf-inspector detect "${tmp_dir}/scanned.pdf" --json | jq -e '.pdfType == "Scann
 pdftoppm -f 1 -l 1 -singlefile -r 72 -jpeg "${tmp_dir}/scanned.pdf" "${tmp_dir}/contract-page"
 [[ -s "${tmp_dir}/contract-page.jpg" ]]
 [[ "$(magick identify -format '%m' "${tmp_dir}/contract-page.jpg")" == "JPEG" ]]
-
-(
-  cd "${tmp_dir}"
-  officecli create contract.pptx
-  officecli add contract.pptx / --type slide --prop layout=blank --prop background=FFFFFF
-  officecli add contract.pptx "/slide[1]" --type shape \
-    --prop text="OfficeCLI contract" \
-    --prop x=2cm --prop y=2cm --prop width=20cm --prop height=2cm \
-    --prop size=36 --prop color=111111
-  officecli save contract.pptx
-  officecli validate contract.pptx
-  officecli view contract.pptx html --page 1 --out contract-slide.html
-  grep -qi '<html' contract-slide.html
-
-  officecli create contract.docx
-  officecli add contract.docx /body --type paragraph \
-    --prop text="OfficeCLI contract" --prop style=Heading1
-  officecli save contract.docx
-  officecli validate contract.docx
-  officecli view contract.docx outline | grep -Fq 'OfficeCLI contract'
-  officecli view contract.docx text --max-lines 20 | grep -Fq 'OfficeCLI contract'
-)
 
 printf 'archive-ok' > "${tmp_dir}/archive-input"
 (

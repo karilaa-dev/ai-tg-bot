@@ -11,6 +11,7 @@ import { createPublishWebsiteTool } from "./publishWebsite.js";
 import { createBrowserTools } from "./browser.js";
 import { isBrowserUseConfigured } from "../../config.js";
 import { createRenderOfficePreviewTool } from "./renderOfficePreview.js";
+import { createValidateOfficeFileTool } from "./validateOfficeFile.js";
 import { createMaterializeChatFilesTool } from "./materializeChatFiles.js";
 import { createRenderPdfPagesTool } from "./renderPdfPages.js";
 import { createInspectWorkspaceImagesTool } from "./inspectWorkspaceImages.js";
@@ -29,6 +30,8 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     read_file_section: createReadFileSectionTool(input),
     materialize_chat_files: createMaterializeChatFilesTool(input),
     render_pdf_pages: createRenderPdfPagesTool(input),
+    render_office_preview: createRenderOfficePreviewTool(input),
+    validate_office_file: createValidateOfficeFileTool(input),
     inspect_workspace_images: createInspectWorkspaceImagesTool(input),
     create_file: createCreateFileTool(input),
     finish_response: createFinishResponseTool(input),
@@ -37,7 +40,6 @@ export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
     web_search: createWebSearchTool(input),
     web_extract: createWebExtractTool(input),
     ...(isBrowserUseConfigured(input.config) && input.browserRuntime ? {
-      render_office_preview: createRenderOfficePreviewTool(input),
       ...createBrowserTools(input),
     } : {}),
   };

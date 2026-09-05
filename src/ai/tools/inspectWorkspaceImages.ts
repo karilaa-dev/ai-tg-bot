@@ -33,7 +33,7 @@ export const ImagePathsSchema = z.array(
   }
 });
 
-export function createInspectWorkspaceImagesTool(input: ToolBuildInput) {
+export function createInspectWorkspaceImagesTool(input: Pick<ToolBuildInput, "commandRuntime" | "config" | "logger" | "user" | "thread">) {
   return defineBotTool({
     holdsCommandActivity: true,
     description:

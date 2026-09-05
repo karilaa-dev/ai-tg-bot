@@ -1,0 +1,85 @@
+{
+  "date": "2026-09-05",
+  "version": "2.0.6",
+  "release": {
+    "templateRef": "ai-tg-bot-tools:v2.0.6",
+    "status": "built",
+    "templateId": "nkeclxc4sm73vmb1e93y",
+    "buildId": "fa380a7c-1cf0-4696-af98-abd0177c9d07"
+  },
+  "checks": {
+    "typecheck": "passed",
+    "tests": {
+      "passed": 459,
+      "skipped": 2,
+      "skippedReason": "PostgreSQL integration requires TEST_POSTGRES_URL"
+    },
+    "build": "passed",
+    "e2bRelease": "passed",
+    "upgradeFrom": "ai-tg-bot-tools:v2.0.5",
+    "upgradePreservedWorkspaceAndSources": true,
+    "liveModelImageAndDeckWorkflows": [
+      {
+        "scenario": "image-only",
+        "toolCalls": 2,
+        "delivered": [
+          "generated-c44c75f4-a832-45f0-8da7-6b1777db513b.png"
+        ],
+        "imageProvidedToModel": true,
+        "continuedAfterGeneration": true
+      },
+      {
+        "scenario": "deck-only",
+        "toolCalls": 7,
+        "delivered": [
+          "quiet-forest.pptx"
+        ],
+        "imageProvidedToModel": true,
+        "continuedAfterGeneration": true
+      }
+    ]
+  },
+  "resources": {
+    "cpuCount": 2,
+    "memoryMB": 2048,
+    "aptAdditionalDiskMB": 331,
+    "measuredDirectoriesKiB": {
+      "/opt/office": 74991,
+      "/usr/lib/libreoffice": 237980,
+      "/usr/share/libreoffice": 12640,
+      "/usr/share/fonts": 8176
+    },
+    "memoryMetric": "Peak child-process RSS, not whole-sandbox peak; includes the document conversion and schema subprocesses.",
+    "officeContract": [
+      {
+        "file": "contract.docx",
+        "pages": 1,
+        "elapsed_ms": 5630,
+        "peak_child_rss_kib": 214328,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.pptx",
+        "pages": 2,
+        "elapsed_ms": 1771,
+        "peak_child_rss_kib": 214988,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "edited.pptx",
+        "pages": 2,
+        "elapsed_ms": 1321,
+        "peak_child_rss_kib": 215048,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.xlsx",
+        "pages": 1,
+        "elapsed_ms": 2369,
+        "peak_child_rss_kib": 215300,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      }
+    ]
+  },
+  "liveDelivery": "Files were prepared through finish_response in disposable sessions; no Telegram messages were sent."
+}

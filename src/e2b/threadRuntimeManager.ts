@@ -1,3 +1,4 @@
+import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
 import { publishWebsite, websiteTarget } from "./websitePublisher.js";
@@ -21,6 +22,7 @@ import type {
   SandboxCommandResult,
   SandboxFileReadRequest,
   SandboxFileReadResult,
+  SandboxFileWriteRequest,
   SandboxFileMaterializeRequest,
   SandboxSourceFileReadRequest,
   SandboxThreadFile,
@@ -193,6 +195,27 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         size: result.bytes.length,
         contentSha256,
       };
+    });
+  }
+
+  writeWorkspaceFile(request: SandboxFileWriteRequest): Promise<void> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      const { sandbox } = await this.prepareSandbox(state, scope, [], ROTATION_GUARD_MS, request.signal);
+      const destination = sandboxWorkspaceFile(request.virtualPath);
+      const parent = path.posix.dirname(destination);
+      const created = await runCommandResult(sandbox, shellJoin(["mkdir", "-p", "--", parent]), this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal, "user");
+      if (created.exitCode !== 0) throw new Error(created.stderr || "Workspace directory creation failed");
+      const canonical = await runCommandResult(sandbox, shellJoin(["realpath", "--", parent]), this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal, "user");
+      if (canonical.exitCode !== 0 || !isSameOrDescendant(canonical.stdout.trim(), E2B_WORKSPACE)) throw new Error("write path escapes this thread's workspace");
+      const staging = path.posix.join(canonical.stdout.trim(), `.write-${randomUUID()}`);
+      try {
+        await sandbox.writeFile(staging, request.bytes, "user", request.signal, this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
+        const moved = await runCommandResult(sandbox, shellJoin(["mv", "-T", "--", staging, destination]), this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal, "user");
+        if (moved.exitCode !== 0) throw new Error(moved.stderr || "Workspace write failed");
+      } finally {
+        await sandbox.removeFile(staging, "user").catch(() => undefined);
+      }
     });
   }
 
@@ -680,7 +703,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       "  command -v pdfinfo >/dev/null",
       "  command -v pdftoppm >/dev/null",
       "  command -v magick >/dev/null",
-      "  command -v officecli >/dev/null",
+
       "}",
       "if ready; then printf 'ready'; exit 0; fi",
       "(",
@@ -703,6 +726,17 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     );
     if (result.exitCode !== 0) {
       throw new Error(result.stderr.trim() || "Existing E2B sandbox toolbox upgrade failed.");
+    }
+    const bundle = await officeBundle();
+    const installed = await runCommandResult(sandbox, "cat /opt/office/installed-revision 2>/dev/null || true", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+    if (installed.stdout.trim() !== bundle.revision) {
+      this.input.logger?.info("upgrading Office tools in existing sandbox", {...scope, sandboxId:sandbox.id});
+      await sandbox.setTimeout(10 * 60_000, signal);
+      const directories = [...new Set(bundle.files.map(file => path.posix.dirname(file.path)))];
+      await runControl(sandbox, shellJoin(["mkdir", "-p", "--", ...directories]), this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+      for (const file of bundle.files) await sandbox.writeFile(file.path, file.bytes, "root", signal, this.input.config.E2B_REQUEST_TIMEOUT_MS);
+      const upgrade = await runCommandResult(sandbox, shellJoin(["bash", `${OFFICE_BUNDLE_PATH}/install.sh`]), 8 * 60_000, signal);
+      if (upgrade.exitCode !== 0) throw new Error(upgrade.stderr || "Office toolbox upgrade failed. Workspace files were preserved.");
     }
     state.toolboxValidatedSandboxId = sandbox.id;
     this.input.logger?.info(
