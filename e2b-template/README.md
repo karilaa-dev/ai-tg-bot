@@ -6,7 +6,7 @@ The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cl
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.6` uses `ai-tg-bot-tools:v2.0.6`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.0.7` uses `ai-tg-bot-tools:v2.0.7`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
@@ -42,4 +42,4 @@ The Office bundle in `assets/office` contains the shared installer, locked Node 
 
 After releasing the image, run `npm run live:pi-image-check` to exercise model vision and continuation after generation, intentional image delivery, and embedding an original generated asset into a visually reviewed deck. The test uses disposable sessions and a separate sandbox namespace; it queues results without sending messages to Telegram.
 
-To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.5 npm run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources. See [the 2.0.6 verification record](../docs/office-tools-2.0.6.md) for measured results.
+To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.6 npm run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources, removes obsolete bundle files, and serializes concurrent installers. See [the 2.0.7 review fixes](../docs/office-review-2.0.7.md) and [the original resource measurements](../docs/office-tools-2.0.6.md).

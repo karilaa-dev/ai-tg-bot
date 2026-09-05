@@ -31,10 +31,19 @@ export const VisualReviewSchema = z.object({
 export type VisualReview = z.infer<typeof VisualReviewSchema>;
 type RenderReport = z.infer<typeof RenderReportSchema>;
 type Entry = {
+  format: OfficeFormat;
   report: RenderReport;
   directory: string;
   seen: Set<number>;
   reviews: Map<number, VisualReview>;
+};
+type OfficeFormat = ".docx" | ".pptx" | ".xlsx";
+const OFFICE_MIME: Record<OfficeFormat, string> = {
+  ".docx":
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx":
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
 
 export function officeFormat(
@@ -80,7 +89,6 @@ export class OfficeValidation {
     this.clear();
     if (!this.scratchDirectories.size || !this.input.runtime) return;
     const directories = [...this.scratchDirectories];
-    this.scratchDirectories.clear();
     const result = await this.input.runtime.execute({
       userId: this.input.userId,
       threadId: this.input.threadId,
@@ -92,8 +100,10 @@ export class OfficeValidation {
       timeoutMs: this.input.config.BASH_TIMEOUT_MS,
       maxOutputChars: 1000,
     });
-    if (result.exitCode !== 0 || result.error)
+    if (result.exitCode !== 0 || result.error || result.timedOut)
       throw new Error(result.error || "Office preview cleanup failed");
+    for (const directory of directories)
+      this.scratchDirectories.delete(directory);
   }
 
   private async command(args: string[], signal?: AbortSignal) {
@@ -142,6 +152,10 @@ export class OfficeValidation {
     if (!format)
       throw new Error("Office validation accepts DOCX, PPTX, and XLSX files.");
     const existing = this.entries.get(hash);
+    if (existing && existing.format !== format)
+      throw new Error(
+        `Office format mismatch: these bytes were validated as ${existing.format}.`,
+      );
     if (
       existing &&
       existing.report.checks.every((check) => check.status === "passed")
@@ -194,6 +208,7 @@ export class OfficeValidation {
     )
       throw new Error("Office renderer returned an invalid artifact path.");
     const entry = {
+      format,
       report,
       directory,
       seen: new Set<number>(),
@@ -325,15 +340,34 @@ export class OfficeValidation {
     for (const page of pages) entry.seen.add(page);
   }
 
-  assertApproved(bytes: Buffer): void {
-    this.assertApprovedHash(sha256Hex(bytes));
+  assertApproved(
+    bytes: Buffer,
+    delivery?: { name: string; mime?: string | null },
+  ): void {
+    this.assertApprovedHash(sha256Hex(bytes), delivery);
   }
 
-  assertApprovedHash(hash: string): void {
+  assertApprovedHash(
+    hash: string,
+    delivery?: { name: string; mime?: string | null },
+  ): void {
     const entry = this.entries.get(hash);
     if (!entry || !this.approved(entry))
       throw new Error(
         "Office validation required: run validate_office_file, render every page with render_office_preview, then record passing visual_reviews for this source_sha256.",
       );
+    if (delivery) {
+      const extension = path.posix.extname(delivery.name).toLowerCase();
+      const mime = delivery.mime?.split(";", 1)[0]?.trim().toLowerCase();
+      if (
+        extension !== entry.format ||
+        (mime &&
+          mime !== "application/octet-stream" &&
+          mime !== OFFICE_MIME[entry.format])
+      )
+        throw new Error(
+          `Office delivery format mismatch: validated ${entry.format}; use that extension and ${OFFICE_MIME[entry.format]}.`,
+        );
+    }
   }
 }

@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
-bundle=$(cd -- "$(dirname -- "$0")" && pwd)
+bundle=$(cd -- "$(dirname -- "$0")" && pwd -P)
 exec 9>/var/lock/ai-tg-bot-office-install.lock
 flock -x 9
-revision=$(find "$bundle" -type f ! -path '*/node_modules/*' ! -path '*/python/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+revision=$(cd "$bundle" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+if [[ -n ${1:-} ]] && [[ $revision != "$1" ]]; then
+  printf 'Office upload revision mismatch\n' >&2
+  exit 1
+fi
+# Only complete, verified uploads may replace the active bundle. Hold this lock
+# through installation so rolling application versions cannot mix their files.
+active_bundle=/usr/local/share/ai-tg-bot/office
+if [[ $bundle != "$active_bundle" ]]; then
+  previous_bundle=$(mktemp -d "${active_bundle}.previous.XXXXXX")
+  rmdir "$previous_bundle"
+  if [[ -e $active_bundle ]]; then mv -T "$active_bundle" "$previous_bundle"; fi
+  if ! mv -T "$bundle" "$active_bundle"; then
+    if [[ -e $previous_bundle ]]; then mv -T "$previous_bundle" "$active_bundle"; fi
+    exit 1
+  fi
+  bundle=$active_bundle
+  rm -rf -- "$previous_bundle"
+fi
 if [[ -f /opt/office/installed-revision ]] && [[ $(cat /opt/office/installed-revision) == "$revision" ]]; then
   /usr/local/bin/docx --version >/dev/null
   /opt/office/python/bin/python -c 'import pptx, openpyxl, lxml'
@@ -13,7 +31,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-impress-nogui libreoffice-calc-nogui fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation poppler-utils python3-venv
-mkdir -p /opt/office/node /opt/office/licenses
+mkdir -p /opt/office/node /opt/office/licenses /opt/office/tests
 cp "$bundle/package.json" "$bundle/package-lock.json" /opt/office/node/
 npm ci --prefix /opt/office/node --omit=dev --ignore-scripts --no-audit --no-fund
 python3 -m venv /opt/office/python
@@ -35,6 +53,7 @@ install -m0755 "$bundle/pptxgenjs-run" /usr/local/bin/pptxgenjs-run
 install -m0644 "$bundle/pptx-helpers.cjs" /opt/office/node/pptx-helpers.cjs
 install -m0644 "$bundle/example-deck.cjs" /opt/office/node/example-deck.cjs
 install -m0755 "$bundle/contract.sh" /usr/local/bin/office-contract
+install -m0644 "$bundle/office-regressions.py" /opt/office/tests/office-regressions.py
 fc-cache -f
 /usr/local/bin/office-contract
 rm -f /usr/local/bin/officecli /usr/local/libexec/officecli-bin

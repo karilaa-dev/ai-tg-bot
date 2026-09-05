@@ -31,6 +31,36 @@ export function officeTestSetup() {
   };
 }
 describe("actual Office previews", () => {
+  it.each(["rejection", "exit", "timeout"])(
+    "retries scratch cleanup after a %s without losing paths",
+    async (failure) => {
+      const { runtime, officeValidation } = officeTestSetup();
+      await officeValidation.validate("/deck.pptx");
+      const original = runtime.execute.getMockImplementation()!;
+      const attempts: string[][] = [];
+      runtime.execute.mockImplementation(async (request) => {
+        if (request.command === "rm") {
+          attempts.push(request.args);
+          if (attempts.length === 1) {
+            if (failure === "rejection")
+              throw new Error("transport unavailable");
+            return {
+              ...(await original(request)),
+              exitCode: failure === "exit" ? 1 : 0,
+              timedOut: failure === "timeout",
+            };
+          }
+        }
+        return original(request);
+      });
+      await expect(officeValidation.dispose()).rejects.toThrow();
+      await officeValidation.dispose();
+      await officeValidation.dispose();
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toEqual(attempts[0]);
+      expect(attempts[0]!.join(" ")).toContain("/.office-qa/");
+    },
+  );
   it("renders multiple pages without a browser, strips image bytes from details, and requires explicit visual review", async () => {
     const { tool, officeValidation } = officeTestSetup();
     const output = await tool.execute({ path: "/deck.pptx", pages: [1, 2] });

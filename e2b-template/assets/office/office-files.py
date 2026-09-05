@@ -13,11 +13,34 @@ import shutil
 import subprocess
 import sys
 import time
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import zipfile
 from lxml import etree
 
 MAX_EXPANDED = 200 * 1024 * 1024
+OFFICE_RELATIONSHIPS = (
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/',
+    'http://purl.oclc.org/ooxml/officeDocument/relationships/',
+)
+HYPERLINK_ELEMENTS = {
+    '{' + namespace + '}' + tag
+    for namespace, tags in [
+        ('http://schemas.openxmlformats.org/wordprocessingml/2006/main', ['hyperlink']),
+        ('http://purl.oclc.org/ooxml/wordprocessingml/main', ['hyperlink']),
+        ('http://schemas.openxmlformats.org/spreadsheetml/2006/main', ['hyperlink']),
+        ('http://purl.oclc.org/ooxml/spreadsheetml/main', ['hyperlink']),
+        ('http://schemas.openxmlformats.org/drawingml/2006/main', ['hlinkClick', 'hlinkMouseOver']),
+        ('http://purl.oclc.org/ooxml/drawingml/main', ['hlinkClick', 'hlinkMouseOver']),
+    ] for tag in tags
+}
+
+
+def relationship_target(base, target):
+    uri = urlsplit(target)
+    if uri.scheme or uri.netloc:
+        raise ValueError('Internal relationship contains an external URI')
+    path = unquote(uri.path)
+    return posixpath.normpath(path.lstrip('/') if path.startswith('/') else posixpath.join(base, path))
 
 
 def run(args, timeout=120):
@@ -51,21 +74,29 @@ def package_checks(source):
                     raise ValueError(f'DTD is unsupported: {name}')
                 xml[name] = root
         relationships = {}
+        external_ids = {}
         for name, root in xml.items():
             if not name.endswith('.rels'):
                 continue
             base = posixpath.dirname(posixpath.dirname(name)) if name != '_rels/.rels' else ''
             ids = set()
             relationships[name] = ids
+            external_ids[name] = set()
             for rel in root:
                 rid = rel.get('Id')
                 if not rid or rid in ids:
                     raise ValueError(f'Missing or duplicate relationship Id in {name}')
                 ids.add(rid)
                 if rel.get('TargetMode') == 'External':
+                    external_ids[name].add(rid)
+                    # Clickable web/email links are inert during rendering. Linked media,
+                    # templates, workbooks, and unknown relationship types must not load.
+                    if (rel.get('Type') not in [prefix + 'hyperlink' for prefix in OFFICE_RELATIONSHIPS]
+                            or urlsplit(rel.get('Target', '')).scheme.lower() not in ('https', 'http', 'mailto')):
+                        raise ValueError(f'External resource is unsupported: {name} ({rel.get("Type", "unknown")}). Embed the resource before validation.')
                     continue
-                target = unquote(urlsplit(rel.get('Target', '')).path)
-                resolved = posixpath.normpath(posixpath.join(base, target)) if not target.startswith('/') else target.lstrip('/')
+                target = rel.get('Target', '')
+                resolved = relationship_target(base, target)
                 if resolved not in names:
                     raise ValueError(f'Missing relationship target: {name} -> {target}')
         office_rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
@@ -76,9 +107,14 @@ def package_checks(source):
             relpath = posixpath.join(posixpath.dirname(name), '_rels', posixpath.basename(name) + '.rels')
             for element in root.iter():
                 for attribute, value in element.attrib.items():
-                    if attribute.startswith(('{' + office_rel + '}', '{' + strict_rel + '}')) and value not in relationships.get(relpath, set()):
-                        raise ValueError(f'Missing relationship Id: {name} -> {value}')
-        if not any(rel.get('Type', '').endswith('/officeDocument') and unquote(rel.get('Target', '')).lstrip('/') == main for rel in xml['_rels/.rels']):
+                    if attribute.startswith(('{' + office_rel + '}', '{' + strict_rel + '}')):
+                        if value not in relationships.get(relpath, set()):
+                            raise ValueError(f'Missing relationship Id: {name} -> {value}')
+                        if value in external_ids.get(relpath, set()) and (element.tag not in HYPERLINK_ELEMENTS or etree.QName(attribute).localname != 'id'):
+                            raise ValueError(f'External resource referenced outside a hyperlink: {name} -> {value}')
+        if not any(rel.get('Type') in [prefix + 'officeDocument' for prefix in OFFICE_RELATIONSHIPS]
+                   and rel.get('TargetMode') != 'External'
+                   and relationship_target('', rel.get('Target', '')) == main for rel in xml['_rels/.rels']):
             raise ValueError('Missing main document relationship')
         ns = {'ct': 'http://schemas.openxmlformats.org/package/2006/content-types'}
         ct = xml['[Content_Types].xml']
@@ -101,6 +137,38 @@ def convert(source, out, profile, extension):
     if not target.is_file() or not target.stat().st_size:
         raise ValueError(f'LibreOffice did not produce {target.name}')
     return target
+
+
+def conversion_copy(source, out):
+    """Canonicalize equivalent internal URIs for LibreOffice, preserving all other parts."""
+    changed = {}
+    with zipfile.ZipFile(source) as archive:
+        for name in archive.namelist():
+            if not name.endswith('.rels'):
+                continue
+            root = etree.fromstring(archive.read(name), etree.XMLParser(resolve_entities=False, no_network=True))
+            base = posixpath.dirname(posixpath.dirname(name)) if name != '_rels/.rels' else ''
+            normalized = False
+            for rel in root:
+                if rel.get('TargetMode') == 'External':
+                    continue
+                uri = urlsplit(rel.get('Target', ''))
+                resolved = relationship_target(base, rel.get('Target', ''))
+                target = '/' + resolved if uri.path.startswith('/') else posixpath.relpath(resolved, base or '.')
+                if target != unquote(uri.path):
+                    rel.set('Target', urlunsplit(('', '', quote(target, safe='/'), uri.query, uri.fragment)))
+                    normalized = True
+            if normalized:
+                changed[name] = etree.tostring(root, xml_declaration=True, encoding='UTF-8')
+        if not changed:
+            return source, 0
+        directory = out / 'render-input'
+        directory.mkdir(exist_ok=True)
+        target = directory / source.name
+        with zipfile.ZipFile(target, 'w') as copy:
+            for entry in archive.infolist():
+                copy.writestr(entry, changed.get(entry.filename, archive.read(entry.filename)))
+    return target, len(changed)
 
 
 def validate(source, out):
@@ -137,9 +205,16 @@ def validate(source, out):
                     book.close()
             check('xlsx_readability', read_book)
         profile = out / 'profile'
+        conversion_input = None
+        def input_for_conversion():
+            nonlocal conversion_input
+            if conversion_input is None:
+                conversion_input = conversion_copy(source, out)
+            return conversion_input
         def render():
             report['renderer_version'] = run(['libreoffice', '--version']).strip()
-            pdf = convert(source, out, profile, 'pdf')
+            render_source, normalized_parts = input_for_conversion()
+            pdf = convert(render_source, out, profile, 'pdf')
             info = run(['pdfinfo', str(pdf)])
             match = re.search(r'^Pages:\s+(\d+)', info, re.M)
             if not match or int(match[1]) < 1:
@@ -150,14 +225,14 @@ def validate(source, out):
                 if report['page_count'] != len(Presentation(str(source)).slides):
                     raise ValueError('Rendered slide count differs from the saved deck')
             report['pdf_path'] = str(pdf)
-            return {'pages': report['page_count']}
+            return {'pages': report['page_count'], 'normalized_relationship_parts': normalized_parts}
         check('actual_file_render', render)
         if source.suffix.lower() == '.xlsx':
             def formulas():
                 from openpyxl import load_workbook
                 recalc = out / 'recalculated'
                 recalc.mkdir(exist_ok=True)
-                target = convert(source, recalc, profile, 'xlsx:Calc MS Excel 2007 XML')
+                target = convert(input_for_conversion()[0], recalc, profile, 'xlsx:Calc MS Excel 2007 XML')
                 original = load_workbook(source, read_only=True, data_only=False)
                 calculated = load_workbook(target, read_only=True, data_only=True)
                 count = 0
@@ -168,7 +243,7 @@ def validate(source, out):
                                 if cell.data_type == 'f':
                                     count += 1
                                     result = calculated[sheet.title][cell.coordinate]
-                                    if result.data_type == 'e' or result.value is None:
+                                    if result.data_type == 'e':
                                         raise ValueError(f'Formula failed: {sheet.title}!{cell.coordinate}: {result.value}')
                     return {'formulas_checked': count, 'engine': 'LibreOffice Calc'}
                 finally:

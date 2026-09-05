@@ -125,7 +125,7 @@ export class OutgoingFiles {
       if (!hash) continue;
       try {
         if (!this.input.officeValidation) throw new Error("Office validation is unavailable.");
-        this.input.officeValidation.assertApprovedHash(hash);
+        this.input.officeValidation.assertApprovedHash(hash, { name: attachment.name, mime: attachment.mimeType });
         if (attachment.sourceVirtualPath) {
           if (!this.input.commandRuntime) throw new Error("Office workspace is unavailable.");
           const current = await this.input.commandRuntime.readWorkspaceFile({
@@ -164,7 +164,7 @@ export class OutgoingFiles {
       if (office) {
         try {
           if (!this.input.officeValidation) throw new Error("Office validation is unavailable.");
-          this.input.officeValidation.assertApproved(file.bytes);
+          this.input.officeValidation.assertApproved(file.bytes, file);
         } catch (error) {
           if (!exported && this.input.commandRuntime?.writeWorkspaceFile) {
             const staged = `/office-imports/${randomUUID()}${office}`;

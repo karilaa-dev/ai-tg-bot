@@ -33,7 +33,7 @@ async function load() {
     revision: sha256Hex(
       Buffer.from(
         files
-          .map((file) => `${sha256Hex(file.bytes)}  ${file.path}\n`)
+          .map((file) => `${sha256Hex(file.bytes)}  ./${path.posix.relative(OFFICE_BUNDLE_PATH, file.path)}\n`)
           .join(""),
       ),
     ),

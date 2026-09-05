@@ -732,11 +732,22 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     if (installed.stdout.trim() !== bundle.revision) {
       this.input.logger?.info("upgrading Office tools in existing sandbox", {...scope, sandboxId:sandbox.id});
       await sandbox.setTimeout(10 * 60_000, signal);
-      const directories = [...new Set(bundle.files.map(file => path.posix.dirname(file.path)))];
-      await runControl(sandbox, shellJoin(["mkdir", "-p", "--", ...directories]), this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-      for (const file of bundle.files) await sandbox.writeFile(file.path, file.bytes, "root", signal, this.input.config.E2B_REQUEST_TIMEOUT_MS);
-      const upgrade = await runCommandResult(sandbox, shellJoin(["bash", `${OFFICE_BUNDLE_PATH}/install.sh`]), 8 * 60_000, signal);
+      const staging = `${OFFICE_BUNDLE_PATH}.staging-${bundle.revision}-${randomUUID()}`;
+      const uploads = bundle.files.map(file => ({ ...file, path: `${staging}/${path.posix.relative(OFFICE_BUNDLE_PATH, file.path)}` }));
+      try {
+        const directories = [...new Set(uploads.map(file => path.posix.dirname(file.path)))];
+        await runControl(sandbox, shellJoin(["mkdir", "-p", "--", ...directories]), this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+        for (const file of uploads) await sandbox.writeFile(file.path, file.bytes, "root", signal, this.input.config.E2B_REQUEST_TIMEOUT_MS);
+      } catch (error) {
+        await runControl(sandbox, shellJoin(["rm", "-rf", "--", staging]), this.input.config.E2B_REQUEST_TIMEOUT_MS).catch(() => undefined);
+        throw error;
+      }
+      // The installer verifies this immutable upload, promotes it and installs it
+      // under its remote lock. Never overwrite the active bundle during upload.
+      const upgrade = await runCommandResult(sandbox, shellJoin(["bash", `${staging}/install.sh`, bundle.revision]), 8 * 60_000, signal);
       if (upgrade.exitCode !== 0) throw new Error(upgrade.stderr || "Office toolbox upgrade failed. Workspace files were preserved.");
+      const verified = await runCommandResult(sandbox, "cat /opt/office/installed-revision", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
+      if (verified.exitCode !== 0 || verified.stdout.trim() !== bundle.revision) throw new Error("Office installed revision differs from the requested bundle.");
     }
     state.toolboxValidatedSandboxId = sandbox.id;
     this.input.logger?.info(

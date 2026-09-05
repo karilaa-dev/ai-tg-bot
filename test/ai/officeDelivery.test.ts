@@ -144,6 +144,52 @@ describe("Office delivery gate", () => {
     await input.outgoingFiles.workspace([{ path: "/deck.pptx", caption }]);
     expect(input.outgoingFiles.items[0]?.caption).toBe(caption);
   });
+  it.each([
+    { name: "deck.docx" },
+    { name: "deck.pdf", mime: "application/pdf" },
+    {
+      name: "deck.pptx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+  ])(
+    "rejects approved bytes with contradictory delivery labels: $name $mime",
+    async (labels) => {
+      const { input, runtime, approve } = await setup();
+      const bytes = Buffer.from("PK\x03\x04ppt/presentation.xml");
+      runtime.put("/deck.pptx", bytes);
+      await approve();
+      const result = await input.outgoingFiles.workspace([
+        { path: "/deck.pptx", ...labels },
+      ]);
+      expect(result.errors[0]?.error).toContain("format mismatch");
+      await expect(
+        input.outgoingFiles.bytes(async () => ({ bytes, ...labels })),
+      ).rejects.toThrow("format mismatch");
+      expect(input.outgoingFiles.items).toHaveLength(0);
+      runtime.put("/renamed.docx", bytes);
+      await expect(
+        input.officeValidation.validate("/renamed.docx"),
+      ).rejects.toThrow("format mismatch");
+    },
+  );
+  it("accepts matching Office labels and rechecks labels changed after queuing", async () => {
+    const { input, approve } = await setup();
+    await approve();
+    await input.outgoingFiles.workspace([
+      {
+        path: "/deck.pptx",
+        name: "Renamed.PPTX",
+        mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      },
+    ]);
+    expect(input.outgoingFiles.items).toHaveLength(1);
+    input.outgoingFiles.items[0]!.name = "changed.pdf";
+    await input.outgoingFiles.verifyOfficeAttachments();
+    expect(input.outgoingFiles.items).toHaveLength(0);
+    expect(input.outgoingFiles.unresolved[0]?.error).toContain(
+      "format mismatch",
+    );
+  });
   it("invalidates changed bytes and removes the stale queued replacement", async () => {
     const { input, runtime, approve } = await setup();
     await approve();

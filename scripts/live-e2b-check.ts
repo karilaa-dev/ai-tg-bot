@@ -6,6 +6,8 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos, type Repos } from "../src/db/repos/index.js";
 import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
 import { OfficeValidation } from "../src/office/validation.js";
+import { officeBundle, OFFICE_BUNDLE_PATH } from "../src/e2b/officeBundle.js";
+import { shellJoin } from "../src/util/shell.js";
 import { createRenderOfficePreviewTool } from "../src/ai/tools/renderOfficePreview.js";
 import { createLogger } from "../src/logger.js";
 import type { SandboxThreadFile } from "../src/sandbox/types.js";
@@ -63,6 +65,14 @@ try {
       user: "root",
     });
     await previous.files.write(upgradeSource, upgradeMarker, { user: "root" });
+    await previous.commands.run(`mkdir -p ${OFFICE_BUNDLE_PATH}`, {
+      user: "root",
+    });
+    await previous.files.write(
+      `${OFFICE_BUNDLE_PATH}/removed-in-next-release.txt`,
+      "obsolete asset",
+      { user: "root" },
+    );
     await repos.threadSandboxes.insertIfAbsent({
       deploymentId: config.E2B_DEPLOYMENT_ID,
       userId: user.tg_id,
@@ -176,6 +186,50 @@ try {
     );
     if (removed.exitCode !== 0)
       throw new Error("OfficeCLI remained installed after replacement checks");
+    const bundle = await officeBundle();
+    const upgraded = await Sandbox.connect(sandboxId!, {
+      apiKey: config.E2B_API_KEY,
+    });
+    await upgraded.commands.run(
+      shellJoin([
+        "bash",
+        "-c",
+        [
+          "set -euo pipefail",
+          `test ! -e ${OFFICE_BUNDLE_PATH}/removed-in-next-release.txt`,
+          `test "$(cat /opt/office/installed-revision)" = ${bundle.revision}`,
+          "task_gate=$(mktemp -d)",
+          `stage_one=${OFFICE_BUNDLE_PATH}.lock-test-one`,
+          `stage_two=${OFFICE_BUNDLE_PATH}.lock-test-two`,
+          "holder= installer_one= installer_two=",
+          'trap \'touch "$task_gate/release"; wait ${holder:-} ${installer_one:-} ${installer_two:-} 2>/dev/null || true; rm -rf -- "$task_gate" "$stage_one" "$stage_two"\' EXIT',
+          `cp -a ${OFFICE_BUNDLE_PATH} "$stage_one"`,
+          `cp -a ${OFFICE_BUNDLE_PATH} "$stage_two"`,
+          `touch ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
+          'flock -x /var/lock/ai-tg-bot-office-install.lock bash -c \'touch "$1/held"; while [[ ! -e $1/release ]]; do sleep 0.05; done\' -- "$task_gate" &',
+          "holder=$!",
+          "for attempt in {1..100}; do [[ -e $task_gate/held ]] && break; sleep 0.05; done",
+          'test -e "$task_gate/held"',
+          `bash "$stage_one/install.sh" ${bundle.revision} >"$task_gate/one.log" 2>&1 &`,
+          "installer_one=$!",
+          `bash "$stage_two/install.sh" ${bundle.revision} >"$task_gate/two.log" 2>&1 &`,
+          "installer_two=$!",
+          "sleep 0.5",
+          'kill -0 "$installer_one" "$installer_two"',
+          `test -e ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
+          'test -d "$stage_one" && test -d "$stage_two"',
+          'touch "$task_gate/release"',
+          'wait "$holder"',
+          'wait "$installer_one" || { cat "$task_gate/one.log"; exit 1; }',
+          'wait "$installer_two" || { cat "$task_gate/two.log"; exit 1; }',
+          `test ! -e ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
+          'test ! -e "$stage_one" && test ! -e "$stage_two"',
+          `test "$(cat /opt/office/installed-revision)" = ${bundle.revision}`,
+          "printf 'Concurrent Office promotions respected the remote lock\\n'",
+        ].join("\n"),
+      ]),
+      { user: "root", timeoutMs: 30_000 },
+    );
   }
   sandboxId = initialMapping.sandbox_id;
 

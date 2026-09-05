@@ -62,7 +62,8 @@ s.append(['Quarter','Sales'])
 s.append(['Q1',10])
 s.append(['Q2',20])
 s['B4'] = '=SUM(B2:B3)'
-s.print_area = 'A1:B4'
+s['B5'] = '=IF(A5="","",A5*2)'
+s.print_area = 'A1:B5'
 s.sheet_properties.pageSetUpPr.fitToPage = True
 s.page_setup.fitToWidth = 1
 s.page_setup.fitToHeight = 1
@@ -105,6 +106,7 @@ for source in corrupt.docx missing-part.docx missing-relationship.docx bad-xml.d
   office-files validate "$task_dir/$source" "$task_dir/qa-$source" > "$source.json"
   jq -e 'any(.checks[]; .status == "failed")' "$source.json" >/dev/null
 done
+office-python /opt/office/tests/office-regressions.py "$task_dir" "$(command -v office-files)"
 # A missing renderer must produce an explicit unavailable status, never approval.
 mkdir no-renderer
 ln -s /usr/local/bin/docx no-renderer/docx
