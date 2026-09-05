@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 import { withModelIdentity } from "../../src/pi/modelIdentity.js";
 import { describe, expect, it } from "vitest";
@@ -209,26 +208,22 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("Close the browser session");
     expect(prompt).toContain("idle cleanup handle session_busy");
     expect(prompt).toContain("render_office_preview to inspect every page or slide");
-    expect(prompt).toContain("three unsuccessful fixes");
+    expect(prompt).toContain("three unsuccessful repair cycles");
     expect(prompt).not.toContain("Camofox");
-    expect(prompt.length + 170).toBeLessThanOrEqual(4500);
+    expect(prompt.length + 170).toBeLessThanOrEqual(5200);
   });
 
-  it("falls back honestly when visual Office preview is unavailable", async () => {
-    const prompt = await renderSystemPrompt({ user: baseUser });
-
-    expect(prompt).toContain("Follow its workflow and delivery checks");
-    const pptx = await fs.readFile("skills/officecli-pptx/SKILL.md", "utf8");
-    const docx = await fs.readFile("skills/officecli-docx/SKILL.md", "utf8");
-    expect(pptx).toContain("visual QA was unavailable");
-    expect(docx).toContain("Do not claim visual verification from schema validation alone");
-    expect(prompt).not.toContain("render_office_preview to inspect");
+  it("requires Office QA even without a browser service", async () => {
+    const prompt = await renderSystemPrompt({user:baseUser});
+    expect(prompt).toContain("validate_office_file");
+    expect(prompt).toContain("record passing visual_reviews");
+    expect(prompt).toContain("without sending the draft");
   });
 
   it("routes existing-image retrieval and photo collages away from generation", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser });
 
-    expect(prompt).toContain("only for an explicit synthesis or editing request");
+    expect(prompt).toContain("requested synthesis/edits or useful supporting artwork");
     expect(prompt).toContain("Prefer original, high-resolution retrieved images");
 
   });

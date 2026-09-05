@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.5",
+  "version": "2.0.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -37,7 +37,6 @@
     "drizzle-orm": "^0.45.2",
     "e2b": "2.46.0",
     "grammy": "^1.46.0",
-    "parse5": "8.0.1",
     "pg": "^8.23.0",
     "playwright-core": "1.62.1",
     "undici": "^8.10.0",

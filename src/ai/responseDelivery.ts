@@ -11,7 +11,6 @@ import { OutgoingBuffers } from "../files/outgoingBuffers.js";
 import { AttachmentPreparation } from "./attachmentPreparation.js";
 
 import type { TurnInput, ThinkingDelivery } from "./types.js";
-import { normalizeGeneratedImageFinalText, appendGeneratedImageDemotedThinking } from "./turnOutput.js";
 
 const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
@@ -24,12 +23,7 @@ export async function sendFinal(
   elapsedMs = 0,
   attachments: CreatedFileAttachment[] = [],
 ): Promise<void> {
-  const hasGeneratedImageAttachment = attachments
-    .slice(0, MAX_CREATED_FILES_PER_ANSWER)
-    .some((attachment) => attachment.origin === "generated_image");
-  const finalText = normalizeGeneratedImageFinalText(answer, hasGeneratedImageAttachment);
-  const visibleThinking = appendGeneratedImageDemotedThinking(input.t, thinking, finalText.demotedReasoning);
-  await sendFinalVisible(input, visibleThinking, finalText.answer, elapsedMs, attachments);
+  await sendFinalVisible(input, thinking, answer, elapsedMs, attachments);
 }
 
 interface FinalVisibleDelivery {
@@ -932,9 +926,9 @@ function documentFallbackCaption(title: string, attachment: CreatedFileAttachmen
 function attachmentPersistedText(attachments: CreatedFileAttachment[]): string {
   if (!attachments.length) return "";
   const generatedImages = attachments.filter((attachment) => attachment.origin === "generated_image");
-  const files = generatedImages.length ? generatedImages : attachments;
+  const files = attachments;
   const names = files.map((file) => file.caption?.trim() || file.name).filter(Boolean).join(", ");
-  if (generatedImages.length) return `Generated image: ${names}`;
+  if (generatedImages.length === files.length) return `Generated image: ${names}`;
   return `Attached file${files.length === 1 ? "" : "s"}: ${names}`;
 }
 

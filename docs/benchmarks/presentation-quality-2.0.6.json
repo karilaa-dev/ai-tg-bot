@@ -1,0 +1,72 @@
+{
+  "date": "2026-09-05",
+  "applicationVersion": "2.0.6",
+  "sandboxImage": "ai-tg-bot-tools:v2.0.6",
+  "before": {
+    "sourceSha256": "f2990f7d45b20a977d1b1cec1c44e19a460450535479f9336b2df7fe50e8d6e9",
+    "slideCount": 7,
+    "embeddedImages": 0,
+    "independentReview": "Five consecutive body slides use the same three-card composition."
+  },
+  "runs": [
+    {
+      "iteration": 1,
+      "prompt": "сделай презентацию на тему \"Город будущего\" Токио",
+      "sourceSha256": "33c5cd457316e577f86486fe9024f115c9cde26b481a5ad86ae03360ea7b4def",
+      "slideCount": 7,
+      "embeddedImages": 3,
+      "slidesWithLargeImages": 3,
+      "caption": null,
+      "approved": true,
+      "tools": [
+        "read",
+        "web_search",
+        "web_search",
+        "bash",
+        "bash",
+        "validate_office_file",
+        "render_office_preview",
+        "render_office_preview",
+        "validate_office_file",
+        "finish_response"
+      ],
+      "telegramMessagesSent": false
+    },
+    {
+      "iteration": 2,
+      "prompt": "сделай презентацию на тему \"Город будущего\" Токио",
+      "sourceSha256": "f4b89ff642a29a3ecda19f62a5cdd74110391c1017e607b37cac3b269af0a75a",
+      "slideCount": 7,
+      "embeddedImages": 2,
+      "slidesWithLargeImages": 2,
+      "caption": null,
+      "approved": true,
+      "tools": [
+        "read",
+        "web_search",
+        "web_search",
+        "bash",
+        "bash",
+        "validate_office_file",
+        "render_office_preview",
+        "render_office_preview",
+        "validate_office_file",
+        "finish_response"
+      ],
+      "telegramMessagesSent": false
+    }
+  ],
+  "independentReview": {
+    "firstRun": "Relevant substantial photographs and varied layouts; cramped gaps under wrapped headings and a generic dark palette prompted another skill revision.",
+    "finalRun": "Tokyo photograph and labeled Tokyo eSG concept illustration, light palette, readable route diagram, varied composition, and improved heading gaps. Inspected all seven actual-file rendered slides.",
+    "limits": "Text-heavy slides remain. This single request does not establish general design quality or parity with curated showcase presentations. Image counts and area thresholds are regression signals, not aesthetic scores."
+  },
+  "checks": {
+    "typecheck": "passed",
+    "testsPassed": 462,
+    "testsSkipped": 2,
+    "skipReason": "TEST_POSTGRES_URL is not configured",
+    "build": "passed",
+    "skillValidation": "passed"
+  }
+}

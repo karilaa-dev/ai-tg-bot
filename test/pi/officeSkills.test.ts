@@ -8,8 +8,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  OFFICECLI_SKILLS,
-  OFFICECLI_SKILLS_REVISION,
+  OFFICE_SKILLS,
+  DOCX_SKILL_REVISION,
   OPENSCAD_SKILLS,
   approvedSkillPaths,
   createApprovedSkillReadTool,
@@ -24,12 +24,12 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-describe("pinned OfficeCLI Pi skills", () => {
-  it("loads exactly the two reviewed, checksum-verified skills", async () => {
+describe("pinned Office Pi skills", () => {
+  it("loads exactly the four reviewed, checksum-verified skills", async () => {
     await expect(validateOfficeSkills()).resolves.toBeUndefined();
-    expect(OFFICECLI_SKILLS_REVISION).toMatch(/^[a-f0-9]{40}$/u);
-    expect(OFFICECLI_SKILLS.map((skill) => skill.sha256))
-      .toEqual(OFFICECLI_SKILLS.map(() => expect.stringMatching(/^[a-f0-9]{64}$/u)));
+    expect(DOCX_SKILL_REVISION).toMatch(/^[a-f0-9]{40}$/u);
+    expect(OFFICE_SKILLS.map((skill) => skill.sha256))
+      .toEqual(OFFICE_SKILLS.map(() => expect.stringMatching(/^[a-f0-9]{64}$/u)));
 
     const loaded = loadSkills({
       cwd: process.cwd(),
@@ -40,8 +40,10 @@ describe("pinned OfficeCLI Pi skills", () => {
 
     expect(loaded.diagnostics).toEqual([]);
     expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
-      "officecli-docx",
-      "officecli-pptx",
+      "docx-cli",
+      "pptx-edit",
+      "pptxgenjs",
+      "xlsx",
     ]);
     expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
 
@@ -59,14 +61,16 @@ describe("pinned OfficeCLI Pi skills", () => {
     });
     expect(loaded.diagnostics).toEqual([]);
     expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
-      "officecli-docx",
-      "officecli-pptx",
+      "docx-cli",
       "openscad",
+      "pptx-edit",
+      "pptxgenjs",
       "sandbox-files",
+      "xlsx",
     ]);
   });
 
-  it("keeps explicit OfficeCLI skills when default skill discovery is disabled", async () => {
+  it("keeps explicit Office skills when default skill discovery is disabled", async () => {
     const loader = new DefaultResourceLoader({
       cwd: process.cwd(),
       agentDir: path.resolve("data/pi"),
@@ -82,8 +86,10 @@ describe("pinned OfficeCLI Pi skills", () => {
     await loader.reload();
     expect(loader.getSkills().diagnostics).toEqual([]);
     expect(loader.getSkills().skills.map((skill) => skill.name).sort()).toEqual([
-      "officecli-docx",
-      "officecli-pptx",
+      "docx-cli",
+      "pptx-edit",
+      "pptxgenjs",
+      "xlsx",
     ]);
   });
 
@@ -98,9 +104,9 @@ describe("pinned OfficeCLI Pi skills", () => {
     );
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-    expect(text).toContain("# OfficeCLI DOCX skill");
-    expect(text).toContain("## Scope");
-    expect(text).toContain("### Delivery gate");
+    expect(text).toContain("# docx-cli");
+    expect(text).toContain("## Installed tool and workspace");
+    expect(text).toContain("## Delivery checks");
     expect(result.details).toMatchObject({ truncated: false, start_line: 1 });
 
     const openscadResult = await tool.execute(
@@ -127,7 +133,7 @@ describe("pinned OfficeCLI Pi skills", () => {
     )).rejects.toThrow("restricted to approved installed skill files");
     await expect(tool.execute(
       "read-license",
-      { path: path.resolve("skills/officecli/LICENSE") },
+      { path: path.resolve("skills/sandbox-files/../../README.md") },
       undefined,
       undefined,
       {} as never,
@@ -137,8 +143,8 @@ describe("pinned OfficeCLI Pi skills", () => {
   it("blocks symlinks that escape an approved skill directory", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-office-skills-"));
     tempRoots.push(root);
-    const docxRoot = path.join(root, "skills/officecli-docx");
-    const pptxRoot = path.join(root, "skills/officecli-pptx");
+    const docxRoot = path.join(root, "skills/docx-cli");
+    const pptxRoot = path.join(root, "skills/pptxgenjs");
     await fs.mkdir(docxRoot, { recursive: true });
     await fs.mkdir(pptxRoot, { recursive: true });
     await fs.symlink(path.resolve("package.json"), path.join(docxRoot, "SKILL.md"));

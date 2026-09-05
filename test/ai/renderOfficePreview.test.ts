@@ -1,109 +1,189 @@
-import { describe, expect, it, vi } from "vitest";
-
-import { createRenderOfficePreviewTool } from "../../src/ai/tools/renderOfficePreview.js";
+import { describe, it, expect } from "vitest";
+import { workspaceRuntime } from "../helpers/workspaceRuntime.js";
 import { loadTestConfig } from "../../src/config.js";
-import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from "../../src/sandbox/types.js";
+import { OfficeValidation } from "../../src/office/validation.js";
+import { createRenderOfficePreviewTool } from "../../src/ai/tools/renderOfficePreview.js";
+import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 
-const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
-
-describe("render_office_preview", () => {
-  it("instructs the model to visually inspect every presentation slide", () => {
-    const tool = createRenderOfficePreviewTool(buildInput(fakeRuntime("not used")));
-
-    expect(tool.description).toContain("once for every slide");
-    expect(tool.description).toContain("overlap, clipping, wrapping, contrast, spacing, and alignment");
+export function officeTestSetup() {
+  const runtime = workspaceRuntime();
+  const bytes = Buffer.from("deck revision one");
+  runtime.put("/deck.pptx", bytes);
+  const config = loadTestConfig();
+  const officeValidation = new OfficeValidation({
+    runtime,
+    config,
+    userId: 1,
+    threadId: 2,
   });
-
-  it("renders sanitized OfficeCLI HTML as a model-only image and cleans up", async () => {
-    const runtime = fakeRuntime("<!doctype html><html><body onload='steal()'><script>steal()</script><h1>Slide</h1></body></html>");
-    const browserRuntime = fakeBrowserRuntime();
-    const tool = createRenderOfficePreviewTool(buildInput(runtime, browserRuntime));
-
-    const output = await tool.execute({ path: "/deck.pptx", page: 2 });
-    const model = await tool.toModelOutput!({ toolCallId: "preview", input: { path: "/deck.pptx", page: 2 }, output });
-    const details = await tool.toToolDetails!({ toolCallId: "preview", input: { path: "/deck.pptx", page: 2 }, output });
-
-    expect(output).toMatchObject({ rendered: true, path: "/deck.pptx", page: 2, size: PNG.length });
-    expect(browserRuntime.renderOfficeHtml).toHaveBeenCalledWith(
-      expect.not.stringContaining("steal"),
-      { selector: '.slide-container[data-slide="2"] .slide' },
-      undefined,
+  const input = {
+    config,
+    user: { tg_id: 1 },
+    thread: { id: 2 },
+    commandRuntime: runtime,
+    officeValidation,
+  } as unknown as ToolBuildInput;
+  return {
+    runtime,
+    bytes,
+    officeValidation,
+    tool: createRenderOfficePreviewTool(input),
+  };
+}
+describe("actual Office previews", () => {
+  it.each(["rejection", "exit", "timeout"])(
+    "retries scratch cleanup after a %s without losing paths",
+    async (failure) => {
+      const { runtime, officeValidation } = officeTestSetup();
+      await officeValidation.validate("/deck.pptx");
+      const original = runtime.execute.getMockImplementation()!;
+      const attempts: string[][] = [];
+      runtime.execute.mockImplementation(async (request) => {
+        if (request.command === "rm") {
+          attempts.push(request.args);
+          if (attempts.length === 1) {
+            if (failure === "rejection")
+              throw new Error("transport unavailable");
+            return {
+              ...(await original(request)),
+              exitCode: failure === "exit" ? 1 : 0,
+              timedOut: failure === "timeout",
+            };
+          }
+        }
+        return original(request);
+      });
+      await expect(officeValidation.dispose()).rejects.toThrow();
+      await officeValidation.dispose();
+      await officeValidation.dispose();
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toEqual(attempts[0]);
+      expect(attempts[0]!.join(" ")).toContain("/.office-qa/");
+    },
+  );
+  it("renders multiple pages without a browser, strips image bytes from details, and requires explicit visual review", async () => {
+    const { tool, officeValidation } = officeTestSetup();
+    const output = await tool.execute({ path: "/deck.pptx", pages: [1, 2] });
+    if ("error" in output) throw new Error(output.error);
+    expect(output.page_count).toBe(2);
+    expect(output.images).toHaveLength(2);
+    expect((await officeValidation.validate("/deck.pptx")).approved).toBe(
+      false,
     );
-    expect(model).toMatchObject({ type: "content" });
-    expect(details).not.toHaveProperty("image_base64");
-    expect(runtime.execute).toHaveBeenCalledTimes(2);
-    expect(runtime.execute.mock.calls[1]![0]).toMatchObject({ command: "rm" });
-  });
-
-  it("rejects unsupported files before using the sandbox", async () => {
-    const runtime = fakeRuntime("not used");
-    const tool = createRenderOfficePreviewTool(buildInput(runtime));
-    await expect(tool.execute({ path: "/notes.txt", page: 1 })).resolves.toEqual({
-      error: "Office preview path must end in .docx, .pptx, or .xlsx.",
+    await expect(
+      officeValidation.validate("/deck.pptx", output.source_sha256, [
+        { page: 1, status: "passed", issues: [] },
+      ]),
+    ).rejects.toThrow("not been returned");
+    const model = await tool.toModelOutput!({
+      toolCallId: "preview",
+      input: { path: "/deck.pptx", pages: [1, 2] },
+      output,
     });
-    expect(runtime.execute).not.toHaveBeenCalled();
+    expect(model).toMatchObject({ type: "content" });
+    const details = await tool.toToolDetails!({
+      toolCallId: "preview",
+      input: { path: "/deck.pptx" },
+      output,
+    });
+    expect(JSON.stringify(details)).not.toContain("image_base64");
+    const report = await officeValidation.validate(
+      "/deck.pptx",
+      output.source_sha256,
+      [1, 2].map((page) => ({ page, status: "passed", issues: [] })),
+    );
+    expect(report.approved).toBe(true);
+  });
+  it("supports legacy single-page input and rejects missing pages", async () => {
+    const { tool } = officeTestSetup();
+    expect(await tool.execute({ path: "/deck.pptx", page: 2 })).toMatchObject({
+      images: [{ page: 2 }],
+    });
+    expect(
+      await tool.execute({ path: "/deck.pptx", pages: [3] }),
+    ).toHaveProperty("error");
+    expect(
+      await tool.execute({ path: "/deck.pptx", pages: [1, 1] }),
+    ).toHaveProperty("error");
+    expect(
+      await tool.inputSchema.safeParseAsync({
+        path: "/deck.pptx",
+        page: 1,
+        pages: [1],
+      }),
+    ).toMatchObject({ success: false });
+  });
+  it("rejects stale reviews and failed structural checks", async () => {
+    const { tool, runtime, officeValidation, bytes } = officeTestSetup();
+    const output = await tool.execute({ path: "/deck.pptx", pages: [1, 2] });
+    if ("error" in output) throw new Error(output.error);
+    await tool.toModelOutput!({
+      toolCallId: "preview",
+      input: { path: "/deck.pptx" },
+      output,
+    });
+    await officeValidation.validate(
+      "/deck.pptx",
+      output.source_sha256,
+      [1, 2].map((page) => ({ page, status: "passed", issues: [] })),
+    );
+    expect(() => officeValidation.assertApproved(bytes)).not.toThrow();
+    runtime.put("/deck.pptx", Buffer.from("changed deck"));
+    runtime.setChecks([
+      {
+        name: "ooxml_package",
+        status: "failed",
+        issues: ["broken relationship"],
+      },
+    ]);
+    await expect(
+      officeValidation.validate("/deck.pptx", output.source_sha256, [
+        { page: 1, status: "passed", issues: [] },
+      ]),
+    ).rejects.toThrow("stale");
+    expect(() =>
+      officeValidation.assertApproved(Buffer.from("changed deck")),
+    ).toThrow("validation required");
+    expect(
+      (await officeValidation.validate("/deck.pptx")).checks[0]?.status,
+    ).toBe("failed");
+  });
+  it("withholds approval for partial, failed, or unavailable reviews and checks", async () => {
+    const { tool, runtime, officeValidation, bytes } = officeTestSetup();
+    const output = await tool.execute({ path: "/deck.pptx", pages: [1, 2] });
+    if ("error" in output) throw new Error(output.error);
+    await tool.toModelOutput!({
+      toolCallId: "preview",
+      input: { path: "/deck.pptx" },
+      output,
+    });
+    expect(
+      (
+        await officeValidation.validate("/deck.pptx", output.source_sha256, [
+          { page: 1, status: "passed", issues: [] },
+        ])
+      ).approved,
+    ).toBe(false);
+    expect(
+      (
+        await officeValidation.validate("/deck.pptx", output.source_sha256, [
+          { page: 2, status: "failed", issues: ["Clipped title"] },
+        ])
+      ).approved,
+    ).toBe(false);
+    expect(() => officeValidation.assertApproved(bytes)).toThrow(
+      "validation required",
+    );
+    officeValidation.clear();
+    runtime.setChecks([
+      {
+        name: "actual_file_render",
+        status: "unavailable",
+        issues: ["LibreOffice missing"],
+      },
+    ]);
+    expect((await officeValidation.validate("/deck.pptx")).approved).toBe(
+      false,
+    );
   });
 });
-
-function buildInput(runtime: ReturnType<typeof fakeRuntime>, browserRuntime = fakeBrowserRuntime()) {
-  return {
-    config: loadTestConfig({
-      BROWSER_USE_API_KEY: "secret",
-    }),
-    repos: {
-      threads: { chain: async (thread: unknown) => [thread] },
-      messages: { listIdsForScopes: async () => [] },
-      files: {
-        listForMessages: async () => [],
-        listForThreads: async () => [],
-        listRecoverableIds: async (fileIds: number[]) => fileIds,
-        listByIds: async () => [],
-        listTelegramFileRefs: async () => [],
-      },
-    },
-    user: { tg_id: 9 },
-    thread: { id: 10 },
-    commandRuntime: runtime,
-    browserRuntime,
-  } as never;
-}
-
-function fakeBrowserRuntime() {
-  return {
-    renderOfficeHtml: vi.fn(async () => ({
-      bytes: PNG,
-      mediaType: "image/png",
-      session_remaining_seconds: 240,
-    })),
-  };
-}
-
-function fakeRuntime(html: string) {
-  return {
-    materializeFiles: vi.fn(async () => ({ directory: "/home/user/telegram-files", available: 0, files: [] })),
-    execute: vi.fn(async (_request: SandboxCommandRequest): Promise<SandboxCommandResult> => commandResult()),
-    readWorkspaceFile: vi.fn(async () => ({
-      sandboxId: "sandbox-1",
-      canonicalPath: "/home/user/workspace/preview.html",
-      sourceCanonicalPath: null,
-      bytes: Buffer.from(html),
-      size: Buffer.byteLength(html),
-      contentSha256: "0".repeat(64),
-    })),
-    readSourceFile: vi.fn(async () => Buffer.alloc(0)),
-    publishWebsite: vi.fn(async () => { throw new Error("not used"); }),
-    dispose: vi.fn(async () => undefined),
-  } satisfies CommandRuntime;
-}
-
-function commandResult(): SandboxCommandResult {
-  return {
-    stdout: "",
-    stderr: "",
-    exitCode: 0,
-    timedOut: false,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
-  };
-}

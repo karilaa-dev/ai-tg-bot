@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export NODE_PATH=/opt/office/node/node_modules
+exec node "$@"

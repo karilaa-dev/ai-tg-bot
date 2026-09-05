@@ -17,6 +17,7 @@ import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { deferred } from "../helpers/async.js";
+import { officeBundle, OFFICE_BUNDLE_PATH } from "../../src/e2b/officeBundle.js";
 
 describe("thread E2B runtime manager", () => {
   let config: AppConfig;
@@ -226,6 +227,68 @@ describe("thread E2B runtime manager", () => {
       call.user === "root"
       && call.requestTimeoutMs === config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS))
       .toBe(true);
+  });
+
+  it("writes binary assets atomically into this thread workspace and cleans staging files", async () => {
+    const bytes = Buffer.from([0, 255, 12, 7]);
+    await runtime.writeWorkspaceFile({userId,threadId,virtualPath:"/assets/generated.png",bytes});
+    const sandbox = client.onlySandbox();
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/assets/generated.png`)).toEqual(bytes);
+    expect([...sandbox.files.keys()].some(name=>name.includes("/.write-"))).toBe(false);
+    expect(sandbox.writeFileCalls.some(call=>call.user === "user" && call.path.includes("/.write-"))).toBe(true);
+  });
+
+  it("rejects writes through a parent symlink outside the workspace", async () => {
+    await runtime.execute(commandRequest(userId,threadId));
+    const sandbox=client.onlySandbox();
+    const original=sandbox.run.bind(sandbox);
+    vi.spyOn(sandbox,"run").mockImplementation(async command=>command.startsWith("'realpath'") ? {stdout:"/etc\n",stderr:"",exitCode:0} : original(command));
+    await expect(runtime.writeWorkspaceFile({userId,threadId,virtualPath:"/escape/file.png",bytes:Buffer.from("image")})).rejects.toThrow("escapes");
+    expect(sandbox.writeFileCalls.some(call=>call.user === "user" && call.path.includes("/.write-"))).toBe(false);
+  });
+
+  it("upgrades Office once without replacing the sandbox or touching user files", async () => {
+    await runtime.execute(commandRequest(userId,threadId));
+    const sandbox=client.onlySandbox();
+    sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`,Buffer.from("keep"));
+    await runtime.execute(commandRequest(userId,threadId));
+    expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
+    expect(sandbox.writeFileCalls.some(call => call.path.startsWith(OFFICE_BUNDLE_PATH + "/"))).toBe(false);
+    expect(sandbox.files.get("/opt/office/installed-revision")?.toString()).toBe((await officeBundle()).revision);
+    await runtime.dispose();
+    runtime = createRuntime();
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("keep");
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
+  });
+
+  it("leaves the active bundle untouched on a failed upload and retries in a fresh directory", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    await runtime.dispose();
+    runtime = createRuntime();
+    sandbox.files.set("/opt/office/installed-revision", Buffer.from("previous revision"));
+    sandbox.files.set(`${OFFICE_BUNDLE_PATH}/obsolete.txt`, Buffer.from("old asset"));
+    const before = Buffer.from(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/install.sh`)!);
+    const original = sandbox.writeFile.bind(sandbox);
+    let failedPath = "";
+    const writer = vi.spyOn(sandbox, "writeFile").mockImplementation(async (...args) => {
+      if (args[0].includes(".staging-")) {
+        failedPath = args[0];
+        throw new Error("upload interrupted");
+      }
+      return original(...args);
+    });
+    await expect(runtime.execute(commandRequest(userId, threadId))).rejects.toThrow("upload interrupted");
+    expect(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/install.sh`)).toEqual(before);
+    expect(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/obsolete.txt`)?.toString()).toBe("old asset");
+    expect(sandbox.controlCommands.some(command => command.startsWith("'rm' '-rf' '--'") && failedPath.startsWith(command.split("'")[7]!))).toBe(true);
+    writer.mockRestore();
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(sandbox.files.has(`${OFFICE_BUNDLE_PATH}/obsolete.txt`)).toBe(false);
+    expect(sandbox.writeFileCalls.filter(call => call.path.includes(".staging-")).every(call => call.path !== failedPath)).toBe(true);
   });
 
   it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
@@ -1611,6 +1674,19 @@ class FakeSandbox implements E2BSandbox {
 
   async run(command: string) {
     this.controlCommands.push(command);
+    if (command.startsWith("cat /opt/office/installed-revision"))
+      return { stdout: this.files.get("/opt/office/installed-revision")?.toString() ?? "", stderr: "", exitCode: 0 };
+    const officeInstall = command.match(/^'bash' '([^']+\.staging-[^']+)\/install.sh' '([a-f0-9]{64})'$/);
+    if (officeInstall) {
+      const staged = [...this.files].filter(([name]) => name.startsWith(officeInstall[1]! + "/"));
+      for (const name of this.files.keys()) if (name.startsWith(OFFICE_BUNDLE_PATH + "/")) this.files.delete(name);
+      for (const [name, bytes] of staged) {
+        this.files.set(OFFICE_BUNDLE_PATH + name.slice(officeInstall[1]!.length), bytes);
+        this.files.delete(name);
+      }
+      this.files.set("/opt/office/installed-revision", Buffer.from(officeInstall[2]!));
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }
     if (this.failSeal && command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")) {
       throw new Error("seal failed");
     }
@@ -1671,6 +1747,11 @@ class FakeSandbox implements E2BSandbox {
       const destination = unquote(match[2]!);
       const bytes = this.files.get(source);
       if (bytes) this.files.set(destination, Buffer.from(bytes));
+    }
+    const atomicMove=command.match(/^'mv' '-T' '--' '([^']+)' '([^']+)'$/);
+    if(atomicMove) {
+      const bytes=this.files.get(atomicMove[1]!);
+      if(bytes) {this.files.set(atomicMove[2]!,bytes);this.files.delete(atomicMove[1]!);}
     }
     for (const match of command.matchAll(/mv -f ('[^']*'|\S+) ('[^']*'|\S+)/g)) {
       const source = unquote(match[1]!);

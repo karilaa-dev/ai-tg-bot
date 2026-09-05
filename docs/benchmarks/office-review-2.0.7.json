@@ -1,0 +1,102 @@
+{
+  "date": "2026-09-05",
+  "applicationVersion": "2.0.7",
+  "fixCommit": "9317700",
+  "reviewThreadsResolved": 8,
+  "distinctFindingsAddressed": 7,
+  "checks": {
+    "typecheck": "passed",
+    "localTestsPassed": 470,
+    "localTestsSkipped": 2,
+    "localSkipReason": "TEST_POSTGRES_URL not configured",
+    "build": "passed",
+    "githubCi": "passed",
+    "githubCiRun": "https://github.com/karilaa-dev/ai-tg-bot/actions/runs/33944145833"
+  },
+  "release": {
+    "template": "ai-tg-bot-tools:v2.0.7",
+    "templateId": "nkeclxc4sm73vmb1e93y",
+    "buildId": "985ca9ba-e189-4a83-a154-2cb08820329d",
+    "liveSmoke": "passed",
+    "cpuCount": 2,
+    "memoryMB": 2048,
+    "officeFixtures": [
+      {
+        "file": "contract.docx",
+        "pages": 1,
+        "elapsed_ms": 5210,
+        "peak_child_rss_kib": 214240,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.pptx",
+        "pages": 2,
+        "elapsed_ms": 1676,
+        "peak_child_rss_kib": 215300,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "edited.pptx",
+        "pages": 2,
+        "elapsed_ms": 1323,
+        "peak_child_rss_kib": 215112,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.xlsx",
+        "pages": 1,
+        "elapsed_ms": 2500,
+        "peak_child_rss_kib": 215096,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      }
+    ]
+  },
+  "existingSandboxUpgrade": {
+    "from": "ai-tg-bot-tools:v2.0.6",
+    "liveSmoke": "passed",
+    "workspaceAndSourcesPreserved": true,
+    "obsoleteBundleFileRemoved": true,
+    "concurrentInstallersWaitedForRemoteLock": true,
+    "reconnectWithoutReinstall": true,
+    "officeFixtures": [
+      {
+        "file": "contract.docx",
+        "pages": 1,
+        "elapsed_ms": 1659,
+        "peak_child_rss_kib": 215120,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.pptx",
+        "pages": 2,
+        "elapsed_ms": 1249,
+        "peak_child_rss_kib": 215168,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "edited.pptx",
+        "pages": 2,
+        "elapsed_ms": 1268,
+        "peak_child_rss_kib": 215380,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      },
+      {
+        "file": "contract.xlsx",
+        "pages": 1,
+        "elapsed_ms": 2084,
+        "peak_child_rss_kib": 215364,
+        "renderer_version": "LibreOffice 7.4.7.2 40(Build:2)"
+      }
+    ]
+  },
+  "regressions": [
+    "blank formula results accepted; spreadsheet error cells rejected",
+    "normalized root relationships rendered across DOCX, PPTX and XLSX with original bytes and other parts preserved",
+    "external resource relationships blocked before conversion, including images disguised as hyperlinks",
+    "ordinary hyperlink rendered with zero requests to a local HTTP endpoint",
+    "delivery extension and MIME checked against approved format, including after queuing",
+    "cleanup transport failures, nonzero exits and timeouts retain retry paths",
+    "failed bundle uploads preserve active files and use a fresh staging directory on retry"
+  ],
+  "resourceMeasurementLimit": "RSS records peak child-process memory for small fixtures, not peak whole-sandbox memory."
+}

@@ -157,7 +157,7 @@ async function ingestTelegramFile(
       size: input.size ?? 0,
       summary: input.type === "pdf"
         ? "Original PDF available for PDF Inspector or model vision in the sandbox."
-        : "Original DOCX available for OfficeCLI in the sandbox.",
+        : "Original DOCX available for docx-cli in the sandbox.",
       isInline: false,
     });
     const canonical = await claimTelegramSource(ctx, file, source, input);

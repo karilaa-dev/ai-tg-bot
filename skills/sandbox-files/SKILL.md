@@ -31,11 +31,11 @@ Older PDF/DOCX records may still have extracted lexical chunks. Prefer restoring
 
 ## DOCX
 
-Read the advertised `officecli-docx` skill before using OfficeCLI. Common inspection commands are:
+Read the advertised `docx-cli` skill before using docx-cli. Common inspection commands are:
 
 ```bash
-officecli view "/home/user/telegram-files/ID--name.docx" outline
-officecli view "/home/user/telegram-files/ID--name.docx" text --max-lines 200
+docx outline "/home/user/telegram-files/ID--name.docx"
+docx read "/home/user/telegram-files/ID--name.docx"
 ```
 
 Copy the file into the workspace before making any change.

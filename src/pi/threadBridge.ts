@@ -25,6 +25,7 @@ import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
 import { type TurnPromptContextSource } from "./turnContext.js";
 import { TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
 import { OutgoingFiles } from "../files/outgoingFiles.js";
+import { OfficeValidation } from "../office/validation.js";
 
 interface PiTurnTransport {
   api: Api;
@@ -48,6 +49,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   publishedWebsites: PublishedWebsite[] = [];
   activeMessageId?: number;
   outgoingFiles: OutgoingFiles;
+  readonly officeValidation: OfficeValidation;
   get attachments(): CreatedFileAttachment[] { return this.outgoingFiles.items; }
   get outgoingBuffers() { return this.outgoingFiles.buffers; }
   private visibilityScope?: ThreadScope;
@@ -85,6 +87,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.modelRegistry = input.modelRegistry;
     this.providerRouter = input.providerRouter;
     this.browserRuntime = input.browserRuntime;
+    this.officeValidation = new OfficeValidation({runtime: this.commandRuntime, config: this.config, userId: this.user.tg_id, threadId: this.thread.id});
     this.outgoingFiles = this.createOutgoingFiles();
   }
 
@@ -92,12 +95,14 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     return new OutgoingFiles({
       config: this.config, repos: this.repos, user: this.user, thread: this.thread,
       commandRuntime: this.commandRuntime, logger: this.logger,
+      officeValidation: this.officeValidation,
       selectContextFiles: (ids) => this.selectContextFiles(ids),
     });
   }
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
     if (this.turnActive) await this.endTurn();
+    this.officeValidation.clear();
     this.visibilityScope = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);
     this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
     const fileIds = await this.repos.files.listRecoverableIds(this.visibilityScope.fileIds);
@@ -138,6 +143,9 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   }
 
   async endTurn(): Promise<void> {
+    await this.officeValidation.dispose().catch(error => {
+      this.logger?.warn("Office preview cleanup failed", {threadId: this.thread.id, error: String(error)});
+    });
     const lease = this.commandActivityLease;
     this.commandActivityLease = undefined;
     lease?.release();
@@ -176,6 +184,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       maxMessageId: this.activeMessageId,
       currentScope: () => this.currentScope(),
       outgoingFiles: this.outgoingFiles,
+      officeValidation: this.officeValidation,
       responseDraft: this.responseDraft,
       logger: this.logger,
       commandRuntime: this.commandRuntime,
@@ -385,7 +394,7 @@ function durableDocumentContext(file: FileRow): TextContent {
 function sandboxDocumentContext(file: FileRow): TextContent {
   const next = file.type === "pdf"
     ? "Call materialize_chat_files, then use pdf-inspector for native text or render_pdf_pages for vision."
-    : "Call materialize_chat_files, read the OfficeCLI DOCX skill, and inspect it with officecli.";
+    : "Call materialize_chat_files, read the docx-cli skill, and inspect it with docx.";
   const fallback = file.extraction_status === "ready"
     ? " If the original source cannot be restored, use search_in_file/read_file_section as a legacy extracted-text fallback."
     : "";

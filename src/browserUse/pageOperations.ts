@@ -64,52 +64,6 @@ export async function capturePage(page: Page, fullPage: boolean) {
   return { bytes, mediaType, viewport };
 }
 
-export async function renderOfficePage(page: Page, html: string, selector: string | undefined, timeoutMs: number): Promise<Buffer> {
-  // Browser Use's remote CDP page can leave Playwright setContent() waiting
-  // forever for a lifecycle event. The HTML is already sanitized and contains
-  // no active elements or remote resources, so replace the blank document
-  // directly without depending on navigation lifecycle reporting.
-  await withinTimeout(
-    page.evaluate((markup) => {
-      document.open();
-      document.write(markup);
-      document.close();
-    }, html),
-    timeoutMs,
-    () => new BrowserUseRuntimeError(
-      "office_preview_timeout",
-      "The remote browser timed out while loading the Office preview.",
-    ),
-  );
-  await withinTimeout(
-    page.evaluate("document.fonts?.ready"),
-    timeoutMs,
-    () => new BrowserUseRuntimeError(
-      "office_preview_timeout",
-      "The remote browser timed out while loading the Office preview fonts.",
-    ),
-  ).catch((error) => {
-    if (error instanceof BrowserUseRuntimeError) throw error;
-    return undefined;
-  });
-  await page.waitForTimeout(250);
-  let bytes: Buffer;
-  if (selector) {
-    const target = page.locator(selector).first();
-    if (await target.count() === 0) {
-      throw new BrowserUseRuntimeError(
-        "office_preview_page_not_found",
-        "OfficeCLI preview HTML did not contain the requested page or slide.",
-      );
-    }
-    bytes = await target.screenshot({ type: "png" });
-  } else {
-    bytes = await page.screenshot({ type: "png", fullPage: true });
-  }
-  assertImageSize(bytes);
-  return bytes;
-}
-
 interface InteractiveRef {
   ref: string;
   role: string;

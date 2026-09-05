@@ -84,6 +84,14 @@ export interface SandboxFileReadResult {
   contentSha256: string;
 }
 
+export interface SandboxFileWriteRequest {
+  userId: number;
+  threadId: number;
+  virtualPath: string;
+  bytes: Buffer;
+  signal?: AbortSignal;
+}
+
 export interface SandboxSourceFileReadRequest {
   sandboxId: string;
   userId: number;
@@ -121,6 +129,7 @@ export interface CommandRuntime {
   materializeFiles(request: SandboxFileMaterializeRequest): Promise<SandboxThreadFileSyncResult>;
   execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
   readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult>;
+  writeWorkspaceFile?(request: SandboxFileWriteRequest): Promise<void>;
   readSourceFile(request: SandboxSourceFileReadRequest): Promise<Buffer>;
   publishWebsite(request: PublishWebsiteRequest): Promise<PublishedWebsite>;
   dispose(): Promise<void>;

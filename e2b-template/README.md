@@ -2,11 +2,11 @@
 
 This directory defines the private `ai-tg-bot-tools` template used by thread sandboxes. It starts from E2B Base with 2 vCPU and 2 GiB RAM.
 
-The image contains the shell tools listed in `template.ts`, ImageMagick, OfficeCLI `1.0.145`, the pinned OpenSCAD `2026.08.27` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.17.0`, and Poppler PDF rendering tools. The OpenSCAD pipeline exports binary STL and exact rendered PNG files without Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
+The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cli `0.25.0`, PptxGenJS `4.0.1`, python-pptx `1.0.2`, openpyxl `3.1.5`, headless LibreOffice Writer/Impress/Calc and compatible fonts, the pinned OpenSCAD `2026.08.27` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.17.0`, and Poppler PDF rendering tools. The OpenSCAD pipeline exports binary STL and exact rendered PNG files without Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.5` uses `ai-tg-bot-tools:v2.0.5`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.0.7` uses `ai-tg-bot-tools:v2.0.7`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
@@ -35,3 +35,11 @@ The full live smoke checks the toolbox contract, outbound internet, allocated CP
 Keep `E2B_DEPLOYMENT_ID` and all `thread_sandboxes` mappings during a bot upgrade. A mapped thread reconnects its original sandbox, so old workspaces and image versions remain intact. Deleting a mapping while changing `E2B_TEMPLATE` can make the old sandbox undiscoverable and cause the bot to create a replacement.
 
 Pinned tool versions may trail upstream. Upgrade a pin only after updating its revision and checksums and passing the full template contract.
+
+The Office bundle in `assets/office` contains the shared installer, locked Node and Python dependencies, runtime wrappers, tested deck examples, licenses, and the actual-file checker. New images and existing sandbox upgrades use this same bundle. The installer runs `office-contract` before recording its content revision or removing old tools. Existing sandboxes retain their mappings, workspaces, and immutable file sources.
+
+`office-contract` tests Word creation, targeted replacements, tracked changes and comments, new decks with artwork/tables/charts, preservation during existing-deck edits, Excel formula recalculation, and actual-file page rendering. It prints conversion time and peak child-process RSS. The image remains 2 vCPU / 2048 MiB; full contracts run inside that allocation. LibreOffice package versions come from the base distribution and are recorded in every rendering report.
+
+After releasing the image, run `npm run live:pi-image-check` to exercise model vision and continuation after generation, intentional image delivery, and embedding an original generated asset into a visually reviewed deck. The test uses disposable sessions and a separate sandbox namespace; it queues results without sending messages to Telegram.
+
+To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.6 npm run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources, removes obsolete bundle files, and serializes concurrent installers. See [the 2.0.7 review fixes](../docs/office-review-2.0.7.md) and [the original resource measurements](../docs/office-tools-2.0.6.md).

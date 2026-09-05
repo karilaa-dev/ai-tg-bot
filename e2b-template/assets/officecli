@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-export OFFICECLI_SKIP_UPDATE=1
-exec /usr/local/libexec/officecli-bin "$@"

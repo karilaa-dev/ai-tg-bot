@@ -48,6 +48,7 @@ describe("turn streaming", () => {
           beginTurn: async () => undefined,
           endTurn: async () => undefined,
           attachments: [], publishedWebsites: [],
+          outgoingFiles: { verifyOfficeAttachments: async () => undefined, unresolved: [] },
           currentTurnBudget: () => undefined,
         },
         session: {

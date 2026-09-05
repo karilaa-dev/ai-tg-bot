@@ -28,15 +28,6 @@ try {
   const browser = manager.forThread(userId, threadId);
   const cookieValue = randomUUID();
 
-  const officePreview = await browser.renderOfficeHtml([
-    "<!doctype html><html><body>",
-    '<div class="slide-container" data-slide="1"><div class="slide">First</div></div>',
-    '<div class="slide-container" data-slide="2"><div class="slide">Second</div></div>',
-    "</body></html>",
-  ].join(""), { selector: '.slide-container[data-slide="2"] .slide' });
-  assert.equal(officePreview.mediaType, "image/png");
-  assert.equal(officePreview.bytes.length > 100, true);
-
   const persistentCookie = encodeURIComponent(
     `ai_tg_browser_use=${cookieValue}; Max-Age=3600; Path=/; Secure; HttpOnly`,
   );
@@ -65,7 +56,7 @@ try {
   const mapping = await repos.browserUseProfiles.get(deploymentId, userId);
   assert.ok(mapping?.profile_id);
   disposableProfileId = mapping.profile_id;
-  process.stdout.write("Browser Use live check passed: selected Office preview, open, screenshot, explicit stop, profile cookie restore, reopen, and stop.\n");
+  process.stdout.write("Browser Use live check passed: open, screenshot, explicit stop, profile cookie restore, reopen, and stop.\n");
 } finally {
   await manager.endTurn(userId, threadId).catch(() => undefined);
   await manager.dispose().catch(() => undefined);

@@ -324,7 +324,7 @@ export function cardForFile(
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
   if (file.extraction_status === "source_only") {
-    return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "OfficeCLI"}.`;
+    return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "docx-cli"}.`;
   }
   if (file.is_inline) {
     return [
@@ -371,7 +371,7 @@ async function contentFor(
 function sandboxDocumentSummary(type: "pdf" | "docx"): string {
   return type === "pdf"
     ? "Original PDF available for PDF Inspector or model vision in the sandbox."
-    : "Original DOCX available for OfficeCLI in the sandbox.";
+    : "Original DOCX available for docx-cli in the sandbox.";
 }
 
 async function reportStage(

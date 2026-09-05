@@ -1,6 +1,6 @@
 import { sha256Hex } from "../files/hash.js";
 import { throwIfAborted } from "../files/cancel.js";
-import { BrowserUseRuntimeError, SCREEN, DEFAULT_VIEWPORT, inspectPage, capturePage, renderOfficePage, withinTimeout } from "./pageOperations.js";
+import { BrowserUseRuntimeError, SCREEN, DEFAULT_VIEWPORT, inspectPage, capturePage } from "./pageOperations.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
@@ -22,7 +22,6 @@ const STOP_RETRIES = 3;
 const PROFILE_SAVE_TIMEOUT_MS = 5_000;
 const PROFILE_SAVE_POLL_MS = 250;
 const STORAGE_STATE_TIMEOUT_MS = 2_000;
-const OFFICE_CONTEXT_CLOSE_TIMEOUT_MS = 2_000;
 
 type BrowserUseRuntimeConfig = Pick<
   AppConfig,
@@ -77,7 +76,6 @@ interface SessionState {
   browser: Browser;
   context: BrowserContext;
   tabs: Map<string, TabState>;
-  officeContexts: Map<number, { context: BrowserContext; page: Page }>;
   downloadHints: DownloadHint[];
   downloadSelections: Map<string, string[]>;
 }
@@ -110,11 +108,7 @@ export interface BrowserUseToolRuntime {
   closeTab(tabId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   extendSession(timeoutMinutes: number, signal?: AbortSignal): Promise<Record<string, unknown>>;
   closeSession(signal?: AbortSignal): Promise<Record<string, unknown>>;
-  renderOfficeHtml(
-    html: string,
-    options?: { selector?: string },
-    signal?: AbortSignal,
-  ): Promise<{ bytes: Buffer; mediaType: string; session_remaining_seconds: number }>;
+
 }
 
 export class BrowserUseRuntimeManager {
@@ -146,11 +140,6 @@ export class BrowserUseRuntimeManager {
     if (count <= 1) state.activeTurns.delete(threadId);
     else state.activeTurns.set(threadId, count - 1);
     await state.lock.run(async () => {
-      const office = state.session?.officeContexts.get(threadId);
-      if (office) {
-        state.session!.officeContexts.delete(threadId);
-        await office.context.close().catch(() => undefined);
-      }
       this.scheduleCleanup(state);
     });
   }
@@ -176,7 +165,6 @@ export class BrowserUseRuntimeManager {
       closeTab: (tabId, signal) => this.closeTab(userId, threadId, tabId, signal),
       extendSession: (timeout, signal) => this.extendSession(userId, threadId, timeout, signal),
       closeSession: (signal) => this.closeSession(userId, threadId, signal),
-      renderOfficeHtml: (html, options, signal) => this.renderOfficeHtml(userId, threadId, html, options, signal),
     };
   }
 
@@ -524,38 +512,6 @@ export class BrowserUseRuntimeManager {
     }, signal);
   }
 
-  private async renderOfficeHtml(
-    userId: number,
-    threadId: number,
-    html: string,
-    options?: { selector?: string },
-    signal?: AbortSignal,
-  ): Promise<{ bytes: Buffer; mediaType: string; session_remaining_seconds: number }> {
-    const state = this.state(userId);
-    return state.lock.run(async () => {
-      const session = await this.ensureSessionLocked(state, undefined, signal);
-      this.assertTime(session, true);
-      let office = session.officeContexts.get(threadId);
-      if (!office) {
-        const context = await session.browser.newContext({ viewport: { width: 1600, height: 1200 } });
-        office = { context, page: await context.newPage() };
-        session.officeContexts.set(threadId, office);
-      }
-      try {
-        const bytes = await renderOfficePage(office.page, html, options?.selector, this.input.config.BROWSER_USE_NAVIGATION_TIMEOUT_MS);
-        return { bytes, mediaType: "image/png", session_remaining_seconds: remainingSeconds(session) };
-      } catch (error) {
-        if (session.officeContexts.get(threadId) === office) session.officeContexts.delete(threadId);
-        await withinTimeout(
-          office.context.close(),
-          OFFICE_CONTEXT_CLOSE_TIMEOUT_MS,
-          () => new Error("Office preview context close timed out."),
-        ).catch(() => undefined);
-        throw error;
-      }
-    }, signal);
-  }
-
   private async withTab<T>(
     userId: number,
     threadId: number,
@@ -630,7 +586,6 @@ export class BrowserUseRuntimeManager {
         browser,
         context,
         tabs: new Map(),
-        officeContexts: new Map(),
         downloadHints: [],
         downloadSelections: new Map(),
       };
@@ -784,8 +739,6 @@ export class BrowserUseRuntimeManager {
     const storageChanged = session.storageSignature === null
       || finalStorageSignature === null
       || finalStorageSignature !== session.storageSignature;
-    for (const office of session.officeContexts.values()) await office.context.close().catch(() => undefined);
-    session.officeContexts.clear();
     const pages = new Set([...session.tabs.values()].map((tab) => tab.page));
     for (const page of session.context.pages()) pages.add(page);
     for (const tab of session.tabs.values()) tab.refs.clear();

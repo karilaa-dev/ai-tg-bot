@@ -169,64 +169,6 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.createBrowser).toHaveBeenCalledTimes(2);
   });
 
-  it("renders a requested Office slide without waiting for remote page lifecycle events", async () => {
-    const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
-
-    await browser.renderOfficeHtml(
-      '<!doctype html><div class="slide-container" data-slide="2"><div class="slide">Two</div></div>',
-      { selector: '.slide-container[data-slide="2"] .slide' },
-    );
-
-    const officeContext = fixture.browsers[0]!.allContexts[1]!;
-    const officePage = officeContext.pageList.at(-1)!;
-    expect(officePage.lastInjectedHtml).toContain('data-slide="2"');
-    expect(officePage.lastLocatorSelector).toBe('.slide-container[data-slide="2"] .slide');
-    expect(officePage.locatorScreenshotCount).toBe(1);
-  });
-
-  it("times out a stuck Office preview and recreates its isolated context", async () => {
-    const fixture = await runtimeFixture({ BROWSER_USE_NAVIGATION_TIMEOUT_MS: 10 });
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
-    await browser.open("https://example.com");
-    const started = deferred<void>();
-    const release = deferred<void>();
-    fixture.browsers[0]!.nextOfficeEvaluateGate = { started, release };
-
-    const rendering = browser.renderOfficeHtml("<!doctype html><h1>Blocked</h1>");
-    await started.promise;
-    await expect(rendering).rejects.toSatisfy((error: BrowserUseRuntimeError) => {
-      expect(error.code).toBe("office_preview_timeout");
-      return true;
-    });
-
-    const failedContext = fixture.browsers[0]!.allContexts[1]!;
-    expect(failedContext.closed).toBe(true);
-    release.resolve();
-    await expect(browser.renderOfficeHtml("<!doctype html><h1>Recovered</h1>"))
-      .resolves.toMatchObject({ mediaType: "image/png" });
-    expect(fixture.browsers[0]!.allContexts[2]!.closed).toBe(false);
-  });
-
-  it("closes Office contexts and cancels automatic cleanup timers on explicit close", async () => {
-    vi.useFakeTimers();
-    const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 1_000 });
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
-    await browser.open("https://example.com");
-    await browser.renderOfficeHtml("<!doctype html><h1>Preview</h1>");
-    const cloudBrowser = fixture.browsers[0]!;
-    expect(cloudBrowser.contexts()).toHaveLength(2);
-
-    await browser.closeSession();
-    expect(cloudBrowser.contexts().every((context) => (context as unknown as FakeContext).closed)).toBe(true);
-    await fixture.manager.endTurn(7, 10);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(1);
-  });
-
   it("automatically stops an idle session after the configured five-minute fallback", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 300_000 });

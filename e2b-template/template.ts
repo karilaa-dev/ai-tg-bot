@@ -23,12 +23,6 @@ export function e2bToolboxBuildRef(tag: string): string {
   return `${E2B_TOOLBOX_TEMPLATE_NAME}:${normalized}`;
 }
 
-export const OFFICECLI_VERSION = "1.0.145";
-export const OFFICECLI_SOURCE_REVISION = "e402d2853259177aba05ee6f79d38b7e1ff067ae";
-export const OFFICECLI_AMD64_SHA256 = "449f0e6a1298e3c6d7da792d26ab53d04ba77bd990f299b51123c7aef383d2ce";
-export const OFFICECLI_ARM64_SHA256 = "d38233bb7df4f0f5fb40313de1f00c0f0e575dc96b4164742709711ceec148c5";
-export const OFFICECLI_DOCX_SKILL_SHA256 = "1da56ed53a308222ab2516a2974ae98c6703b7d504fa5158348c39a18e85a4f1";
-export const OFFICECLI_PPTX_SKILL_SHA256 = "0d53192751d5770984f16f3c34f9923377651555c667150d7f96e16e8c9757b3";
 export const PDF_INSPECTOR_VERSION = "1.17.0";
 
 export const OPENSCAD_VERSION = "2026.08.27";
@@ -100,7 +94,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
   })
     .fromBaseImage()
     .aptInstall([...E2B_TOOLBOX_APT_PACKAGES], { noInstallRecommends: true })
-    .makeDir(["/usr/local/libexec", "/usr/local/libexec/openscad", "/usr/local/share/officecli/skills/officecli-docx", "/usr/local/share/officecli/skills/officecli-pptx", "/usr/local/share/licenses/officecli", "/usr/local/share/licenses/openscad"], {
+    .makeDir(["/usr/local/libexec", "/usr/local/libexec/openscad", "/usr/local/share/licenses/openscad"], {
       user: "root",
       mode: 0o755,
     })
@@ -108,7 +102,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .makeDir("/home/user/workspace", { user: "user", mode: 0o700 })
     .copyItems([
       { src: "assets/tool-contract.sh", dest: "/usr/local/bin/tool-contract.sh", user: "root", mode: 0o755 },
-      { src: "assets/officecli", dest: "/usr/local/bin/officecli", user: "root", mode: 0o755 },
+      { src: "assets/office", dest: "/usr/local/share/ai-tg-bot/office", user: "root" },
       { src: "assets/openscad", dest: "/usr/local/bin/openscad", user: "root", mode: 0o755 },
       { src: "assets/openscad-build", dest: "/usr/local/bin/openscad-build", user: "root", mode: 0o755 },
       { src: "assets/openscad-pov-render.mjs", dest: "/usr/local/libexec/openscad-pov-render.mjs", user: "root", mode: 0o755 },
@@ -117,7 +111,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .makeSymlink("/usr/local/bin/python3", "/usr/local/bin/python", { user: "root", force: true })
     .runCmd(installOpenScadCommand(), { user: "root" })
     .runCmd(installImageMagickCommand(), { user: "root" })
-    .runCmd(installOfficeCliCommand(), { user: "root" })
+    .runCmd("bash /usr/local/share/ai-tg-bot/office/install.sh", { user: "root" })
     .runCmd(installPdfInspectorCommand(), { user: "root" })
     .runCmd("/usr/local/bin/tool-contract.sh", { user: "user" })
     .setWorkdir("/home/user/workspace")
@@ -154,32 +148,6 @@ make -j2
 make install
 ldconfig
 magick -version | grep -F 'ImageMagick ${IMAGEMAGICK_VERSION}'`;
-}
-
-function installOfficeCliCommand(): string {
-  return `set -euo pipefail
-case "$(dpkg --print-architecture)" in
-  amd64) officecli_asset='officecli-linux-x64'; officecli_sha='${OFFICECLI_AMD64_SHA256}' ;;
-  arm64) officecli_asset='officecli-linux-arm64'; officecli_sha='${OFFICECLI_ARM64_SHA256}' ;;
-  *) printf 'Unsupported OfficeCLI architecture: %s\n' "$(dpkg --print-architecture)" >&2; exit 1 ;;
-esac
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
-curl -fsSL "https://github.com/iOfficeAI/OfficeCLI/releases/download/v${OFFICECLI_VERSION}/$officecli_asset" -o "$tmp_dir/officecli"
-printf '%s  %s\n' "$officecli_sha" "$tmp_dir/officecli" | sha256sum -c -
-install -Dm0755 "$tmp_dir/officecli" /usr/local/libexec/officecli-bin
-for skill in docx pptx; do
-  curl -fsSL "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/${OFFICECLI_SOURCE_REVISION}/skills/officecli-$skill/SKILL.md" -o "$tmp_dir/officecli-$skill.md"
-done
-printf '%s  %s\n' '${OFFICECLI_DOCX_SKILL_SHA256}' "$tmp_dir/officecli-docx.md" | sha256sum -c -
-printf '%s  %s\n' '${OFFICECLI_PPTX_SKILL_SHA256}' "$tmp_dir/officecli-pptx.md" | sha256sum -c -
-install -Dm0644 "$tmp_dir/officecli-docx.md" /usr/local/share/officecli/skills/officecli-docx/SKILL.md
-install -Dm0644 "$tmp_dir/officecli-pptx.md" /usr/local/share/officecli/skills/officecli-pptx/SKILL.md
-for legal_file in LICENSE NOTICE; do
-  curl -fsSL "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/${OFFICECLI_SOURCE_REVISION}/$legal_file" -o "$tmp_dir/$legal_file"
-  install -Dm0644 "$tmp_dir/$legal_file" "/usr/local/share/licenses/officecli/$legal_file"
-done
-/usr/local/bin/officecli --version`;
 }
 
 function installPdfInspectorCommand(): string {
