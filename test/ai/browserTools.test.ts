@@ -135,6 +135,7 @@ describe("Browser Use Pi tools", () => {
         files: {
           insertFile: vi.fn(async (value: Record<string, unknown>) => ({ ...stored, ...value, id: stored.id })),
           get: vi.fn(async () => stored),
+          deleteFile: vi.fn(async () => []),
         },
       },
     }));
@@ -184,6 +185,7 @@ describe("Browser Use Pi tools", () => {
             mime_type: value.mimeType,
             is_inline: 0,
           })),
+          deleteFile: vi.fn(async () => []),
         },
       },
     }));

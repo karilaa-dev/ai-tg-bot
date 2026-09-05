@@ -28,17 +28,22 @@ type Input = {
 /** Owns the attachment queue and every export reservation for one turn. */
 export class OutgoingFiles {
   readonly buffers = new OutgoingBuffers();
-  private readonly order: string[] = [];
+  private readonly slots = new Map<string, string | undefined>();
 
-  constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {}
+  constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {
+    for (const file of items) this.slots.set(fileKey(file), undefined);
+  }
+
+  get unresolved(): Array<{ path: string; error: string }> {
+    return [...this.slots].flatMap(([path, error]) => error === undefined ? [] : [{ path, error }]);
+  }
 
   async workspace(files: Array<FileOptions & { path: string }>, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const paths = files.map((file) => normalizeCreatedFilePath(file.path));
     if (new Set(paths).size !== paths.length) throw new Error("File paths must be unique.");
-    const existing = new Set(this.items.map((file) => file.sourceVirtualPath));
-    this.assertCapacity(paths.filter((key) => !existing.has(key)).length);
-    for (const key of [...this.items.map(fileKey), ...paths]) if (!this.order.includes(key)) this.order.push(key);
+    this.assertCapacity(paths.filter((key) => !this.slots.has(key)).length);
+    for (const key of paths) if (!this.slots.has(key)) this.slots.set(key, undefined);
     const results = await prepareWithTwoWorkers(files, (file, index) => this.prepare(async () => {
       if (!this.input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
       const exported = await this.input.commandRuntime.readWorkspaceFile({
@@ -55,7 +60,14 @@ export class OutgoingFiles {
     const errors: Array<{ path: string; error: string }> = [];
     for (let index = 0; index < results.length; index++) {
       const result = results[index]!;
-      if (result.status === "rejected") { errors.push({ path: paths[index]!, error: String(result.reason) }); continue; }
+      const key = paths[index]!;
+      if (result.status === "rejected") {
+        const error = String(result.reason);
+        this.slots.set(key, error);
+        errors.push({ path: key, error });
+        continue;
+      }
+      this.slots.set(key, undefined);
       const attachment = result.value;
       attachment.sourceVirtualPath = paths[index];
       const oldIndex = this.items.findIndex((file) => file.sourceVirtualPath === paths[index]);
@@ -64,7 +76,8 @@ export class OutgoingFiles {
       else await this.remove(old);
       prepared.push({ attachment, replaced: Boolean(old) });
     }
-    this.items.sort((a, b) => this.order.indexOf(fileKey(a)) - this.order.indexOf(fileKey(b)));
+    const order = [...this.slots.keys()];
+    this.items.sort((a, b) => order.indexOf(fileKey(a)) - order.indexOf(fileKey(b)));
     return { prepared, errors };
   }
 
@@ -72,15 +85,24 @@ export class OutgoingFiles {
     this.assertCapacity(1);
     const attachment = await this.prepare(async () => ({ file: await load() }), signal);
     this.items.push(attachment);
-    this.order.push(fileKey(attachment));
+    this.slots.set(fileKey(attachment), undefined);
     this.input.selectContextFiles?.([attachment.fileId]);
     return attachment;
   }
 
-  dispose(): Promise<void> { return this.buffers.dispose(); }
+  async dispose(): Promise<void> {
+    try {
+      for (const attachment of this.items.splice(0)) {
+        if (!attachment.telegramDelivery && !attachment.telegramDeliveryUnknown) await this.remove(attachment);
+      }
+    } finally {
+      this.slots.clear();
+      await this.buffers.dispose();
+    }
+  }
 
   private assertCapacity(additional: number): void {
-    if (this.items.length + additional > MAX_CREATED_FILES_PER_ANSWER) {
+    if (this.slots.size + additional > MAX_CREATED_FILES_PER_ANSWER) {
       throw new Error(`File limit reached: at most ${MAX_CREATED_FILES_PER_ANSWER} files per answer.`);
     }
   }

@@ -88,6 +88,64 @@ describe("thread E2B runtime manager", () => {
     expect(result.stdout).toBe("ok");
   });
 
+  it("kills a command cancelled during startup without starting an unobserved wait", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const controller = new AbortController();
+    const wait = vi.fn(async () => { throw new Error("Command exited with code 137"); });
+    const kill = vi.fn(async () => true);
+    vi.spyOn(sandbox, "runBackground").mockImplementation(async () => {
+      controller.abort(new Error("cancelled during startup"));
+      return { pid: 123, wait, kill };
+    });
+
+    await expect(runtime.execute({ ...commandRequest(userId, threadId), signal: controller.signal }))
+      .rejects.toThrow("cancelled during startup");
+    expect(kill).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it.each(["stdout", "stderr"])("propagates transport failures while checking captured %s", async (stream) => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) => {
+      if (filePath.endsWith(`/${stream}`)) throw new Error("output transport unavailable");
+      return original(filePath);
+    });
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .rejects.toThrow("output transport unavailable");
+  });
+
+  it("propagates cancellation during output collection", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const controller = new AbortController();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) => {
+      if (/\/(stdout|stderr)$/u.test(filePath)) {
+        controller.abort(new Error("output collection cancelled"));
+        throw controller.signal.reason;
+      }
+      return original(filePath);
+    });
+
+    await expect(runtime.execute({ ...commandRequest(userId, threadId), signal: controller.signal }))
+      .rejects.toThrow("output collection cancelled");
+  });
+
+  it("allows genuinely missing output captures", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) =>
+      /\/(stdout|stderr)$/u.test(filePath) ? false : original(filePath));
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .resolves.toMatchObject({ stdout: "", stderr: "", exitCode: 0, timedOut: false });
+  });
+
   it("creates one sandbox per thread and synchronizes Telegram files once as read-only", async () => {
     client.telegramFiles.set("tg-hello", Buffer.from("hello"));
     const stored = await repos.files.insertFile({

@@ -34,10 +34,19 @@ for (const dialect of ["sqlite", "postgres"] as const) {
           userId: user.tg_id, threadId, messageId, type: "txt", name: "notes.txt", size: 5, contentMd: "notes", isInline: true,
         });
         const visible = await file(parent.id, beforeFork.id);
+        await repos.files.attachToMessage(beforeFork.id, visible.id, {});
         const hiddenParent = await file(parent.id, afterFork.id);
         const hiddenQueued = await file(child.id, queued.id);
         const reused = await file(other.id, otherMessage.id);
         await repos.files.attachToMessage(accepted.id, reused.id, {});
+        const reusedPending = await file(other.id);
+        await repos.files.attachToMessage(accepted.id, reusedPending.id, {});
+        const reusedAfterFork = await file(other.id);
+        await repos.files.attachToMessage(afterFork.id, reusedAfterFork.id, {});
+        const reusedQueued = await file(other.id);
+        await repos.files.attachToMessage(queued.id, reusedQueued.id, {});
+        const localQueued = await file(child.id);
+        await repos.files.attachToMessage(queued.id, localQueued.id, {});
         const outgoing = await file(child.id);
         const inbound = await file(child.id);
         await repos.files.rememberSource(inbound.id, { transport: "telegram", connectionKey: "test", remoteKey: "inbound", locator: {} });
@@ -52,15 +61,35 @@ for (const dialect of ["sqlite", "postgres"] as const) {
             expect(row).not.toHaveProperty("content_md");
           }
         }
+        const fileQuery = queries.mock.calls.at(-1)![0];
         queries.mockRestore();
+        if (dialect === "sqlite") {
+          const plan = await db.db.query<{ id: number; parent: number; detail: string }>(sql`explain query plan ${fileQuery}`);
+          const byId = new Map(plan.map((row) => [row.id, row]));
+          for (const row of plan.filter((step) => step.detail.includes("messages_thread_id_idx"))) {
+            // Scoped message scans must not run inside a correlated subquery per file.
+            let parent = byId.get(row.parent);
+            while (parent) {
+              expect(parent.detail).not.toContain("CORRELATED");
+              parent = byId.get(parent.parent);
+            }
+          }
+        }
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
-        expect(scope.fileIds).toEqual([visible.id, reused.id, outgoing.id]);
+        expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
         expect(scope.fileIds).not.toContain(hiddenParent.id);
         expect(scope.fileIds).not.toContain(hiddenQueued.id);
+        expect(scope.fileIds).not.toContain(reusedAfterFork.id);
+        expect(scope.fileIds).not.toContain(reusedQueued.id);
+        expect(scope.fileIds).not.toContain(localQueued.id);
         expect(scope.fileIds).not.toContain(inbound.id);
         expect((await repos.messages.listForThreadChain([parent, child], accepted.id)).map((row) => row.id)).toEqual(scope.messageIds);
         expect((await repos.messages.listForThreadChain([parent, child])).map((row) => row.id)).toEqual([beforeFork.id, accepted.id, queued.id]);
-        expect((await threadVisibilityScope(repos, child)).fileIds).toContain(inbound.id);
+        const currentScope = await threadVisibilityScope(repos, child);
+        expect(currentScope.fileIds).toContain(inbound.id);
+        expect(currentScope.fileIds).toContain(reusedQueued.id);
+        expect(currentScope.fileIds).toContain(localQueued.id);
+        expect(currentScope.fileIds).not.toContain(reusedAfterFork.id);
         expect((await threadVisibilityScope(repos, child, 0)).messageIds).toEqual([]);
         expect(await repos.messages.listIdsForScopes([])).toEqual([]);
         expect(await repos.files.listVisibleIds([], false)).toEqual([]);

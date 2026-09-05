@@ -53,6 +53,7 @@ export async function executeSandboxCommand(
       signal: request.signal,
     });
     try {
+      throwIfAborted(request.signal);
       const result = await raceWithAbort(handle.wait(), request.signal);
       exitCode = result.exitCode;
       if (result.error) errorText = result.error;
@@ -124,7 +125,7 @@ export async function runCommandResult(
 }
 
 async function readIfExists(sandbox: E2BSandbox, filePath: string, signal?: AbortSignal): Promise<Buffer> {
-  if (!await sandbox.fileExists(filePath, "user", signal).catch(() => false)) return Buffer.alloc(0);
+  if (!await sandbox.fileExists(filePath, "user", signal)) return Buffer.alloc(0);
   return Buffer.from(await sandbox.readFile(filePath, "user", signal));
 }
 

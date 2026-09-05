@@ -19,7 +19,8 @@ export function createFinishResponseTool(input: ToolBuildInput) {
         if (!text.trim() && !files.length && !input.outgoingFiles.items.length) throw new Error("Provide final text or files.");
         const result = await input.outgoingFiles.workspace(files, signal);
         const prepared = result.prepared.map(({ attachment }) => ({ file_id: attachment.fileId, path: attachment.sourceVirtualPath! }));
-        if (result.errors.length) return { completed: false, error: "Some files could not be prepared. Repair only failed paths, then finish_response again.", prepared, errors: result.errors };
+        const errors = input.outgoingFiles.unresolved;
+        if (errors.length) return { completed: false, error: "Some files could not be prepared. Repair only failed paths, then finish_response again.", prepared, errors };
         return { completed: true, text: text.trim(), file_ids: input.outgoingFiles.items.map((file) => file.fileId) };
       } catch (error) {
         if (signal?.aborted) throw signal.reason ?? error;

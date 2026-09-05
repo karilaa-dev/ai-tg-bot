@@ -61,11 +61,43 @@ describe("finish_response", () => {
     expect(partial.terminate).not.toBe(true);
     expect(partial.details).toMatchObject({ completed: false, prepared: [{ path: "/b.stl" }], errors: [{ path: "/a.stl" }] });
     const successfulId = input.outgoingFiles!.items[0]!.fileId;
-    const repaired = await finish(input, { files: [{ path: "/a.stl" }] });
+    const incomplete = await finish(input, { text: "Done" });
+    expect(incomplete.terminate).not.toBe(true);
+    expect(incomplete.details).toMatchObject({ completed: false, errors: [{ path: "/a.stl", error: expect.stringContaining("missing STL") }] });
+    const unrelated = await finish(input, { files: [{ path: "/c.stl" }] });
+    expect(unrelated.terminate).not.toBe(true);
+    expect(unrelated.details).toMatchObject({ completed: false, prepared: [{ path: "/c.stl" }], errors: [{ path: "/a.stl" }] });
+    const repaired = await finish(input, { files: [{ path: "/home/user/workspace/a.stl" }] });
     expect(repaired.terminate).toBe(true);
-    expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl"]);
+    expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl", "/c.stl"]);
     expect(input.outgoingFiles!.items[1]!.fileId).toBe(successfulId);
     expect(read.mock.calls.filter(([request]) => request.virtualPath === "/b.stl")).toHaveLength(1);
+  });
+
+  it("keeps a failed replacement unresolved until its new revision is prepared", async () => {
+    const { input, read } = await setup();
+    await input.outgoingFiles!.workspace([{ path: "/a.stl" }]);
+    const oldId = input.outgoingFiles!.items[0]!.fileId;
+    read.mockRejectedValueOnce(new Error("replacement not ready"));
+    await finish(input, { files: [{ path: "/a.stl" }] });
+    expect(input.outgoingFiles!.items[0]!.fileId).toBe(oldId);
+    expect((await finish(input, { text: "Done" })).details).toMatchObject({ completed: false, errors: [{ path: "/a.stl" }] });
+    expect((await finish(input, { files: [{ path: "/a.stl" }] })).terminate).toBe(true);
+    expect(await input.repos.files.get(oldId)).toBeUndefined();
+  });
+
+  it("reserves failed slots so other files cannot exhaust their repair capacity", async () => {
+    const { input, read } = await setup();
+    read.mockRejectedValueOnce(new Error("missing first"));
+    await finish(input, { files: Array.from({ length: 25 }, (_, index) => ({ path: `/${index}.stl` })) });
+    read.mockClear();
+    expect((await finish(input, { files: [{ path: "/extra.stl" }] })).details)
+      .toMatchObject({ completed: false, error: expect.stringContaining("limit") });
+    await expect(input.outgoingFiles!.bytes(async () => ({ name: "browser.pdf", bytes: Buffer.alloc(1) })))
+      .rejects.toThrow("limit");
+    expect(read).not.toHaveBeenCalled();
+    expect((await finish(input, { files: [{ path: "/0.stl" }] })).terminate).toBe(true);
+    expect(input.outgoingFiles!.items).toHaveLength(25);
   });
 
   it("cancels preparation without queuing files or terminating successfully", async () => {
@@ -118,6 +150,35 @@ describe("finish_response", () => {
     await vi.waitFor(async () => expect(await input.repos.files.listForThreads([input.thread.id])).toEqual([]));
   });
 
+  it("removes abandoned files and sources at turn end while retaining confirmed and ambiguous sends", async () => {
+    const { input, runtime } = await setupPi([]);
+    const queue = runtime.bridge.outgoingFiles;
+    await queue.workspace(["abandoned", "confirmed", "unknown", "rejected"].map((name) => ({ path: `/${name}.stl` })));
+    const [abandoned, confirmed, unknown, rejected] = queue.items;
+    const generated = await queue.bytes(async () => ({ name: "generated.png", bytes: Buffer.from("image"), origin: "generated_image", summary: "Generated" }));
+    const browser = await queue.bytes(async () => ({ name: "browser.png", bytes: Buffer.from("screenshot") }));
+    // An acknowledged send must survive even if its metadata could not be saved.
+    confirmed!.telegramDelivery = { messageId: 55, fileId: null, fileUniqueId: null };
+    unknown!.telegramDeliveryUnknown = true;
+    rejected!.telegramDeliveryFailure = "telegram_rejected";
+    const remove = vi.spyOn(input.repos.files, "deleteFile");
+
+    await runtime.bridge.endTurn();
+    await runtime.bridge.endTurn();
+
+    expect(remove).toHaveBeenCalledTimes(4);
+    for (const file of [abandoned!, rejected!, generated, browser]) {
+      expect(await input.repos.files.get(file.fileId)).toBeUndefined();
+      expect(await input.repos.files.listSources(file.fileId)).toEqual([]);
+    }
+    for (const file of [confirmed!, unknown!]) {
+      expect(await input.repos.files.get(file.fileId)).toBeDefined();
+      expect(await input.repos.files.listSources(file.fileId)).toHaveLength(1);
+    }
+    expect(queue.buffers.snapshot().bufferedBytes).toBe(0);
+    expect(queue.items).toEqual([]);
+  });
+
   it("executes four Pi cycles with both inspections and ends with one STL and final photo", async () => {
     const { input, runtime, contexts, calls } = await setupPi([
       [{ name: "read", arguments: { path: path.resolve("skills/openscad/SKILL.md") } }],
@@ -154,6 +215,26 @@ describe("finish_response", () => {
     expect(assistant.text_plain).toBe("Persisted final");
     expect(assistant.pi_entry_id).toBe(terminal.id);
     expect(JSON.stringify(send.mock.calls)).toContain("Persisted final");
+  });
+
+  it.each(["confirmed", "ambiguous"])("preserves a %s send through turn cleanup when delivery metadata is unavailable", async (outcome) => {
+    const { input, runtime } = await setupPi([[{ name: "finish_response", arguments: { files: [{ path: "/model.stl" }] } }]]);
+    const metadata = vi.spyOn(input.repos.files, "rememberTelegramObservation").mockRejectedValue(new Error("metadata unavailable"));
+    const sendDocument = vi.fn(async () => {
+      if (outcome === "ambiguous") throw new Error("connection closed after upload");
+      return { message_id: 7, document: { file_id: "sent-stl", file_unique_id: "unique-stl" } };
+    });
+    await runTurn({ ...input, user: { ...input.user, stream_mode: 0 }, logger: input.logger!,
+      api: { sendDocument, raw: { sendRichMessage: async () => ({ message_id: 8 }), editMessageText: async () => true }, sendChatAction: async () => true } as never,
+      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime }, t: (key) => key,
+    });
+
+    expect(sendDocument).toHaveBeenCalledOnce();
+    expect(metadata).toHaveBeenCalledTimes(outcome === "confirmed" ? 2 : 0);
+    const retained = await input.repos.files.listForThreads([input.thread.id]);
+    expect(retained).toHaveLength(1);
+    expect(await input.repos.files.listSources(retained[0]!.id)).toMatchObject([{ transport: "e2b" }]);
+    expect(runtime.bridge.attachments).toEqual([]);
   });
 
   it("blocks every tool in a mixed terminal batch before mutations, then allows repair", async () => {

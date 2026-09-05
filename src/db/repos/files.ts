@@ -130,26 +130,23 @@ export class FilesRepo {
     const visibleMessage = messageScopePredicate(sql`m.thread_id`, sql`m.id`, threadIds, scopes);
     const rows = await this.db.query<{ id: number }>(sql`
       select id from (
-        select f.id,
-          exists (
-            select 1 from messages m where ${visibleMessage}
-              and (m.id = f.message_id or exists (
-                select 1 from message_files mf where mf.file_id = f.id and mf.message_id = m.id
-              ))
-          ) as attached,
-          (f.message_id is null
-            and (f.thread_id in (${valueList(threadIds)}) or exists (
-              select 1 from message_files mf join messages m on m.id = mf.message_id
-              where mf.file_id = f.id and m.thread_id in (${valueList(threadIds)})
-            ))
-            and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
-              exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')
-              or exists (select 1 from file_sources s where s.file_id = f.id and s.transport = 'telegram')
-            ))
-          ) as pending
+        select f.id, 1 as attached
+        from files f join messages m on m.id = f.message_id
+        where ${visibleMessage}
+        union
+        select mf.file_id as id, 1 as attached
+        from message_files mf join messages m on m.id = mf.message_id
+        where ${visibleMessage}
+        union all
+        select f.id, 0 as attached
         from files f
+        where f.message_id is null and f.thread_id in (${valueList(threadIds)})
+          and not exists (select 1 from message_files mf where mf.file_id = f.id)
+          and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
+            exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')
+            or exists (select 1 from file_sources s where s.file_id = f.id and s.transport = 'telegram')
+          ))
       ) candidates
-      where attached or pending
       order by attached desc, id asc
     `);
     return rows.map((row) => row.id);
