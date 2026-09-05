@@ -96,7 +96,7 @@ describe("Telegram audio prompts", () => {
     expect(surface).not.toContain("could not transcribe");
     expect(surface).not.toContain("Audio transcribed.");
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(fetchMock.mock.calls[1]![1].body).model).toBe("microsoft/mai-transcribe-2");
+    expect(JSON.parse(fetchMock.mock.calls[1]![1].body).model).toBe("qwen/qwen3-asr-1.7b");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(2);
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(1);

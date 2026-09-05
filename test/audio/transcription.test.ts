@@ -43,9 +43,9 @@ describe("OpenRouter transcription", () => {
     expect(url).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
     expect(request).toMatchObject({ method: "POST", headers: { Authorization: "Bearer test-openrouter" } });
     expect(JSON.parse(request.body)).toEqual({
-      model: "microsoft/mai-transcribe-2", input_audio: { data: bytes.toString("base64"), format: "ogg" },
+      model: "qwen/qwen3-asr-1.7b", input_audio: { data: bytes.toString("base64"), format: "ogg" },
     });
-    expect(result).toEqual({ text: "Please help me plan tomorrow.", model: "microsoft/mai-transcribe-2", usage: { seconds: 4.2, cost: 0.001 } });
+    expect(result).toEqual({ text: "Please help me plan tomorrow.", model: "qwen/qwen3-asr-1.7b", usage: { seconds: 4.2, cost: 0.001 } });
   });
 
   it("honors model overrides and language hints", async () => {
@@ -80,7 +80,7 @@ describe("OpenRouter transcription", () => {
       .mockResolvedValue(Response.json({ text: "Recovered transcript" }));
     vi.stubGlobal("fetch", fetchMock);
     const assertion = expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", language: "en" }))
-      .resolves.toMatchObject({ text: "Recovered transcript", model: "microsoft/mai-transcribe-2" });
+      .resolves.toMatchObject({ text: "Recovered transcript", model: "qwen/qwen3-asr-1.7b" });
     await vi.advanceTimersByTimeAsync(999);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);

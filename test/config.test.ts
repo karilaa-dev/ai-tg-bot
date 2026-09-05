@@ -59,8 +59,8 @@ describe("database configuration", () => {
 });
 
 describe("transcription configuration", () => {
-  it("defaults to MAI-Transcribe-2 and supports an override", () => {
-    expect(loadConfig(required)).toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "microsoft/mai-transcribe-2", TRANSCRIPTION_TIMEOUT_MS: 120_000 });
+  it("defaults to Qwen3-ASR-1.7B and supports an override", () => {
+    expect(loadConfig(required)).toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "qwen/qwen3-asr-1.7b", TRANSCRIPTION_TIMEOUT_MS: 120_000 });
     expect(loadConfig({ ...required, OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: "60000" }))
       .toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: 60_000 });
   });

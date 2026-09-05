@@ -52,7 +52,7 @@ describe("transcribe_audio", () => {
 
   it("transcribes a scoped chat attachment without a sandbox", async () => {
     const result = await createTranscribeAudioTool(input).execute({ file_id: fileId });
-    expect(result).toMatchObject({ text: "Words from the recording.", model: "microsoft/mai-transcribe-2" });
+    expect(result).toMatchObject({ text: "Words from the recording.", model: "qwen/qwen3-asr-1.7b" });
     expect(input.resolveFile).toHaveBeenCalledWith(expect.objectContaining({ id: fileId }), undefined);
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body).input_audio.format).toBe("ogg");
   });
