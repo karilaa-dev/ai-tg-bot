@@ -7,7 +7,7 @@ import { sanitizeThreadTitle } from "../pi/threadTitle.js";
 
 const MAX_TITLE_ATTEMPTS = 3;
 
-export interface ThreadTitleScheduleInput {
+interface ThreadTitleScheduleInput {
   api: Api;
   chatId: number;
   threadId: number;

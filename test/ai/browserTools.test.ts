@@ -1,5 +1,6 @@
+import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BrowserUseRuntimeError } from "../../src/browserUse/runtime.js";
+import { BrowserUseRuntimeError } from "../../src/browserUse/pageOperations.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 
@@ -134,6 +135,7 @@ describe("Browser Use Pi tools", () => {
         files: {
           insertFile: vi.fn(async (value: Record<string, unknown>) => ({ ...stored, ...value, id: stored.id })),
           get: vi.fn(async () => stored),
+          deleteFile: vi.fn(async () => []),
         },
       },
     }));
@@ -183,6 +185,7 @@ describe("Browser Use Pi tools", () => {
             mime_type: value.mimeType,
             is_inline: 0,
           })),
+          deleteFile: vi.fn(async () => []),
         },
       },
     }));
@@ -222,14 +225,10 @@ function bridge(
   extra: Record<string, unknown> = {},
 ) {
   return {
-    buildInput: () => ({
-      config,
-      repos: {},
-      user: { tg_id: 9910 },
-      thread: { id: 44 },
-      browserRuntime,
-      ...extra,
-    } as never),
+    buildInput: () => {
+      const input = { config, repos: {}, user: { tg_id: 9910 }, thread: { id: 44 }, browserRuntime, ...extra };
+      return { ...input, outgoingFiles: testOutgoingFiles(input as never, extra.createdFiles as unknown[] | undefined) } as never;
+    },
   };
 }
 

@@ -52,7 +52,7 @@ function buildInput(runtime: ReturnType<typeof fakeRuntime>, browserRuntime = fa
     }),
     repos: {
       threads: { chain: async (thread: unknown) => [thread] },
-      messages: { listForThreadChainSearchScope: async () => [] },
+      messages: { listIdsForScopes: async () => [] },
       files: {
         listForMessages: async () => [],
         listForThreads: async () => [],

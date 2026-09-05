@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import { ThreadTurnCoordinator } from "../../src/ai/threadTurnCoordinator.js";
-import type { TurnInput } from "../../src/ai/run.js";
+import type { TurnInput } from "../../src/ai/types.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";

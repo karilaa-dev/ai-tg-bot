@@ -1,6 +1,6 @@
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
-import { createTextSearch, type MessageSearchScope } from "../search.js";
+import { createTextSearch, messageScopePredicate, type MessageSearchScope } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
 
 export class MessagesRepo {
@@ -81,30 +81,22 @@ export class MessagesRepo {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }
 
-  async listForThreadChain(threads: ThreadRow[]): Promise<MessageRow[]> {
-    return this.listForThreadChainRows(threads);
+  async listForThreadChain(threads: ThreadRow[], maxMessageId?: number): Promise<MessageRow[]> {
+    const scopes = messageSearchScopesForChain(threads, maxMessageId);
+    return this.db.query<MessageRow>(sql`
+      select * from messages
+      where ${messageScopePredicate(sql`thread_id`, sql`id`, threads.map((thread) => thread.id), scopes)}
+      order by id asc
+    `);
   }
 
-  async listForThreadChainSearchScope(threads: ThreadRow[], maxMessageId?: number): Promise<MessageRow[]> {
-    return this.listForThreadChainRows(threads, maxMessageId);
-  }
-
-  private async listForThreadChainRows(
-    threads: ThreadRow[],
-    maxMessageId?: number,
-  ): Promise<MessageRow[]> {
-    const rows: MessageRow[] = [];
-    for (let i = 0; i < threads.length; i += 1) {
-      const thread = threads[i]!;
-      const child = threads[i + 1];
-      const filters: SQL[] = [sql`thread_id = ${thread.id}`];
-      if (maxMessageId !== undefined) filters.push(sql`id <= ${maxMessageId}`);
-      if (child?.parent_thread_id === thread.id && child.fork_point_message_id !== null) {
-        filters.push(sql`id <= ${child.fork_point_message_id}`);
-      }
-      rows.push(...(await this.db.query<MessageRow>(sql`select * from messages where ${sql.join(filters, sql` and `)} order by id asc`)));
-    }
-    return rows.sort((a, b) => a.id - b.id);
+  async listIdsForScopes(scopes: MessageSearchScope[]): Promise<number[]> {
+    const rows = await this.db.query<{ id: number }>(sql`
+      select id from messages
+      where ${messageScopePredicate(sql`thread_id`, sql`id`, scopes.map((scope) => scope.threadId), scopes)}
+      order by id asc
+    `);
+    return rows.map((row) => row.id);
   }
 
   latest(threadId: number): Promise<MessageRow | undefined> {

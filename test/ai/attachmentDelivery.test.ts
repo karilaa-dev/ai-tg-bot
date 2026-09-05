@@ -1,18 +1,119 @@
 import { GrammyError } from "grammy";
 import { describe, expect, it, vi } from "vitest";
-import {
-  buildFinalThinkingSummary,
-  normalizeTelegramAttachmentDeliveries,
-  refreshFinalThinkingVisible,
-  sendCreatedFileAttachments,
-  sendFinal,
-  type TurnInput,
-} from "../../src/ai/run.js";
-import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
+import { buildFinalThinkingSummary } from "../../src/ai/agentTurnEngine.js";
+import { normalizeTelegramAttachmentDeliveries, refreshFinalThinkingVisible, sendCreatedFileAttachments, sendFinal } from "../../src/ai/responseDelivery.js";
+import { type TurnInput } from "../../src/ai/types.js";
+import type { CreatedFileAttachment } from "../../src/files/types.js";
+import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
+import { deferred } from "../helpers/async.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
 import { renderFinalThinking } from "../../src/telegram/render.js";
 
 describe("buffered Telegram attachment delivery", () => {
+  it("prefetches while final text is pending and never sends attachments before text", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const textGate = deferred<void>();
+    api.raw.sendRichMessage.mockImplementation(async () => { await textGate.promise; return { message_id: 700 }; });
+    const file = imageAttachment(1, "a.jpg", 100);
+    file.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    input.resolveFile = vi.fn(async () => ({ bytes: Buffer.from("prefetched") } as never));
+    const sending = sendFinal(input, "", "Final answer", 0, [file]);
+    try {
+      await vi.waitFor(() => expect(input.resolveFile).toHaveBeenCalledOnce());
+      expect(api.sendPhoto).not.toHaveBeenCalled();
+    } finally { textGate.resolve(); }
+    await sending;
+    expect(input.resolveFile).toHaveBeenCalledOnce();
+    expect(api.raw.sendRichMessage.mock.invocationCallOrder[0]).toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
+  });
+
+  it("prepares the next batch during upload and preserves interleaved documents, photos and generated images", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const uploadGate = deferred<void>();
+    const first = imageAttachment(1, "first.stl", 100);
+    first.delivery = "document";
+    const second = imageAttachment(2, "second.jpg", 100);
+    const generated = imageAttachment(3, "generated.jpg", 100);
+    generated.origin = "generated_image";
+    const last = imageAttachment(4, "last.stl", 100);
+    last.delivery = "document";
+    for (const file of [first, second, generated, last]) file.data = undefined;
+    vi.mocked(input.repos.files.get).mockImplementation(async (id) => ({ id }) as never);
+    input.resolveFile = vi.fn(async (file) => ({ bytes: Buffer.from(String(file.id)) } as never));
+    api.sendDocument.mockImplementationOnce(async () => { await uploadGate.promise; return { message_id: 600, document: { file_id: "doc", file_unique_id: "doc", file_size: 100 } }; });
+    const sending = sendCreatedFileAttachments(input, { id: 99 } as never, [first, second, generated, last]);
+    try {
+      await vi.waitFor(() => expect(api.sendDocument).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(input.resolveFile).toHaveBeenCalledTimes(3));
+      expect(api.sendMediaGroup).not.toHaveBeenCalled();
+    } finally { uploadGate.resolve(); }
+    await sending;
+    expect(input.resolveFile).toHaveBeenCalledTimes(4);
+    expect(api.sendDocument).toHaveBeenCalledTimes(2);
+    expect(api.sendMediaGroup).toHaveBeenCalledOnce();
+    expect(api.sendDocument.mock.invocationCallOrder[0]).toBeLessThan(api.sendMediaGroup.mock.invocationCallOrder[0]!);
+    expect(api.sendMediaGroup.mock.invocationCallOrder[0]).toBeLessThan(api.sendDocument.mock.invocationCallOrder[1]!);
+    expect([first, second, generated, last].every((file) => file.telegramDelivery && !file.data)).toBe(true);
+  });
+
+  it("shares the outgoing budget across in-flight upload and prefetch", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const pool = new OutgoingBuffers(40);
+    input.outgoingBuffers = pool;
+    const uploadGate = deferred<void>();
+    const first = imageAttachment(1, "first.stl", 30);
+    first.delivery = "document";
+    const second = imageAttachment(2, "second.jpg", 20);
+    first.data = undefined; second.data = undefined;
+    vi.mocked(input.repos.files.get).mockImplementation(async (id) => ({ id }) as never);
+    input.resolveFile = vi.fn(async (file) => ({ bytes: Buffer.alloc(file.id === 1 ? 30 : 20) } as never));
+    api.sendDocument.mockImplementationOnce(async () => { await uploadGate.promise; return { message_id: 600, document: { file_id: "doc", file_unique_id: "doc", file_size: 30 } }; });
+    const sending = sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
+    try {
+      await vi.waitFor(() => expect(api.sendDocument).toHaveBeenCalledOnce());
+      expect(input.resolveFile).toHaveBeenCalledOnce();
+      expect(pool.snapshot().bufferedBytes).toBe(30);
+    } finally { uploadGate.resolve(); }
+    await sending;
+    expect(pool.snapshot()).toEqual({ bufferedBytes: 0, peakBufferedBytes: 30 });
+    expect(input.resolveFile).toHaveBeenCalledTimes(2);
+    await pool.dispose();
+  });
+
+  it("cancels pending prefetch without sending or retaining buffers", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    const controller = new AbortController();
+    input.signal = controller.signal;
+    const pool = new OutgoingBuffers(); input.outgoingBuffers = pool;
+    const file = imageAttachment(1, "a.jpg", 100); file.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    input.resolveFile = vi.fn(async (_file, signal) => new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true })));
+    const sending = sendCreatedFileAttachments(input, { id: 99 } as never, [file]);
+    const rejected = expect(sending).rejects.toThrow("cancelled");
+    await vi.waitFor(() => expect(input.resolveFile).toHaveBeenCalledOnce());
+    controller.abort(new Error("cancelled"));
+    await rejected;
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(pool.snapshot().bufferedBytes).toBe(0);
+    await pool.dispose();
+  });
+
+  it("treats an incomplete album acknowledgment as ambiguous and does not retry", async () => {
+    const api = fakeApi();
+    const input = turnInput(api);
+    api.sendMediaGroup.mockResolvedValueOnce([photoMessage(500, "one-result")]);
+    const files = [imageAttachment(1, "a.jpg", 100), imageAttachment(2, "b.jpg", 100)];
+    await sendCreatedFileAttachments(input, { id: 99 } as never, files);
+    expect(api.sendMediaGroup).toHaveBeenCalledOnce();
+    expect(api.sendPhoto).not.toHaveBeenCalled();
+    expect(files.every((file) => file.telegramDeliveryUnknown && !file.data)).toBe(true);
+  });
+
   it("keeps the original requested count when only delivered files are summarized", () => {
     const delivered = Array.from({ length: 25 }, (_, index) =>
       imageAttachment(index + 1, `${index + 1}.jpg`, 100));

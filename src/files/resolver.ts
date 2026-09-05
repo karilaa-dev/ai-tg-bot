@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./hash.js";
+
 import type { FileRow, FileSourceRow } from "../db/types.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
@@ -58,7 +59,7 @@ export class FileResolver {
       bytes,
       mimeType: source.mimeType ?? null,
       size: bytes.length,
-      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+      contentSha256: sha256Hex(bytes),
       source,
     };
   }

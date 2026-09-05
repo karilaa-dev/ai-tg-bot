@@ -7,7 +7,7 @@ import {
   parseManagedE2BTemplateRef,
 } from "./templateIdentity.js";
 
-export interface E2BTemplateReleaseResult {
+interface E2BTemplateReleaseResult {
   templateRef: string;
   status: "built" | "reused";
   templateId?: string;

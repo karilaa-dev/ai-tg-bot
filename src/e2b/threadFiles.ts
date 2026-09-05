@@ -3,11 +3,11 @@ import { threadChainScope } from "../memory/retrieval.js";
 import type { SandboxThreadFile } from "../sandbox/types.js";
 
 export async function resolveThreadFileDescriptors(
-  input: Pick<ToolBuildInput, "repos" | "thread" | "maxMessageId">,
+  input: Pick<ToolBuildInput, "repos" | "thread" | "maxMessageId" | "currentScope">,
   _signal?: AbortSignal,
   selectedFileIds?: number[],
 ): Promise<SandboxThreadFile[]> {
-  const scope = await threadChainScope(input.repos, input.thread, input.maxMessageId);
+  const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const selected = selectedFileIds
     ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
     : scope.fileIds;

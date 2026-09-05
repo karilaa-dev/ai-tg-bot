@@ -47,6 +47,105 @@ describe("thread E2B runtime manager", () => {
     await db.destroy();
   });
 
+  it("throttles ordinary pruning, forces export checks, and renews each prepared operation once", async () => {
+    const lease = runtime.acquireActivityLease(userId, threadId);
+    try {
+      await runtime.execute(commandRequest(userId, threadId));
+      const sandbox = client.onlySandbox();
+      const scans = () => sandbox.controlCommands.filter((command) => command.includes("source_root=sys.argv[1]")).length;
+      expect(scans()).toBe(1);
+      const timeoutCalls = sandbox.timeoutCalls.length;
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(1);
+      expect(sandbox.timeoutCalls).toHaveLength(timeoutCalls + 1);
+      sandbox.files.set(`${E2B_WORKSPACE}/export.stl`, Buffer.from("export"));
+      await runtime.readWorkspaceFile({ userId, threadId, virtualPath: "/export.stl", maxBytes: 100, preserveSource: true });
+      expect(scans()).toBe(2);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(2);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(scans()).toBe(3);
+    } finally { lease.release(); }
+  });
+
+  it("reads captured stdout and stderr concurrently", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.readFile.bind(sandbox);
+    const both = deferred<void>();
+    const started = new Set<string>();
+    vi.spyOn(sandbox, "readFile").mockImplementation(async (...args) => {
+      if (/\/(stdout|stderr)$/u.test(args[0])) {
+        started.add(args[0].split("/").at(-1)!);
+        if (started.size === 2) both.resolve();
+        await both.promise;
+      }
+      return original(...args);
+    });
+    const result = await runtime.execute(commandRequest(userId, threadId));
+    expect(started).toEqual(new Set(["stdout", "stderr"]));
+    expect(result.stdout).toBe("ok");
+  });
+
+  it("kills a command cancelled during startup without starting an unobserved wait", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const controller = new AbortController();
+    const wait = vi.fn(async () => { throw new Error("Command exited with code 137"); });
+    const kill = vi.fn(async () => true);
+    vi.spyOn(sandbox, "runBackground").mockImplementation(async () => {
+      controller.abort(new Error("cancelled during startup"));
+      return { pid: 123, wait, kill };
+    });
+
+    await expect(runtime.execute({ ...commandRequest(userId, threadId), signal: controller.signal }))
+      .rejects.toThrow("cancelled during startup");
+    expect(kill).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it.each(["stdout", "stderr"])("propagates transport failures while checking captured %s", async (stream) => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) => {
+      if (filePath.endsWith(`/${stream}`)) throw new Error("output transport unavailable");
+      return original(filePath);
+    });
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .rejects.toThrow("output transport unavailable");
+  });
+
+  it("propagates cancellation during output collection", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const controller = new AbortController();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) => {
+      if (/\/(stdout|stderr)$/u.test(filePath)) {
+        controller.abort(new Error("output collection cancelled"));
+        throw controller.signal.reason;
+      }
+      return original(filePath);
+    });
+
+    await expect(runtime.execute({ ...commandRequest(userId, threadId), signal: controller.signal }))
+      .rejects.toThrow("output collection cancelled");
+  });
+
+  it("allows genuinely missing output captures", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const original = sandbox.fileExists.bind(sandbox);
+    vi.spyOn(sandbox, "fileExists").mockImplementation(async (filePath) =>
+      /\/(stdout|stderr)$/u.test(filePath) ? false : original(filePath));
+
+    await expect(runtime.execute(commandRequest(userId, threadId)))
+      .resolves.toMatchObject({ stdout: "", stderr: "", exitCode: 0, timedOut: false });
+  });
+
   it("creates one sandbox per thread and synchronizes Telegram files once as read-only", async () => {
     client.telegramFiles.set("tg-hello", Buffer.from("hello"));
     const stored = await repos.files.insertFile({
@@ -766,6 +865,7 @@ describe("thread E2B runtime manager", () => {
     const orphanHash = "f".repeat(64);
     const orphanPath = `${E2B_FILE_SOURCES}/${orphanHash}`;
     sandbox.files.set(orphanPath, Buffer.from("orphan"));
+    now += 60_000;
 
     await runtime.execute(commandRequest(userId, threadId));
 
@@ -830,6 +930,9 @@ describe("thread E2B runtime manager", () => {
 
     expect(client.telegramDownloadCalls).toBe(0);
     expect(original.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--outbound.txt`)).toEqual(bytes);
+    // An ordinary scan runs after the one-minute throttle window.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    await runtime.execute(commandRequest(userId, threadId, [descriptor]));
     expect(original.files.has(`${E2B_FILE_SOURCES}/${hash}`)).toBe(false);
     await expect(repos.files.listSources(stored.id)).resolves.toEqual([]);
 

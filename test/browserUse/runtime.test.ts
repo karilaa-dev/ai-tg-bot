@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Browser, BrowserContext, Page } from "playwright-core";
-import { BrowserUseRuntimeError, BrowserUseRuntimeManager } from "../../src/browserUse/runtime.js";
+import { BrowserUseRuntimeManager } from "../../src/browserUse/runtime.js";
+import { BrowserUseRuntimeError } from "../../src/browserUse/pageOperations.js";
 import { BrowserUseHttpError } from "../../src/browserUse/client.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";

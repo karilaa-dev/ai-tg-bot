@@ -34,7 +34,7 @@ export interface AcceptedTurnRun {
   queuedBehind: boolean;
 }
 
-export interface TurnAcceptanceInput {
+interface TurnAcceptanceInput {
   userId: number;
   threadId: number;
   chatId: number;

@@ -15,13 +15,13 @@ type ToolThinkingItem = {
   summary?: string;
 };
 
-export type ThinkingItem = ReasoningThinkingItem | ToolThinkingItem;
+type ThinkingItem = ReasoningThinkingItem | ToolThinkingItem;
 
 export type ToolCallMetadata = {
   fileName?: string;
 };
 
-export type ThinkingRunSummary = {
+type ThinkingRunSummary = {
   reasoningSummaries: string[];
   toolCallCount: number;
   toolCounts: ToolCountSummary[];

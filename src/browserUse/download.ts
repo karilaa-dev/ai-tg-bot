@@ -8,7 +8,7 @@ const MAX_REDIRECTS = 5;
 const MAX_ERROR_BYTES = 8 * 1024;
 const NON_PUBLIC_ADDRESSES = createNonPublicBlockList();
 
-export interface DownloadedBrowserFile {
+interface DownloadedBrowserFile {
   bytes: Buffer;
   mimeType?: string;
   finalUrl: string;

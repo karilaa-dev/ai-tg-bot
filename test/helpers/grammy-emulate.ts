@@ -6,7 +6,8 @@ import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { installBot } from "../../src/bot/router.js";
 import type { BotContext, BotServices } from "../../src/bot/context.js";
-import { sendFinal, type TurnRunner } from "../../src/ai/run.js";
+import { sendFinal } from "../../src/ai/responseDelivery.js";
+import { type TurnRunner } from "../../src/ai/types.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
 

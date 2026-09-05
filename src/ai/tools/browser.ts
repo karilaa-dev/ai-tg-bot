@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BrowserUseRuntimeError } from "../../browserUse/runtime.js";
+import { BrowserUseRuntimeError } from "../../browserUse/pageOperations.js";
 import { redactBrowserUseError } from "../../browserUse/client.js";
 import { downloadPublicBrowserFile } from "../../browserUse/download.js";
 import { isAbortError } from "../../files/cancel.js";
 import { chatFileMarker } from "../../files/contextMarker.js";
 import { safeJson } from "../../util/records.js";
-import { assertCreatedFileCapacity, prepareDirectCreatedFile, toToolError } from "./helpers.js";
+import { toToolError } from "./helpers.js";
 import { defineBotTool, type BotToolRegistry, type ToolBuildInput } from "./types.js";
 
 const tabIdSchema = z.string().min(1).max(256);
@@ -146,19 +146,16 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
       }),
       execute: async ({ tab_id, full_page, delivery, caption }, signal) => {
         try {
-          if (!input.createdFiles) throw new Error("Telegram attachment delivery is unavailable.");
-          const usedBefore = assertCreatedFileCapacity(input);
-          const screenshot = await runtime().screenshot(tab_id, full_page, signal);
-          const extension = screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
-          const attached = await prepareDirectCreatedFile(input, {
-            bytes: screenshot.bytes,
-            name: `browser-screenshot-${randomUUID().slice(0, 8)}.${extension}`,
-            mime: screenshot.mediaType,
-            caption,
-            delivery,
-            summary: "Screenshot captured through Browser Use Cloud.",
+          if (!input.outgoingFiles) throw new Error("Telegram attachment delivery is unavailable.");
+          let screenshot!: Awaited<ReturnType<NonNullable<ToolBuildInput["browserRuntime"]>["screenshot"]>>;
+          const attached = await input.outgoingFiles.bytes(async () => {
+            screenshot = await runtime().screenshot(tab_id, full_page, signal);
+            const extension = screenshot.mediaType === "image/jpeg" ? "jpg" : "png";
+            return {
+              bytes: screenshot.bytes, name: `browser-screenshot-${randomUUID().slice(0, 8)}.${extension}`,
+              mime: screenshot.mediaType, caption, delivery, summary: "Screenshot captured through Browser Use Cloud.",
+            };
           }, signal);
-          input.createdFiles.push(attached);
           return {
             tab_id,
             full_page,
@@ -169,7 +166,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             marker: chatFileMarker(attached.fileId),
             name: attached.name,
             caption: attached.caption,
-            attached_files_used: usedBefore + 1,
+            attached_files_used: input.outgoingFiles.items.length,
             session_remaining_seconds: screenshot.session_remaining_seconds,
             screenshot_base64: screenshot.bytes.toString("base64"),
             screenshot_media_type: screenshot.mediaType,
@@ -211,38 +208,39 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
       }),
       execute: async ({ tab_id, download_index, ref, url, name, caption, delivery }, signal) => {
         try {
-          if (!input.createdFiles) throw new Error("Telegram attachment delivery is unavailable.");
-          const usedBefore = assertCreatedFileCapacity(input);
-          const sessionRemainingSeconds = await runtime().sessionRemaining(tab_id, true, signal);
-          let sourceUrl: string;
-          let sourceName: string | undefined;
-          let source: "download" | "link" | "url";
-          if (download_index !== undefined) {
-            const resolved = await runtime().resolveDownload(tab_id, download_index, signal);
-            sourceUrl = resolved.url;
-            sourceName = resolved.filename;
-            source = "download";
-          } else if (ref) {
-            sourceUrl = await runtime().resolveLink(tab_id, ref, signal);
-            source = "link";
-          } else {
-            sourceUrl = url!;
-            source = "url";
-          }
-          const fetched = await downloadPublicBrowserFile(
-            sourceUrl,
-            input.config.BROWSER_USE_API_TIMEOUT_MS,
-            signal,
-          );
-          const attached = await prepareDirectCreatedFile(input, {
-            bytes: fetched.bytes,
-            name: name ?? sourceName ?? downloadNameFromUrl(fetched.finalUrl),
-            mime: fetched.mimeType,
-            caption,
-            delivery,
-            summary: "File downloaded through Browser Use Cloud.",
+          if (!input.outgoingFiles) throw new Error("Telegram attachment delivery is unavailable.");
+          let sessionRemainingSeconds!: number;
+          let source!: "download" | "link" | "url";
+          const attached = await input.outgoingFiles.bytes(async () => {
+            sessionRemainingSeconds = await runtime().sessionRemaining(tab_id, true, signal);
+            let sourceUrl: string;
+            let sourceName: string | undefined;
+            if (download_index !== undefined) {
+              const resolved = await runtime().resolveDownload(tab_id, download_index, signal);
+              sourceUrl = resolved.url;
+              sourceName = resolved.filename;
+              source = "download";
+            } else if (ref) {
+              sourceUrl = await runtime().resolveLink(tab_id, ref, signal);
+              source = "link";
+            } else {
+              sourceUrl = url!;
+              source = "url";
+            }
+            const fetched = await downloadPublicBrowserFile(
+              sourceUrl,
+              input.config.BROWSER_USE_API_TIMEOUT_MS,
+              signal,
+            );
+            return {
+              bytes: fetched.bytes,
+              name: name ?? sourceName ?? downloadNameFromUrl(fetched.finalUrl),
+              mime: fetched.mimeType,
+              caption,
+              delivery,
+              summary: "File downloaded through Browser Use Cloud.",
+            };
           }, signal);
-          input.createdFiles.push(attached);
           return {
             tab_id,
             source,
@@ -254,7 +252,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
             size: attached.size,
             caption: attached.caption,
             delivery: attached.delivery,
-            attached_files_used: usedBefore + 1,
+            attached_files_used: input.outgoingFiles.items.length,
             session_remaining_seconds: sessionRemainingSeconds,
           };
         } catch (error) {

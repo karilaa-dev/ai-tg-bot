@@ -1,12 +1,13 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { toolResultFailed } from "./toolOutcome.js";
 
-export type TurnBudgetReason =
+type TurnBudgetReason =
   | "model_cycle_limit"
   | "tool_call_limit"
   | "consecutive_tool_failures"
   | "identical_tool_failures";
 
-export interface TurnBudgetSnapshot {
+interface TurnBudgetSnapshot {
   modelCycles: number;
   toolCalls: number;
   consecutiveToolFailures: number;
@@ -111,7 +112,7 @@ export function createTurnBudgetExtension(source: TurnBudgetSource): InlineExten
         );
       });
       pi.on("tool_result", (event, context) => {
-        const structuredFailure = hasStructuredError(event.details);
+        const structuredFailure = toolResultFailed(event.details);
         const failed = event.isError || structuredFailure;
         if (source.currentTurnBudget()?.afterToolResult(event.toolCallId, failed)) {
           context.abort();
@@ -151,10 +152,4 @@ function normalize(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, child]) => [key, normalize(child)]));
-}
-
-function hasStructuredError(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const error = (value as Record<string, unknown>).error;
-  return typeof error === "string" && error.trim().length > 0;
 }

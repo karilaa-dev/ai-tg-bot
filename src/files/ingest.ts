@@ -31,7 +31,7 @@ export function classifyFile(name: string, mime = ""): AcceptedFileType | "legac
   return null;
 }
 
-export interface FileIngestInput {
+interface FileIngestInput {
   config: AppConfig;
   repo: FilesRepo;
   userId: number;
@@ -47,14 +47,14 @@ export interface FileIngestInput {
   onStage?: FileIngestStageReporter;
 }
 
-export interface FileIngestResult {
+interface FileIngestResult {
   fileId: number;
   card: string;
   inline: boolean;
   type: AcceptedFileType;
 }
 
-export interface FileRefreshInput {
+interface FileRefreshInput {
   config: AppConfig;
   repo: FilesRepo;
   file: FileRow;

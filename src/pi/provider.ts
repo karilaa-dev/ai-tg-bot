@@ -14,6 +14,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./circuit.js";
+import { withModelIdentity } from "./modelIdentity.js";
 
 const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
 const TELEGRAM_MAIN_MODEL = "main";
@@ -150,7 +151,7 @@ async function* routeStream(input: {
   try {
     const auth = await input.registry.getApiKeyAndHeaders(input.codex);
     if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? "Missing openai-codex OAuth token" : auth.error);
-    const stream = input.streamCodex(input.codex, input.context, {
+    const stream = input.streamCodex(input.codex, withModelIdentity(input.context, input.codex), {
       ...input.options,
       apiKey: auth.apiKey,
       headers: { ...auth.headers, ...input.options?.headers },
@@ -250,7 +251,7 @@ async function* openRouterEvents(input: {
   options?: SimpleStreamOptions;
   streamOpenRouter: typeof streamOpenRouter;
 }): AsyncGenerator<AssistantMessageEvent> {
-  const stream = input.streamOpenRouter(input.openRouter, input.context, {
+  const stream = input.streamOpenRouter(input.openRouter, withModelIdentity(input.context, input.openRouter), {
     ...input.options,
     apiKey: input.config.OPENROUTER_API_KEY,
     timeoutMs: input.config.PI_TURN_TIMEOUT_MS || undefined,

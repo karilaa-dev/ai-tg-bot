@@ -1,0 +1,3390 @@
+{
+  "date": "2026-09-04",
+  "model": "gpt-6-astra",
+  "reasoning": "low",
+  "baselineCommit": "2d0fa0c",
+  "telegram": "mocked",
+  "method": "Three cold/warm pairs per version and provider. Fresh Pi session and no visible message/file history for every run. Cold uses a new sandbox; warm reuses that sandbox after clearing its workspace. Provider prompt-cache state is uncontrolled and usage is recorded. Providers run concurrently with each other, with versions measured sequentially within each provider.",
+  "summary": [
+    {
+      "provider": "openai-codex",
+      "temperature": "cold",
+      "baselineMedianMs": 79525,
+      "currentMedianMs": 66076,
+      "reductionPercent": 16.91
+    },
+    {
+      "provider": "openai-codex",
+      "temperature": "warm",
+      "baselineMedianMs": 64882,
+      "currentMedianMs": 62714,
+      "reductionPercent": 3.34
+    },
+    {
+      "provider": "openai-codex",
+      "temperature": "all",
+      "baselineMedianMs": 73250.5,
+      "currentMedianMs": 64395.0,
+      "reductionPercent": 12.09
+    },
+    {
+      "provider": "openrouter",
+      "temperature": "cold",
+      "baselineMedianMs": 60354,
+      "currentMedianMs": 54487,
+      "reductionPercent": 9.72
+    },
+    {
+      "provider": "openrouter",
+      "temperature": "warm",
+      "baselineMedianMs": 58849,
+      "currentMedianMs": 48539,
+      "reductionPercent": 17.52
+    },
+    {
+      "provider": "openrouter",
+      "temperature": "all",
+      "baselineMedianMs": 59601.5,
+      "currentMedianMs": 49254.5,
+      "reductionPercent": 17.36
+    }
+  ],
+  "runs": [
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 1,
+      "temperature": "cold",
+      "wallMs": 99522,
+      "modelCycles": 8,
+      "modelMs": 46219,
+      "toolMs": 52445,
+      "peakContextTokens": 9699,
+      "inputTokens": 11005,
+      "cachedTokens": 52864,
+      "outputTokens": 710,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 6,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 32344,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 2429,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12666,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 2340,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1952,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 708,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3775,
+          "context": 5824,
+          "input": 5824,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 17556,
+          "context": 6458,
+          "input": 826,
+          "cached": 5632,
+          "output": 488
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4719,
+          "context": 7061,
+          "input": 789,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4865,
+          "context": 7878,
+          "input": 966,
+          "cached": 6912,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2772,
+          "context": 8028,
+          "input": 476,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3650,
+          "context": 9403,
+          "input": 1467,
+          "cached": 7936,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4682,
+          "context": 9518,
+          "input": 430,
+          "cached": 9088,
+          "output": 74
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4200,
+          "context": 9699,
+          "input": 227,
+          "cached": 9472,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 99342
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 99519
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 7776084,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64095,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 1,
+      "temperature": "warm",
+      "wallMs": 64882,
+      "modelCycles": 8,
+      "modelMs": 39560,
+      "toolMs": 24517,
+      "peakContextTokens": 9679,
+      "inputTokens": 19015,
+      "cachedTokens": 44672,
+      "outputTokens": 686,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 9065,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1448,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 9761,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1527,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2016,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 698,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4006,
+          "context": 5824,
+          "input": 5824,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 16901,
+          "context": 6458,
+          "input": 826,
+          "cached": 5632,
+          "output": 458
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3509,
+          "context": 7031,
+          "input": 759,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2874,
+          "context": 7848,
+          "input": 7848,
+          "cached": 0,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2661,
+          "context": 7998,
+          "input": 446,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2741,
+          "context": 9373,
+          "input": 2461,
+          "cached": 6912,
+          "output": 32
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4920,
+          "context": 9476,
+          "input": 516,
+          "cached": 8960,
+          "output": 85
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 1948,
+          "context": 9679,
+          "input": 335,
+          "cached": 9344,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter.stl",
+          "ms": 64712
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 64880
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter.stl",
+          "size": 8736084,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 63160,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 2,
+      "temperature": "cold",
+      "wallMs": 66976,
+      "modelCycles": 8,
+      "modelMs": 37701,
+      "toolMs": 28607,
+      "peakContextTokens": 9679,
+      "inputTokens": 8117,
+      "cachedTokens": 55680,
+      "outputTokens": 697,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 13369,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1504,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 9775,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1434,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1829,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 694,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3915,
+          "context": 5824,
+          "input": 2624,
+          "cached": 3200,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 16712,
+          "context": 6458,
+          "input": 826,
+          "cached": 5632,
+          "output": 480
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2402,
+          "context": 7053,
+          "input": 781,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2668,
+          "context": 7870,
+          "input": 958,
+          "cached": 6912,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2248,
+          "context": 8020,
+          "input": 468,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3393,
+          "context": 9395,
+          "input": 1459,
+          "cached": 7936,
+          "output": 32
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3995,
+          "context": 9498,
+          "input": 410,
+          "cached": 9088,
+          "output": 74
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2368,
+          "context": 9679,
+          "input": 591,
+          "cached": 9088,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter.stl",
+          "ms": 66809
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 66974
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter.stl",
+          "size": 8294484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64626,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 2,
+      "temperature": "warm",
+      "wallMs": 60676,
+      "modelCycles": 8,
+      "modelMs": 42618,
+      "toolMs": 17482,
+      "peakContextTokens": 9687,
+      "inputTokens": 20385,
+      "cachedTokens": 43392,
+      "outputTokens": 698,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 5940,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1564,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 6474,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1550,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1222,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 730,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4234,
+          "context": 5824,
+          "input": 5824,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 15976,
+          "context": 6458,
+          "input": 826,
+          "cached": 5632,
+          "output": 474
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 6335,
+          "context": 7047,
+          "input": 775,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3409,
+          "context": 7864,
+          "input": 952,
+          "cached": 6912,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2699,
+          "context": 8014,
+          "input": 462,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3324,
+          "context": 9389,
+          "input": 1453,
+          "cached": 7936,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4432,
+          "context": 9494,
+          "input": 406,
+          "cached": 9088,
+          "output": 80
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2209,
+          "context": 9687,
+          "input": 9687,
+          "cached": 0,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube-adapter.stl",
+          "ms": 60493
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 60674
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube-adapter.stl",
+          "size": 4224084,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64503,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 3,
+      "temperature": "cold",
+      "wallMs": 79525,
+      "modelCycles": 8,
+      "modelMs": 36418,
+      "toolMs": 41975,
+      "peakContextTokens": 9676,
+      "inputTokens": 5793,
+      "cachedTokens": 57856,
+      "outputTokens": 681,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 1,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 17886,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1572,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 17265,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 2075,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2235,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 941,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4221,
+          "context": 5824,
+          "input": 320,
+          "cached": 5504,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 15140,
+          "context": 6458,
+          "input": 954,
+          "cached": 5504,
+          "output": 451
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2330,
+          "context": 7024,
+          "input": 752,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2714,
+          "context": 7841,
+          "input": 929,
+          "cached": 6912,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2451,
+          "context": 7991,
+          "input": 439,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2783,
+          "context": 9366,
+          "input": 1558,
+          "cached": 7808,
+          "output": 32
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4407,
+          "context": 9469,
+          "input": 509,
+          "cached": 8960,
+          "output": 87
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2372,
+          "context": 9676,
+          "input": 332,
+          "cached": 9344,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter.stl",
+          "ms": 79308
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 79523
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 65544,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openai-codex",
+      "pair": 3,
+      "temperature": "warm",
+      "wallMs": 81654,
+      "modelCycles": 8,
+      "modelMs": 40304,
+      "toolMs": 40175,
+      "peakContextTokens": 9668,
+      "inputTokens": 11191,
+      "cachedTokens": 52480,
+      "outputTokens": 680,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 1,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 17792,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1479,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 15943,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1490,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2782,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 688,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3586,
+          "context": 5824,
+          "input": 5824,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 15398,
+          "context": 6458,
+          "input": 826,
+          "cached": 5632,
+          "output": 457
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2767,
+          "context": 7030,
+          "input": 758,
+          "cached": 6272,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4013,
+          "context": 7847,
+          "input": 935,
+          "cached": 6912,
+          "output": 24
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3361,
+          "context": 7997,
+          "input": 445,
+          "cached": 7552,
+          "output": 23
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5038,
+          "context": 9372,
+          "input": 1564,
+          "cached": 7808,
+          "output": 32
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4497,
+          "context": 9475,
+          "input": 515,
+          "cached": 8960,
+          "output": 80
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 1644,
+          "context": 9668,
+          "input": 324,
+          "cached": 9344,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter.stl",
+          "ms": 81478
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 81652
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter.stl",
+          "size": 15462484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64532,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 1,
+      "temperature": "cold",
+      "wallMs": 60354,
+      "modelCycles": 8,
+      "modelMs": 30088,
+      "toolMs": 29183,
+      "peakContextTokens": 9860,
+      "inputTokens": 24,
+      "cachedTokens": 52136,
+      "outputTokens": 792,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 6,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 13479,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1408,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 9786,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1497,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2304,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 703,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3364,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 8581,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 513
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1975,
+          "context": 7086,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4574,
+          "context": 7915,
+          "input": 3,
+          "cached": 7083,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2954,
+          "context": 8065,
+          "input": 3,
+          "cached": 7083,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2199,
+          "context": 9452,
+          "input": 3,
+          "cached": 8062,
+          "output": 41
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 5105,
+          "context": 9573,
+          "input": 3,
+          "cached": 8062,
+          "output": 127
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1336,
+          "context": 9860,
+          "input": 3,
+          "cached": 9570,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 60169
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 60353
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 63857,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 1,
+      "temperature": "warm",
+      "wallMs": 58849,
+      "modelCycles": 8,
+      "modelMs": 29263,
+      "toolMs": 28419,
+      "peakContextTokens": 9974,
+      "inputTokens": 24,
+      "cachedTokens": 52696,
+      "outputTokens": 905,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 3,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 11001,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1393,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 11463,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1408,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2651,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 500,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1744,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 12371,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 625
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2757,
+          "context": 7198,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2489,
+          "context": 8027,
+          "input": 3,
+          "cached": 7195,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2291,
+          "context": 8177,
+          "input": 3,
+          "cached": 7195,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2487,
+          "context": 9564,
+          "input": 3,
+          "cached": 8174,
+          "output": 41
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3605,
+          "context": 9685,
+          "input": 3,
+          "cached": 8174,
+          "output": 128
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1519,
+          "context": 9974,
+          "input": 3,
+          "cached": 9682,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 58679
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 58846
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 15462484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64517,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 2,
+      "temperature": "cold",
+      "wallMs": 51802,
+      "modelCycles": 8,
+      "modelMs": 26388,
+      "toolMs": 24774,
+      "peakContextTokens": 9855,
+      "inputTokens": 24,
+      "cachedTokens": 52171,
+      "outputTokens": 793,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 3,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 11564,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1499,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 7880,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1496,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1786,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 546,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2056,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 9141,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 520
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1984,
+          "context": 7093,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1882,
+          "context": 7922,
+          "input": 3,
+          "cached": 7090,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2463,
+          "context": 8072,
+          "input": 3,
+          "cached": 7090,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2306,
+          "context": 9459,
+          "input": 3,
+          "cached": 8069,
+          "output": 41
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3640,
+          "context": 9580,
+          "input": 3,
+          "cached": 8069,
+          "output": 121
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2916,
+          "context": 9855,
+          "input": 3,
+          "cached": 9577,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 51622
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 51800
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 8294484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64896,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 2,
+      "temperature": "warm",
+      "wallMs": 40211,
+      "modelCycles": 8,
+      "modelMs": 24979,
+      "toolMs": 14681,
+      "peakContextTokens": 9817,
+      "inputTokens": 24,
+      "cachedTokens": 51993,
+      "outputTokens": 756,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 4722,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1411,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 4937,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1502,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1412,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 695,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2914,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 8883,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 484
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1819,
+          "context": 7057,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1634,
+          "context": 7886,
+          "input": 3,
+          "cached": 7054,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1517,
+          "context": 8036,
+          "input": 3,
+          "cached": 7054,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2561,
+          "context": 9423,
+          "input": 3,
+          "cached": 8033,
+          "output": 42
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4086,
+          "context": 9546,
+          "input": 3,
+          "cached": 8033,
+          "output": 119
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1565,
+          "context": 9817,
+          "input": 3,
+          "cached": 9543,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6mm.stl",
+          "ms": 40037
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 40209
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6mm.stl",
+          "size": 4224084,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64449,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 3,
+      "temperature": "cold",
+      "wallMs": 62481,
+      "modelCycles": 8,
+      "modelMs": 25737,
+      "toolMs": 35782,
+      "peakContextTokens": 9795,
+      "inputTokens": 24,
+      "cachedTokens": 52006,
+      "outputTokens": 746,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 16523,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1523,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 13370,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1540,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 2273,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 551,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2035,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 8563,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 487
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2052,
+          "context": 7060,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2029,
+          "context": 7889,
+          "input": 3,
+          "cached": 7057,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2160,
+          "context": 8039,
+          "input": 3,
+          "cached": 7057,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2854,
+          "context": 9426,
+          "input": 3,
+          "cached": 8036,
+          "output": 41
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3783,
+          "context": 9547,
+          "input": 3,
+          "cached": 8036,
+          "output": 107
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2261,
+          "context": 9795,
+          "input": 3,
+          "cached": 9544,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 62303
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 62480
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64513,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.4",
+      "requestedProvider": "openrouter",
+      "pair": 3,
+      "temperature": "warm",
+      "wallMs": 66515,
+      "modelCycles": 8,
+      "modelMs": 34301,
+      "toolMs": 31188,
+      "peakContextTokens": 9864,
+      "inputTokens": 24,
+      "cachedTokens": 52228,
+      "outputTokens": 803,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 12577,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1465,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 13229,
+          "error": false
+        },
+        {
+          "name": "inspect_workspace_images",
+          "ms": 1481,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "create_file",
+          "ms": 1740,
+          "error": false
+        },
+        {
+          "name": "create_file",
+          "ms": 694,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3097,
+          "context": 5824,
+          "input": 3,
+          "cached": 0,
+          "output": 37
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 9928,
+          "context": 6458,
+          "input": 3,
+          "cached": 5821,
+          "output": 531
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3655,
+          "context": 7104,
+          "input": 3,
+          "cached": 6455,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2838,
+          "context": 7933,
+          "input": 3,
+          "cached": 7101,
+          "output": 24
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3267,
+          "context": 8083,
+          "input": 3,
+          "cached": 7101,
+          "output": 23
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3607,
+          "context": 9470,
+          "input": 3,
+          "cached": 8080,
+          "output": 42
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4366,
+          "context": 9593,
+          "input": 3,
+          "cached": 8080,
+          "output": 119
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3543,
+          "context": 9864,
+          "input": 3,
+          "cached": 9590,
+          "output": 4
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6mm.stl",
+          "ms": 66339
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 66514
+        }
+      ],
+      "budget": {
+        "modelCycles": 8,
+        "toolCalls": 7,
+        "consecutiveToolFailures": 0
+      },
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6mm.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64766,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 1,
+      "temperature": "cold",
+      "wallMs": 72315,
+      "modelCycles": 4,
+      "modelMs": 30404,
+      "toolMs": 41851,
+      "peakContextTokens": 8364,
+      "inputTokens": 8922,
+      "cachedTokens": 16768,
+      "outputTokens": 665,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 4,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 21191,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 17457,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 3199,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4980,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 17236,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 492
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 2928,
+          "context": 6916,
+          "input": 1540,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5260,
+          "context": 8364,
+          "input": 1708,
+          "cached": 6656,
+          "output": 105
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 72311
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 72312
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 72313
+        }
+      ],
+      "firstTextMs": 72311,
+      "firstFileMs": 72312,
+      "lastFileMs": 72313,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 16486484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64562,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 1,
+      "temperature": "warm",
+      "wallMs": 57306,
+      "modelCycles": 4,
+      "modelMs": 27313,
+      "toolMs": 29957,
+      "peakContextTokens": 8341,
+      "inputTokens": 8876,
+      "cachedTokens": 16768,
+      "outputTokens": 648,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 12973,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 13959,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 3023,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3211,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 15764,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 469
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3061,
+          "context": 6893,
+          "input": 1517,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5277,
+          "context": 8341,
+          "input": 1685,
+          "cached": 6656,
+          "output": 111
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 57303
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 57304
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 57305
+        }
+      ],
+      "firstTextMs": 57303,
+      "firstFileMs": 57304,
+      "lastFileMs": 57305,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64856,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 2,
+      "temperature": "cold",
+      "wallMs": 58285,
+      "modelCycles": 4,
+      "modelMs": 31183,
+      "toolMs": 27071,
+      "peakContextTokens": 8374,
+      "inputTokens": 8942,
+      "cachedTokens": 16768,
+      "outputTokens": 690,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 13776,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 10525,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2768,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3256,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 18068,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 502
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4642,
+          "context": 6926,
+          "input": 1550,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5217,
+          "context": 8374,
+          "input": 1718,
+          "cached": 6656,
+          "output": 120
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 58283
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 58283
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 58284
+        }
+      ],
+      "firstTextMs": 58283,
+      "firstFileMs": 58283,
+      "lastFileMs": 58284,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64652,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 2,
+      "temperature": "warm",
+      "wallMs": 77626,
+      "modelCycles": 4,
+      "modelMs": 51765,
+      "toolMs": 25834,
+      "peakContextTokens": 8345,
+      "inputTokens": 8884,
+      "cachedTokens": 16768,
+      "outputTokens": 659,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 3,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 10883,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 11998,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2950,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 8235,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 27788,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 473
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 6599,
+          "context": 6897,
+          "input": 1521,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 9143,
+          "context": 8345,
+          "input": 1689,
+          "cached": 6656,
+          "output": 118
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 77624
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 77624
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 77625
+        }
+      ],
+      "firstTextMs": 77624,
+      "firstFileMs": 77624,
+      "lastFileMs": 77625,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 63762,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 3,
+      "temperature": "cold",
+      "wallMs": 66076,
+      "modelCycles": 4,
+      "modelMs": 32577,
+      "toolMs": 33477,
+      "peakContextTokens": 8414,
+      "inputTokens": 9022,
+      "cachedTokens": 16768,
+      "outputTokens": 721,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 18554,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12158,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2763,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3363,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 18190,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 542
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 4053,
+          "context": 6966,
+          "input": 1590,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 6971,
+          "context": 8414,
+          "input": 1758,
+          "cached": 6656,
+          "output": 111
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 66075
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 66075
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 66076
+        }
+      ],
+      "firstTextMs": 66075,
+      "firstFileMs": 66075,
+      "lastFileMs": 66076,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64869,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openai-codex",
+      "pair": 3,
+      "temperature": "warm",
+      "wallMs": 62714,
+      "modelCycles": 4,
+      "modelMs": 33168,
+      "toolMs": 29514,
+      "peakContextTokens": 8435,
+      "inputTokens": 9064,
+      "cachedTokens": 16768,
+      "outputTokens": 745,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 13780,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12434,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 3298,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5367,
+          "context": 4833,
+          "input": 4833,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 19066,
+          "context": 5577,
+          "input": 841,
+          "cached": 4736,
+          "output": 563
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 3105,
+          "context": 6987,
+          "input": 1611,
+          "cached": 5376,
+          "output": 33
+        },
+        {
+          "provider": "openai-codex",
+          "model": "gpt-6-astra",
+          "ms": 5630,
+          "context": 8435,
+          "input": 1779,
+          "cached": 6656,
+          "output": 114
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 62712
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 62712
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 62713
+        }
+      ],
+      "firstTextMs": 62712,
+      "firstFileMs": 62712,
+      "lastFileMs": 62713,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64420,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 1,
+      "temperature": "cold",
+      "wallMs": 63213,
+      "modelCycles": 4,
+      "modelMs": 21064,
+      "toolMs": 42073,
+      "peakContextTokens": 8434,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 764,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 5,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 21362,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 17412,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 3294,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3023,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 11350,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 538
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2429,
+          "context": 6974,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4262,
+          "context": 8434,
+          "input": 3,
+          "cached": 5574,
+          "output": 158
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 63209
+        },
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 63210
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 63211
+        }
+      ],
+      "firstTextMs": 63209,
+      "firstFileMs": 63210,
+      "lastFileMs": 63211,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 16486484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64559,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 1,
+      "temperature": "warm",
+      "wallMs": 48539,
+      "modelCycles": 4,
+      "modelMs": 20791,
+      "toolMs": 27699,
+      "peakContextTokens": 8411,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 720,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 12211,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12832,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2654,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2015,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 12681,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 515
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2428,
+          "context": 6951,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3667,
+          "context": 8411,
+          "input": 3,
+          "cached": 5574,
+          "output": 137
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 48538
+        },
+        {
+          "kind": "document",
+          "name": "tube_adapter.stl",
+          "ms": 48538
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 48538
+        }
+      ],
+      "firstTextMs": 48538,
+      "firstFileMs": 48538,
+      "lastFileMs": 48538,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "tube_adapter.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64768,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 2,
+      "temperature": "cold",
+      "wallMs": 54487,
+      "modelCycles": 4,
+      "modelMs": 21071,
+      "toolMs": 33377,
+      "peakContextTokens": 8374,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 700,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 1,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 16567,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 13761,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 3048,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3172,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 10657,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 478
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2541,
+          "context": 6914,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4701,
+          "context": 8374,
+          "input": 3,
+          "cached": 5574,
+          "output": 154
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 54486
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 54486
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 54486
+        }
+      ],
+      "firstTextMs": 54486,
+      "firstFileMs": 54486,
+      "lastFileMs": 54486,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 12390484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64863,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 2,
+      "temperature": "warm",
+      "wallMs": 46232,
+      "modelCycles": 4,
+      "modelMs": 20609,
+      "toolMs": 25596,
+      "peakContextTokens": 8375,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 698,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 1,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 11086,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 11868,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2641,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3055,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 8299,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 479
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2244,
+          "context": 6915,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 7011,
+          "context": 8375,
+          "input": 3,
+          "cached": 5574,
+          "output": 151
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 46230
+        },
+        {
+          "kind": "document",
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "ms": 46231
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 46231
+        }
+      ],
+      "firstTextMs": 46230,
+      "firstFileMs": 46231,
+      "lastFileMs": 46231,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "tube_adapter_57.1_to_44.6.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64930,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 3,
+      "temperature": "cold",
+      "wallMs": 48763,
+      "modelCycles": 4,
+      "modelMs": 17631,
+      "toolMs": 31109,
+      "peakContextTokens": 8441,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 744,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 2,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 16127,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12471,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2509,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1982,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 10076,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 545
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2262,
+          "context": 6981,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 3311,
+          "context": 8441,
+          "input": 3,
+          "cached": 5574,
+          "output": 131
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 48761
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 48761
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 48762
+        }
+      ],
+      "firstTextMs": 48761,
+      "firstFileMs": 48761,
+      "lastFileMs": 48762,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 64710,
+          "delivery": "photo"
+        }
+      ]
+    },
+    {
+      "version": "2.0.5",
+      "requestedProvider": "openrouter",
+      "pair": 3,
+      "temperature": "warm",
+      "wallMs": 49746,
+      "modelCycles": 4,
+      "modelMs": 22639,
+      "toolMs": 27086,
+      "peakContextTokens": 8581,
+      "inputTokens": 12,
+      "cachedTokens": 15978,
+      "outputTokens": 892,
+      "tools": [
+        {
+          "name": "read",
+          "ms": 1,
+          "error": false
+        },
+        {
+          "name": "bash",
+          "ms": 12057,
+          "error": false,
+          "inspections": [
+            "/model.preview.png"
+          ]
+        },
+        {
+          "name": "bash",
+          "ms": 12288,
+          "error": false,
+          "inspections": [
+            "/model.final.png"
+          ]
+        },
+        {
+          "name": "finish_response",
+          "ms": 2740,
+          "error": false
+        }
+      ],
+      "models": [
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 1873,
+          "context": 4833,
+          "input": 3,
+          "cached": 0,
+          "output": 35
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 13607,
+          "context": 5577,
+          "input": 3,
+          "cached": 4830,
+          "output": 685
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 2428,
+          "context": 7121,
+          "input": 3,
+          "cached": 5574,
+          "output": 33
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-astra",
+          "ms": 4731,
+          "context": 8581,
+          "input": 3,
+          "cached": 5574,
+          "output": 139
+        }
+      ],
+      "deliveries": [
+        {
+          "kind": "text",
+          "ms": 49744
+        },
+        {
+          "kind": "document",
+          "name": "model.stl",
+          "ms": 49744
+        },
+        {
+          "kind": "photo",
+          "name": "model.final.png",
+          "ms": 49745
+        }
+      ],
+      "firstTextMs": 49744,
+      "firstFileMs": 49744,
+      "lastFileMs": 49745,
+      "fileReloads": 0,
+      "budget": {
+        "modelCycles": 4,
+        "toolCalls": 4,
+        "consecutiveToolFailures": 0
+      },
+      "peakBufferedBytes": 41943040,
+      "files": [
+        {
+          "name": "model.stl",
+          "size": 10342484,
+          "delivery": "document"
+        },
+        {
+          "name": "model.final.png",
+          "size": 63896,
+          "delivery": "photo"
+        }
+      ]
+    }
+  ]
+}

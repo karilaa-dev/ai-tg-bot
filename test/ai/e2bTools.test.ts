@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { appendPublishedWebsiteNotice } from "../../src/ai/run.js";
+import { appendPublishedWebsiteNotice } from "../../src/ai/agentTurnEngine.js";
 import { createBashTool } from "../../src/ai/tools/bash.js";
 import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
@@ -7,13 +7,13 @@ import { loadTestConfig } from "../../src/config.js";
 import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
 
 describe("E2B-backed agent tools", () => {
-  it("tells the model how to detach long-lived background processes", () => {
+  it("describes combined inspection and task-scoped service bindings", () => {
     const description = createBashTool(buildInput(fakeRuntime())).description;
 
-    expect(description).toContain("nohup command </dev/null >server.log 2>&1 &");
-    expect(description).toContain("inherited output pipes");
-    expect(description).toContain("Bind local or diagnostic services to 127.0.0.1");
-    expect(description).toContain("next action is publish_website");
+    expect(description).toContain("inspect_images");
+    expect(description).toContain("retry only inspect_workspace_images");
+    expect(description).toContain("diagnostics to 127.0.0.1");
+    expect(description).toContain("requested published websites to 0.0.0.0");
   });
 
   it("holds sandbox activity while exporting a created file", () => {
@@ -68,7 +68,7 @@ function buildInput(runtime: CommandRuntime, registerPublishedWebsite?: (website
     config: loadTestConfig(),
     repos: {
       threads: { chain: async (thread: unknown) => [thread] },
-      messages: { listForThreadChainSearchScope: async () => [] },
+      messages: { listIdsForScopes: async () => [] },
       files: {
         listForMessages: async () => [],
         listForThreads: async () => [],

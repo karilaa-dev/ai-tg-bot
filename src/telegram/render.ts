@@ -13,14 +13,14 @@ const THINKING_TRUNCATION_MARKER = "…";
 
 export type RenderT = (key: string, params?: Record<string, string | number>) => string;
 
-export interface RenderFinalInput {
+interface RenderFinalInput {
   thinkingLog?: string;
   answerMd: string;
   elapsedMs: number;
   t: RenderT;
 }
 
-export interface RenderDraftInput {
+interface RenderDraftInput {
   thinkingMd: string;
   answerMd: string;
   elapsedMs: number;

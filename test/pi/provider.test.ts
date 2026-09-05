@@ -1,6 +1,7 @@
 import {
   createAssistantMessageEventStream,
   type Api,
+  type Context,
   type AssistantMessage,
   type AssistantMessageEvent,
   type Model,
@@ -15,6 +16,31 @@ import {
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 describe("Pi automatic provider", () => {
+  it("injects the selected full model name on every request without changing history", async () => {
+    const harness = providerHarness({ codexConfigured: true });
+    await harness.run("main");
+    await harness.run("main");
+    await harness.run("helper");
+    expect(harness.contexts.map((context) => context.systemPrompt)).toEqual([
+      "Core\n\nModel: GPT-6 Astra", "Core\n\nModel: GPT-6 Astra", "Core\n\nModel: GPT-5.6 Luna",
+    ]);
+    expect(harness.context).toEqual({ systemPrompt: "Core", messages: [] });
+  });
+
+  it("uses the actual configured fallback identity after a primary failure and for helper requests", async () => {
+    const harness = providerHarness({ codexError: "quota exhausted", models: {
+      CODEX_MODEL: "gpt-6-astra-custom", OPENROUTER_MAIN_MODEL: "vendor/other-model-v2",
+      OPENROUTER_HELPER_MODEL: "openai/gpt-5.6-terra",
+    } });
+    await harness.run();
+    await harness.run("helper");
+    expect(harness.contexts.map((context) => context.systemPrompt)).toEqual([
+      "Core\n\nModel: GPT-6 Astra Custom", "Core\n\nModel: other-model-v2", "Core\n\nModel: GPT-5.6 Terra",
+    ]);
+    expect(harness.contexts.every((context) => !/provider:|Model: (main|helper)/u.test(context.systemPrompt!))).toBe(true);
+    expect(harness.context.systemPrompt).toBe("Core");
+  });
+
   it("uses Codex exclusively while its OAuth and provider are available", async () => {
     const harness = providerHarness({ codexConfigured: true });
     const mainEvents = await harness.run("main");
@@ -111,6 +137,7 @@ describe("Pi automatic provider", () => {
 });
 
 function providerHarness(input: {
+  models?: Record<string, string>;
   codexConfigured?: boolean;
   codexError?: string;
   codexPartial?: string;
@@ -119,6 +146,8 @@ function providerHarness(input: {
   discoveredOpenRouterCompat?: Model<"openai-completions">["compat"];
 }) {
   const calls: string[] = [];
+  const contexts: Context[] = [];
+  const context = { systemPrompt: "Core", messages: [] as [] };
   const streamOptions: Array<{ provider: string; sessionId: string | undefined }> = [];
   let registered: {
     streamSimple: (
@@ -150,7 +179,8 @@ function providerHarness(input: {
       : { ok: true as const, apiKey: "codex-token", headers: {} },
   };
   const streams: PiProviderStreamOverrides = {
-    codex: ((model, _context, options) => {
+    codex: ((model, context, options) => {
+      contexts.push(context);
       calls.push("codex");
       streamOptions.push({ provider: "codex", sessionId: options?.sessionId });
       if (input.codexPartial) {
@@ -158,20 +188,23 @@ function providerHarness(input: {
       }
       return input.codexError ? errorStream(model, input.codexError) : eventStream(model, "codex answer");
     }) as PiProviderStreamOverrides["codex"],
-    openRouter: ((model, _context, options) => {
+    openRouter: ((model, context, options) => {
+      contexts.push(context);
       calls.push("openrouter");
       streamOptions.push({ provider: "openrouter", sessionId: options?.sessionId });
       return eventStream(model, "openrouter answer");
     }) as PiProviderStreamOverrides["openRouter"],
   };
   const router = registerPiProviderRouter({
-    config: loadTestConfig(),
+    config: loadTestConfig(input.models),
     modelRegistry: registry as never,
     circuit: input.circuit,
     streams,
   });
   return {
     calls,
+    context,
+    contexts,
     streamOptions,
     router,
     run: async (kind: "main" | "helper" = "main") => {
@@ -180,7 +213,7 @@ function providerHarness(input: {
       const model = kind === "helper" ? router.helperModel : router.mainModel;
       for await (const event of registered.streamSimple(
         model,
-        { systemPrompt: "", messages: [] },
+        context,
         { sessionId: "opaque-pi-session" },
       )) events.push(event);
       return events;

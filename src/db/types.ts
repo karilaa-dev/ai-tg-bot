@@ -84,13 +84,6 @@ interface TurnRunsTable {
   updated_at: number;
 }
 
-interface TurnRunSourcesTable {
-  turn_run_id: number;
-  telegram_update_id: number;
-  telegram_message_id: number | null;
-  created_at: number;
-}
-
 interface FilesTable {
   id: number;
   user_id: number;
@@ -180,21 +173,10 @@ interface FileChunksTable {
   created_at: number;
 }
 
-interface EmbeddingsTable {
-  id: number;
-  kind: "chunk";
-  ref_id: number;
-  model: string | null;
-  dim: number;
-  vector: Buffer;
-  created_at: number;
-}
-
 export type UserRow = UsersTable;
 export type ThreadRow = ThreadsTable;
 export type MessageRow = MessagesTable;
 export type TurnRunRow = TurnRunsTable;
-export type TurnRunSourceRow = TurnRunSourcesTable;
 export type FileRow = FilesTable;
 export type ThreadSandboxRow = ThreadSandboxesTable;
 export type BrowserUseProfileRow = BrowserUseProfilesTable;
@@ -202,4 +184,3 @@ export type FileSourceRow = FileSourcesTable;
 export type TelegramFileRefRow = TelegramFileRefsTable;
 export type SandboxFileRestoreStatusRow = SandboxFileRestoreStatusTable;
 export type FileChunkRow = FileChunksTable;
-export type EmbeddingRow = EmbeddingsTable;

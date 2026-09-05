@@ -10,7 +10,7 @@ export type InputRichMessage =
   | { markdown: string; html?: never; is_rtl?: boolean; skip_entity_detection?: boolean }
   | { html: string; markdown?: never; is_rtl?: boolean; skip_entity_detection?: boolean };
 
-export interface SendRichMessageParams {
+interface SendRichMessageParams {
   business_connection_id?: string;
   chat_id: number | string;
   message_thread_id?: number;
@@ -24,14 +24,14 @@ export interface SendRichMessageParams {
   reply_markup?: unknown;
 }
 
-export interface SendRichMessageDraftParams {
+interface SendRichMessageDraftParams {
   chat_id: number;
   message_thread_id?: number;
   draft_id: number;
   rich_message: InputRichMessage;
 }
 
-export interface EditRichMessageParams {
+interface EditRichMessageParams {
   chat_id: number;
   message_id: number;
   rich_message: InputRichMessage;

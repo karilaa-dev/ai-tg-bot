@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createInspectWorkspaceImagesTool } from "../../src/ai/tools/inspectWorkspaceImages.js";
+import { createBashTool } from "../../src/ai/tools/bash.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from "../../src/sandbox/types.js";
@@ -7,6 +8,42 @@ import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from
 const JPEG = Buffer.from([255, 216, 255, 224, 0]);
 
 describe("inspect_workspace_images", () => {
+  it("returns command output and images in one call, keeping base64 out of details", async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.execute).mockResolvedValueOnce(commandResult("built successfully"));
+    const bash = createPiToolAdapters({ buildInput: () => buildInput(runtime) }).find((tool) => tool.name === "bash")!;
+    const result = await bash.execute("build", { script: "build", inspect_images: ["/preview.png", "/detail.png"] }, undefined, undefined, {} as never);
+    expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("built successfully") });
+    expect(result.content.filter((part) => part.type === "image")).toHaveLength(2);
+    expect(JSON.stringify(result.details)).not.toContain(JPEG.toString("base64"));
+  });
+
+  it("retains a successful command after inspection failure and permits inspection-only repair", async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.execute)
+      .mockResolvedValueOnce(commandResult("artifact built"))
+      .mockResolvedValueOnce({ ...commandResult(""), exitCode: 2, stderr: "missing preview" });
+    const tool = createBashTool(buildInput(runtime));
+    const output = await tool.execute({ script: "build", cwd: "/", stdin: "", args: [], inspect_images: ["/preview.png"] });
+    expect(output).toMatchObject({ stdout: "artifact built", exit_code: 0, error: expect.stringContaining("Retry inspect_workspace_images only") });
+    const repaired = await createInspectWorkspaceImagesTool(buildInput(runtime)).execute({ paths: ["/preview.png", "/detail.png"] });
+    expect(repaired).toMatchObject({ inspected: true });
+    expect(vi.mocked(runtime.execute).mock.calls.filter(([request]) => request.args?.includes("build"))).toHaveLength(1);
+  });
+
+  it("skips image inspection after nonzero exit or timeout and validates the shared path limit", async () => {
+    for (const failure of [{ exitCode: 7 }, { timedOut: true }]) {
+      const runtime = fakeRuntime();
+      vi.mocked(runtime.execute).mockResolvedValueOnce({ ...commandResult("partial"), ...failure });
+      const tool = createBashTool(buildInput(runtime));
+      await tool.execute({ script: "build", cwd: "/", stdin: "", args: [], inspect_images: ["/preview.png"] });
+      expect(runtime.execute).toHaveBeenCalledTimes(1);
+      expect(runtime.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(tool.inputSchema.safeParse({ script: "build", inspect_images: Array(5).fill("/p.png") }).success).toBe(false);
+      expect(tool.inputSchema.safeParse({ script: "build", inspect_images: ["/p.png", "/home/user/workspace/p.png"] }).success).toBe(false);
+    }
+  });
+
   it("returns normalized workspace images to the model and removes its previews", async () => {
     const runtime = fakeRuntime();
     const tool = createInspectWorkspaceImagesTool(buildInput(runtime));

@@ -1,6 +1,7 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { runTurn, type TurnInput } from "../../src/ai/agentTurnEngine.js";
+import { runTurn } from "../../src/ai/agentTurnEngine.js";
+import { type TurnInput } from "../../src/ai/types.js";
 import { loadTestConfig } from "../../src/config.js";
 import { deferred } from "../helpers/async.js";
 
@@ -46,7 +47,7 @@ describe("turn streaming", () => {
         bridge: {
           beginTurn: async () => undefined,
           endTurn: async () => undefined,
-          attachments: [], pendingCreatedFiles: [], publishedWebsites: [],
+          attachments: [], publishedWebsites: [],
           currentTurnBudget: () => undefined,
         },
         session: {
