@@ -1,13 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CreatedFileAttachment } from "../ai/tools/types.js";
+import type { CreatedFileAttachment } from "./types.js";
 import { raceWithAbort } from "./cancel.js";
 
 export const OUTGOING_BUFFER_BYTES = 40 * 1024 * 1024;
-export const FILE_PREPARATION_WORKERS = 2;
+const FILE_PREPARATION_WORKERS = 2;
 
-export interface OutgoingReservation {
+interface OutgoingReservation {
   commit(attachment: CreatedFileAttachment, bytes: Buffer, pinned?: boolean): void;
   release(): void;
 }

@@ -19,7 +19,7 @@ export const OFFICECLI_SKILLS = [
   },
 ] as const;
 
-export const SANDBOX_FILE_SKILLS = [
+const SANDBOX_FILE_SKILLS = [
   {
     name: "sandbox-files",
     relativePath: "skills/sandbox-files/SKILL.md",

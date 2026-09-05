@@ -1,4 +1,4 @@
-export interface Chunk {
+interface Chunk {
   idx: number;
   headingPath: string | null;
   content: string;

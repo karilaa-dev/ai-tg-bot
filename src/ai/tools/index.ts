@@ -18,8 +18,6 @@ import type { BotToolRegistry, ToolBuildInput } from "./types.js";
 
 export type {
   BotToolRegistry,
-  CreatedFileAttachment,
-  PendingCreatedFile,
   ToolBuildInput,
 } from "./types.js";
 

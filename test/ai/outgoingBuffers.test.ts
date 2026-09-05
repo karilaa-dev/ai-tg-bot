@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OutgoingBuffers, OUTGOING_BUFFER_BYTES } from "../../src/files/outgoingBuffers.js";
-import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
+import type { CreatedFileAttachment } from "../../src/files/types.js";
 
 describe("outgoing buffers", () => {
   it("evicts cached exports under pressure, preserves non-durable bytes on disk, and releases reservations", async () => {

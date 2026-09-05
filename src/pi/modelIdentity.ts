@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/pi-ai";
 
-export function modelDisplayName(model: { id: string; name: string }): string {
+function modelDisplayName(model: { id: string; name: string }): string {
   const id = model.id.split("/").at(-1)!;
   const gpt = /^gpt-(\d+(?:\.\d+)*)(?:-(.+))?$/iu.exec(id);
   const name = gpt

@@ -8,23 +8,13 @@ import type { Locale, MessageKind, TurnRunRow } from "../db/types.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
-import type { TurnRunner } from "./run.js";
+import type { TurnRunner } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
 
 interface ActiveTurn {
   run: TurnRunRow;
   controller: AbortController;
   finalizer: TurnFinalizer;
-}
-
-export interface DurableTurnRequest {
-  turnRunId: number;
-  userId: number;
-  threadId: number;
-  userMessageId: number;
-  chatId: number;
-  messageThreadId: number | null;
-  locale: Locale;
 }
 
 export class ThreadTurnCoordinator {

@@ -25,6 +25,8 @@ Final text precedes attachments. Two preparation workers prefetch files while te
 
 Turn logs include model-cycle latency, token/cache usage, peak request context, file preparation latency, and first-text/first-file/last-file delivery times. Snapshot pruning runs at most once per minute during ordinary operations; source-preserving exports still force a check.
 
+The [2.0.5 simplification report](docs/simplification-2.0.5.md) describes internal ownership, code reduction, and before/after validation results.
+
 ## Requirements
 
 - Node.js 24.18 or newer

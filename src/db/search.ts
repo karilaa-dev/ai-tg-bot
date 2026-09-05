@@ -192,7 +192,7 @@ class PgTextSearch implements TextSearch {
   }
 }
 
-function messageScopePredicate(
+export function messageScopePredicate(
   scopeColumn: ReturnType<typeof sql.raw>,
   idColumn: ReturnType<typeof sql.raw>,
   scopeIds: number[],

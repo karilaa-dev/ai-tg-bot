@@ -7,7 +7,7 @@ import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { officeSkillPaths } from "../../src/pi/officeSkills.js";
-import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/runtime.js";
+import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/threadBridge.js";
 import {
   createTurnPromptContextExtension,
   prependSessionContext,

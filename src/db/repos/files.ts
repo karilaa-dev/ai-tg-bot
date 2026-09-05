@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
-import { createTextSearch, type MessageSearchScope, type TextSearch } from "../search.js";
+import { createTextSearch, messageScopePredicate, type MessageSearchScope, type TextSearch } from "../search.js";
 import type {
   FileChunkRow,
   FileRow,
@@ -124,22 +124,35 @@ export class FilesRepo {
     `);
   }
 
-  listForMessageScopes(scopes: MessageSearchScope[]): Promise<FileRow[]> {
-    if (!scopes.length) return Promise.resolve([]);
-    const visibleMessage = sql`(${sql.join(scopes.map((scope) => scope.maxMessageId === undefined
-      ? sql`(m.thread_id = ${scope.threadId})`
-      : sql`(m.thread_id = ${scope.threadId} and m.id <= ${scope.maxMessageId})`), sql` or `)})`;
-    return this.db.query<FileRow>(sql`
-      select distinct f.*
-      from files f
-      left join message_files mf on mf.file_id = f.id
-      where exists (
-        select 1 from messages m
-        where (m.id = mf.message_id or m.id = f.message_id)
-          and ${visibleMessage}
-      )
-      order by f.id asc
+  async listVisibleIds(scopes: MessageSearchScope[], includeUnattachedInbound: boolean): Promise<number[]> {
+    if (!scopes.length) return [];
+    const threadIds = scopes.map((scope) => scope.threadId);
+    const visibleMessage = messageScopePredicate(sql`m.thread_id`, sql`m.id`, threadIds, scopes);
+    const rows = await this.db.query<{ id: number }>(sql`
+      select id from (
+        select f.id,
+          exists (
+            select 1 from messages m where ${visibleMessage}
+              and (m.id = f.message_id or exists (
+                select 1 from message_files mf where mf.file_id = f.id and mf.message_id = m.id
+              ))
+          ) as attached,
+          (f.message_id is null
+            and (f.thread_id in (${valueList(threadIds)}) or exists (
+              select 1 from message_files mf join messages m on m.id = mf.message_id
+              where mf.file_id = f.id and m.thread_id in (${valueList(threadIds)})
+            ))
+            and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
+              exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')
+              or exists (select 1 from file_sources s where s.file_id = f.id and s.transport = 'telegram')
+            ))
+          ) as pending
+        from files f
+      ) candidates
+      where attached or pending
+      order by attached desc, id asc
     `);
+    return rows.map((row) => row.id);
   }
 
   listByIds(fileIds: number[]): Promise<FileRow[]> {
@@ -445,27 +458,6 @@ export class FilesRepo {
     `);
   }
 
-  async listUnattachedInboundIds(fileIds: number[]): Promise<number[]> {
-    if (!fileIds.length) return [];
-    const rows = await this.db.query<{ id: number }>(sql`
-      select distinct f.id
-      from files f
-      where f.id in (${valueList(fileIds)})
-        and f.message_id is null
-        and (
-          exists (
-            select 1 from telegram_file_refs ref
-            where ref.file_id = f.id and ref.direction = 'inbound'
-          )
-          or exists (
-            select 1 from file_sources source
-            where source.file_id = f.id and source.transport = 'telegram'
-          )
-        )
-      order by f.id asc
-    `);
-    return rows.map((row) => row.id);
-  }
 
   chunksForFiles(fileIds: number[]): Promise<FileChunkRow[]> {
     if (!fileIds.length) return Promise.resolve([]);

@@ -1,0 +1,1589 @@
+{
+  "date": "2026-09-05",
+  "version": "2.0.5",
+  "baselineCommit": "af793e2",
+  "targetBranchVersion": "2.0.4",
+  "codeMetrics": {
+    "method": "src/**/*.ts; nonempty lines; top-level export declarations; esbuild transform with loader ts and minifyWhitespace only",
+    "before": {
+      "sourceFiles": 111,
+      "nonblankLines": 18737,
+      "exports": 383,
+      "javascriptBytes": 515039
+    },
+    "after": {
+      "sourceFiles": 115,
+      "nonblankLines": 18144,
+      "exports": 359,
+      "javascriptBytes": 504734
+    },
+    "subsystems": {
+      "before": {
+        "config.ts": {
+          "nonblankLines": 78,
+          "javascriptBytes": 3457
+        },
+        "logger.ts": {
+          "nonblankLines": 38,
+          "javascriptBytes": 910
+        },
+        "main.ts": {
+          "nonblankLines": 91,
+          "javascriptBytes": 2916
+        },
+        "version.ts": {
+          "nonblankLines": 6,
+          "javascriptBytes": 306
+        },
+        "util": {
+          "nonblankLines": 45,
+          "javascriptBytes": 1311
+        },
+        "telegram": {
+          "nonblankLines": 781,
+          "javascriptBytes": 18830
+        },
+        "sandbox": {
+          "nonblankLines": 115,
+          "javascriptBytes": 0
+        },
+        "pi": {
+          "nonblankLines": 2636,
+          "javascriptBytes": 71861
+        },
+        "memory": {
+          "nonblankLines": 93,
+          "javascriptBytes": 2593
+        },
+        "files": {
+          "nonblankLines": 813,
+          "javascriptBytes": 20645
+        },
+        "e2b": {
+          "nonblankLines": 2607,
+          "javascriptBytes": 65599
+        },
+        "db": {
+          "nonblankLines": 2312,
+          "javascriptBytes": 63526
+        },
+        "browserUse": {
+          "nonblankLines": 1534,
+          "javascriptBytes": 43039
+        },
+        "bot": {
+          "nonblankLines": 1706,
+          "javascriptBytes": 48329
+        },
+        "ai": {
+          "nonblankLines": 5882,
+          "javascriptBytes": 171717
+        }
+      },
+      "after": {
+        "config.ts": {
+          "nonblankLines": 78,
+          "javascriptBytes": 3457
+        },
+        "logger.ts": {
+          "nonblankLines": 38,
+          "javascriptBytes": 910
+        },
+        "main.ts": {
+          "nonblankLines": 91,
+          "javascriptBytes": 2916
+        },
+        "version.ts": {
+          "nonblankLines": 6,
+          "javascriptBytes": 306
+        },
+        "util": {
+          "nonblankLines": 45,
+          "javascriptBytes": 1311
+        },
+        "telegram": {
+          "nonblankLines": 781,
+          "javascriptBytes": 18830
+        },
+        "sandbox": {
+          "nonblankLines": 115,
+          "javascriptBytes": 0
+        },
+        "pi": {
+          "nonblankLines": 2591,
+          "javascriptBytes": 70899
+        },
+        "memory": {
+          "nonblankLines": 74,
+          "javascriptBytes": 1989
+        },
+        "files": {
+          "nonblankLines": 1083,
+          "javascriptBytes": 28942
+        },
+        "e2b": {
+          "nonblankLines": 2497,
+          "javascriptBytes": 64749
+        },
+        "db": {
+          "nonblankLines": 2280,
+          "javascriptBytes": 63497
+        },
+        "browserUse": {
+          "nonblankLines": 1543,
+          "javascriptBytes": 43424
+        },
+        "bot": {
+          "nonblankLines": 1707,
+          "javascriptBytes": 48341
+        },
+        "ai": {
+          "nonblankLines": 5215,
+          "javascriptBytes": 155163
+        }
+      }
+    }
+  },
+  "contracts": {
+    "before": [
+      {
+        "browser": false,
+        "coreCharacters": 3621,
+        "promptSha256": "cda703046fe1d0e97625d92ca298283f9ab125fdd747ff44116afab65e66984d",
+        "toolCount": 13,
+        "toolSchemaBytes": 10015,
+        "toolSchemaSha256": "5f0d2b1ad1786b5a5fdf8d43657d098397a40fe7e74454e84ace15fe6ac5383c"
+      },
+      {
+        "browser": true,
+        "coreCharacters": 4133,
+        "promptSha256": "012d489545a9db4ad1a92d9fb0cabdb8efe80668819a8e6833bf3a8e1babb571",
+        "toolCount": 28,
+        "toolSchemaBytes": 17872,
+        "toolSchemaSha256": "ef1980d2f5a13db791002da8049efb3b4c24ac16cc3299b0af68e8e976da4c70"
+      }
+    ],
+    "after": [
+      {
+        "browser": false,
+        "coreCharacters": 3621,
+        "promptSha256": "cda703046fe1d0e97625d92ca298283f9ab125fdd747ff44116afab65e66984d",
+        "toolCount": 13,
+        "toolSchemaBytes": 10015,
+        "toolSchemaSha256": "5f0d2b1ad1786b5a5fdf8d43657d098397a40fe7e74454e84ace15fe6ac5383c"
+      },
+      {
+        "browser": true,
+        "coreCharacters": 4133,
+        "promptSha256": "012d489545a9db4ad1a92d9fb0cabdb8efe80668819a8e6833bf3a8e1babb571",
+        "toolCount": 28,
+        "toolSchemaBytes": 17872,
+        "toolSchemaSha256": "ef1980d2f5a13db791002da8049efb3b4c24ac16cc3299b0af68e8e976da4c70"
+      }
+    ],
+    "fixture": "English, GPT-6 Astra; browser disabled and enabled. Includes descriptions, schemas, and execution modes for registered bot tools. The image extension schema is unchanged in source."
+  },
+  "visibility": {
+    "fixture": {
+      "forkDepth": 6,
+      "messagesPerThread": 20,
+      "charactersPerMessage": 1000,
+      "fileMessages": [
+        6,
+        16
+      ],
+      "forkAfterMessage": 11
+    },
+    "before": {
+      "calls": 13,
+      "rows": 89,
+      "resultBytes": 168078,
+      "messageBodyQueries": 6,
+      "elapsedMs": 2.2159599999999955,
+      "scope": {
+        "threadIds": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "messageScopes": [
+          {
+            "threadId": 1,
+            "maxMessageId": 11
+          },
+          {
+            "threadId": 2,
+            "maxMessageId": 31
+          },
+          {
+            "threadId": 3,
+            "maxMessageId": 51
+          },
+          {
+            "threadId": 4,
+            "maxMessageId": 71
+          },
+          {
+            "threadId": 5,
+            "maxMessageId": 91
+          },
+          {
+            "threadId": 6,
+            "maxMessageId": 111
+          }
+        ],
+        "messageIds": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          110,
+          111
+        ],
+        "fileIds": [
+          1,
+          3,
+          5,
+          7,
+          9,
+          11
+        ]
+      }
+    },
+    "after": {
+      "calls": 7,
+      "rows": 77,
+      "resultBytes": 1994,
+      "messageBodyQueries": 0,
+      "elapsedMs": 1.5685600000000477,
+      "scope": {
+        "threadIds": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "messageScopes": [
+          {
+            "threadId": 1,
+            "maxMessageId": 11
+          },
+          {
+            "threadId": 2,
+            "maxMessageId": 31
+          },
+          {
+            "threadId": 3,
+            "maxMessageId": 51
+          },
+          {
+            "threadId": 4,
+            "maxMessageId": 71
+          },
+          {
+            "threadId": 5,
+            "maxMessageId": 91
+          },
+          {
+            "threadId": 6,
+            "maxMessageId": 111
+          }
+        ],
+        "messageIds": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          110,
+          111
+        ],
+        "fileIds": [
+          1,
+          3,
+          5,
+          7,
+          9,
+          11
+        ]
+      }
+    }
+  },
+  "deterministicReplays": {
+    "baselinePassed": 42,
+    "scenarios": [
+      {
+        "file": "attachmentDelivery.test.ts",
+        "tests": [
+          {
+            "name": "buffered Telegram attachment delivery prefetches while final text is pending and never sends attachments before text",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery prepares the next batch during upload and preserves interleaved documents, photos and generated images",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery shares the outgoing budget across in-flight upload and prefetch",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery cancels pending prefetch without sending or retaining buffers",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery treats an incomplete album acknowledgment as ambiguous and does not retry",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery keeps the original requested count when only delivered files are summarized",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery reports the confirmed count when a capped delivery is only partially successful",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery keeps confirmed file names when verbose reasoning is capped",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery refreshes multipart thinking deliveries and removes stale fallback parts",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery downgrades oversized generated images before attachment delivery",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery sends final thinking before a captioned generated image without a completion reply",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not deliver a generated image when assistant persistence fails",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery persists the assistant result before delivery and does not retry an ambiguous final send",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery retries finalized assistant content before confirming delivery",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not confirm delivery when finalized assistant content exhausts retries",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not persist or send a final answer after cancellation wins the delivery barrier",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery sends a failure reply only when generated-image delivery is definitively rejected",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery sends images over Telegram's photo limit as documents",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery retries failed photo groups individually and falls back to a document per rejected photo",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery sends a photo_only attachment as a photo without document fallback",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery reports a rejected photo_only attachment instead of sending a document",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery shows a photo delivery failure when other model files were delivered",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery shows a photo delivery failure when a photo_only outcome is unknown",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not retry a media group after an ambiguous transport failure",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery persists an ambiguous send in a separate operational bucket",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not resend a photo when post-delivery bookkeeping fails",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery retries the durable Telegram source before associating the delivered message",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery does not resend a media group when one delivery record fails",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery splits large albums to bound simultaneously buffered file bytes",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery loads a sandbox attachment only for its send and releases the buffer afterward",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery continues with readable files when one media-group source cannot be loaded",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery sends a visible failure when a caption-only turn cannot load its only file",
+            "status": "passed"
+          },
+          {
+            "name": "buffered Telegram attachment delivery continues pending delivery when bookkeeping for an earlier photo fails",
+            "status": "passed"
+          }
+        ]
+      },
+      {
+        "file": "finishResponse.test.ts",
+        "tests": [
+          {
+            "name": "finish_response prepares with two workers, registers requested order, retains bytes and durable sources, and terminates",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response reserves capacity and rejects duplicate normalized paths before any exports",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response retains partial successes and repairs a failed earlier slot without re-exporting successes",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response cancels preparation without queuing files or terminating successfully",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response executes four Pi cycles with both inspections and ends with one STL and final photo",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response persists final text against the terminal result entry so forks retain a complete exchange",
+            "status": "passed"
+          },
+          {
+            "name": "finish_response blocks every tool in a mixed terminal batch before mutations, then allows repair",
+            "status": "passed"
+          }
+        ]
+      },
+      {
+        "file": "outgoingBuffers.test.ts",
+        "tests": [
+          {
+            "name": "outgoing buffers evicts cached exports under pressure, preserves non-durable bytes on disk, and releases reservations",
+            "status": "passed"
+          },
+          {
+            "name": "outgoing buffers rejects oversized output without exceeding the reservation",
+            "status": "passed"
+          }
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "typecheck": "passed",
+    "build": "passed",
+    "testFiles": 55,
+    "passed": 437,
+    "failed": 0,
+    "skipped": 0,
+    "postgres": "18-alpine, isolated local container and per-test schemas",
+    "liveE2B": "passed: existing smoke, versioned 2.0.5 image, no real Telegram transfers",
+    "liveBrowserUse": "passed: Office rendering, session stop/reopen, profile cookie restoration",
+    "telegram": "mocked for all CAD checks"
+  },
+  "liveCAD": {
+    "method": "One cold/warm pair per provider per version; isolated database and Pi sessions; warm keeps a cleared sandbox; providers concurrent, versions sequential within provider; after runs overlapped isolated sandbox/browser smoke tests; low reasoning and existing 2.0.5 image. Provider caching and generated scripts vary.",
+    "samples": {
+      "before": [
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openai-codex",
+          "pair": 1,
+          "temperature": "cold",
+          "wallMs": 59961,
+          "modelCycles": 4,
+          "modelMs": 27300,
+          "toolMs": 32511,
+          "peakContextTokens": 8346,
+          "inputTokens": 8895,
+          "cachedTokens": 16768,
+          "outputTokens": 653,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 7,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 15480,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 13781,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 3243,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 3756,
+              "context": 4837,
+              "input": 4837,
+              "cached": 0,
+              "output": 36
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 15777,
+              "context": 5582,
+              "input": 846,
+              "cached": 4736,
+              "output": 469
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 2641,
+              "context": 6898,
+              "input": 1522,
+              "cached": 5376,
+              "output": 33
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 5126,
+              "context": 8346,
+              "input": 1690,
+              "cached": 6656,
+              "output": 115
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 59955
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 59957
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 59959
+            }
+          ],
+          "firstTextMs": 59955,
+          "firstFileMs": 59957,
+          "lastFileMs": 59959,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 62747,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openai-codex",
+          "pair": 1,
+          "temperature": "warm",
+          "wallMs": 57458,
+          "modelCycles": 4,
+          "modelMs": 27213,
+          "toolMs": 30172,
+          "peakContextTokens": 8354,
+          "inputTokens": 13647,
+          "cachedTokens": 12032,
+          "outputTokens": 646,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 2,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 13351,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 13880,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2939,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 3150,
+              "context": 4837,
+              "input": 4837,
+              "cached": 0,
+              "output": 36
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 16200,
+              "context": 5582,
+              "input": 5582,
+              "cached": 0,
+              "output": 477
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 2754,
+              "context": 6906,
+              "input": 1530,
+              "cached": 5376,
+              "output": 33
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 5109,
+              "context": 8354,
+              "input": 1698,
+              "cached": 6656,
+              "output": 100
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 57457
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 57457
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 57458
+            }
+          ],
+          "firstTextMs": 57457,
+          "firstFileMs": 57457,
+          "lastFileMs": 57458,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64623,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openrouter",
+          "pair": 1,
+          "temperature": "cold",
+          "wallMs": 54321,
+          "modelCycles": 4,
+          "modelMs": 22786,
+          "toolMs": 31402,
+          "peakContextTokens": 8438,
+          "inputTokens": 12,
+          "cachedTokens": 15992,
+          "outputTokens": 755,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 9,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 16176,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 12610,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2607,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 4693,
+              "context": 4837,
+              "input": 3,
+              "cached": 0,
+              "output": 36
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 11230,
+              "context": 5582,
+              "input": 3,
+              "cached": 4834,
+              "output": 537
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 3117,
+              "context": 6978,
+              "input": 3,
+              "cached": 5579,
+              "output": 33
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 3746,
+              "context": 8438,
+              "input": 3,
+              "cached": 5579,
+              "output": 149
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 54318
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 54318
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 54319
+            }
+          ],
+          "firstTextMs": 54318,
+          "firstFileMs": 54318,
+          "lastFileMs": 54319,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 10342484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64006,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openrouter",
+          "pair": 1,
+          "temperature": "warm",
+          "wallMs": 47941,
+          "modelCycles": 4,
+          "modelMs": 17766,
+          "toolMs": 30139,
+          "peakContextTokens": 8402,
+          "inputTokens": 12,
+          "cachedTokens": 15992,
+          "outputTokens": 729,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 3,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 13299,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 13775,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 3062,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 2183,
+              "context": 4837,
+              "input": 3,
+              "cached": 0,
+              "output": 36
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 7824,
+              "context": 5582,
+              "input": 3,
+              "cached": 4834,
+              "output": 501
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 2588,
+              "context": 6942,
+              "input": 3,
+              "cached": 5579,
+              "output": 33
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 5171,
+              "context": 8402,
+              "input": 3,
+              "cached": 5579,
+              "output": 159
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 47940
+            },
+            {
+              "kind": "document",
+              "name": "tube_adapter_57.1_to_44.6.stl",
+              "ms": 47940
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 47940
+            }
+          ],
+          "firstTextMs": 47940,
+          "firstFileMs": 47940,
+          "lastFileMs": 47940,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "tube_adapter_57.1_to_44.6.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64632,
+              "delivery": "photo"
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openai-codex",
+          "pair": 1,
+          "temperature": "cold",
+          "wallMs": 81473,
+          "modelCycles": 4,
+          "modelMs": 27670,
+          "toolMs": 53705,
+          "peakContextTokens": 8333,
+          "inputTokens": 8860,
+          "cachedTokens": 16768,
+          "outputTokens": 640,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 5,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 35466,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 15349,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2885,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 3617,
+              "context": 4833,
+              "input": 4833,
+              "cached": 0,
+              "output": 35
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 15548,
+              "context": 5577,
+              "input": 841,
+              "cached": 4736,
+              "output": 461
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 3442,
+              "context": 6885,
+              "input": 1509,
+              "cached": 5376,
+              "output": 33
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 5063,
+              "context": 8333,
+              "input": 1677,
+              "cached": 6656,
+              "output": 111
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 81470
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 81471
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 81472
+            }
+          ],
+          "firstTextMs": 81470,
+          "firstFileMs": 81471,
+          "lastFileMs": 81472,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64591,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openai-codex",
+          "pair": 1,
+          "temperature": "warm",
+          "wallMs": 60313,
+          "modelCycles": 4,
+          "modelMs": 28712,
+          "toolMs": 31560,
+          "peakContextTokens": 8336,
+          "inputTokens": 10274,
+          "cachedTokens": 15360,
+          "outputTokens": 647,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 1,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 13394,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 15886,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2279,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 3384,
+              "context": 4833,
+              "input": 4833,
+              "cached": 0,
+              "output": 35
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 15951,
+              "context": 5577,
+              "input": 2249,
+              "cached": 3328,
+              "output": 464
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 4000,
+              "context": 6888,
+              "input": 1512,
+              "cached": 5376,
+              "output": 33
+            },
+            {
+              "provider": "openai-codex",
+              "model": "gpt-6-astra",
+              "ms": 5377,
+              "context": 8336,
+              "input": 1680,
+              "cached": 6656,
+              "output": 115
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 60312
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 60312
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 60312
+            }
+          ],
+          "firstTextMs": 60312,
+          "firstFileMs": 60312,
+          "lastFileMs": 60312,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64623,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openrouter",
+          "pair": 1,
+          "temperature": "cold",
+          "wallMs": 53811,
+          "modelCycles": 4,
+          "modelMs": 19250,
+          "toolMs": 34492,
+          "peakContextTokens": 8426,
+          "inputTokens": 12,
+          "cachedTokens": 15978,
+          "outputTokens": 744,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 4,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 17733,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 13927,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2828,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 2826,
+              "context": 4833,
+              "input": 3,
+              "cached": 0,
+              "output": 35
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 8823,
+              "context": 5577,
+              "input": 3,
+              "cached": 4830,
+              "output": 530
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 3793,
+              "context": 6966,
+              "input": 3,
+              "cached": 5574,
+              "output": 33
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 3808,
+              "context": 8426,
+              "input": 3,
+              "cached": 5574,
+              "output": 146
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 53808
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 53808
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 53809
+            }
+          ],
+          "firstTextMs": 53808,
+          "firstFileMs": 53808,
+          "lastFileMs": 53809,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64764,
+              "delivery": "photo"
+            }
+          ]
+        },
+        {
+          "version": "2.0.5",
+          "requestedProvider": "openrouter",
+          "pair": 1,
+          "temperature": "warm",
+          "wallMs": 50015,
+          "modelCycles": 4,
+          "modelMs": 20476,
+          "toolMs": 29512,
+          "peakContextTokens": 8432,
+          "inputTokens": 12,
+          "cachedTokens": 15978,
+          "outputTokens": 747,
+          "tools": [
+            {
+              "name": "read",
+              "ms": 2,
+              "error": false
+            },
+            {
+              "name": "bash",
+              "ms": 13256,
+              "error": false,
+              "inspections": [
+                "/model.preview.png"
+              ]
+            },
+            {
+              "name": "bash",
+              "ms": 14016,
+              "error": false,
+              "inspections": [
+                "/model.final.png"
+              ]
+            },
+            {
+              "name": "finish_response",
+              "ms": 2238,
+              "error": false
+            }
+          ],
+          "models": [
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 2043,
+              "context": 4833,
+              "input": 3,
+              "cached": 0,
+              "output": 35
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 11906,
+              "context": 5577,
+              "input": 3,
+              "cached": 4830,
+              "output": 536
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 2717,
+              "context": 6972,
+              "input": 3,
+              "cached": 5574,
+              "output": 33
+            },
+            {
+              "provider": "openrouter",
+              "model": "openai/gpt-6-astra",
+              "ms": 3810,
+              "context": 8432,
+              "input": 3,
+              "cached": 5574,
+              "output": 143
+            }
+          ],
+          "deliveries": [
+            {
+              "kind": "text",
+              "ms": 50013
+            },
+            {
+              "kind": "document",
+              "name": "model.stl",
+              "ms": 50013
+            },
+            {
+              "kind": "photo",
+              "name": "model.final.png",
+              "ms": 50014
+            }
+          ],
+          "firstTextMs": 50013,
+          "firstFileMs": 50013,
+          "lastFileMs": 50014,
+          "fileReloads": 0,
+          "budget": {
+            "modelCycles": 4,
+            "toolCalls": 4,
+            "consecutiveToolFailures": 0
+          },
+          "peakBufferedBytes": 41943040,
+          "files": [
+            {
+              "name": "model.stl",
+              "size": 12390484,
+              "delivery": "document"
+            },
+            {
+              "name": "model.final.png",
+              "size": 64785,
+              "delivery": "photo"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

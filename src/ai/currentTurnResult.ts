@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { asRecord } from "../util/records.js";
 
-export interface CurrentTurnAssistantResult {
+interface CurrentTurnAssistantResult {
   text: string;
   error?: string;
   stopReason?: string;

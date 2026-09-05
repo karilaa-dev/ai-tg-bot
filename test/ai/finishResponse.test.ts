@@ -12,7 +12,7 @@ import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import { runTurn } from "../../src/ai/agentTurnEngine.js";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
-import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
+import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 import type { SandboxCommandRequest } from "../../src/sandbox/types.js";
 
@@ -33,12 +33,12 @@ describe("finish_response", () => {
     const result = await finish(input, { text: "Ready", files: [{ path: "/a.stl" }, { path: "/b.stl" }, { path: "/c.stl" }] });
     expect(result.terminate).toBe(true);
     expect(peak).toBe(2);
-    expect(input.createdFiles!.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl", "/c.stl"]);
-    for (const attachment of input.createdFiles!) {
+    expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl", "/c.stl"]);
+    for (const attachment of input.outgoingFiles!.items) {
       expect(await input.repos.files.listSources(attachment.fileId)).toHaveLength(1);
     }
-    expect(input.createdFiles!.filter((file) => file.data).length).toBeGreaterThanOrEqual(2);
-    expect(input.outgoingBuffers!.snapshot().peakBufferedBytes).toBeLessThanOrEqual(40 * 1024 * 1024);
+    expect(input.outgoingFiles!.items.filter((file) => file.data).length).toBeGreaterThanOrEqual(2);
+    expect(input.outgoingFiles!.buffers.snapshot().peakBufferedBytes).toBeLessThanOrEqual(40 * 1024 * 1024);
     expect(result.details).toMatchObject({ completed: true, text: "Ready" });
   });
 
@@ -51,7 +51,7 @@ describe("finish_response", () => {
     expect((await finish(input, { files: [{ path: "/0.stl" }, { path: "/home/user/workspace/0.stl" }] })).details).toMatchObject({ completed: false, error: expect.stringContaining("unique") });
     expect(read).not.toHaveBeenCalled();
     expect((await finish(input, { files: [{ path: "/0.stl" }] })).terminate).toBe(true);
-    expect(input.createdFiles).toHaveLength(25);
+    expect(input.outgoingFiles!.items).toHaveLength(25);
   });
 
   it("retains partial successes and repairs a failed earlier slot without re-exporting successes", async () => {
@@ -60,11 +60,11 @@ describe("finish_response", () => {
     const partial = await finish(input, { files: [{ path: "/a.stl" }, { path: "/b.stl" }] });
     expect(partial.terminate).not.toBe(true);
     expect(partial.details).toMatchObject({ completed: false, prepared: [{ path: "/b.stl" }], errors: [{ path: "/a.stl" }] });
-    const successfulId = input.createdFiles![0]!.fileId;
+    const successfulId = input.outgoingFiles!.items[0]!.fileId;
     const repaired = await finish(input, { files: [{ path: "/a.stl" }] });
     expect(repaired.terminate).toBe(true);
-    expect(input.createdFiles!.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl"]);
-    expect(input.createdFiles![1]!.fileId).toBe(successfulId);
+    expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl"]);
+    expect(input.outgoingFiles!.items[1]!.fileId).toBe(successfulId);
     expect(read.mock.calls.filter(([request]) => request.virtualPath === "/b.stl")).toHaveLength(1);
   });
 
@@ -73,8 +73,49 @@ describe("finish_response", () => {
     const controller = new AbortController();
     read.mockImplementation(async () => { controller.abort(new Error("cancelled")); throw controller.signal.reason; });
     await expect(finish(input, { files: [{ path: "/a.stl" }, { path: "/b.stl" }] }, controller.signal)).rejects.toThrow("cancelled");
-    expect(input.createdFiles).toEqual([]);
-    expect(input.outgoingBuffers!.snapshot().bufferedBytes).toBe(0);
+    expect(input.outgoingFiles!.items).toEqual([]);
+    expect(input.outgoingFiles!.buffers.snapshot().bufferedBytes).toBe(0);
+  });
+
+  it("repairs a finish_response slot through create_file without changing queue order", async () => {
+    const { input, read } = await setup();
+    read.mockRejectedValueOnce(new Error("missing first file"));
+    await finish(input, { files: [{ path: "/first.stl" }, { path: "/second.stl" }] });
+    const tools = createPiToolAdapters({ buildInput: () => input });
+    const create = tools.find((tool) => tool.name === "create_file")!;
+    await create.execute("extra", { path: "/third.stl" }, undefined, undefined, {} as never);
+    await create.execute("repair", { path: "/first.stl" }, undefined, undefined, {} as never);
+    expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/first.stl", "/second.stl", "/third.stl"]);
+    const result = await finish(input, { text: "Ready" });
+    expect(result.terminate).toBe(true);
+    expect(read.mock.calls.filter(([request]) => request.virtualPath === "/second.stl")).toHaveLength(1);
+  });
+
+  it("releases prepared successes if another worker is cancelled before registration", async () => {
+    const { input, read } = await setup();
+    const original = read.getMockImplementation()!;
+    const controller = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    read.mockImplementation(async (request) => {
+      if (request.virtualPath === "/second.stl") {
+        await gate;
+        controller.signal.throwIfAborted();
+      }
+      return original(request);
+    });
+    const result = finish(input, { files: [{ path: "/first.stl" }, { path: "/second.stl" }] }, controller.signal);
+    const rejected = expect(result).rejects.toThrow("cancelled");
+    try {
+      await vi.waitFor(async () => expect(await input.repos.files.listForThreads([input.thread.id])).toHaveLength(1));
+    } finally {
+      controller.abort(new Error("cancelled"));
+      release();
+    }
+    await rejected;
+    expect(input.outgoingFiles!.items).toEqual([]);
+    expect(input.outgoingFiles!.buffers.snapshot().bufferedBytes).toBe(0);
+    await vi.waitFor(async () => expect(await input.repos.files.listForThreads([input.thread.id])).toEqual([]));
   });
 
   it("executes four Pi cycles with both inspections and ends with one STL and final photo", async () => {
@@ -107,7 +148,7 @@ describe("finish_response", () => {
       api: { raw: { sendRichMessage: send, editMessageText: async () => true }, sendChatAction: async () => true } as never,
       chatId: input.user.tg_id, text: "Complete this", pi: { runtime: async () => runtime }, t: (key) => key,
     });
-    const messages = await input.repos.messages.listForThreadChainSearchScope([input.thread]);
+    const messages = await input.repos.messages.listForThreadChain([input.thread]);
     const assistant = messages.find((message) => message.role === "assistant")!;
     const terminal = runtime.session.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "finish_response")!;
     expect(assistant.text_plain).toBe("Persisted final");
@@ -142,8 +183,6 @@ async function setup() {
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9191, firstName: "Test", lang: "en" });
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Harness" });
-  const outgoingBuffers = new OutgoingBuffers();
-  cleanups.push(() => outgoingBuffers.dispose());
   const read = vi.fn(async (request: { virtualPath: string }) => {
     const bytes = request.virtualPath.endsWith(".stl") ? Buffer.alloc(84) : Buffer.from([255, 216, 255, 224, 0]);
     return { bytes, size: bytes.length, sandboxId: "test", canonicalPath: request.virtualPath, sourceCanonicalPath: "/home/user/.file-sources/test", contentSha256: createHash("sha256").update(bytes).digest("hex") };
@@ -153,10 +192,11 @@ async function setup() {
     stderr: "", exitCode: 0, timedOut: false, stdoutTruncated: false, stderrTruncated: false,
     threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
   }));
-  const input: ToolBuildInput = { config, db, repos, user, thread, createdFiles: [], createdFileOrder: [], outgoingBuffers,
+  const input: ToolBuildInput = { config, db, repos, user, thread,
     commandRuntime: { execute, readWorkspaceFile: read, dispose: async () => undefined } as never,
     logger: createLogger({ LOG_LEVEL: "error" }),
   };
+  input.outgoingFiles = testOutgoingFiles(input);
   return { input, read, execute };
 }
 

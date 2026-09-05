@@ -43,7 +43,7 @@ export interface SandboxCommandResult {
   error?: string;
 }
 
-export interface SandboxMaterializedFile {
+interface SandboxMaterializedFile {
   fileId: number;
   originalName: string;
   mimeType: string | null;

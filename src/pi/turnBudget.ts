@@ -1,13 +1,13 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { toolResultFailed } from "./toolOutcome.js";
 
-export type TurnBudgetReason =
+type TurnBudgetReason =
   | "model_cycle_limit"
   | "tool_call_limit"
   | "consecutive_tool_failures"
   | "identical_tool_failures";
 
-export interface TurnBudgetSnapshot {
+interface TurnBudgetSnapshot {
   modelCycles: number;
   toolCalls: number;
   consecutiveToolFailures: number;

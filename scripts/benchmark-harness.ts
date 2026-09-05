@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { FileRow } from "../src/db/types.js";
 import type { Logger } from "../src/logger.js";
-import type { CreatedFileAttachment } from "../src/ai/tools/types.js";
+import type { CreatedFileAttachment } from "../src/files/types.js";
 import type { InputFile } from "grammy";
 
 const { values } = parseArgs({ options: {
@@ -33,7 +33,7 @@ const { createE2BClient }: typeof import("../src/e2b/client.js") = await moduleA
 const { E2BFileSourceAdapter }: typeof import("../src/e2b/fileSource.js") = await moduleAt("src/e2b/fileSource.ts");
 const { PiRuntimeManager }: typeof import("../src/pi/runtime.js") = await moduleAt("src/pi/runtime.ts");
 const { currentTurnAssistantResult }: typeof import("../src/ai/currentTurnResult.js") = await moduleAt("src/ai/currentTurnResult.ts");
-const { sendFinal }: typeof import("../src/ai/agentTurnEngine.js") = await moduleAt("src/ai/agentTurnEngine.ts");
+const { sendFinal }: typeof import("../src/ai/responseDelivery.js") = await moduleAt(await fs.access(path.join(root, "src/ai/responseDelivery.ts")).then(() => "src/ai/responseDelivery.ts", () => "src/ai/agentTurnEngine.ts"));
 const base = loadConfig();
 const prompt = "Create a 100 mm long hollow tube adapter for 3D printing. One end should have a 57.1 mm inner diameter, the other a 44.6 mm inner diameter. Use 3 mm wall thickness everywhere. Keep both ends straight, with the size transition centered in the middle of the tube and make that transition smooth.";
 const namespace = `harness-${version}-${values.provider}-${randomUUID().slice(0, 8)}`;

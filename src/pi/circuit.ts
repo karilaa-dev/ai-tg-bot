@@ -1,7 +1,7 @@
 const THIRTY_MINUTES_MS = 30 * 60_000;
 const RESET_GRACE_MS = 60_000;
 
-export type CodexAttempt =
+type CodexAttempt =
   | { allowed: true; probe: boolean }
   | { allowed: false; retryAt: number };
 

@@ -19,7 +19,7 @@ interface CodexAuthSnapshot {
   credential: OAuthCredential;
 }
 
-export interface CodexCliCredentialDiscovery {
+interface CodexCliCredentialDiscovery {
   status: "available" | "missing" | "invalid";
   store?: CredentialStore;
 }

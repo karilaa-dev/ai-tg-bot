@@ -1,8 +1,8 @@
 import { OutgoingBuffers, OUTGOING_BUFFER_BYTES, prepareWithTwoWorkers } from "../files/outgoingBuffers.js";
-import type { CreatedFileAttachment } from "./tools/types.js";
+import type { CreatedFileAttachment } from "../files/types.js";
 
 /** Batches never cross a delivery-type boundary or reorder the attachment queue. */
-export function orderedAttachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
+function orderedAttachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
   const batches: CreatedFileAttachment[][] = [];
   for (const attachment of attachments) {
     const previous = batches.at(-1);

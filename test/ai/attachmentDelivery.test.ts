@@ -1,14 +1,9 @@
 import { GrammyError } from "grammy";
 import { describe, expect, it, vi } from "vitest";
-import {
-  buildFinalThinkingSummary,
-  normalizeTelegramAttachmentDeliveries,
-  refreshFinalThinkingVisible,
-  sendCreatedFileAttachments,
-  sendFinal,
-  type TurnInput,
-} from "../../src/ai/run.js";
-import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
+import { buildFinalThinkingSummary } from "../../src/ai/agentTurnEngine.js";
+import { normalizeTelegramAttachmentDeliveries, refreshFinalThinkingVisible, sendCreatedFileAttachments, sendFinal } from "../../src/ai/responseDelivery.js";
+import { type TurnInput } from "../../src/ai/types.js";
+import type { CreatedFileAttachment } from "../../src/files/types.js";
 import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
 import { deferred } from "../helpers/async.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
@@ -30,6 +25,7 @@ describe("buffered Telegram attachment delivery", () => {
       expect(api.sendPhoto).not.toHaveBeenCalled();
     } finally { textGate.resolve(); }
     await sending;
+    expect(input.resolveFile).toHaveBeenCalledOnce();
     expect(api.raw.sendRichMessage.mock.invocationCallOrder[0]).toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
   });
 
@@ -55,6 +51,7 @@ describe("buffered Telegram attachment delivery", () => {
       expect(api.sendMediaGroup).not.toHaveBeenCalled();
     } finally { uploadGate.resolve(); }
     await sending;
+    expect(input.resolveFile).toHaveBeenCalledTimes(4);
     expect(api.sendDocument).toHaveBeenCalledTimes(2);
     expect(api.sendMediaGroup).toHaveBeenCalledOnce();
     expect(api.sendDocument.mock.invocationCallOrder[0]).toBeLessThan(api.sendMediaGroup.mock.invocationCallOrder[0]!);

@@ -1,8 +1,9 @@
+import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sendCreatedFileAttachments } from "../../src/ai/run.js";
-import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
-import type { CreatedFileAttachment } from "../../src/ai/tools/types.js";
+import { sendCreatedFileAttachments } from "../../src/ai/responseDelivery.js";
+import { createCreateFileTool as buildCreateFileTool } from "../../src/ai/tools/createFile.js";
+import type { CreatedFileAttachment } from "../../src/files/types.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -24,7 +25,7 @@ describe("create_file", () => {
     await db.destroy();
   });
 
-  it("does not insert a generic duplicate when durable source registration fails", async () => {
+  it("cleans up the unqueued file when durable source registration fails", async () => {
     const config = loadTestConfig();
     const user = await repos.users.ensure({ tgId: 801, firstName: "Files", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Files" });
@@ -46,7 +47,7 @@ describe("create_file", () => {
       .resolves.toMatchObject({ error: "Error: source registry unavailable" });
 
     expect(rememberSource).toHaveBeenCalledTimes(1);
-    expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
+    expect(await repos.files.listForThreads([thread.id])).toHaveLength(0);
   });
 
   it("preserves image delivery when image indexing falls back to a basic file row", async () => {
@@ -74,7 +75,7 @@ describe("create_file", () => {
       .resolves.toMatchObject({ type: "image" });
 
     expect(createdFiles).toMatchObject([{ type: "image", delivery: "photo" }]);
-    expect(createdFiles[0]?.data).toBeUndefined();
+    expect(createdFiles[0]?.data).toEqual(bytes);
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(1);
   });
 
@@ -284,4 +285,8 @@ function revisionRuntime(revisions: Buffer[]): CommandRuntime {
     publishWebsite: async () => { throw new Error("not used"); },
     dispose: async () => undefined,
   };
+}
+
+function createCreateFileTool(input: Parameters<typeof buildCreateFileTool>[0] & { createdFiles?: unknown[] }) {
+  return buildCreateFileTool({ ...input, outgoingFiles: testOutgoingFiles(input, input.createdFiles) });
 }

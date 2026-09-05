@@ -5,7 +5,7 @@ import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
 import type { ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import type { TurnRunner } from "../ai/run.js";
+import type { TurnRunner } from "../ai/types.js";
 import type { AcceptedFileType } from "../files/ingest.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
@@ -45,7 +45,7 @@ interface PendingTextBurst {
   sources: TelegramTurnSource[];
 }
 
-export interface RouterState {
+interface RouterState {
   activeFileJobs: Map<string, ActiveFileJob>;
   pendingMediaGroups: Map<string, PendingMediaGroup>;
   pendingTextBursts: Map<string, PendingTextBurst>;

@@ -3,7 +3,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
-import { clearRetrievalVectorCacheForTests, hybridSearch, threadChainScope } from "../../src/memory/retrieval.js";
+import { hybridSearch, threadChainScope } from "../../src/memory/retrieval.js";
 
 describe("Pi retrieval tools backend", () => {
   let db: AppDatabase;
@@ -16,7 +16,6 @@ describe("Pi retrieval tools backend", () => {
   });
 
   afterEach(async () => {
-    clearRetrievalVectorCacheForTests();
     await db.destroy();
   });
 

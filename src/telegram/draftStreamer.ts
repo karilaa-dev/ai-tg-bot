@@ -16,7 +16,7 @@ function allocateDraftId(): number {
   return lastDraftId;
 }
 
-export interface DraftStreamerOptions {
+interface DraftStreamerOptions {
   api: RawRichApi;
   chatId: number;
   messageThreadId?: number;

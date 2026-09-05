@@ -7,7 +7,7 @@ import type { Logger } from "../logger.js";
 
 const RRF_K = 60;
 
-export type RetrievalHit =
+type RetrievalHit =
   | { kind: "message"; ref_id: number; snippet: string; score: number }
   | { kind: "chunk"; ref_id: number; snippet: string; score: number };
 
@@ -74,29 +74,9 @@ export async function threadVisibilityScope(repos: Repos, thread: ThreadRow, max
   const chain = await repos.threads.chain(thread);
   const threadIds = chain.map((row) => row.id);
   const messageScopes = messageSearchScopesForChain(chain, maxMessageId);
-  const messages = await repos.messages.listForThreadChainSearchScope(chain, maxMessageId);
-  const messageIds = messages.map((row) => row.id);
-  const messageIdSet = new Set(messageIds);
-  const attachedFiles = await repos.files.listForMessageScopes(messageScopes);
-  const threadFiles = await repos.files.listForThreads(threadIds);
-  const unattachedInboundIds = new Set(maxMessageId === undefined
-    ? []
-    : await repos.files.listUnattachedInboundIds(
-        threadFiles.filter((file) => file.message_id === null).map((file) => file.id),
-      ));
-  const candidateFileIds = [
-    ...new Set([
-      ...attachedFiles.map((file) => file.id),
-      ...threadFiles
-        .filter((file) => file.message_id === null
-          ? !unattachedInboundIds.has(file.id)
-          : messageIdSet.has(file.message_id))
-        .map((file) => file.id),
-    ]),
-  ];
-  return { threadIds, messageScopes, messageIds, fileIds: candidateFileIds };
-}
-
-export function clearRetrievalVectorCacheForTests(): void {
-  // Retained as a compatibility no-op for callers that used to reset the vector cache.
+  const [messageIds, fileIds] = await Promise.all([
+    repos.messages.listIdsForScopes(messageScopes),
+    repos.files.listVisibleIds(messageScopes, maxMessageId === undefined),
+  ]);
+  return { threadIds, messageScopes, messageIds, fileIds };
 }

@@ -23,14 +23,3 @@ export async function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal
 export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
-
-export function relayAbort(signal: AbortSignal | undefined, abort: () => void): () => void {
-  if (!signal) return () => undefined;
-  if (signal.aborted) {
-    abort();
-    return () => undefined;
-  }
-  const onAbort = () => abort();
-  signal.addEventListener("abort", onAbort, { once: true });
-  return () => signal.removeEventListener("abort", onAbort);
-}

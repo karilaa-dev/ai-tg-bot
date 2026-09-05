@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { appendPublishedWebsiteNotice } from "../../src/ai/run.js";
+import { appendPublishedWebsiteNotice } from "../../src/ai/agentTurnEngine.js";
 import { createBashTool } from "../../src/ai/tools/bash.js";
 import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
@@ -68,7 +68,7 @@ function buildInput(runtime: CommandRuntime, registerPublishedWebsite?: (website
     config: loadTestConfig(),
     repos: {
       threads: { chain: async (thread: unknown) => [thread] },
-      messages: { listForThreadChainSearchScope: async () => [] },
+      messages: { listIdsForScopes: async () => [] },
       files: {
         listForMessages: async () => [],
         listForThreads: async () => [],

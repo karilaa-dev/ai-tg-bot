@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleStreamPart, normalizeStreamPart, toolErrorText } from "../../src/ai/run.js";
+import { handleStreamPart, normalizeStreamPart, toolErrorText } from "../../src/ai/agentTurnEngine.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
 
 describe("StreamShaper", () => {

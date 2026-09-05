@@ -9,7 +9,7 @@ import type { CommandRuntime } from "../../sandbox/types.js";
 import type { PublishedWebsite } from "../../sandbox/types.js";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
 import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
-import type { OutgoingBuffers } from "../../files/outgoingBuffers.js";
+import type { OutgoingFiles } from "../../files/outgoingFiles.js";
 import type { ThreadScope } from "../../memory/retrieval.js";
 
 export interface ToolBuildInput {
@@ -20,53 +20,17 @@ export interface ToolBuildInput {
   thread: ThreadRow;
   maxMessageId?: number;
   currentScope?: () => Promise<ThreadScope>;
-  outgoingBuffers?: OutgoingBuffers;
+  outgoingFiles?: OutgoingFiles;
   logger?: Logger;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
   selectContextFiles?: (fileIds: number[]) => void;
   selectDurableContextFiles?: (fileIds: number[]) => void;
-  createdFiles?: CreatedFileAttachment[];
-  createdFileOrder?: string[];
-  pendingCreatedFiles?: PendingCreatedFile[];
   publishedWebsites?: PublishedWebsite[];
   registerPublishedWebsite?: (website: PublishedWebsite) => void;
 }
 
-export interface CreatedFileAttachment {
-  fileId: number;
-  sourceVirtualPath?: string;
-  type: StoredFileType;
-  name: string;
-  mimeType?: string | null;
-  data?: Buffer;
-  size: number;
-  caption?: string | null;
-  inline: boolean;
-  card: string;
-  delivery?: "document" | "photo";
-  photoFallback?: "document" | "none";
-  origin?: "created_file" | "generated_image";
-  telegramDeliveryUnknown?: boolean;
-  telegramDeliveryFailure?: "source_unavailable" | "telegram_rejected";
-  telegramDelivery?: {
-    messageId: number;
-    fileId: string | null;
-    fileUniqueId: string | null;
-    refs?: Array<{
-      fileId: string;
-      fileUniqueId: string | null;
-      width: number | null;
-      height: number | null;
-      size: number | null;
-      primary: boolean;
-    }>;
-  };
-}
-
-export type PendingCreatedFile = Promise<{ attachment?: CreatedFileAttachment; revisedPrompt?: string | null; error?: string }>;
-export type CreatedFileDeliveryPreference = "auto" | "photo" | "photo_only" | "document";
 export const MAX_LOADED_MESSAGE_CHARS = 8000;
 export const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 

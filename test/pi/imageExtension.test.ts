@@ -1,3 +1,4 @@
+import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -70,7 +71,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => false,
       } as unknown as ModelRegistry,
@@ -106,12 +107,12 @@ describe("Pi generate_image extension", () => {
     const inputReferences = requestBody?.input_references as Array<{ image_url: { url: string } }>;
     expect(inputReferences).toHaveLength(1);
     expect(inputReferences[0]?.image_url.url).toBe(`data:image/png;base64,${Buffer.from("reference-bytes").toString("base64")}`);
-    expect(bridge.attachments).toHaveLength(1);
-    expect(bridge.attachments[0]?.data).toEqual(outputBytes);
-    expect(bridge.attachments[0]?.caption).toBe("finished");
+    expect(bridge.outgoingFiles.items).toHaveLength(1);
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(outputBytes);
+    expect(bridge.outgoingFiles.items[0]?.caption).toBe("finished");
     expect(result.terminate).toBe(true);
     expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("[[chat-file:");
-    const generated = await repos.files.get(bridge.attachments[0]!.fileId);
+    const generated = await repos.files.get(bridge.outgoingFiles.items[0]!.fileId);
     await expect(repos.files.listSources(generated!.id)).resolves.toEqual([]);
     const persisted = JSON.stringify({ generated, result });
     expect(persisted).not.toContain(outputBytes.toString("base64"));
@@ -149,7 +150,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({
@@ -181,8 +182,8 @@ describe("Pi generate_image extension", () => {
       tool_choice: { type: "image_generation" },
       tools: [{ type: "image_generation", output_format: "webp", action: "generate" }],
     });
-    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("codex-image"));
-    expect(bridge.attachments[0]?.caption).toBe("Codex revised prompt");
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("codex-image"));
+    expect(bridge.outgoingFiles.items[0]?.caption).toBe("Codex revised prompt");
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 
@@ -213,7 +214,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: accessToken }),
@@ -227,8 +228,8 @@ describe("Pi generate_image extension", () => {
       output_format: "jpeg",
     }, undefined, undefined, {} as never);
 
-    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("latest-codex-partial"));
-    const stored = await repos.files.get(bridge.attachments[0]!.fileId);
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("latest-codex-partial"));
+    const stored = await repos.files.get(bridge.outgoingFiles.items[0]!.fileId);
     expect(stored?.mime_type).toBe("image/jpeg");
   });
 
@@ -263,7 +264,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-completed-stream") }),
@@ -277,7 +278,7 @@ describe("Pi generate_image extension", () => {
       output_format: "png",
     }, undefined, undefined, {} as never);
 
-    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("latest-hosted-codex-partial"));
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("latest-hosted-codex-partial"));
     expect(bridge.providerRouter.circuit.state().open).toBe(false);
   });
 
@@ -308,7 +309,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-disconnect") }),
@@ -324,7 +325,7 @@ describe("Pi generate_image extension", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.details).toMatchObject({ provider: "openrouter" });
-    expect(bridge.attachments[0]?.data).toEqual(fallback);
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(fallback);
     expect(router.circuit.state().open).toBe(true);
   });
 
@@ -348,7 +349,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-fallback") }),
@@ -367,7 +368,7 @@ describe("Pi generate_image extension", () => {
     ]);
     expect(result.details).toMatchObject({ provider: "openrouter" });
     expect(router.circuit.state().open).toBe(true);
-    expect(bridge.attachments[0]?.data).toEqual(Buffer.from("fallback-image"));
+    expect(bridge.outgoingFiles.items[0]?.data).toEqual(Buffer.from("fallback-image"));
   });
 
   it("closes a half-open circuit after a definitive Codex image rejection", async () => {
@@ -394,7 +395,7 @@ describe("Pi generate_image extension", () => {
       repos,
       user,
       thread,
-      attachments: [],
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
       modelRegistry: {
         hasConfiguredAuth: () => true,
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-rejected") }),
