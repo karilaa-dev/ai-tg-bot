@@ -108,6 +108,7 @@ export class TurnRunsRepo {
             'queued', 'pending', ${now}, ${now}
           ) returning *
         `);
+        await tx.execute(sql`insert into turn_activity_sync(turn_run_id) values (${turnRun.id})`);
         await attachFilesToAcceptedMessage(
           tx,
           userMessage.id,

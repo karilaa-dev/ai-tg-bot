@@ -95,6 +95,35 @@ describe("thread activity titles", () => {
     expect(editForumTopic).toHaveBeenCalledTimes(1);
   });
 
+  it("repairs a manual rename that races an in-flight title request", async () => {
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const input = { api, chatId: 1001, threadId: thread.id };
+    await accept(thread.id, 1);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    editForumTopic.mockImplementationOnce(async () => { started.resolve(); await release.promise; return true; });
+    const update = titles.syncActivity(input);
+    await started.promise;
+    await repos.threads.applyTelegramTopicTitle(thread.id, "My new title", false);
+    await titles.observeTelegramTitle(1001, 42, "My new title");
+    release.resolve();
+    await update;
+    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ My new title" }), expect.any(AbortSignal));
+  });
+
+  it("does not trust an old working-title cache after a peer clears the title", async () => {
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const input = { api, chatId: 1001, threadId: thread.id };
+    const first = await accept(thread.id, 1);
+    await titles.syncActivity(input);
+    await repos.turnRuns.markFailed(first.turnRun.id, "done");
+    const peer = new ThreadTitleCoordinator({ repos, pi: {} as never, logger: createLogger(loadTestConfig()) });
+    await peer.syncActivity(input);
+    await accept(thread.id, 2);
+    await titles.syncActivity(input);
+    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ Planning" }), expect.any(AbortSignal));
+  });
+
   it("retries a failed edit before remembering the title", async () => {
     const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
     const input = { api, chatId: 1001, threadId: thread.id };
@@ -111,7 +140,7 @@ describe("thread activity titles", () => {
     const input = { api, chatId: 1001, threadId: thread.id };
     await accept(thread.id, 1);
     await titles.syncActivity(input);
-    titles.observeTelegramTitle(1001, 42, "Planning");
+    await titles.observeTelegramTitle(1001, 42, "Planning");
     await titles.syncActivity(input);
     expect(editForumTopic).toHaveBeenCalledTimes(2);
     expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ Planning" }), expect.any(AbortSignal));

@@ -12,12 +12,13 @@ interface ThreadTitleScheduleInput {
   api: Api;
   chatId: number;
   threadId: number;
+  signal?: AbortSignal;
 }
 
 export class ThreadTitleCoordinator {
   private readonly jobs = new Map<number, Promise<void>>();
-  private readonly titleUpdates = new Map<number, Promise<void>>();
-  private readonly telegramTitles = new Map<string, string>();
+  private readonly titleUpdates = new Map<number, Promise<boolean>>();
+  private readonly requestedActivityTitles = new Map<string, Set<string>>();
 
   constructor(private readonly input: {
     repos: Repos;
@@ -49,12 +50,24 @@ export class ThreadTitleCoordinator {
     await Promise.all([...this.titleUpdates.values()]);
   }
 
-  observeTelegramTitle(chatId: number, topicId: number, title: string): void {
+  async observeTelegramTitle(chatId: number, topicId: number, title: string): Promise<void> {
+    await this.input.repos.threads.recordTelegramTitle(chatId, topicId, title);
+  }
+
+  async isRequestedActivityTitle(chatId: number, topicId: number, title: string): Promise<boolean> {
+    return Boolean(this.requestedActivityTitles.get(`${chatId}:${topicId}`)?.has(title)
+      || (await this.input.repos.threads.telegramTitle(chatId, topicId))?.requested_activity_title === title);
+  }
+
+  private rememberActivityTitle(chatId: number, topicId: number, title: string): void {
     const key = `${chatId}:${topicId}`;
-    this.telegramTitles.delete(key);
-    this.telegramTitles.set(key, title);
-    if (this.telegramTitles.size > MAX_REMEMBERED_TOPIC_TITLES) {
-      this.telegramTitles.delete(this.telegramTitles.keys().next().value!);
+    const titles = this.requestedActivityTitles.get(key) ?? new Set<string>();
+    titles.add(title);
+    if (titles.size > 16) titles.delete(titles.values().next().value!);
+    this.requestedActivityTitles.delete(key);
+    this.requestedActivityTitles.set(key, titles);
+    if (this.requestedActivityTitles.size > MAX_REMEMBERED_TOPIC_TITLES) {
+      this.requestedActivityTitles.delete(this.requestedActivityTitles.keys().next().value!);
     }
   }
 
@@ -126,42 +139,60 @@ export class ThreadTitleCoordinator {
     await this.syncActivity(input);
   }
 
-  async syncActivity(input: ThreadTitleScheduleInput): Promise<void> {
-    const previous = this.titleUpdates.get(input.threadId) ?? Promise.resolve();
+  async syncActivity(input: ThreadTitleScheduleInput): Promise<boolean> {
+    const previous = this.titleUpdates.get(input.threadId) ?? Promise.resolve(true);
     const update = previous.then(() => this.syncTelegramTitle(input)).catch((error) => {
       this.input.logger.warn("thread title could not be synchronized to Telegram", {
         threadId: input.threadId, error: String(error),
       });
+      if (error instanceof GrammyError && (error.error_code === 403
+        || (error.error_code === 400 && /topic.*not found|topic_id_invalid|message thread not found/i.test(error.description)))) return true;
+      return false;
     });
     this.titleUpdates.set(input.threadId, update);
-    await update;
+    const synced = await update;
     if (this.titleUpdates.get(input.threadId) === update) this.titleUpdates.delete(input.threadId);
+    return synced;
   }
 
-  private async syncTelegramTitle(input: ThreadTitleScheduleInput): Promise<void> {
-    const thread = await this.input.repos.threads.get(input.threadId);
-    if (!isEligibleTopic(thread)) return;
-    const working = await this.input.repos.turnRuns.hasUnfinished(thread.id);
-    const name = working ? `⏳ ${Array.from(thread.title).slice(0, 126).join("")}` : thread.title;
-    const key = `${input.chatId}:${thread.topic_id}`;
-    if (this.telegramTitles.get(key) !== name) {
-      // Acceptance and execution can request the same title. Telegram may
-      // create a service message even when the requested name is unchanged.
-      this.telegramTitles.delete(key);
-      try {
-        await input.api.raw.editForumTopic({
-          chat_id: input.chatId,
-          message_thread_id: thread.topic_id!,
-          name,
-        }, AbortSignal.timeout(5_000) as Parameters<Api["raw"]["editForumTopic"]>[1]);
-      } catch (error) {
-        if (!isTopicNotModified(error)) throw error;
+  private async syncTelegramTitle(input: ThreadTitleScheduleInput): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      input.signal?.throwIfAborted();
+      const thread = await this.input.repos.threads.get(input.threadId);
+      if (!isEligibleTopic(thread)) return true;
+      const working = await this.input.repos.turnRuns.hasUnfinished(thread.id);
+      const name = activityTitle(thread.title, working);
+      // A manual rename can arrive during either the database read or the
+      // Telegram request. Check before sending and reconcile again afterward.
+      const beforeSend = await this.input.repos.threads.get(thread.id);
+      if (beforeSend?.title !== thread.title) continue;
+      const known = await this.input.repos.threads.telegramTitle(input.chatId, thread.topic_id!);
+      if (known?.name !== name) {
+        await this.input.repos.threads.recordTelegramTitle(input.chatId, thread.topic_id!, null);
+        if (working) {
+          this.rememberActivityTitle(input.chatId, thread.topic_id!, name);
+          await this.input.repos.threads.recordActivityTitleRequest(input.chatId, thread.topic_id!, name);
+        }
+        try {
+          await input.api.raw.editForumTopic({
+            chat_id: input.chatId,
+            message_thread_id: thread.topic_id!,
+            name,
+          }, AbortSignal.any([AbortSignal.timeout(5_000), ...(input.signal ? [input.signal] : [])]) as Parameters<Api["raw"]["editForumTopic"]>[1]);
+        } catch (error) {
+          if (!isTopicNotModified(error)) throw error;
+        }
+        await this.observeTelegramTitle(input.chatId, thread.topic_id!, name);
       }
-      this.observeTelegramTitle(input.chatId, thread.topic_id!, name);
+      const latest = await this.input.repos.threads.get(thread.id);
+      const stillWorking = await this.input.repos.turnRuns.hasUnfinished(thread.id);
+      if (latest && activityTitle(latest.title, stillWorking) !== name) continue;
+      if (thread.title_source === "generated") {
+        await this.input.repos.threads.markTopicTitleSynced(thread.id, thread.title);
+      }
+      return true;
     }
-    if (thread.title_source === "generated") {
-      await this.input.repos.threads.markTopicTitleSynced(thread.id, thread.title);
-    }
+    return false;
   }
 }
 
@@ -172,4 +203,8 @@ function isEligibleTopic(thread: ThreadRow | undefined): thread is ThreadRow {
 function isTopicNotModified(error: unknown): boolean {
   const message = error instanceof GrammyError ? error.description : String(error);
   return /TOPIC_NOT_MODIFIED|topic is not modified/i.test(message);
+}
+
+function activityTitle(title: string, working: boolean): string {
+  return working ? `⏳ ${Array.from(title).slice(0, 126).join("")}` : title;
 }

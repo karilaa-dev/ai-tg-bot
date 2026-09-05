@@ -90,6 +90,15 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`
+    create table if not exists telegram_topic_titles (
+      chat_id ${intType} not null,
+      topic_id integer not null,
+      name text,
+      requested_activity_title text,
+      primary key(chat_id, topic_id)
+    )
+  `));
+  await db.execute(sql.raw(`
     create table if not exists thread_sandboxes (
       deployment_id text not null,
       user_id ${intType} not null references users(tg_id),
@@ -176,6 +185,21 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create index if not exists turn_run_sources_run_idx on turn_run_sources(turn_run_id)`));
+  await db.execute(sql.raw(`
+    create table if not exists turn_activity_sync (
+      turn_run_id ${intType} primary key references turn_runs(id) on delete cascade,
+      synced_working integer,
+      generation integer not null default 0,
+      owner_id text,
+      lease_expires_at ${intType},
+      retry_at ${intType} not null default 0
+    )
+  `));
+  // Existing turns may have indicators left by an earlier deployment.
+  await db.execute(sql`
+    insert into turn_activity_sync(turn_run_id)
+    select id from turn_runs where true on conflict(turn_run_id) do nothing
+  `);
   await db.execute(sql.raw(`
     create table if not exists files (
       id ${idType},

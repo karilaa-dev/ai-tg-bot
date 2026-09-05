@@ -72,6 +72,36 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("starts generation while a reaction request is stalled", async () => {
+    const { userId, threadId } = await ownership(repos, 852);
+    const release = deferred<void>();
+    const started = deferred<void>();
+    const setMessageReaction = vi.fn(async () => { await release.promise; return true; });
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      started.resolve();
+      await confirmDelivery(input);
+    }, undefined, {}, { raw: { setMessageReaction } } as never);
+    const accepting = coordinator.accept(request(userId, threadId, 52_001, "hello"));
+    try {
+      expect(await Promise.race([started.promise.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 200))])).toBe(true);
+    } finally {
+      release.resolve();
+      await accepting;
+      await coordinator.shutdown();
+    }
+  });
+
+  it("recovers cleanup for a turn finalized before the process stopped", async () => {
+    const { userId, threadId } = await ownership(repos, 853);
+    const accepted = await repos.turnRuns.accept(request(userId, threadId, 53_001, "hello"));
+    await repos.turnRuns.markFailed(accepted.turnRun.id, "generation_failed");
+    const setMessageReaction = vi.fn(async () => true);
+    const coordinator = createCoordinator(db, repos, confirmDelivery, undefined, {}, { raw: { setMessageReaction } } as never);
+    await coordinator.waitForIdle();
+    expect(setMessageReaction).toHaveBeenCalledWith({ chat_id: userId, message_id: 63_001, reaction: [] }, expect.any(AbortSignal));
+    await coordinator.shutdown();
+  });
+
   it("runs identical messages with distinct update IDs FIFO and deduplicates a retried update", async () => {
     const { userId, threadId } = await ownership(repos, 801);
     const firstStarted = deferred<void>();

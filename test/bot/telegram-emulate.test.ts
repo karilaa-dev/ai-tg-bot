@@ -286,7 +286,7 @@ describe("Telegram bot with grammy-emulate", () => {
 
     await env.bot.sendCommand(env.user, env.chat, "/compact");
 
-    expect(waitForIdle).toHaveBeenCalledWith(expect.any(Number));
+    expect(waitForIdle).toHaveBeenCalledWith(expect.any(Number), false);
     expect(compact).toHaveBeenCalledOnce();
     expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
   });
@@ -354,6 +354,26 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.sendMessage(env.user, env.chat, "revise the presentation", { messageThreadId: 89 });
     await env.services.threadTitles.waitForIdle();
     expect(names).toEqual(["⏳ Presentation", "Presentation", "⏳ Presentation", "Presentation"]);
+  });
+
+  it("does not store an echoed activity title as a user's permanent title", async () => {
+    await env.dispose();
+    env = await createGrammyEmulator({ privateTopics: true });
+    await createTopic(env, 89, "Presentation", false);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, 89);
+    const run = await env.repos.turnRuns.accept({
+      userId: env.user.id, chatId: env.chat.id, threadId: thread.id, messageThreadId: 89,
+      locale: "en", kind: "text", content: { text: "hello" }, textPlain: "hello",
+      sources: [{ updateId: 900_001, messageId: 900_001 }],
+    });
+    await env.services.threadTitles.syncActivity({ api: env.bot.api, chatId: env.chat.id, threadId: thread.id });
+    const edit = env.bot.server.updateFactory.createForumTopicCreated(env.user, env.chat, { name: "⏳ Presentation", icon_color: 0x6fb9f0 }, 89);
+    const message = edit.message as typeof edit.message & Record<string, unknown>;
+    delete message.forum_topic_created;
+    message.forum_topic_edited = { name: "⏳ Presentation" };
+    await env.bot.processUpdatesConcurrently([edit]);
+    expect((await env.repos.threads.get(thread.id))?.title).toBe("Presentation");
+    await env.repos.turnRuns.markFailed(run.turnRun.id, "test_done");
   });
 
   it("generates and synchronizes a short title for a new implicit topic", async () => {

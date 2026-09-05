@@ -8,6 +8,7 @@ import { ThreadSandboxesRepo } from "./threadSandboxes.js";
 import { SandboxFileRestoresRepo } from "./sandboxFileRestores.js";
 import { BrowserUseProfilesRepo } from "./browserUseProfiles.js";
 import { TurnRunsRepo } from "./turnRuns.js";
+import { TurnActivityRepo } from "./turnActivity.js";
 
 export interface Repos {
   users: UsersRepo;
@@ -18,6 +19,7 @@ export interface Repos {
   sandboxFileRestores: SandboxFileRestoresRepo;
   browserUseProfiles: BrowserUseProfilesRepo;
   turnRuns: TurnRunsRepo;
+  turnActivity: TurnActivityRepo;
 }
 
 export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
@@ -30,5 +32,6 @@ export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
     sandboxFileRestores: new SandboxFileRestoresRepo(db),
     browserUseProfiles: new BrowserUseProfilesRepo(db),
     turnRuns: new TurnRunsRepo(db, search),
+    turnActivity: new TurnActivityRepo(db),
   };
 }
