@@ -301,7 +301,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               injectedIds.add(file.id);
               additions.push({
                 type: "text",
-                text: `\n\n[Audio attachment #${file.id}. Reuse the transcript in the message when present; otherwise call transcribe_audio with file_id: ${file.id}.]`,
+                text: `\n\n[Audio attachment #${file.id}. Reuse the transcript in the message when present, following its continuation instructions for long recordings; otherwise call transcribe_audio with file_id: ${file.id}.]`,
               });
               continue;
             }

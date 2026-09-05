@@ -53,6 +53,12 @@ export class TurnRunsRepo {
     private readonly search: TextSearch,
   ) {}
 
+  async hasTelegramUpdate(updateId: number): Promise<boolean> {
+    return Boolean(await queryOne(this.db, sql`
+      select 1 from turn_run_sources where telegram_update_id = ${updateId} limit 1
+    `));
+  }
+
   async telegramMessageIds(id: number): Promise<number[]> {
     const rows = await this.db.query<{ telegram_message_id: number }>(sql`
       select distinct telegram_message_id from turn_run_sources

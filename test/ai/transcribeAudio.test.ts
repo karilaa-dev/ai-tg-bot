@@ -8,6 +8,8 @@ import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
 import { audioFixture } from "../helpers/audio.js";
 import { workspaceRuntime } from "../helpers/workspaceRuntime.js";
+import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import type { TranscriptPage } from "../../src/audio/transcripts.js";
 
 describe("transcribe_audio", () => {
   let db: AppDatabase;
@@ -57,6 +59,71 @@ describe("transcribe_audio", () => {
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body).input_audio.format).toBe("ogg");
   });
 
+  it("bounds long transcripts in both Pi content and tool details", async () => {
+    fetchMock.mockResolvedValueOnce(Response.json({ text: "long recording ".repeat(80_000) }));
+    const tool = createPiToolAdapters({ buildInput: () => input }).find((entry) => entry.name === "transcribe_audio")!;
+    const result = await tool.execute("audio-call", { file_id: fileId }, undefined, undefined, {} as never);
+    expect(Buffer.byteLength(JSON.stringify(result.content))).toBeLessThan(10_000);
+    expect(Buffer.byteLength(JSON.stringify(result.details))).toBeLessThan(10_000);
+    expect(result.details).toMatchObject({ transcript_id: expect.any(String), next_offset: expect.any(Number), truncated: true });
+  });
+
+  it.each(["chat", "workspace"])("reads the complete saved %s transcript across Unicode pages with a smaller context", async (source) => {
+    input.config.MODEL_CONTEXT_TOKENS = 8192;
+    const fullText = `${"你好 🎙️ Привет!\n".repeat(700)}Last words.`;
+    fetchMock.mockResolvedValueOnce(Response.json({ text: fullText }));
+    const runtime = workspaceRuntime();
+    runtime.put("/recording.ogg", audioFixture());
+    const first = await createTranscribeAudioTool({ ...input, commandRuntime: runtime }).execute(
+      source === "chat" ? { file_id: fileId } : { path: "/recording.ogg" },
+    ) as TranscriptPage;
+    expect(first).toMatchObject({ next_offset: expect.any(Number), truncated: true });
+    // A new repository and tool instance have no in-memory transcription cache or resolver.
+    const reader = createTranscribeAudioTool({ ...input, repos: createRepos(db.db, db.search), resolveFile: undefined });
+    const pages: string[] = [];
+    let page = first;
+    do {
+      expect(Buffer.byteLength(page.text)).toBeLessThanOrEqual(512);
+      expect(page.text).toBe(fullText.slice(page.offset, page.next_offset ?? fullText.length));
+      expect(page.text).not.toContain("�");
+      pages.push(page.text);
+      if (page.next_offset === null) break;
+      page = await reader.execute({ transcript_id: page.transcript_id, offset: page.next_offset }) as TranscriptPage;
+    } while (pages.length < 100);
+    expect(pages.join("")).toBe(fullText);
+    expect(page.truncated).toBe(false);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(runtime.readWorkspaceFile).toHaveBeenCalledTimes(source === "workspace" ? 1 : 0);
+    expect(await reader.execute({ transcript_id: first.transcript_id, offset: fullText.length + 1 }))
+      .toMatchObject({ error: expect.stringContaining("Invalid transcript offset") });
+    expect(await reader.execute({ transcript_id: first.transcript_id, offset: fullText.indexOf("🎙") + 1 }))
+      .toMatchObject({ error: expect.stringContaining("Invalid transcript offset") });
+  });
+
+  it("keeps transcript continuations within the user, file and message visibility scope", async () => {
+    const later = await input.repos.messages.insert({ threadId: input.thread.id, role: "user", content: {}, textPlain: "Transcribe again" });
+    fetchMock.mockResolvedValueOnce(Response.json({ text: "recording ".repeat(2000) }));
+    const page = await createTranscribeAudioTool({ ...input, maxMessageId: later.id }).execute({ file_id: fileId }) as TranscriptPage;
+    const args = { transcript_id: page.transcript_id, offset: page.next_offset! };
+    const otherUser = await input.repos.users.ensure({ tgId: 812, lang: "en" });
+    const otherThread = await input.repos.threads.create({ userId: input.user.tg_id, topicId: 432, title: "Other" });
+    const beforeFork = await input.repos.threads.create({ userId: input.user.tg_id, topicId: 433, title: "Earlier", parentThreadId: input.thread.id, forkPointMessageId: messageId });
+    const afterFork = await input.repos.threads.create({ userId: input.user.tg_id, topicId: 434, title: "Later", parentThreadId: input.thread.id, forkPointMessageId: later.id });
+    for (const restricted of [
+      { ...input, user: otherUser },
+      { ...input, thread: otherThread },
+      { ...input, maxMessageId: messageId },
+      { ...input, thread: beforeFork },
+      { ...input, currentScope: async () => ({ threadIds: [input.thread.id], messageIds: [later.id], messageScopes: [], fileIds: [] }) },
+    ]) {
+      expect(await createTranscribeAudioTool(restricted).execute(args)).toEqual({ error: "Transcript not found in this thread." });
+    }
+    expect(await createTranscribeAudioTool({ ...input, thread: afterFork }).execute(args)).toMatchObject({ text: expect.any(String) });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await input.repos.files.deleteFile(fileId);
+    expect(await input.repos.audioTranscripts.get(page.transcript_id)).toBeUndefined();
+  });
+
   it("refuses files from a different thread before resolving bytes", async () => {
     const other = await input.repos.threads.create({ userId: input.user.tg_id, topicId: 432, title: "Other" });
     const result = await createTranscribeAudioTool({ ...input, thread: other }).execute({ file_id: fileId });
@@ -87,10 +154,17 @@ describe("transcribe_audio", () => {
 
   it("validates source selection and language hints", () => {
     const schema = createTranscribeAudioTool(input).inputSchema;
-    for (const value of [{}, { file_id: fileId, path: "/audio.wav" }, { path: "relative.wav" }, { file_id: fileId, language: "English" }]) {
+    const transcript_id = "4980aa81-1d42-47d2-bfd9-40d96522260b";
+    for (const value of [
+      {}, { file_id: fileId, path: "/audio.wav" }, { path: "relative.wav" }, { file_id: fileId, language: "English" },
+      { transcript_id, file_id: fileId }, { transcript_id, path: "/audio.wav" }, { transcript_id, language: "en" },
+      { transcript_id, format: "ogg" }, { transcript_id, offset: -1 }, { transcript_id, offset: 1.5 },
+      { file_id: fileId, offset: 0 }, { transcript_id: "invalid" },
+    ]) {
       expect(schema.safeParse(value).success).toBe(false);
     }
     expect(schema.safeParse({ path: "/recording", format: "ogg" }).success).toBe(true);
+    expect(schema.safeParse({ transcript_id, offset: 8000 }).success).toBe(true);
   });
 
   it.each([

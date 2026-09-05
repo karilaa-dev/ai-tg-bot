@@ -3,6 +3,7 @@ import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { audioFormat, detectAudioType, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
+import { boundTranscript } from "../audio/transcripts.js";
 import { chatFileMarker } from "../files/contextMarker.js";
 import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
@@ -260,6 +261,10 @@ async function ingestTelegramFile(
 
 export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
+  // Acceptance remains atomic in TurnRunsRepo. This early lookup avoids repeating
+  // paid transcription and status messages when Telegram redelivers accepted audio.
+  if ((input.mediaKind === "voice" || input.mediaKind === "audio")
+    && await ctx.services.repos.turnRuns.hasTelegramUpdate(ctx.update.update_id)) return;
   if (input.type === "image") {
     await handleTelegramImage(ctx, input);
     return;
@@ -292,7 +297,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   const releaseMediaGroup = holdPendingMediaGroup(ctx, input.mediaGroupId);
   let failureKey = "error-generic";
   try {
-    let transcript: string | undefined;
+    let transcript: Awaited<ReturnType<typeof transcribeAudio>> | undefined;
     // Failed or cancelled transcription must not create or claim durable file records.
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
       failureKey = "audio-download-failed";
@@ -314,7 +319,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       throwIfAborted(controller.signal);
       await status.clear();
       throwIfAborted(controller.signal);
-      transcript = transcribed.text;
+      transcript = transcribed;
       // Transcription is complete; hand off to file registration and turn acceptance.
       clearJob();
     }
@@ -326,7 +331,14 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     });
     if (result === "too-big" || result === undefined) return;
     if (transcript !== undefined) {
-      result.prepared.card = `${transcript}\n\n${chatFileMarker(result.prepared.fileId)} [Audio message transcribed above]`;
+      const bounded = await boundTranscript(ctx.services.config, ctx.services.repos.audioTranscripts, {
+        userId: ctx.user.tg_id, threadId: ctx.thread.id, fileId: result.prepared.fileId,
+        telegramUpdateId: ctx.update.update_id,
+      }, transcript);
+      const note = "transcript_id" in bounded
+        ? `[Audio transcript preview; full transcript saved (${bounded.total_chars} characters). Read more with transcribe_audio(${JSON.stringify({ transcript_id: bounded.transcript_id, offset: bounded.next_offset })}).]`
+        : "[Audio message transcribed above]";
+      result.prepared.card = `${bounded.text}\n\n${chatFileMarker(result.prepared.fileId)} ${note}`;
       await handlePreparedTelegramFile(ctx, input, result.prepared);
       return;
     }
