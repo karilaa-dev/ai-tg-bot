@@ -297,6 +297,14 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
           for (const fileId of fileIds) {
             let file = byId.get(fileId);
             if (!file) continue;
+            if (file.type === "audio") {
+              injectedIds.add(file.id);
+              additions.push({
+                type: "text",
+                text: `\n\n[Audio attachment #${file.id}. Reuse the transcript in the message when present, following its continuation instructions for long recordings; otherwise call transcribe_audio with file_id: ${file.id}.]`,
+              });
+              continue;
+            }
             if (file.type === "pdf" || file.type === "docx") {
               injectedIds.add(file.id);
               additions.push(sandboxDocumentContext(file));

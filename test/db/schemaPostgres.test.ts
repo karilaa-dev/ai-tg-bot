@@ -46,6 +46,22 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     expect(await tableExists("chunk_search")).toBe(true);
     expect(await tableExists("turn_runs")).toBe(true);
     expect(await tableExists("turn_run_sources")).toBe(true);
+    const transcriptId = await repos.audioTranscripts.insert({ userId: user.tg_id, threadId: thread.id, messageId: message.id }, {
+      text: "A persisted transcript.", model: "qwen/qwen3-asr-1.7b",
+    });
+    await database.initialize();
+    expect(await repos.audioTranscripts.get(transcriptId)).toMatchObject({ text: "A persisted transcript.", visible_message_id: message.id });
+    const incomingId = await repos.audioTranscripts.insert({ userId: user.tg_id, threadId: thread.id, telegramUpdateId: 1234 }, {
+      text: "An incoming transcript.", model: "qwen/qwen3-asr-1.7b",
+    });
+    expect(await repos.audioTranscripts.get(incomingId)).toMatchObject({ visible_message_id: null });
+    expect(await repos.turnRuns.hasTelegramUpdate(1234)).toBe(false);
+    const accepted = await repos.turnRuns.accept({
+      userId: user.tg_id, threadId: thread.id, chatId: user.tg_id, messageThreadId: null,
+      locale: "en", kind: "file", content: {}, textPlain: "A bounded preview.", sources: [{ updateId: 1234, messageId: 1 }],
+    });
+    expect(await repos.audioTranscripts.get(incomingId)).toMatchObject({ visible_message_id: accepted.userMessage.id });
+    expect(await repos.turnRuns.hasTelegramUpdate(1234)).toBe(true);
     expect(await tableExists("schema_migrations")).toBe(false);
     expect(await tableExists("invites")).toBe(false);
     expect(await tableExists("summaries")).toBe(false);

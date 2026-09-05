@@ -38,7 +38,7 @@ export async function renderThreadSessionContext(input: {
     type: file.type,
     mode: file.type === "pdf" || file.type === "docx"
       ? "sandbox source"
-      : file.type === "image"
+      : file.type === "image" || file.type === "audio"
       ? "chat reference"
       : file.is_inline ? "inline" : "searchable",
     summary: file.summary,

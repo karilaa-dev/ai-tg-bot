@@ -816,7 +816,7 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("replies to unsupported media instead of silently ignoring it", async () => {
     await startBot();
-    const res = await env.bot.sendAudio(env.user, env.chat, { duration: 3, title: "voice memo" });
+    const res = await env.bot.sendVideo(env.user, env.chat, { width: 640, height: 480, duration: 3 });
 
     expect(res.text).toContain("not supported");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
