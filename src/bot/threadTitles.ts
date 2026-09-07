@@ -160,12 +160,13 @@ export class ThreadTitleCoordinator {
       input.signal?.throwIfAborted();
       const thread = await this.input.repos.threads.get(input.threadId);
       if (!isEligibleTopic(thread)) return true;
-      const working = await this.input.repos.turnRuns.hasUnfinished(thread.id);
-      const name = activityTitle(thread.title, working);
+      const working = thread.title_source === "placeholder";
+      // Keep the placeholder until a real title replaces it, including between turns.
+      const name = telegramTitle(thread);
       // A manual rename can arrive during either the database read or the
       // Telegram request. Check before sending and reconcile again afterward.
       const beforeSend = await this.input.repos.threads.get(thread.id);
-      if (beforeSend?.title !== thread.title) continue;
+      if (beforeSend?.title !== thread.title || beforeSend?.title_source !== thread.title_source) continue;
       const known = await this.input.repos.threads.telegramTitle(input.chatId, thread.topic_id!);
       if (known?.name !== name) {
         await this.input.repos.threads.recordTelegramTitle(input.chatId, thread.topic_id!, null);
@@ -185,8 +186,7 @@ export class ThreadTitleCoordinator {
         await this.observeTelegramTitle(input.chatId, thread.topic_id!, name);
       }
       const latest = await this.input.repos.threads.get(thread.id);
-      const stillWorking = await this.input.repos.turnRuns.hasUnfinished(thread.id);
-      if (latest && activityTitle(latest.title, stillWorking) !== name) continue;
+      if (latest && telegramTitle(latest) !== name) continue;
       if (thread.title_source === "generated") {
         await this.input.repos.threads.markTopicTitleSynced(thread.id, thread.title);
       }
@@ -205,6 +205,6 @@ function isTopicNotModified(error: unknown): boolean {
   return /TOPIC_NOT_MODIFIED|topic is not modified/i.test(message);
 }
 
-function activityTitle(title: string, working: boolean): string {
-  return working ? `⏳ ${Array.from(title).slice(0, 126).join("")}` : title;
+function telegramTitle(thread: ThreadRow): string {
+  return thread.title_source === "placeholder" ? "⏳" : thread.title;
 }

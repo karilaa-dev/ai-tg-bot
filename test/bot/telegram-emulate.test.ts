@@ -337,7 +337,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await env.repos.messages.listThread(thread.id)).map((row) => row.text_plain)).toContain("first question in manual topic");
   });
 
-  it("renames a topic only once when an accepted turn starts running", async () => {
+  it("leaves explicit topic names unchanged across turns", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
     await createTopic(env, 89, "Presentation", false);
@@ -350,16 +350,16 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.sendMessage(env.user, env.chat, "make a presentation", { messageThreadId: 89 });
     await env.services.threadTitles.waitForIdle();
 
-    expect(names).toEqual(["⏳ Presentation", "Presentation"]);
+    expect(names).toEqual([]);
     await env.bot.sendMessage(env.user, env.chat, "revise the presentation", { messageThreadId: 89 });
     await env.services.threadTitles.waitForIdle();
-    expect(names).toEqual(["⏳ Presentation", "Presentation", "⏳ Presentation", "Presentation"]);
+    expect(names).toEqual([]);
   });
 
   it("does not store an echoed activity title as a user's permanent title", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
-    await createTopic(env, 89, "Presentation", false);
+    await createTopic(env, 89, "Presentation", true);
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, 89);
     const run = await env.repos.turnRuns.accept({
       userId: env.user.id, chatId: env.chat.id, threadId: thread.id, messageThreadId: 89,
@@ -367,10 +367,10 @@ describe("Telegram bot with grammy-emulate", () => {
       sources: [{ updateId: 900_001, messageId: 900_001 }],
     });
     await env.services.threadTitles.syncActivity({ api: env.bot.api, chatId: env.chat.id, threadId: thread.id });
-    const edit = env.bot.server.updateFactory.createForumTopicCreated(env.user, env.chat, { name: "⏳ Presentation", icon_color: 0x6fb9f0 }, 89);
+    const edit = env.bot.server.updateFactory.createForumTopicCreated(env.user, env.chat, { name: "⏳", icon_color: 0x6fb9f0 }, 89);
     const message = edit.message as typeof edit.message & Record<string, unknown>;
     delete message.forum_topic_created;
-    message.forum_topic_edited = { name: "⏳ Presentation" };
+    message.forum_topic_edited = { name: "⏳" };
     await env.bot.processUpdatesConcurrently([edit]);
     expect((await env.repos.threads.get(thread.id))?.title).toBe("Presentation");
     await env.repos.turnRuns.markFailed(run.turnRun.id, "test_done");

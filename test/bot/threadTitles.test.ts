@@ -37,39 +37,39 @@ describe("thread activity titles", () => {
     });
   }
 
-  it("keeps the marker until the whole queue finishes and preserves the saved title", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+  it("keeps the marker after the queue finishes and preserves the saved title", async () => {
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     const first = await accept(thread.id, 1);
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "⏳ Planning" }, expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "⏳" }, expect.any(AbortSignal));
     const second = await accept(thread.id, 2);
     await repos.turnRuns.markFailed(first.turnRun.id, "generation_failed");
     await titles.syncActivity(input);
     expect(editForumTopic).toHaveBeenCalledTimes(1);
-    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "⏳ Planning" }, expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "⏳" }, expect.any(AbortSignal));
     expect((await repos.threads.get(thread.id))?.title).toBe("Planning");
     await repos.turnRuns.markFailed(second.turnRun.id, "generation_failed");
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "Planning" }, expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith({ chat_id: 1001, message_thread_id: 42, name: "⏳" }, expect.any(AbortSignal));
   });
 
-  it("restores a title generated or manually renamed during work", async () => {
+  it("replaces the marker directly with a generated or manual title", async () => {
     const thread = await repos.threads.activeForUserTopic(1001, 42, "New topic", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     const run = await accept(thread.id, 1);
     await titles.syncActivity(input);
     await repos.threads.setGeneratedTitleIfPlaceholder(thread.id, "Generated title");
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ Generated title" }), expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Generated title" }), expect.any(AbortSignal));
     await repos.threads.applyTelegramTopicTitle(thread.id, "My title", false);
     await repos.turnRuns.markFailed(run.turnRun.id, "generation_failed");
     await titles.syncActivity(input);
     expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "My title" }), expect.any(AbortSignal));
   });
 
-  it("serializes a slow working-title edit before cleanup", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+  it("does not remove the marker when work finishes during the edit", async () => {
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     const run = await accept(thread.id, 1);
     const started = deferred<void>();
@@ -82,13 +82,12 @@ describe("thread activity titles", () => {
     release.resolve();
     await Promise.all([working, cleanup]);
     expect(editForumTopic.mock.calls.map(([payload]) => payload)).toEqual([
-      { chat_id: 1001, message_thread_id: 42, name: "⏳ Planning" },
-      { chat_id: 1001, message_thread_id: 42, name: "Planning" },
+      { chat_id: 1001, message_thread_id: 42, name: "⏳" },
     ]);
   });
 
   it("coalesces concurrent requests for the same title", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     await accept(thread.id, 1);
     await Promise.all([titles.syncActivity(input), titles.syncActivity(input), titles.syncActivity(input)]);
@@ -96,7 +95,7 @@ describe("thread activity titles", () => {
   });
 
   it("repairs a manual rename that races an in-flight title request", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     await accept(thread.id, 1);
     const started = deferred<void>();
@@ -108,11 +107,11 @@ describe("thread activity titles", () => {
     await titles.observeTelegramTitle(1001, 42, "My new title");
     release.resolve();
     await update;
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ My new title" }), expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "My new title" }), expect.any(AbortSignal));
   });
 
-  it("does not trust an old working-title cache after a peer clears the title", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+  it("does not repeat the marker across turns or coordinator restarts", async () => {
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     const first = await accept(thread.id, 1);
     await titles.syncActivity(input);
@@ -121,11 +120,11 @@ describe("thread activity titles", () => {
     await peer.syncActivity(input);
     await accept(thread.id, 2);
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ Planning" }), expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenCalledTimes(1);
   });
 
   it("retries a failed edit before remembering the title", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     await accept(thread.id, 1);
     editForumTopic.mockRejectedValueOnce(new Error("Telegram unavailable"));
@@ -136,25 +135,26 @@ describe("thread activity titles", () => {
   });
 
   it("respects an observed manual rename even when the saved title is unchanged", async () => {
-    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning");
+    const thread = await repos.threads.activeForUserTopic(1001, 42, "Planning", "placeholder");
     const input = { api, chatId: 1001, threadId: thread.id };
     await accept(thread.id, 1);
     await titles.syncActivity(input);
     await titles.observeTelegramTitle(1001, 42, "Planning");
     await titles.syncActivity(input);
     expect(editForumTopic).toHaveBeenCalledTimes(2);
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳ Planning" }), expect.any(AbortSignal));
+    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: "⏳" }), expect.any(AbortSignal));
   });
 
-  it("truncates only the working title to Telegram's limit", async () => {
+  it("preserves emoji in explicit topic names", async () => {
     const original = "🌲".repeat(128);
-    const thread = await repos.threads.activeForUserTopic(1001, 42, original);
+    const thread = await repos.threads.activeForUserTopic(1001, 42, original, "explicit");
+    await titles.observeTelegramTitle(1001, 42, original);
     const input = { api, chatId: 1001, threadId: thread.id };
     const run = await accept(thread.id, 1);
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: `⏳ ${"🌲".repeat(126)}` }), expect.any(AbortSignal));
     await repos.turnRuns.markFailed(run.turnRun.id, "generation_failed");
     await titles.syncActivity(input);
-    expect(editForumTopic).toHaveBeenLastCalledWith(expect.objectContaining({ name: original }), expect.any(AbortSignal));
+    expect(editForumTopic).not.toHaveBeenCalled();
+    expect((await repos.threads.get(thread.id))?.title).toBe(original);
   });
 });
