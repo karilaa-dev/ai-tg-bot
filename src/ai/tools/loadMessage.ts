@@ -39,6 +39,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
       if (requestedIds.length) {
         for (const fileId of requestedIds) {
           const file = byId.get(fileId)!;
+          if (file.type === "audio") continue;
           if (file.type === "pdf" || file.type === "docx") {
             sandboxIds.push(fileId);
             continue;
@@ -85,7 +86,9 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           inline: Boolean(file.is_inline),
           bash_input_file_id: file.id,
           source_only: file.extraction_status === "source_only",
-          recommended_tool: file.type === "pdf" || file.type === "docx"
+          recommended_tool: file.type === "audio"
+            ? "transcribe_audio" as const
+            : file.type === "pdf" || file.type === "docx"
             ? "materialize_chat_files" as const
             : "load_message" as const,
         })),

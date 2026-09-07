@@ -12,7 +12,7 @@ export interface SandboxThreadFile {
     width?: number | null;
     height?: number | null;
     direction: "inbound" | "outbound";
-    mediaKind: "document" | "photo";
+    mediaKind: "document" | "photo" | "voice" | "audio";
     isPrimary: boolean;
     lastSeenAt: number;
   }>;

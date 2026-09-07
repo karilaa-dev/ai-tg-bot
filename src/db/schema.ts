@@ -221,6 +221,19 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`create index if not exists files_content_sha256_idx on files(content_sha256, type, size)`));
   await db.execute(sql.raw(`
+    create table if not exists audio_transcripts (
+      id text primary key,
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      source_file_id ${intType} references files(id) on delete cascade,
+      source_message_id ${intType} references messages(id) on delete cascade,
+      telegram_update_id ${intType},
+      text text not null,
+      model text not null,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
     create table if not exists file_sources (
       id ${idType},
       file_id ${intType} not null references files(id) on delete cascade,

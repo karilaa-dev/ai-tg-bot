@@ -24,6 +24,9 @@ export function createSearchInFileTool(input: ToolBuildInput) {
         input.logger?.debug("tool search_in_file not found", { threadId: input.thread.id, fileId: file_id });
         return { error: "file not found in this thread" };
       }
+      if (file.type === "audio") {
+        return { error: "transcription_required", file_id, message: "Use transcribe_audio to read this audio file." };
+      }
       if (file.extraction_status === "source_only") {
         return {
           error: "sandbox_required",

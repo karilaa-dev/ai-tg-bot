@@ -78,7 +78,9 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain("provider:");
     expect(prompt.length).toBeLessThanOrEqual(4500);
     const tools = createPiToolAdapters({ buildInput: () => ({ config, user: baseUser, thread, browserRuntime: browser ? {} : undefined }) as never });
-    const schemas = JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
+    expect(tools.some((tool) => tool.name === "transcribe_audio")).toBe(true);
+    // Transcription was added after this baseline; compare the same set of tools.
+    const schemas = JSON.stringify(tools.filter((tool) => tool.name !== "transcribe_audio").map(({ name, description, parameters }) => ({ name, description, parameters })));
     // Measured 2.0.4 core plus these same adapter schemas; unchanged skills/read/image tools cancel out.
     expect(prompt.length + schemas.length).toBeLessThan(browser ? 25676 : 16441);
   });

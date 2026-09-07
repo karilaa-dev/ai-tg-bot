@@ -24,6 +24,8 @@ const ConfigSchema = z.object({
   OPENROUTER_MAIN_MODEL: z.string().default("openai/gpt-6-astra"),
   OPENROUTER_HELPER_MODEL: z.string().default("openai/gpt-5.6-luna"),
   OPENROUTER_IMAGE_MODEL: z.string().default("openai/gpt-5.4-image-2"),
+  OPENROUTER_TRANSCRIPTION_MODEL: z.string().trim().min(1).default("qwen/qwen3-asr-1.7b"),
+  TRANSCRIPTION_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   IMAGE_TIMEOUT_MS: z.coerce.number().int().min(0).default(300_000),
   OPENROUTER_API_KEY: z.string().min(1),
   TAVILY_API_KEY: z.string().min(1),

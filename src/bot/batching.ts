@@ -124,6 +124,20 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<P
   ctx.services.logger.debug("media group queued", ctxLogMeta(ctx, { groupId, items: 1 }));
 }
 
+// Keep earlier album items queued while the next attachment downloads or transcribes.
+export function holdPendingMediaGroup(ctx: BotContext, groupId?: string): () => void {
+  if (!groupId || !ctx.chat || !ctx.thread) return () => {};
+  const key = `${ctx.chat.id}:${ctx.thread.id}:${groupId}`;
+  const pending = ctx.services.routerState.pendingMediaGroups.get(key);
+  if (!pending) return () => {};
+  clearTimeout(pending.timer);
+  return () => {
+    if (ctx.services.routerState.pendingMediaGroups.get(key) !== pending) return;
+    clearTimeout(pending.timer);
+    pending.timer = scheduleMediaGroupFlush(key, ctx, groupId);
+  };
+}
+
 function scheduleMediaGroupFlush(key: string, ctx: BotContext, groupId: string): NodeJS.Timeout {
   return setTimeout(() => {
     void flushMediaGroup(ctx, key).catch((err) => {

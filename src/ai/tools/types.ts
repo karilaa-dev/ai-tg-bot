@@ -61,7 +61,7 @@ interface LoadMessageFileEntry {
   inline: boolean;
   bash_input_file_id: number;
   source_only: boolean;
-  recommended_tool: "materialize_chat_files" | "load_message";
+  recommended_tool: "materialize_chat_files" | "load_message" | "transcribe_audio";
 }
 
 interface LoadMessageImageEntry {

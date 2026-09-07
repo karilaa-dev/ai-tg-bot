@@ -22,6 +22,7 @@ const BASE_BOT_TOOL_NAMES = [
   "bash",
   "web_search",
   "web_extract",
+  "transcribe_audio",
 ] as const;
 
 const BROWSER_TOOL_NAMES = [
@@ -65,6 +66,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
         || name === "materialize_chat_files"
         || name === "render_pdf_pages"
         || name === "inspect_workspace_images"
+        || name === "transcribe_audio"
         || name === "create_file"
         || name === "finish_response"
         || name === "publish_website"

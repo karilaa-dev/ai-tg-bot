@@ -5,6 +5,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 
 const CURRENT_TABLES = [
+  "audio_transcripts",
   "browser_use_profiles",
   "chunks_fts",
   "embeddings",

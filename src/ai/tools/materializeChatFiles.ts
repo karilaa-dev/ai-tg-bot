@@ -70,6 +70,7 @@ export function createMaterializeChatFilesTool(input: ToolBuildInput) {
 }
 
 function recommendedTools(file: FileRow): string[] {
+  if (file.type === "audio") return [`transcribe_audio({ file_id: ${file.id} })`];
   if (file.type === "pdf") {
     return [
       "pdf-inspector detect <path> --json",
