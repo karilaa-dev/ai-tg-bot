@@ -14,8 +14,7 @@
     "rootDir": ".",
     "types": [
       "node",
-      "vitest",
-      "bun"
+      "vitest"
     ],
     "paths": {
       "@/*": [

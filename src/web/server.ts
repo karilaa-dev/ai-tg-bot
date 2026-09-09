@@ -1,5 +1,9 @@
 import path from "node:path";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { fileTypeFromBuffer } from "file-type";
 import type { AppConfig } from "../config.js";
 import type { FileResolver } from "../files/resolver.js";
@@ -28,7 +32,7 @@ const headers = {
   "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
 };
 
-export function createWebHandler(options: WebServerOptions, shutdownSignal: AbortSignal, assets = new Map<string, () => Response>()) {
+export function createWebHandler(options: WebServerOptions, shutdownSignal: AbortSignal, assets = new Map<string, () => Response | Promise<Response>>()) {
   let downloads = 0;
   return async (request: Request): Promise<Response> => {
     try {
@@ -96,7 +100,7 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
       } else {
         const asset = assets.get(url.pathname);
         if (!asset) throw new WebNotFound();
-        const response = asset();
+        const response = await asset();
         for (const [key, value] of Object.entries(headers)) response.headers.set(key, value);
         return request.method === "HEAD" ? new Response(null, { headers: response.headers }) : response;
       }
@@ -116,32 +120,87 @@ export async function startWebServer(options: WebServerOptions) {
   const directory = path.resolve(options.assetsDirectory ?? "dist/web");
   const entries = await readdir(directory, { withFileTypes: true });
   if (!entries.some(entry => entry.name === "index.html")) throw new Error("Website assets are missing. Run npm run build:web.");
-  const assets = new Map<string, () => Response>();
+  const assets = new Map<string, () => Response | Promise<Response>>();
+  const assetTypes: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
   for (const entry of entries) {
     if (!entry.isFile() || !/\.(html|js|css)$/.test(entry.name)) continue;
-    assets.set(entry.name === "index.html" ? "/" : `/${entry.name}`, () => new Response(Bun.file(path.join(directory, entry.name))));
+    assets.set(entry.name === "index.html" ? "/" : `/${entry.name}`, async () => {
+      const bytes = await readFile(path.join(directory, entry.name));
+      return new Response(bytes, { headers: {
+        "Content-Type": assetTypes[path.extname(entry.name)]!, "Content-Length": String(bytes.length),
+      } });
+    });
   }
   const controller = new AbortController();
-  const tasks = new Set<Promise<Response>>();
+  const tasks = new Set<Promise<void>>();
   const handler = createWebHandler(options, controller.signal, assets);
-  const server = Bun.serve({
-    hostname: options.config.WEB_HOST, port: options.config.WEB_PORT, idleTimeout: 130,
-    fetch(request) {
-      const task = handler(request);
-      tasks.add(task);
-      void task.finally(() => tasks.delete(task));
-      return task;
-    },
+  const server = createServer({ requestTimeout: 130_000 }, (incoming, outgoing) => {
+    const task = respond(incoming, outgoing);
+    tasks.add(task);
+    void task.finally(() => tasks.delete(task));
   });
-  options.logger.info("conversation website started", { url: server.url.toString() });
+  server.setTimeout(130_000, socket => socket.destroy());
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(options.config.WEB_PORT, options.config.WEB_HOST, () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+  } catch (error) {
+    throw new Error(`Could not start conversation website on ${options.config.WEB_HOST}:${options.config.WEB_PORT}: ${String(error)}`, { cause: error });
+  }
+  server.on("error", error => options.logger.error("website listener failed", { error: String(error) }));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Website listener has no TCP address.");
+  const host = address.address.includes(":") ? `[${address.address}]` : address.address;
+  const url = new URL(`http://${host}:${address.port}/`);
+  options.logger.info("conversation website started", { url: url.toString() });
+  let stopping: Promise<void> | undefined;
   return {
-    url: server.url,
-    async stop() {
-      controller.abort();
-      await server.stop(true);
-      await Promise.allSettled([...tasks]);
+    url,
+    stop() {
+      return stopping ??= (async () => {
+        controller.abort();
+        const closed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        server.closeAllConnections();
+        await closed;
+        await Promise.allSettled([...tasks]);
+      })();
     },
   };
+
+  async function respond(incoming: IncomingMessage, outgoing: ServerResponse): Promise<void> {
+    const disconnected = new AbortController();
+    const abort = () => disconnected.abort();
+    const onClose = () => { if (!outgoing.writableFinished) abort(); };
+    incoming.once("aborted", abort);
+    outgoing.once("close", onClose);
+    const signal = AbortSignal.any([controller.signal, disconnected.signal]);
+    try {
+      if (incoming.method !== "GET" && incoming.method !== "HEAD") {
+        outgoing.writeHead(405, { ...headers, Allow: "GET, HEAD", Connection: "close" }).end("Method not allowed");
+        return;
+      }
+      // A fixed origin keeps routing independent of untrusted Host/proxy headers.
+      const request = new Request(new URL(incoming.url ?? "/", "http://localhost"), { method: incoming.method, signal });
+      const response = await handler(request);
+      signal.throwIfAborted();
+      outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+      if (response.body) await pipeline(Readable.fromWeb(response.body as NodeReadableStream), outgoing, { signal });
+      else outgoing.end();
+    } catch (error) {
+      if (!signal.aborted) {
+        options.logger.warn("website response failed", { error: error instanceof Error ? error.name : "unknown" });
+        if (!outgoing.headersSent && !outgoing.destroyed) outgoing.writeHead(500, headers).end("Could not load this page.");
+        else outgoing.destroy();
+      }
+    } finally {
+      incoming.removeListener("aborted", abort);
+      outgoing.removeListener("close", onClose);
+    }
+  }
 }
 
 function optionalInteger(value: string | null): number | undefined { return value === null ? undefined : integer(value); }

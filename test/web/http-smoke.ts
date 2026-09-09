@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import assert from "node:assert/strict";
@@ -86,10 +88,12 @@ if (preview) {
     assert.equal((await fetch(new URL("/api/users", web.url), { method: "POST" })).status, 405);
     await assert.rejects(startWebServer({ ...options, config: { ...config, WEB_PORT: Number(web.url.port) } }));
     await web.stop();
-    const rebound = Bun.serve({ hostname: "127.0.0.1", port: Number(web.url.port), fetch: () => new Response("rebound") });
-    await rebound.stop(true);
+    const rebound = createServer();
+    rebound.listen(Number(web.url.port), "127.0.0.1");
+    await once(rebound, "listening");
+    await new Promise<void>((resolve, reject) => rebound.close(error => error ? reject(error) : resolve()));
     assert.equal(await startWebServer({ ...options, config: { ...config, WEB_ENABLED: false } }), undefined);
-    console.log("Bun HTTP smoke passed: assets, history, downloads, bind failure, shutdown, disabled mode");
+    console.log("Node.js HTTP smoke passed: assets, history, downloads, bind failure, shutdown, disabled mode");
   } finally { await web.stop(); await db.destroy();
     if (admin) { await admin.db.execute(sql.raw(`drop schema ${schema} cascade`)); await admin.destroy(); }
     await rm(temp, { recursive: true, force: true }); }

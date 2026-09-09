@@ -43,8 +43,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Requirements
 
-- Bun 1.4.2 for the bot and website
-- Node.js 24.18 or newer and npm for installation, builds, and release tools
+- Node.js 24.18 or newer and npm
 - A Telegram BotFather token
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
@@ -76,7 +75,7 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 ## Dokploy
 
-Dokploy can deploy this repository with Railpack. The included `railpack.json` adds Bun 1.4.2 to the build and runtime image. Railpack runs `npm run build` and starts both services with `bun dist/src/main.js`.
+Dokploy can deploy this repository with Railpack. The included `railpack.json` uses the Node.js provider. Railpack runs `npm run build` and starts the bot and optional website in one Node.js process with `node dist/src/main.js`.
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
@@ -258,7 +257,7 @@ WEB_PORT=3000
 WEB_AUTOLOAD_MAX_BYTES=5242880
 ```
 
-Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes require Bun 1.4.2. The website defaults to disabled and opens no listener in that mode.
+Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes use Node.js 24.18 or newer. The website defaults to disabled and opens no listener in that mode.
 
 Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database.
 
@@ -270,4 +269,4 @@ Attachments up to 5 MiB load into the page automatically with at most three conc
 
 The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), [Rare UI Code Block](https://www.rareui.com/components/codeblock), and shadcn chat components. Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
 
-For a local preview with synthetic conversations and files, run `npm run build:web` followed by `bun test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Bun HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
+For a local preview with synthetic conversations and files, run `npm run build:web` followed by `node --import tsx test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Node.js HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
