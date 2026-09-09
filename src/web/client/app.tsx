@@ -217,7 +217,7 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
               <header>{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
               {message.thinking && <details className="thinking"><summary>Thinking</summary><RichText text={message.thinking} /></details>}
               {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
-              {message.attachments.map(file => <FileAttachment key={file.id} file={file} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
+              {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
               <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
             </article>
           </div>)}

@@ -2,6 +2,8 @@ import { expect, it } from "vitest";
 import type { MessageRow } from "../../src/db/types.js";
 import { messageView } from "../../src/web/message-view.js";
 import type { WebAttachment } from "../../src/web/types.js";
+import { cardForFile } from "../../src/files/ingest.js";
+import type { FileRow } from "../../src/db/types.js";
 
 const image: WebAttachment = { id: 1, kind: "image", name: "photo.jpg", mimeType: "image/jpeg", size: 500, caption: "Make a picture", description: "A cat [with stripes]." };
 const audio: WebAttachment = { id: 2, kind: "audio", name: "voice.ogg", mimeType: "audio/ogg", size: 500, caption: null };
@@ -39,4 +41,24 @@ it("keeps ordinary messages, unrelated markers, and unrecognized cards intact", 
   const literal = message("[[chat-file:1]] [image #1: A cat [with stripes].]");
   literal.kind = "text";
   expect(messageView(literal, [image]).text).toBe(literal.text_plain);
+});
+
+it.each(["txt", "csv", "pdf", "docx"] as const)("hides saved %s instructions and inline contents while preserving surrounding words", type => {
+  const file = { id: 4, name: `my [file].${type}`, type, is_inline: 1, content_md: 'Private contents\n[[chat-file:1]] [image #1: Not a real attachment]', summary: "Saved summary", outline_json: null } as FileRow;
+  const attachment: WebAttachment = { id: 4, name: file.name, kind: "file", mimeType: "text/plain", size: 100, caption: "Read this" };
+  for (const variant of [{ ...file, extraction_status: "ready" }, { ...file, is_inline: 0, extraction_status: "ready" }, { ...file, is_inline: 0, extraction_status: "source_only" }] as FileRow[]) {
+    const card = cardForFile(variant);
+    const row = message(`Read this\n\n${card}\n\nKeep this too.`);
+    const view = messageView(row, [attachment, image]);
+    expect(view.text).toBe("Read this\n\nKeep this too.");
+    expect(view.attachments).toHaveLength(2);
+    expect(messageView({ ...row, kind: "text" }, [attachment]).text).toBe(row.text_plain);
+  }
+});
+
+it("preserves incomplete and unrelated ordinary file cards", () => {
+  const file: WebAttachment = { id: 4, name: "notes.txt", kind: "file", mimeType: "text/plain", size: 100, caption: null };
+  for (const text of ['[[chat-file:4]] File #4: notes.txt (txt, inline).\n<attachment id="4" name="notes.txt">\nMissing closing tag', '[[chat-file:5]] File #5: notes.txt (txt, sandbox source). Use materialize_chat_files, then docx-cli.', '[[chat-file:4]] File #4: notes.txt (not a saved card).']) {
+    expect(messageView(message(text), [file]).text).toBe(text);
+  }
 });

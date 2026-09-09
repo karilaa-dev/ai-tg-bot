@@ -8,14 +8,16 @@ import { Button, buttonVariants } from "./components/ui/button.js";
 
 const fileSize = (size: number | null) => size === null ? "Unknown size" : size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
 
-export function FileAttachment({ file, state, maxBytes, load }: {
-  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void;
+export function FileAttachment({ file, state, maxBytes, load, messageText = "" }: {
+  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string;
 }) {
   const [decoded, setDecoded] = useState<{ url: string; width: number; height: number }>();
   const [broken, setBroken] = useState<string>();
   const kind = attachmentKind(file);
   const image = kind === "image";
   const audio = kind === "audio";
+  const caption = file.caption?.trim();
+  const showCaption = caption && !`\n\n${messageText.trim()}\n\n`.includes(`\n\n${caption}\n\n`);
   const oversized = file.size !== null && file.size > maxBytes;
   const readyImage = state?.url && imageMimeTypes.includes(state.mime ?? "");
   const readyAudio = state?.url && isAudioMime(state.mime ?? "");
@@ -56,6 +58,6 @@ export function FileAttachment({ file, state, maxBytes, load }: {
     {state?.error && <p role="status" className="file-error">{state.error}</p>}
     {mediaError && <p role="status" className="file-error">This preview could not be opened. You can save the file or <button className="underline" onClick={() => load()}>retry</button>.</p>}
     {state?.text !== undefined && !image && !audio && <details className="text-preview" open><summary>Text preview{file.size !== null && file.size > 65536 ? " · First 64 KiB" : ""}</summary><pre>{state.text}</pre></details>}
-    {file.caption && !image && !audio && <p className="file-caption">{file.caption}</p>}
+    {showCaption && <p className="file-caption">{caption}</p>}
   </div>;
 }

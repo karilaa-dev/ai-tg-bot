@@ -43,3 +43,15 @@ it("provides an audio player without autoplay and an expandable escaped transcri
   expect(html).not.toMatch(/<details[^>]*open/);
   expect(html).toContain('&lt;script&gt;speech&lt;/script&gt; &amp; text');
 });
+
+it.each(["image", "audio"] as const)("shows a %s caption unless it is already in the message", kind => {
+  const props = {
+    file: { id: 1, kind, name: "media", mimeType: `${kind}/test`, size: 50, caption: "A separate <script>caption</script>" },
+    messageText: "Here is the answer.", maxBytes: 20 * 1024 * 1024, load: () => {},
+  };
+  const html = renderToStaticMarkup(createElement(FileAttachment, props));
+  expect(html).toContain('<p class="file-caption">A separate &lt;script&gt;caption&lt;/script&gt;</p>');
+  expect(html).not.toContain("<script>");
+  const duplicated = renderToStaticMarkup(createElement(FileAttachment, { ...props, messageText: props.file.caption }));
+  expect(duplicated).not.toContain('class="file-caption"');
+});

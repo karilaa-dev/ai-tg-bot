@@ -66,7 +66,7 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
         if (sandbox !== null && (sandbox !== "start" || mode !== "download")) throw new HttpError(400, "Invalid sandbox request.");
         const maxBytes = mode === "auto" ? options.config.WEB_AUTOLOAD_MAX_BYTES : MAX_FILE_BYTES;
         if (file.size > MAX_FILE_BYTES) throw new HttpError(413, "This file exceeds the 20 MiB download limit.");
-        if (mode === "auto" && (maxBytes === 0 || file.size < 0 || file.size > maxBytes)) {
+        if (mode === "auto" && (maxBytes === 0 || file.size <= 0 || file.size > maxBytes)) {
           throw new HttpError(413, "Load this attachment manually.");
         }
         // HEAD never fetches a remote attachment.

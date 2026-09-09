@@ -58,11 +58,31 @@ export function messageView(message: MessageRow, attachments: WebAttachment[], t
       file.transcription = full?.text ?? spoken;
       file.transcriptionTruncated = Boolean(long && !full);
       cursor = marker.index + marker[0].length + note.length;
+    } else {
+      const end = fileCardEnd(tail, file);
+      if (end === null) continue;
+      visible.push(prefix);
+      cursor = marker.index + marker[0].length + end;
     }
   }
   visible.push(message.text_plain.slice(cursor));
   view.text = visible.map(part => part.trim()).filter(Boolean).join("\n\n");
   return view;
+}
+
+function fileCardEnd(text: string, file: WebAttachment): number | null {
+  const prefix = `File #${file.id}: ${file.name} (`;
+  if (!text.startsWith(prefix)) return null;
+  const body = text.slice(prefix.length);
+  const inline = body.match(/^(?:txt|csv|pdf|docx|other), inline\)\.\n/);
+  if (inline) {
+    const opening = `${inline[0]}<attachment id="${file.id}" name="${file.name}">\n`;
+    if (!body.startsWith(opening)) return null;
+    const end = body.slice(opening.length).search(/\n<\/attachment>(?=\n\n|$)/);
+    return end < 0 ? null : prefix.length + opening.length + end + "\n</attachment>".length;
+  }
+  const card = body.match(/^(?:txt|csv|pdf|docx|other), (?:sandbox source\)\. Use materialize_chat_files, then (?:PDF Inspector or render_pdf_pages|docx-cli)\.|\d+ chunks\)\.[\s\S]*?Use search_in_file or read_file_section\.)(?=\n\n|$)/);
+  return card ? prefix.length + card[0].length : null;
 }
 
 function savedCaptions(content: string, files: WebAttachment[]): string[] {

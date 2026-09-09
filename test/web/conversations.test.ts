@@ -66,6 +66,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     const second = await thread(2);
     const old = await message(first.id);
     const recent = await message(second.id);
+    await database.db.execute(sql`update threads set created_at = 1`);
     await database.db.execute(sql`update messages set created_at = 10 where id = ${old.id}`);
     await database.db.execute(sql`update messages set created_at = 20 where id = ${recent.id}`);
     expect((await repository.users("", 0, 1)).items.map(u => u.id)).toEqual([2]);
@@ -78,6 +79,35 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(userLabel({ id: 1, name: "Alice", username: "alice" })).toBe("@alice");
     expect(userLabel({ id: 1, name: "Alice", username: null })).toBe("Alice");
     expect(userLabel({ id: 1, name: null, username: null })).toBe("User 1");
+  });
+
+  it("counts a new empty thread or fork as activity and falls back for users without threads", async () => {
+    const first = await thread(1);
+    const second = await thread(2);
+    const old = await message(first.id);
+    const recent = await message(second.id);
+    await database.db.execute(sql`update threads set created_at = 1`);
+    await database.db.execute(sql`update messages set created_at = 10 where id = ${old.id}`);
+    await database.db.execute(sql`update messages set created_at = 20 where id = ${recent.id}`);
+    const fork = await repos.threads.create({ userId: 1, title: "New fork", topicId: 1, parentThreadId: first.id, forkPointMessageId: old.id });
+    await database.db.execute(sql`update threads set created_at = 30 where id = ${fork.id}`);
+    expect((await repository.users("", 0)).items.map(u => [u.id, u.lastActivity])).toEqual([[1, 30], [2, 20]]);
+    expect((await repository.threads(1, 0)).items[0]?.id).toBe(fork.id);
+    await repos.users.ensure({ tgId: 3, firstName: "No threads" });
+    await database.db.execute(sql`update users set created_at = 40 where tg_id = 3`);
+    expect((await repository.users("", 0, 1)).items[0]).toMatchObject({ id: 3, lastActivity: 40 });
+  });
+
+  it("searches Unicode names regardless of case before paginating", async () => {
+    for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"]] as const) {
+      await repos.users.ensure({ tgId, firstName });
+    }
+    for (const query of ["Дмитрий", "дмитрий", "ДМИТРИЙ"]) {
+      expect((await repository.users(query, 0, 1)).items.map(u => u.id)).toEqual([2]);
+      expect((await repository.users(query, 1, 1)).items.map(u => u.id)).toEqual([1]);
+    }
+    expect((await repository.users("ÉLODIE", 0)).items.map(u => u.id)).toEqual([3]);
+    expect((await repository.users("%_\\\\", 0)).items.map(u => u.id)).toEqual([4]);
   });
 
   it("hides existing bot records from lists, search, and direct history access", async () => {
@@ -150,22 +180,43 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await request(`/api/threads/${stranger.id}/files/${file.id}`)).status).toBe(404);
   });
 
+  it("downloads canonical files reused by another user only through visible associations", async () => {
+    const owner = await thread(1);
+    const original = await message(owner.id);
+    const file = await attachment(owner.id, original.id, 5);
+    const other = await thread(2);
+    const before = await message(other.id);
+    const reused = await message(other.id);
+    await repos.files.attachToMessage(reused.id, file.id, { displayName: "reused.txt" });
+    resolver.registry.register({ transport: "test", connectionKey: "default", fetch: async () => Buffer.from("hello") });
+    expect((await repository.history(other.id)).messages.at(-1)?.attachments[0]?.id).toBe(file.id);
+    expect(await (await request(`/api/threads/${other.id}/files/${file.id}`)).text()).toBe("hello");
+    const fork = await repos.threads.create({ userId: 2, title: "Before reuse", topicId: 1, parentThreadId: other.id, forkPointMessageId: before.id });
+    expect((await request(`/api/threads/${fork.id}/files/${file.id}`)).status).toBe(404);
+    const unrelated = await thread(3);
+    expect((await request(`/api/threads/${unrelated.id}/files/${file.id}`)).status).toBe(404);
+  });
+
   it("gates automatic downloads, passes byte limits, and forces active content to downloads", async () => {
     const t = await thread();
     const m = await message(t.id);
     const small = await attachment(t.id, m.id, 5);
     const large = await attachment(t.id, m.id, config.WEB_AUTOLOAD_MAX_BYTES + 1);
     const unknown = await attachment(t.id, m.id, -1);
+    const missingSize = await attachment(t.id, m.id, 0);
     const fetch = vi.fn(async () => Buffer.from("hello"));
     resolver.registry.register({ transport: "test", connectionKey: "default", fetch });
     expect((await request(`/api/threads/${t.id}/files/${large.id}?mode=auto`)).status).toBe(413);
     expect((await request(`/api/threads/${t.id}/files/${unknown.id}?mode=auto`)).status).toBe(413);
+    expect((await request(`/api/threads/${t.id}/files/${missingSize.id}?mode=auto`)).status).toBe(413);
+    expect((await repository.history(t.id)).messages[0]?.attachments.find(f => f.id === missingSize.id)?.size).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
     const response = await request(`/api/threads/${t.id}/files/${small.id}?mode=auto`);
     expect(await response.text()).toBe("hello");
     expect(fetch.mock.calls[0]).toHaveLength(4);
     expect((fetch.mock.calls[0] as unknown[])[2]).toBe(config.WEB_AUTOLOAD_MAX_BYTES);
     expect((await request(`/api/threads/${t.id}/files/${large.id}?mode=download`)).status).toBe(200);
+    expect((await request(`/api/threads/${t.id}/files/${missingSize.id}?mode=download`)).status).toBe(200);
     const svg = await attachment(t.id, m.id, 20, "image/svg+xml");
     fetch.mockResolvedValue(Buffer.from('<svg onload="alert(1)"></svg>'));
     const active = await request(`/api/threads/${t.id}/files/${svg.id}?mode=auto`);

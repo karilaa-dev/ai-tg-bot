@@ -16,15 +16,17 @@ export class ConversationRepository {
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
     const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+    const lower = this.db.dialect === "sqlite" ? sql`unicode_lower` : sql`lower`;
     const rows = await this.db.query<WebUser>(sql`
       select u.tg_id as id, u.first_name as name, u.username,
-        coalesce(max(m.created_at), max(t.created_at), u.created_at) as "lastActivity",
+        case when max(m.created_at) > max(t.created_at) then max(m.created_at)
+          else coalesce(max(t.created_at), max(m.created_at), u.created_at) end as "lastActivity",
         count(distinct t.id) as "threadCount"
       from users u left join threads t on t.user_id = u.tg_id
       left join messages m on m.thread_id = t.id
       where ${this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`}
-        and (lower(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
-        or lower(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
+        and (${lower}(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
+        or ${lower}(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
         or cast(u.tg_id as text) like ${pattern} escape ${"\\"})
       group by u.tg_id, u.first_name, u.username, u.created_at
       order by "lastActivity" desc, u.tg_id desc limit ${limit + 1} offset ${offset}
@@ -115,7 +117,7 @@ export class ConversationRepository {
     `);
     for (const { messageId, ...file } of rows) {
       const files = result.get(messageId) ?? [];
-      files.push({ ...file, size: file.size !== null && file.size >= 0 ? file.size : null });
+      files.push({ ...file, size: file.size !== null && file.size > 0 ? file.size : null });
       result.set(messageId, files);
     }
     return result;
@@ -134,11 +136,11 @@ export class ConversationRepository {
   }
 
   async file(threadId: number, fileId: number) {
-    const { thread, chain, scopes } = await this.scope(threadId);
+    const { chain, scopes } = await this.scope(threadId);
     const rows = await this.db.query<{ id: number }>(sql`
       select f.id from files f join messages m on f.message_id = m.id or exists (
         select 1 from message_files mf where mf.file_id = f.id and mf.message_id = m.id
-      ) where f.id = ${fileId} and f.user_id = ${thread.user_id}
+      ) where f.id = ${fileId}
       and ${messageScopePredicate(sql`m.thread_id`, sql`m.id`, chain.map(t => t.id), scopes)} limit 1
     `);
     if (!rows.length) throw new WebNotFound();
