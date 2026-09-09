@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": {
+    "bun": "1.4.2"
+  },
+  "deploy": {
+    "startCommand": "bun dist/src/main.js"
+  },
+  "steps": {
+    "install": {
+      "commands": [
+        "npm ci"
+      ]
+    }
+  }
+}

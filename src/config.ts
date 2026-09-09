@@ -7,6 +7,10 @@ const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high",
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
 
 const ConfigSchema = z.object({
+  WEB_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  WEB_HOST: z.string().trim().min(1).default("0.0.0.0"),
+  WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  WEB_AUTOLOAD_MAX_BYTES: z.coerce.number().int().min(0).max(20 * 1024 * 1024).default(5 * 1024 * 1024),
   BOT_TOKEN: z.string().min(1),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),

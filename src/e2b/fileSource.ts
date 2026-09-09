@@ -44,7 +44,7 @@ export class E2BFileSourceAdapter implements ChatFileSourceAdapter {
     this.connectionKey = e2bConnectionKey(config);
   }
 
-  fetch(source: ChatFileSource, signal?: AbortSignal): Promise<Buffer> {
+  fetch(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<Buffer> {
     const sandboxId = source.locator.sandbox_id;
     const userId = source.locator.user_id;
     const threadId = source.locator.thread_id;
@@ -58,7 +58,7 @@ export class E2BFileSourceAdapter implements ChatFileSourceAdapter {
       userId: Number(userId),
       threadId: Number(threadId),
       canonicalPath,
-      maxBytes: MAX_FILE_BYTES,
+      maxBytes: Math.min(maxBytes, MAX_FILE_BYTES),
       signal,
     });
   }

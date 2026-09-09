@@ -32,7 +32,7 @@ export class TelegramFileSourceAdapter implements ChatFileSourceAdapter {
     download: TelegramFileDownloader;
   }) {}
 
-  async fetch(source: ChatFileSource, signal?: AbortSignal): Promise<Buffer> {
+  async fetch(source: ChatFileSource, signal?: AbortSignal, maxBytes?: number): Promise<Buffer> {
     const fileId = source.locator.file_id;
     if (typeof fileId !== "string" || !fileId.trim()) throw new Error("Telegram source has no file_id.");
     const downloaded = await this.input.download({
@@ -40,6 +40,7 @@ export class TelegramFileSourceAdapter implements ChatFileSourceAdapter {
       config: this.input.config,
       fileId,
       signal,
+      maxBytes,
     });
     return Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
   }

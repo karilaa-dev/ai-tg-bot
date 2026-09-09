@@ -9,7 +9,7 @@ export interface ChatFileSource {
 export interface ChatFileSourceAdapter {
   readonly transport: string;
   readonly connectionKey: string;
-  fetch(source: ChatFileSource, signal?: AbortSignal): Promise<Buffer | Uint8Array>;
+  fetch(source: ChatFileSource, signal?: AbortSignal, maxBytes?: number): Promise<Buffer | Uint8Array>;
 }
 
 export interface ResolvedChatFile {

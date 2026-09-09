@@ -28,12 +28,12 @@ export class FileResolver {
     readonly registry = new FileSourceRegistry(),
   ) {}
 
-  async resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile> {
+  async resolveFile(file: FileRow, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<ResolvedChatFile> {
     const sources = await this.files.listSources(file.id);
     const errors: string[] = [];
     for (const source of sources) {
       try {
-        const resolved = await this.resolveSource(rowToSource(source), signal);
+        const resolved = await this.resolveSource(rowToSource(source), signal, maxBytes);
         if (source.transport === "e2b") assertE2BSourceIntegrity(file, resolved);
         await this.files.markSourceVerified(source.id).catch(() => undefined);
         return resolved;
@@ -47,14 +47,14 @@ export class FileResolver {
       : `File #${file.id} has no durable source.`);
   }
 
-  async resolveSource(source: ChatFileSource, signal?: AbortSignal): Promise<ResolvedChatFile> {
+  async resolveSource(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<ResolvedChatFile> {
     const adapter = this.registry.get(source);
     if (!adapter) throw new Error(`No ${source.transport}/${source.connectionKey} file adapter is configured.`);
     throwIfAborted(signal);
-    const payload = await adapter.fetch(source, signal);
+    const payload = await adapter.fetch(source, signal, Math.min(maxBytes, MAX_FILE_BYTES));
     throwIfAborted(signal);
     const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-    if (bytes.length > MAX_FILE_BYTES) throw new FileTooLargeError();
+    if (bytes.length > Math.min(maxBytes, MAX_FILE_BYTES)) throw new FileTooLargeError();
     return {
       bytes,
       mimeType: source.mimeType ?? null,

@@ -43,7 +43,8 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Requirements
 
-- Node.js 24.18 or newer
+- Bun 1.4.2 for the bot and website
+- Node.js 24.18 or newer and npm for installation, builds, and release tools
 - A Telegram BotFather token
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
@@ -75,7 +76,7 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 ## Dokploy
 
-Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `npm run build` and starts the bot with `npm start`.
+Dokploy can deploy this repository with Railpack. The included `railpack.json` adds Bun 1.4.2 to the build and runtime image. Railpack runs `npm run build` and starts both services with `bun dist/src/main.js`.
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
@@ -102,7 +103,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.11` uses `ai-tg-bot-tools:v2.0.11`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.12` uses `ai-tg-bot-tools:v2.0.12`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -116,8 +117,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.11 is ai-tg-bot-tools:v2.0.11.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.11
+# Optional override. The default for version 2.0.12 is ai-tg-bot-tools:v2.0.12.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.12
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -245,3 +246,26 @@ node --import tsx scripts/benchmark-harness.ts --provider openrouter --runs 3 --
 ```
 
 `--repo /path/to/checkout` measures another version with the same driver. That checkout needs its dependencies and released E2B image. The script uses a temporary SQLite database and Pi directory, and a separate E2B deployment namespace. Each pair uses a new sandbox for the cold run and the same sandbox with a cleared workspace and fresh model session for the warm run. Provider-side prompt caching is measured but cannot be reset. It removes its own sandboxes and temporary sessions afterward. These are live API calls and use the configured accounts.
+
+## Conversation website
+
+Set `WEB_ENABLED=true` to run a read-only conversation browser alongside the bot:
+
+```dotenv
+WEB_ENABLED=true
+WEB_HOST=0.0.0.0
+WEB_PORT=3000
+WEB_AUTOLOAD_MAX_BYTES=5242880
+```
+
+Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes require Bun 1.4.2. The website defaults to disabled and opens no listener in that mode.
+
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database.
+
+Users appear by most recent activity. The browser uses saved usernames and names, with Telegram IDs as a fallback. Search accepts names, usernames, and IDs. Threads include archived conversations and inherited messages up to each fork point. The latest 50 messages open first; use **Load older** for earlier history. Visible lists and messages refresh every 10 seconds while the tab is active.
+
+Attachments up to 5 MiB load into the page automatically with at most three concurrent downloads. Raster images and plain text have previews; other files have a **Save** link. Larger or unknown-size files require **Load file** first. `WEB_AUTOLOAD_MAX_BYTES=0` disables automatic loading. The existing 20 MiB file resolver limit still applies. Files whose Telegram or E2B sources are unavailable show a retry action. Browsing can retrieve E2B file sources but never starts an AI turn. HTML and SVG attachments are downloads, and external Markdown images are not fetched.
+
+The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), [Rare UI Code Block](https://www.rareui.com/components/codeblock), and shadcn chat components. Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
+
+For a local preview with synthetic conversations and files, run `npm run build:web` followed by `bun test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Bun HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
