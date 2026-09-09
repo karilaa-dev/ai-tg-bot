@@ -25,7 +25,7 @@ it("renders image information as a closed disclosure without a filename card", (
   }));
   expect(html).toContain('class="image-frame"');
   expect(html).toContain('<summary>Image details</summary>');
-  expect(html).not.toContain('data-slot="attachment-title"');
+  expect(html).not.toContain('class="file-card"');
   expect(html).not.toMatch(/<details[^>]*open/);
   expect(html).not.toContain("<script>");
 });

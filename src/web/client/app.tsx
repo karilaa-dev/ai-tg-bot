@@ -1,24 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MotionConfig } from "motion/react";
-import { ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon } from "lucide-react";
-import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types";
-import { AttachmentLoader, type LoadedAttachment } from "./attachments";
-import { HookSidebar } from "@/components/ui/hook-sidebar";
-import { RichText } from "./rich-text";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Field, FieldLabel } from "@/components/ui/field";
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Message, MessageContent, MessageHeader, MessageFooter } from "@/components/ui/message";
-import { Bubble, BubbleContent } from "@/components/ui/bubble";
-import { Marker, MarkerContent } from "@/components/ui/marker";
-import { FileAttachment } from "./file-attachment";
-import { MessageScrollerProvider, MessageScroller, MessageScrollerViewport, MessageScrollerContent, MessageScrollerItem, MessageScrollerButton } from "@/components/ui/message-scroller";
-import { cn } from "@/lib/utils";
+import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon } from "lucide-react";
+import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
+import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
+import { HookSidebar } from "./components/ui/hook-sidebar.js";
+import { RichText } from "./rich-text.js";
+import { Button } from "./components/ui/button.js";
+import { FileAttachment } from "./file-attachment.js";
+import { cn } from "./lib/utils.js";
 
 async function get<T>(url: string, signal: AbortSignal): Promise<T> {
   const response = await fetch(url, { signal });
@@ -30,11 +20,11 @@ const timestamp = (value: number) => new Date(value).toLocaleString(undefined, {
 
 
 function Notice({ title, description }: { title: string; description: string }) {
-  return <Empty><EmptyHeader><EmptyTitle>{title}</EmptyTitle><EmptyDescription>{description}</EmptyDescription></EmptyHeader></Empty>;
+  return <div className="notice"><h3>{title}</h3><p>{description}</p></div>;
 }
-function Loading() { return <div className="flex flex-col gap-4 p-5" aria-label="Loading"><Skeleton className="h-5 w-2/3" /><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /></div>; }
+function Loading() { return <div className="loading" role="status">Loading…</div>; }
 function Failure({ message, retry }: { message: string; retry?: () => void }) {
-  return <Alert variant="destructive" className="my-3"><AlertDescription>{message}{retry && <Button variant="outline" size="sm" onClick={retry}>Retry</Button>}</AlertDescription></Alert>;
+  return <div className="failure" role="alert">{message}{retry && <Button variant="outline" size="sm" onClick={retry}>Retry</Button>}</div>;
 }
 
 function selection() {
@@ -111,7 +101,7 @@ function App() {
   return <MotionConfig reducedMotion="user"><div className="app-shell" data-screen={screen}>
     <aside className="users-pane pane" aria-label="Users">
       <header className="brand"><MessageSquare aria-hidden="true" /><div><h1>Conversations</h1><p>Telegram bot archive</p></div><ThemeToggle /></header>
-      <div className="pane-tools"><Field><FieldLabel htmlFor="user-search"><Search className="size-3.5" /> Find a person</FieldLabel><Input id="user-search" placeholder="Name, username or ID" value={search} onChange={e => setSearch(e.target.value)} /></Field></div>
+      <div className="pane-tools"><label htmlFor="user-search"><Search className="size-3.5" /> Find a person</label><input id="user-search" placeholder="Name, username or ID" value={search} onChange={e => setSearch(e.target.value)} /></div>
       <div className="list-caption"><Users className="size-3.5" /><span>Most recently active</span></div>
       <div className="pane-scroll">
         {users.error && <Failure message={users.error} retry={users.retry} />}
@@ -148,6 +138,33 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
   const [loader] = useState(() => new AttachmentLoader(threadId, setFiles));
   const controller = useRef<AbortController | null>(null);
   const fetching = useRef(false);
+  const viewport = useRef<HTMLDivElement>(null);
+  const scrollPosition = useRef<{ top: number; height: number } | null>(null);
+  const positioned = useRef(false);
+  const [canJump, setCanJump] = useState(false);
+  const checkScroll = () => {
+    const node = viewport.current;
+    if (node) setCanJump(node.scrollHeight - node.scrollTop - node.clientHeight > 40);
+  };
+  useLayoutEffect(() => {
+    const node = viewport.current;
+    if (!node || !data) return;
+    if (scrollPosition.current) {
+      node.scrollTop = scrollPosition.current.top + node.scrollHeight - scrollPosition.current.height;
+      scrollPosition.current = null;
+    } else if (!positioned.current) {
+      node.scrollTop = node.scrollHeight;
+      positioned.current = true;
+    }
+    checkScroll();
+  }, [data?.messages]);
+  useEffect(() => {
+    const content = viewport.current?.firstElementChild;
+    if (!content) return;
+    const observer = new ResizeObserver(checkScroll);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [Boolean(data)]);
   const load = useCallback(async (older = false) => {
     if (fetching.current || !controller.current || controller.current.signal.aborted) return;
     fetching.current = true; setBusy(true);
@@ -165,6 +182,7 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
       if (signal.aborted) return;
       const messages = [...new Map([...(previous?.messages ?? []), ...received].map(m => [m.id, m])).values()].sort((a, b) => a.id - b.id);
       const merged = { ...latest, messages, olderCursor: older || !previous ? latest.olderCursor : previous.olderCursor };
+      if (older && viewport.current) scrollPosition.current = { top: viewport.current.scrollTop, height: viewport.current.scrollHeight };
       dataRef.current = merged; setData(merged); setError("");
     } catch (err) { if (!signal.aborted) setError(err instanceof Error ? err.message : "Could not load this conversation."); }
     finally { fetching.current = false; if (!signal.aborted) setBusy(false); }
@@ -185,26 +203,26 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
     }
   }, [data, loader]);
   return <>
-    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p></div>{data?.thread.archived && <Badge variant="secondary">Archived</Badge>}<ThemeToggle /></header>
+    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p></div>{data?.thread.archived && <span className="archive-label">Archived</span>}<ThemeToggle /></header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
     {!data ? !error && <Loading /> : <>
       {data.thread.parentThreadId && <div className="fork-note"><GitFork className="size-3.5" />Forked history · Inherited messages are labeled below</div>}
-      <MessageScrollerProvider defaultScrollPosition="end" autoScroll={false}><MessageScroller>
-        <MessageScrollerViewport tabIndex={0} aria-label="Conversation messages"><MessageScrollerContent className="transcript" aria-live="off">
-          {data.olderCursor !== null && <MessageScrollerItem messageId="load-older"><div className="flex justify-center"><Button variant="outline" disabled={busy} onClick={() => void load(true)}>Load older</Button></div></MessageScrollerItem>}
-          {!data.messages.length && <MessageScrollerItem messageId="empty"><Notice title="No messages yet" description="Saved messages will appear here as this conversation continues." /></MessageScrollerItem>}
-          {data.messages.map((message, index) => <MessageScrollerItem key={message.id} messageId={String(message.id)}>
-            {(message.threadId !== data.messages[index - 1]?.threadId && (message.threadId !== threadId || index > 0)) && <Marker variant="separator"><MarkerContent>{message.threadId === threadId ? "This conversation" : `Inherited from ${data.chain.find(t => t.id === message.threadId)?.title ?? "parent conversation"}`}</MarkerContent></Marker>}
-            <Message align={message.role === "user" ? "end" : "start"} className="mt-3"><MessageContent>
-              <MessageHeader>{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</MessageHeader>
+      <div className="message-scroller">
+        <div ref={viewport} className="message-viewport" tabIndex={0} aria-label="Conversation messages" onScroll={checkScroll}><div className="transcript" aria-live="off">
+          {data.olderCursor !== null && <div className="flex justify-center"><Button variant="outline" disabled={busy} onClick={() => void load(true)}>Load older</Button></div>}
+          {!data.messages.length && <Notice title="No messages yet" description="Saved messages will appear here as this conversation continues." />}
+          {data.messages.map((message, index) => <div key={message.id} data-message-id={message.id}>
+            {(message.threadId !== data.messages[index - 1]?.threadId && (message.threadId !== threadId || index > 0)) && <div className="history-boundary">{message.threadId === threadId ? "This conversation" : `Inherited from ${data.chain.find(t => t.id === message.threadId)?.title ?? "parent conversation"}`}</div>}
+            <article className="message" data-role={message.role}>
+              <header>{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
               {message.thinking && <details className="thinking"><summary>Thinking</summary><RichText text={message.thinking} /></details>}
-              {message.text && <Bubble variant={message.role === "user" ? "tinted" : "outline"} align={message.role === "user" ? "end" : "start"}><BubbleContent><RichText text={message.text} /></BubbleContent></Bubble>}
+              {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
               {message.attachments.map(file => <FileAttachment key={file.id} file={file} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
-              <MessageFooter><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></MessageFooter>
-            </MessageContent></Message>
-          </MessageScrollerItem>)}
-        </MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton aria-label="Jump to latest" behavior="instant" />
-      </MessageScroller></MessageScrollerProvider>
+              <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
+            </article>
+          </div>)}
+        </div></div>{canJump && <Button className="jump-to-latest" variant="outline" size="icon-sm" aria-label="Jump to latest" onClick={() => { const node = viewport.current; if (node) node.scrollTop = node.scrollHeight; }}><ArrowDown /></Button>}
+      </div>
       <footer className="transcript-footer">{data.messages.length} messages loaded · Refreshes every 10 seconds</footer>
     </>}
   </>;

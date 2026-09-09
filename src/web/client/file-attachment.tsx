@@ -5,7 +5,6 @@ import { attachmentKind, isAudioMime, imageMimeTypes } from "../media.js";
 import type { LoadedAttachment } from "./attachments.js";
 import { RichText } from "./rich-text.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
-import { Attachment, AttachmentContent, AttachmentTitle, AttachmentDescription, AttachmentActions, AttachmentMedia } from "./components/ui/attachment.js";
 
 const fileSize = (size: number | null) => size === null ? "Unknown size" : size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
 
@@ -50,9 +49,9 @@ export function FileAttachment({ file, state, maxBytes, load }: {
         : <div className="audio-placeholder" role="status" aria-busy={pending}><span className="audio-bars" aria-hidden="true">▂ ▅ ▃ ▇ ▄ ▂ ▆ ▅ ▃ ▇ ▄ ▂</span><span>{placeholder}</span></div>}
       {file.transcription && <details className="media-details audio-transcription"><summary>Transcription{file.transcriptionTruncated ? " · Saved preview" : ""}</summary><p className="transcription-text">{file.transcription}</p></details>}
     </div>}
-    {!image && !audio && <Attachment state={pending ? "processing" : state?.status === "error" ? "error" : state?.status === "ready" ? "done" : "idle"}>
-      <AttachmentMedia><FileText /></AttachmentMedia><AttachmentContent><AttachmentTitle>{file.name}</AttachmentTitle><AttachmentDescription>{fileSize(file.size)}{pending ? " · Loading" : oversized ? " · Exceeds 20 MiB limit" : ""}</AttachmentDescription></AttachmentContent><AttachmentActions>{action}</AttachmentActions>
-    </Attachment>}
+    {!image && !audio && <div className="file-card">
+      <FileText aria-hidden="true" /><div className="file-info"><strong>{file.name}</strong><small>{fileSize(file.size)}{pending ? " · Loading" : oversized ? " · Exceeds 20 MiB limit" : ""}</small></div>{action}
+    </div>}
     {state?.needsSandbox && <div className="sandbox-prompt" role="status"><p>Retrieve this file using its sandbox? If paused, it will start temporarily and pause again as soon as the file is loaded.</p><Button variant="outline" size="sm" onClick={() => load(true)}>Start sandbox and load</Button></div>}
     {state?.error && <p role="status" className="file-error">{state.error}</p>}
     {mediaError && <p role="status" className="file-error">This preview could not be opened. You can save the file or <button className="underline" onClick={() => load()}>retry</button>.</p>}

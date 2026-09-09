@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils.js";
 
 const CORNER = 6;
 const DASH =

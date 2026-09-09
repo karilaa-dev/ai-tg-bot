@@ -12,24 +12,9 @@
     "resolveJsonModule": true,
     "outDir": "dist",
     "rootDir": ".",
-    "types": [
-      "node",
-      "vitest"
-    ],
-    "paths": {
-      "@/*": [
-        "./src/web/client/*"
-      ]
-    },
+    "types": ["node", "vitest"],
     "jsx": "react-jsx"
   },
-  "include": [
-    "src/**/*.ts",
-    "test/**/*.ts",
-    "scripts/**/*.ts",
-    "e2b-template/**/*.ts"
-  ],
-  "exclude": [
-    "src/web/client"
-  ]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "e2b-template/**/*.ts"],
+  "exclude": ["src/web/client"]
 }

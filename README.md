@@ -43,7 +43,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Requirements
 
-- Node.js 24.18 or newer and npm
+- Node.js 24.18 or newer
 - A Telegram BotFather token
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
@@ -75,7 +75,7 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 ## Dokploy
 
-Dokploy can deploy this repository with Railpack. The included `railpack.json` uses the Node.js provider. Railpack runs `npm run build` and starts the bot and optional website in one Node.js process with `node dist/src/main.js`.
+Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `npm run build` and starts the bot with `npm start`.
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
@@ -267,6 +267,6 @@ Use the sun/moon button to switch between light and dark themes. The initial the
 
 Attachments up to 5 MiB load into the page automatically with at most three concurrent downloads. Raster images and plain text have previews. Audio loads into a player without autoplay, with saved speech under **Transcription**. Photo descriptions and audio transcripts are separated from the message caption. Other files have a **Save** link. Larger or unknown-size files require **Load file** first. `WEB_AUTOLOAD_MAX_BYTES=0` disables automatic loading. The existing 20 MiB file resolver limit still applies. Files whose Telegram or E2B sources are unavailable show a retry action. The browser tries Telegram and other non-sandbox copies before E2B. If an E2B file needs a connection, the page asks before starting or resuming its sandbox. A sandbox resumed for retrieval pauses immediately after success, failure, or cancellation; sandboxes already serving bot work stay available to it. Browsing never starts an AI turn. HTML and SVG attachments are downloads, and external Markdown images are not fetched.
 
-The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), [Rare UI Code Block](https://www.rareui.com/components/codeblock), and shadcn chat components. Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
+The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), and [Rare UI Code Block](https://www.rareui.com/components/codeblock). Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
 
 For a local preview with synthetic conversations and files, run `npm run build:web` followed by `node --import tsx test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Node.js HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
