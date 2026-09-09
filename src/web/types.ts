@@ -26,6 +26,10 @@ export interface WebAttachment {
   size: number | null;
   mimeType: string | null;
   caption: string | null;
+  kind?: "image" | "audio" | "file";
+  description?: string | null;
+  transcription?: string | null;
+  transcriptionTruncated?: boolean;
 }
 
 export interface WebMessage {

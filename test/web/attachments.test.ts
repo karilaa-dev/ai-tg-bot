@@ -73,3 +73,20 @@ it("accepts the exact byte boundary and rejects oversized Telegram metadata befo
   await expect(downloadTelegramFile({ api, config: loadTestConfig(), fileId: "test", maxBytes: 5 })).rejects.toBeInstanceOf(FileTooLargeError);
   expect(fetch).toHaveBeenCalledOnce();
 });
+
+
+it("waits for explicit sandbox approval without retrying during refresh", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => Response.json({ code: "sandbox_consent_required" }, { status: 409 })));
+  let states = new Map<number, LoadedAttachment>();
+  const loader = new AttachmentLoader(9, next => { states = next; });
+  const file = { id: 3, name: "a.png", size: 5, mimeType: "image/png", caption: null };
+  loader.load(file, "auto");
+  await vi.waitFor(() => expect(states.get(3)?.needsSandbox).toBe(true));
+  loader.load(file, "auto");
+  expect(fetch).toHaveBeenCalledTimes(1);
+  vi.mocked(fetch).mockResolvedValue(new Response("hello"));
+  loader.load(file, "download", true, true);
+  await vi.waitFor(() => expect(states.get(3)?.status).toBe("ready"));
+  expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe("/api/threads/9/files/3?mode=download&sandbox=start");
+  loader.dispose();
+});

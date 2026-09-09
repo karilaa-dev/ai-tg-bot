@@ -3,6 +3,8 @@ import { readdir } from "node:fs/promises";
 import { fileTypeFromBuffer } from "file-type";
 import type { AppConfig } from "../config.js";
 import type { FileResolver } from "../files/resolver.js";
+import { SandboxConsentRequired } from "../files/source.js";
+import { isAudioMime, imageMimeTypes } from "./media.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { Logger } from "../logger.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
@@ -23,7 +25,7 @@ const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
-  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
 };
 
 export function createWebHandler(options: WebServerOptions, shutdownSignal: AbortSignal, assets = new Map<string, () => Response>()) {
@@ -56,6 +58,8 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
         const file = await options.repository.file(integer(parts[3]!), integer(parts[5]!));
         const mode = url.searchParams.get("mode") ?? "download";
         if (mode !== "auto" && mode !== "download") throw new HttpError(400, "Invalid file mode.");
+        const sandbox = url.searchParams.get("sandbox");
+        if (sandbox !== null && (sandbox !== "start" || mode !== "download")) throw new HttpError(400, "Invalid sandbox request.");
         const maxBytes = mode === "auto" ? options.config.WEB_AUTOLOAD_MAX_BYTES : MAX_FILE_BYTES;
         if (file.size > MAX_FILE_BYTES) throw new HttpError(413, "This file exceeds the 20 MiB download limit.");
         if (mode === "auto" && (maxBytes === 0 || file.size < 0 || file.size > maxBytes)) {
@@ -67,21 +71,24 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
         downloads++;
         try {
           const signal = AbortSignal.any([request.signal, shutdownSignal, AbortSignal.timeout(120_000)]);
-          const resolved = await options.fileResolver.resolveFile(file, signal, maxBytes);
+          const resolved = await options.fileResolver.resolveFile(file, signal, maxBytes, { allowSandboxResume: sandbox === "start", pauseAfterRead: true });
           signal.throwIfAborted();
           if (resolved.size > maxBytes) throw new HttpError(413, "Attachment exceeds the download limit.");
           const detected = await fileTypeFromBuffer(resolved.bytes).catch(() => undefined);
-          const mime = detected?.mime ?? "application/octet-stream";
-          const safeImage = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(mime);
+          const mime = detected?.mime === "video/webm" && (file.type === "audio" || file.mime_type?.startsWith("audio/"))
+            ? "audio/webm" : detected?.mime === "audio/x-m4a" ? "audio/mp4" : detected?.mime ?? "application/octet-stream";
+          const safeImage = imageMimeTypes.includes(mime);
+          const safeAudio = isAudioMime(mime);
           const safeText = !detected && /^(text\/(plain|csv|markdown)|application\/json)$/.test(file.mime_type ?? "")
             && !resolved.bytes.subarray(0, 8192).includes(0);
-          const contentType = safeImage ? mime : safeText ? "text/plain; charset=utf-8" : "application/octet-stream";
+          const contentType = safeImage || safeAudio ? mime : safeText ? "text/plain; charset=utf-8" : "application/octet-stream";
           const encodedName = encodeURIComponent(file.name.replace(/[\r\n\x00-\x1f]/g, "_")).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16)}`);
           return new Response(new Uint8Array(resolved.bytes), { headers: {
             ...headers, "Content-Type": contentType, "Content-Length": String(resolved.size),
-            "Content-Disposition": `${mode === "auto" && safeImage ? "inline" : "attachment"}; filename*=UTF-8''${encodedName}`,
+            "Content-Disposition": `${mode === "auto" && (safeImage || safeAudio) ? "inline" : "attachment"}; filename*=UTF-8''${encodedName}`,
           } });
         } catch (error) {
+          if (error instanceof SandboxConsentRequired) return Response.json({ code: "sandbox_consent_required", error: error.message }, { status: 409, headers });
           if (error instanceof HttpError) throw error;
           options.logger.warn("website attachment unavailable", { fileId: file.id });
           throw new HttpError(502, "This attachment could not be retrieved. Try again later.");

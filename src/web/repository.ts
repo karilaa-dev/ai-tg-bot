@@ -5,12 +5,14 @@ import type { Repos } from "../db/repos/index.js";
 import { messageSearchScopesForChain } from "../db/repos/messages.js";
 import { messageScopePredicate } from "../db/search.js";
 import type { MessageRow, ThreadRow } from "../db/types.js";
-import type { WebAttachment, WebMessage, WebPage, WebThread, WebUser } from "./types.js";
+import type { WebAttachment, WebPage, WebThread, WebUser } from "./types.js";
+
+import { messageView, type SavedTranscript } from "./message-view.js";
 
 export class WebNotFound extends Error {}
 
 export class ConversationRepository {
-  constructor(private readonly db: SqlExecutor, private readonly repos: Repos) {}
+  constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number) {}
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
     const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
@@ -20,9 +22,10 @@ export class ConversationRepository {
         count(distinct t.id) as "threadCount"
       from users u left join threads t on t.user_id = u.tg_id
       left join messages m on m.thread_id = t.id
-      where lower(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
+      where ${this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`}
+        and (lower(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
         or lower(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
-        or cast(u.tg_id as text) like ${pattern} escape ${"\\"}
+        or cast(u.tg_id as text) like ${pattern} escape ${"\\"})
       group by u.tg_id, u.first_name, u.username, u.created_at
       order by "lastActivity" desc, u.tg_id desc limit ${limit + 1} offset ${offset}
     `);
@@ -31,7 +34,7 @@ export class ConversationRepository {
 
   async user(id: number): Promise<WebUser> {
     const user = await this.repos.users.get(id);
-    if (!user) throw new WebNotFound();
+    if (!user || id === this.botUserId) throw new WebNotFound();
     return { id: user.tg_id, name: user.first_name, username: user.username, lastActivity: user.created_at, threadCount: 0 };
   }
 
@@ -47,7 +50,7 @@ export class ConversationRepository {
 
   async scope(threadId: number) {
     const thread = await this.repos.threads.get(threadId);
-    if (!thread) throw new WebNotFound();
+    if (!thread || thread.user_id === this.botUserId) throw new WebNotFound();
     // Bound traversal and require every ancestor to belong to the same user.
     const chain: ThreadRow[] = [thread];
     const seen = new Set([thread.id]);
@@ -84,10 +87,9 @@ export class ConversationRepository {
     const selected = rows.slice(0, 50);
     if (after === undefined) selected.reverse();
     const attachments = await this.attachments(selected.map(m => m.id));
-    const messages: WebMessage[] = selected.map(m => ({
-      id: m.id, threadId: m.thread_id, role: m.role, text: m.text_plain,
-      thinking: m.thinking, createdAt: m.created_at, attachments: attachments.get(m.id) ?? [],
-    }));
+    const transcripts = selected.some(m => m.text_plain.includes("[Audio transcript preview;"))
+      ? await this.savedTranscripts(selected.map(m => m.id)) : [];
+    const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts));
     return {
       user: await this.user(thread.user_id), thread: threadView(thread),
       chain: chain.map(t => ({ id: t.id, title: t.title, parentThreadId: t.parent_thread_id, forkPointMessageId: t.fork_point_message_id })),
@@ -102,7 +104,9 @@ export class ConversationRepository {
     if (!messageIds.length) return result;
     const rows = await this.db.query<WebAttachment & { messageId: number }>(sql`
       select m.id as "messageId", f.id, coalesce(mf.display_name, f.name) as name,
-        f.size, f.mime_type as "mimeType", mf.caption
+        f.size, f.mime_type as "mimeType", mf.caption,
+        case when f.type in ('image', 'audio') then f.type else 'file' end as kind,
+        case when f.type = 'image' then f.summary else null end as description
       from messages m join files f on f.message_id = m.id or exists (
         select 1 from message_files link where link.file_id = f.id and link.message_id = m.id
       )
@@ -115,6 +119,18 @@ export class ConversationRepository {
       result.set(messageId, files);
     }
     return result;
+  }
+
+  private savedTranscripts(messageIds: number[]): Promise<SavedTranscript[]> {
+    return this.db.query<SavedTranscript>(sql`
+      select a.id, a.source_file_id as "fileId", m.id as "messageId", a.text
+      from audio_transcripts a
+      left join turn_run_sources s on s.telegram_update_id = a.telegram_update_id
+      left join turn_runs r on r.id = s.turn_run_id
+      join messages m on m.id = coalesce(a.source_message_id, r.user_message_id)
+      join threads t on t.id = m.thread_id
+      where m.id in (${valueList(messageIds)}) and a.thread_id = m.thread_id and a.user_id = t.user_id
+    `);
   }
 
   async file(threadId: number, fileId: number) {

@@ -5,6 +5,8 @@ import type { FilesRepo } from "../db/repos/files.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
 import { FileTooLargeError, MAX_FILE_BYTES } from "./limits.js";
 import {
+  type FileReadPolicy,
+  SandboxConsentRequired,
   type ChatFileSource,
   type ChatFileSourceAdapter,
   type ResolvedChatFile,
@@ -28,30 +30,34 @@ export class FileResolver {
     readonly registry = new FileSourceRegistry(),
   ) {}
 
-  async resolveFile(file: FileRow, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<ResolvedChatFile> {
+  async resolveFile(file: FileRow, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES, policy?: FileReadPolicy): Promise<ResolvedChatFile> {
     const sources = await this.files.listSources(file.id);
+    if (policy) sources.sort((a, b) => Number(a.transport === "e2b") - Number(b.transport === "e2b"));
     const errors: string[] = [];
+    let consentRequired = false;
     for (const source of sources) {
       try {
-        const resolved = await this.resolveSource(rowToSource(source), signal, maxBytes);
+        const resolved = await this.resolveSource(rowToSource(source), signal, maxBytes, policy);
         if (source.transport === "e2b") assertE2BSourceIntegrity(file, resolved);
         await this.files.markSourceVerified(source.id).catch(() => undefined);
         return resolved;
       } catch (error) {
         if (isAbortError(error) || signal?.aborted) throw error;
+        if (error instanceof SandboxConsentRequired) consentRequired = true;
         errors.push(`${source.transport}/${source.connection_key}: ${String(error)}`);
       }
     }
+    if (consentRequired) throw new SandboxConsentRequired();
     throw new Error(errors.length
       ? `No source for file #${file.id} could be loaded (${errors.join("; ")}).`
       : `File #${file.id} has no durable source.`);
   }
 
-  async resolveSource(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<ResolvedChatFile> {
+  async resolveSource(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES, policy?: FileReadPolicy): Promise<ResolvedChatFile> {
     const adapter = this.registry.get(source);
     if (!adapter) throw new Error(`No ${source.transport}/${source.connectionKey} file adapter is configured.`);
     throwIfAborted(signal);
-    const payload = await adapter.fetch(source, signal, Math.min(maxBytes, MAX_FILE_BYTES));
+    const payload = await adapter.fetch(source, signal, Math.min(maxBytes, MAX_FILE_BYTES), policy);
     throwIfAborted(signal);
     const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
     if (bytes.length > Math.min(maxBytes, MAX_FILE_BYTES)) throw new FileTooLargeError();

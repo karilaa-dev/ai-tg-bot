@@ -93,6 +93,7 @@ export interface SandboxFileWriteRequest {
 }
 
 export interface SandboxSourceFileReadRequest {
+  policy?: import("../files/source.js").FileReadPolicy;
   sandboxId: string;
   userId: number;
   threadId: number;

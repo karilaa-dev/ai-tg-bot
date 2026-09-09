@@ -20,7 +20,7 @@ export async function privateOnly(ctx: BotContext, next: NextFunction): Promise<
 }
 
 export async function initializeUserAndThread(ctx: BotContext, next: NextFunction): Promise<void> {
-  if (ctx.from?.is_bot && ctx.msg?.forum_topic_edited) {
+  if (ctx.from?.is_bot) {
     // Our service messages must not create a user/thread owned by the bot or
     // promote its temporary activity marker to a permanent topic title.
     await next();

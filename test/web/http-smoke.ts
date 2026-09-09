@@ -11,6 +11,7 @@ import { createLogger } from "../../src/logger.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
+import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
 
 const preview = process.argv.includes("--preview");
@@ -31,7 +32,7 @@ await db.initialize();
 const repos = createRepos(db.db, db.search);
 const resolver = new FileResolver(repos.files);
 const payloads = new Map<string, Buffer>();
-resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async source => payloads.get(source.remoteKey)! });
+resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async source => { if (preview && source.mimeType === "image/png") await new Promise(resolve => setTimeout(resolve, 2500)); return payloads.get(source.remoteKey)!; } });
 const user = await repos.users.ensure({ tgId: 1001, firstName: "Alice Morgan", username: "alice_m" });
 await repos.users.ensure({ tgId: 1002, firstName: "Дмитрий", username: "dmitry" });
 await repos.users.ensure({ tgId: 1003, firstName: "Sam Rivera" });
@@ -48,7 +49,23 @@ const large = await repos.files.insertFile({ userId: user.tg_id, threadId: threa
 payloads.set(String(large.id), Buffer.alloc(6 * 1024 * 1024));
 await repos.files.rememberSource(large.id, { transport: "fixture", connectionKey: "default", remoteKey: String(large.id), locator: {} });
 if (!preview) await writeFile(path.join(temp, "index.html"), "<!doctype html><title>Smoke test</title>");
-const options = { config, repository: new ConversationRepository(db.db, repos), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
+await repos.users.ensure({ tgId: 999, firstName: "Archive Test Bot", username: "archive_test_bot" });
+if (preview) {
+  const picture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5xkAAAAASUVORK5CYII=", "base64");
+  const imageMessage = await repos.messages.insert({ threadId: thread.id, role: "user", kind: "image", textPlain: "Here is the route preview.", content: { caption: "Here is the route preview." } });
+  const pictureFile = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: imageMessage.id, type: "image", name: "route-preview.png", mimeType: "image/png", size: picture.length, summary: "A saved preview of the walking route.", isInline: true });
+  payloads.set(String(pictureFile.id), picture);
+  await repos.files.rememberSource(pictureFile.id, { transport: "fixture", connectionKey: "default", remoteKey: String(pictureFile.id), locator: {}, mimeType: "image/png" });
+  await db.db.execute(sql`update messages set text_plain = ${`Here is the route preview.\n\n[[chat-file:${pictureFile.id}]] [image #${pictureFile.id}: A saved preview of the walking route.]`} where id = ${imageMessage.id}`);
+  const audioMessage = await repos.messages.insert({ threadId: thread.id, role: "user", kind: "file", textPlain: "", content: {} });
+  const voice = audioFixture("ogg");
+  const voiceFile = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: audioMessage.id, type: "audio", name: "telegram-voice-message.ogg", mimeType: "audio/ogg", size: voice.length, isInline: false });
+  payloads.set(String(voiceFile.id), voice);
+  await repos.files.rememberSource(voiceFile.id, { transport: "fixture", connectionKey: "default", remoteKey: String(voiceFile.id), locator: {}, mimeType: "audio/ogg" });
+  await db.db.execute(sql`update messages set text_plain = ${`Let's take the lakeside route tomorrow.\n\n[[chat-file:${voiceFile.id}]] [Audio message transcribed above]`} where id = ${audioMessage.id}`);
+
+}
+const options = { config, repository: new ConversationRepository(db.db, repos, 999), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
 const web = (await startWebServer(options))!;
 if (preview) {
   console.log(`Preview: ${web.url}?user=${user.tg_id}&thread=${thread.id}`);

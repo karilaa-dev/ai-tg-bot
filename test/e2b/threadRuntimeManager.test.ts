@@ -1298,6 +1298,57 @@ describe("thread E2B runtime manager", () => {
     })).rejects.toThrow("outside this thread's durable file roots");
   });
 
+  it("requires browser consent before reconnecting and immediately pauses after retrieval", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const canonicalPath = `${E2B_WORKSPACE}/saved.txt`;
+    sandbox.files.set(canonicalPath, Buffer.from("saved"));
+    await runtime.dispose();
+    runtime = createRuntime();
+    const request = { sandboxId: sandbox.id, userId, threadId, canonicalPath, maxBytes: 100,
+      policy: { allowSandboxResume: false, pauseAfterRead: true } };
+    await expect(runtime.readSourceFile(request)).rejects.toThrow("needs its sandbox");
+    expect(client.connectCalls).toBe(0);
+    expect(sandbox.running).toBe(false);
+    await expect(runtime.readSourceFile({ ...request, policy: { ...request.policy, allowSandboxResume: true } })).resolves.toEqual(Buffer.from("saved"));
+    expect(client.connectCalls).toBe(1);
+    expect(sandbox.running).toBe(false);
+    expect(sandbox.pauseCalls).toBe(2);
+  });
+
+  it("pauses a sandbox resumed for a browser even when reading fails or is cancelled", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    await runtime.dispose();
+    runtime = createRuntime();
+    const controller = new AbortController();
+    const request = { sandboxId: sandbox.id, userId, threadId, canonicalPath: `${E2B_WORKSPACE}/missing.txt`, maxBytes: 100,
+      policy: { allowSandboxResume: true, pauseAfterRead: true }, signal: controller.signal };
+    await expect(runtime.readSourceFile(request)).rejects.toThrow();
+    expect(sandbox.running).toBe(false);
+    const connect = client.connect.bind(client);
+    vi.spyOn(client, "connect").mockImplementation(async id => {
+      const result = await connect(id);
+      controller.abort();
+      return result;
+    });
+    await expect(runtime.readSourceFile(request)).rejects.toThrow();
+    expect(sandbox.running).toBe(false);
+    expect(sandbox.pauseCalls).toBe(3);
+  });
+
+  it("does not pause a running sandbox used by the bot when the browser reads a file", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const canonicalPath = `${E2B_WORKSPACE}/saved.txt`;
+    sandbox.files.set(canonicalPath, Buffer.from("saved"));
+    await expect(runtime.readSourceFile({ sandboxId: sandbox.id, userId, threadId, canonicalPath, maxBytes: 100,
+      policy: { allowSandboxResume: false, pauseAfterRead: true } })).resolves.toEqual(Buffer.from("saved"));
+    expect(client.connectCalls).toBe(0);
+    expect(sandbox.pauseCalls).toBe(0);
+    expect(sandbox.running).toBe(true);
+  });
+
   it("caches a source-file reconnection when it is the first operation after restart", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();

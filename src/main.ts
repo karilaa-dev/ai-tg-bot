@@ -50,12 +50,12 @@ try {
   });
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
-  web = await startWebServer({ config, repository: new ConversationRepository(db.db, repos), fileResolver: services.fileResolver, logger });
+  await bot.init();
+  web = await startWebServer({ config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });
   logger.info("database initialized, runner polling started");
-  await bot.init();
   const handle = run(bot);
   logger.info("bot started", { username: bot.botInfo.username });
   const stop = async () => {

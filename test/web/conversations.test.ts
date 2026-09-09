@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
+import { SandboxConsentRequired } from "../../src/files/source.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import { createLogger } from "../../src/logger.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { createWebHandler, startWebServer } from "../../src/web/server.js";
+import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
@@ -34,7 +36,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     database = createDatabase({ DB_URL: dbUrl });
     await database.initialize();
     repos = createRepos(database.db, database.search);
-    repository = new ConversationRepository(database.db, repos);
+    repository = new ConversationRepository(database.db, repos, 99);
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
     const handler = createWebHandler({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
@@ -76,6 +78,41 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(userLabel({ id: 1, name: "Alice", username: "alice" })).toBe("@alice");
     expect(userLabel({ id: 1, name: "Alice", username: null })).toBe("Alice");
     expect(userLabel({ id: 1, name: null, username: null })).toBe("User 1");
+  });
+
+  it("hides existing bot records from lists, search, and direct history access", async () => {
+    const botThread = await thread(99);
+    await thread(1);
+    expect((await repository.users("", 0)).items.map(u => u.id)).toEqual([1]);
+    for (const query of ["99", "Person 99"]) expect((await repository.users(query, 0)).items).toEqual([]);
+    expect((await request("/api/users/99/threads")).status).toBe(404);
+    expect((await request(`/api/threads/${botThread.id}/messages`)).status).toBe(404);
+    expect(await repos.users.get(99)).toBeDefined();
+  });
+
+  it("requires explicit manual sandbox consent and tries non-sandbox copies first", async () => {
+    const t = await thread();
+    const m = await message(t.id);
+    const file = await attachment(t.id, m.id, 5);
+    const e2b = vi.fn(async (_source, _signal, _max, policy) => {
+      if (!policy.allowSandboxResume) throw new SandboxConsentRequired();
+      return Buffer.from("hello");
+    });
+    resolver.registry.register({ transport: "e2b", connectionKey: "default", fetch: e2b });
+    await repos.files.rememberSource(file.id, { transport: "e2b", connectionKey: "default", remoteKey: "sandbox", locator: {} });
+    const url = `/api/threads/${t.id}/files/${file.id}`;
+    const pending = await request(`${url}?mode=auto`);
+    expect(pending.status).toBe(409);
+    expect(await pending.json()).toMatchObject({ code: "sandbox_consent_required" });
+    expect((await request(`${url}?mode=download`)).status).toBe(409);
+    expect((await request(`${url}?mode=auto&sandbox=start`)).status).toBe(400);
+    expect((await request(`${url}?sandbox=no`)).status).toBe(400);
+    expect(await (await request(`${url}?mode=download&sandbox=start`)).text()).toBe("hello");
+    expect(e2b.mock.calls.at(-1)?.[3]).toEqual({ allowSandboxResume: true, pauseAfterRead: true });
+    e2b.mockClear();
+    resolver.registry.register({ transport: "test", connectionKey: "default", fetch: async () => Buffer.from("hello") });
+    expect(await (await request(`${url}?mode=auto`)).text()).toBe("hello");
+    expect(e2b).not.toHaveBeenCalled();
   });
 
   it("includes archived threads, paginates history, and refreshes the latest message", async () => {
@@ -126,7 +163,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(fetch).not.toHaveBeenCalled();
     const response = await request(`/api/threads/${t.id}/files/${small.id}?mode=auto`);
     expect(await response.text()).toBe("hello");
-    expect(fetch.mock.calls[0]).toHaveLength(3);
+    expect(fetch.mock.calls[0]).toHaveLength(4);
     expect((fetch.mock.calls[0] as unknown[])[2]).toBe(config.WEB_AUTOLOAD_MAX_BYTES);
     expect((await request(`/api/threads/${t.id}/files/${large.id}?mode=download`)).status).toBe(200);
     const svg = await attachment(t.id, m.id, 20, "image/svg+xml");
@@ -135,6 +172,32 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(active.headers.get("content-type")).toBe("application/octet-stream");
     expect(active.headers.get("content-disposition")).toMatch(/^attachment/);
     expect(active.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it.each(["ogg", "mp3", "wav", "m4a", "flac", "aac", "webm"] as const)("serves detected %s audio for automatic playback", async format => {
+    const t = await thread();
+    const m = await message(t.id);
+    const bytes = audioFixture(format);
+    const file = await attachment(t.id, m.id, bytes.length, "audio/ogg");
+    resolver.registry.register({ transport: "test", connectionKey: "default", fetch: async () => bytes });
+    const response = await request(`/api/threads/${t.id}/files/${file.id}?mode=auto`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toMatch(/^audio\//);
+    expect(response.headers.get("content-disposition")).toMatch(/^inline/);
+    expect(response.headers.get("content-security-policy")).toContain("media-src 'self' blob:");
+  });
+
+  it("reads full saved audio transcripts only at their visible message", async () => {
+    const t = await thread();
+    const m = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: "" });
+    const file = await repos.files.insertFile({ userId: 1, threadId: t.id, messageId: m.id, type: "audio", name: "voice.ogg", mimeType: "audio/ogg", size: 500, isInline: false });
+    const id = await repos.audioTranscripts.insert({ userId: 1, threadId: t.id, messageId: m.id, fileId: file.id }, { text: "Full saved speech", model: "test" });
+    const text = `Preview\n\n[[chat-file:${file.id}]] [Audio transcript preview; full transcript saved (9000 characters). Read more with transcribe_audio(${JSON.stringify({ transcript_id: id, offset: 8000 })}).]`;
+    await database.db.execute(sql`update messages set text_plain = ${text} where id = ${m.id}`);
+    expect((await repository.history(t.id)).messages[0]?.attachments[0]?.transcription).toBe("Full saved speech");
+    const earlier = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: text });
+    await repos.files.attachToMessage(earlier.id, file.id);
+    expect((await repository.history(t.id)).messages[1]?.attachments[0]).toMatchObject({ transcription: "Preview", transcriptionTruncated: true });
   });
 
   it("rejects malformed requests, hides resolver errors, and respects shutdown", async () => {

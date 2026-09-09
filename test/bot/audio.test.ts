@@ -4,6 +4,7 @@ import { audioFixture } from "../helpers/audio.js";
 import { deferred } from "../helpers/async.js";
 import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { createTranscribeAudioTool } from "../../src/ai/tools/transcribeAudio.js";
+import { ConversationRepository } from "../../src/web/repository.js";
 import { sql } from "drizzle-orm";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
 
@@ -385,5 +386,9 @@ describe("Telegram audio prompts", () => {
     expect(message!.text_plain).toContain("First part.");
     expect(message!.text_plain).toContain("Second part.");
     expect(await env.repos.files.listForMessage(message!.id)).toHaveLength(2);
+    const browser = new ConversationRepository(env.db.db, env.repos);
+    const history = await browser.history(thread.id);
+    expect(history.messages[0]?.text).toBe("Use both parts");
+    expect(history.messages[0]?.attachments.map(file => file.transcription)).toEqual(["First part.", "Second part."]);
   });
 });

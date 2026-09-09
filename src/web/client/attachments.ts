@@ -1,6 +1,6 @@
 import type { WebAttachment } from "../types.js";
 
-export interface LoadedAttachment { status: "loading" | "ready" | "error"; url?: string; text?: string; mime?: string; error?: string }
+export interface LoadedAttachment { status: "loading" | "ready" | "error"; url?: string; text?: string; mime?: string; error?: string; needsSandbox?: boolean }
 
 /** One queue per open thread; disposal cancels queued and active work and releases every blob. */
 export class AttachmentLoader {
@@ -10,15 +10,19 @@ export class AttachmentLoader {
   private states = new Map<number, LoadedAttachment>();
   constructor(private threadId: number, private changed: (states: Map<number, LoadedAttachment>) => void) {}
 
-  load(file: WebAttachment, mode: "auto" | "download", retry = false) {
+  load(file: WebAttachment, mode: "auto" | "download", retry = false, allowSandbox = false) {
     if (this.controller.signal.aborted || (!retry && this.states.has(file.id))) return;
     if (this.states.get(file.id)?.status === "loading") return;
     this.set(file.id, { status: "loading" });
     this.queue.push(async () => {
       try {
-        const response = await fetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}`, { signal: this.controller.signal });
+        const response = await fetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}${allowSandbox ? "&sandbox=start" : ""}`, { signal: this.controller.signal });
         if (!response.ok) {
-          const body = await response.json() as { error?: string };
+          const body = await response.json() as { error?: string; code?: string };
+          if (response.status === 409 && body.code === "sandbox_consent_required") {
+            if (!this.controller.signal.aborted) this.set(file.id, { status: "error", needsSandbox: true });
+            return;
+          }
           throw new Error(body.error ?? "Could not load this file.");
         }
         const blob = await response.blob();

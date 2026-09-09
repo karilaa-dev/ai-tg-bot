@@ -10,7 +10,7 @@ export function RichText({ text }: { text: string }) {
     code: ({ className, children, node }) => {
       const source = String(children).replace(/\n$/, "");
       const block = className?.startsWith("language-") || (node?.position && node.position.end.line > node.position.start.line);
-      return block ? <CodeBlock code={source} language={className?.replace("language-", "") ?? "text"} mode="light" accent="#2563eb" showLineNumbers={false} /> : <code>{children}</code>;
+      return block ? <CodeBlock code={source} language={className?.replace("language-", "") ?? "text"} mode="auto" accent="#2563eb" showLineNumbers={false} /> : <code>{children}</code>;
     },
   }}>{text}</Markdown></div>;
 }

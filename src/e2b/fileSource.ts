@@ -1,6 +1,6 @@
 import type { AppConfig } from "../config.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
-import type { ChatFileSource, ChatFileSourceAdapter } from "../files/source.js";
+import type { ChatFileSource, ChatFileSourceAdapter, FileReadPolicy } from "../files/source.js";
 import type { CommandRuntime, SandboxFileReadResult } from "../sandbox/types.js";
 
 function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): string {
@@ -44,7 +44,7 @@ export class E2BFileSourceAdapter implements ChatFileSourceAdapter {
     this.connectionKey = e2bConnectionKey(config);
   }
 
-  fetch(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES): Promise<Buffer> {
+  fetch(source: ChatFileSource, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES, policy?: FileReadPolicy): Promise<Buffer> {
     const sandboxId = source.locator.sandbox_id;
     const userId = source.locator.user_id;
     const threadId = source.locator.thread_id;
@@ -55,6 +55,7 @@ export class E2BFileSourceAdapter implements ChatFileSourceAdapter {
     if (!Number.isSafeInteger(threadId) || Number(threadId) <= 0) throw new Error("E2B source has no valid thread_id.");
     return this.runtime.readSourceFile({
       sandboxId,
+      policy,
       userId: Number(userId),
       threadId: Number(threadId),
       canonicalPath,
