@@ -1,3 +1,4 @@
+import { SandboxConsentRequired } from "../files/source.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
@@ -242,13 +243,19 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         }
         throw new Error("E2B file source does not belong to this Telegram thread");
       }
+      let resumedForRead = false;
       let sandbox = state.connection?.id === request.sandboxId ? state.connection : undefined;
       if (!sandbox || !await sandbox.isRunning(request.signal).catch(() => false)) {
         const info = await this.client.getInfo(request.sandboxId, request.signal);
+        // Connecting can resume a sandbox that pauses after getInfo; require consent
+        // whenever a browser read needs to establish a connection.
+        if (request.policy?.allowSandboxResume === false) throw new SandboxConsentRequired();
+        resumedForRead = info.state === "paused" && Boolean(request.policy?.pauseAfterRead);
         sandbox = await this.client.connect(
           request.sandboxId,
           E2B_IDLE_PAUSE_MS,
-          request.signal,
+          // Complete a consented resume so cancellation can still pause it in finally.
+          resumedForRead ? undefined : request.signal,
         );
         state.continuousStartedAt = info.state === "paused"
           ? Date.now()
@@ -256,6 +263,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       }
       this.rememberConnection(state, sandbox);
       try {
+        request.signal?.throwIfAborted();
         return (await this.readCanonicalFile(
           sandbox,
           request.canonicalPath,
@@ -265,8 +273,17 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           "root",
         )).bytes;
       } finally {
-        const idle = this.idleTimeout(state, sandbox.id, false);
-        await sandbox.setTimeout(idle.timeoutMs).catch(() => undefined);
+        if (resumedForRead && state.leases === 0) {
+          // Cleanup must survive a disconnected browser or an aborted download.
+          try { await sandbox.pause(); }
+          catch (error) {
+            await sandbox.setTimeout(1_000).catch(() => undefined);
+            this.input.logger?.warn("failed to pause attachment sandbox", { sandboxId: sandbox.id, error: String(error) });
+          }
+        } else {
+          const idle = this.idleTimeout(state, sandbox.id, false);
+          await sandbox.setTimeout(idle.timeoutMs).catch(() => undefined);
+        }
       }
     });
   }

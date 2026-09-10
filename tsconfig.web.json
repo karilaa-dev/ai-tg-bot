@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": [
+      "react",
+      "react-dom"
+    ],
+    "noEmit": true
+  },
+  "include": [
+    "src/web/client/**/*.ts",
+    "src/web/client/**/*.tsx",
+    "src/web/types.ts"
+  ],
+  "exclude": []
+}

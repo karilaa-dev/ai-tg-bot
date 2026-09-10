@@ -33,6 +33,7 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     if (sqlitePath !== ":memory:") fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
     logger?.debug("opening sqlite database", { path: sqlitePath });
     const sqlite = drizzleSqlite({ client: new Database(sqlitePath) });
+    sqlite.$client.function("unicode_lower", { deterministic: true }, (value: string) => value.toLowerCase());
     let operationTail = Promise.resolve();
     const withLock = async <T>(operation: () => Promise<T>): Promise<T> => {
       const previous = operationTail;

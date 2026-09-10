@@ -102,7 +102,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.11` uses `ai-tg-bot-tools:v2.0.11`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.12` uses `ai-tg-bot-tools:v2.0.12`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -116,8 +116,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.11 is ai-tg-bot-tools:v2.0.11.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.11
+# Optional override. The default for version 2.0.12 is ai-tg-bot-tools:v2.0.12.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.12
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -245,3 +245,28 @@ node --import tsx scripts/benchmark-harness.ts --provider openrouter --runs 3 --
 ```
 
 `--repo /path/to/checkout` measures another version with the same driver. That checkout needs its dependencies and released E2B image. The script uses a temporary SQLite database and Pi directory, and a separate E2B deployment namespace. Each pair uses a new sandbox for the cold run and the same sandbox with a cleared workspace and fresh model session for the warm run. Provider-side prompt caching is measured but cannot be reset. It removes its own sandboxes and temporary sessions afterward. These are live API calls and use the configured accounts.
+
+## Conversation website
+
+Set `WEB_ENABLED=true` to run a read-only conversation browser alongside the bot:
+
+```dotenv
+WEB_ENABLED=true
+WEB_HOST=0.0.0.0
+WEB_PORT=3000
+WEB_AUTOLOAD_MAX_BYTES=5242880
+```
+
+Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes use Node.js 24.18 or newer. The website defaults to disabled and opens no listener in that mode.
+
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database. The explicit **Start sandbox and load** action uses POST on the attachment URL; allow that method through the proxy. Ordinary browsing and downloads use GET.
+
+Users appear by most recent activity. The browser uses saved usernames and names, with Telegram IDs as a fallback. Search accepts names, usernames, and IDs. The bot itself is excluded, including old records accidentally saved for it. Threads include archived conversations and inherited messages up to each fork point. The latest 50 messages open first; use **Load older** for earlier history. Visible lists and messages refresh every 10 seconds while the tab is active.
+
+Use the sun/moon button to switch between light and dark themes. The initial theme follows your system setting; an explicit choice is saved in your browser. Image attachments reserve preview space while loading. Expand **Image details** to see the saved description, filename, size, format, and loaded dimensions.
+
+Attachments up to 5 MiB load into the page automatically with at most three concurrent downloads. Raster images and plain text have previews. Audio loads into a player without autoplay, with saved speech under **Transcription**. Photo descriptions and audio transcripts are separated from the message caption. Other files have a **Save** link. Larger or unknown-size files require **Load file** first. `WEB_AUTOLOAD_MAX_BYTES=0` disables automatic loading. The existing 20 MiB file resolver limit still applies. Files whose Telegram or E2B sources are unavailable show a retry action. The browser tries Telegram and other non-sandbox copies before E2B. If an E2B file needs a connection, the page asks before starting or resuming its sandbox. A sandbox resumed for retrieval pauses immediately after success, failure, or cancellation; sandboxes already serving bot work stay available to it. Browsing never starts an AI turn. HTML and SVG attachments are downloads, and external Markdown images are not fetched.
+
+The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), and [Rare UI Code Block](https://www.rareui.com/components/codeblock). Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
+
+For a local preview with synthetic conversations and files, run `npm run build:web` followed by `node --import tsx test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Node.js HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
