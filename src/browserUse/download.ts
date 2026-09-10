@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
-import { Agent, fetch as undiciFetch, interceptors, type Dispatcher } from "undici";
+// Load the npm implementation: Bun's built-in undici shim lacks DNS pinning.
+import { Agent, fetch as undiciFetch, interceptors, type Dispatcher } from "undici/index.js";
 import { raceWithAbort, throwIfAborted } from "../files/cancel.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 

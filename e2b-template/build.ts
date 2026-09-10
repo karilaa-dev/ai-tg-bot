@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { defaultBuildLogger } from "e2b";
 import {
   E2B_TOOLBOX_CPU_COUNT,

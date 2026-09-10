@@ -7,7 +7,7 @@ export class E2BTemplateNotFoundError extends Error {
   ) {
     super(
       `E2B sandbox image "${templateRef}" was not found. `
-      + "Build the current version with \"npm run e2b:release\" before creating a new thread, "
+      + "Build the current version with \"bun run e2b:release\" before creating a new thread, "
       + "or set E2B_TEMPLATE to an existing image.",
       { cause },
     );

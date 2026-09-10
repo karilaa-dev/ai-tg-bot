@@ -705,9 +705,12 @@ describe("thread E2B runtime manager", () => {
 
     releaseDelayedWorker.resolve();
     await expect(execution).rejects.toThrow("restore cancelled");
-    expect(client.onlySandbox().controlCommands.some((command) =>
-      command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")))
-      .toBe(true);
+    // execute() rejects promptly on abort; the queued operation finishes cleanup.
+    await vi.waitFor(() => {
+      expect(client.onlySandbox().controlCommands.some((command) =>
+        command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")))
+        .toBe(true);
+    });
   });
 
   it("preserves the publication window without resetting it after later turns", async () => {

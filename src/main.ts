@@ -51,7 +51,7 @@ try {
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
   await bot.init();
-  web = await startWebServer({ config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger });
+  web = await startWebServer({ development: process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });

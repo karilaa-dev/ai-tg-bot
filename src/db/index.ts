@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { type SQL } from "drizzle-orm";
-import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import type { AppConfig } from "../config.js";
@@ -32,8 +32,10 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     const sqlitePath = target === ":memory:" ? ":memory:" : path.resolve(target);
     if (sqlitePath !== ":memory:") fs.mkdirSync(path.dirname(sqlitePath), { recursive: true });
     logger?.debug("opening sqlite database", { path: sqlitePath });
-    const sqlite = drizzleSqlite({ client: new Database(sqlitePath) });
-    sqlite.$client.function("unicode_lower", { deterministic: true }, (value: string) => value.toLowerCase());
+    // Bun's node:sqlite implementation supports the Unicode search function.
+    const sqlite = new DatabaseSync(sqlitePath);
+    const sqliteDialect = new SQLiteSyncDialect();
+    sqlite.function("unicode_lower", { deterministic: true }, (value) => String(value).toLowerCase());
     let operationTail = Promise.resolve();
     const withLock = async <T>(operation: () => Promise<T>): Promise<T> => {
       const previous = operationTail;
@@ -46,10 +48,13 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
         release();
       }
     };
-    const rawQuery = async <T extends object>(statement: SQL): Promise<T[]> =>
-      normalizeRows(sqlite.all<T>(statement));
+    const rawQuery = async <T extends object>(statement: SQL): Promise<T[]> => {
+      const query = sqliteDialect.sqlToQuery(statement);
+      return normalizeRows(sqlite.prepare(query.sql).all(...query.params as SQLInputValue[]) as T[]);
+    };
     const rawExecute = async (statement: SQL): Promise<void> => {
-      sqlite.run(statement);
+      const query = sqliteDialect.sqlToQuery(statement);
+      sqlite.prepare(query.sql).run(...query.params as SQLInputValue[]);
     };
     let transactionExecutor: SqlExecutor;
     transactionExecutor = {
@@ -67,20 +72,20 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
       execute: (statement: SQL) => withLock(() => rawExecute(statement)),
       transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>) => {
         return withLock(async () => {
-          sqlite.$client.exec("begin immediate");
+          sqlite.exec("begin immediate");
           try {
             const result = await callback(transactionExecutor);
-            sqlite.$client.exec("commit");
+            sqlite.exec("commit");
             return result;
           } catch (error) {
-            sqlite.$client.exec("rollback");
+            sqlite.exec("rollback");
             throw error;
           }
         });
       },
       destroy: () => withLock(async () => {
         logger?.debug("closing sqlite database");
-        sqlite.$client.close();
+        if (sqlite.isOpen) sqlite.close();
       }),
     };
     db = sqliteExecutor;

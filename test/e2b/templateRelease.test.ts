@@ -19,9 +19,9 @@ import { deferred } from "../helpers/async.js";
 
 describe("versioned E2B template identity", () => {
   it("derives the release tag from package.json", () => {
-    expect(APP_VERSION).toBe("2.0.12");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.12");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.12");
+    expect(APP_VERSION).toBe("2.0.13");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.13");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.13");
   });
 
   it("accepts only tagged references owned by this bot", () => {
@@ -107,7 +107,7 @@ describe("missing sandbox image failure", () => {
       .rejects.toEqual(expect.objectContaining({
         name: "E2BTemplateNotFoundError",
         templateRef: E2B_TOOLBOX_RELEASE_REF,
-        message: expect.stringContaining("npm run e2b:release"),
+        message: expect.stringContaining("bun run e2b:release"),
       }));
     expect(create).toHaveBeenCalledTimes(1);
     expect(isE2BNotFoundError(new SandboxError("404: missing"))).toBe(true);
@@ -140,7 +140,7 @@ function buildInfo(): BuildInfo {
   return {
     alias: "ai-tg-bot-tools",
     name: "ai-tg-bot-tools",
-    tags: ["v2.0.12"],
+    tags: ["v2.0.13"],
     templateId: "template-id",
     buildId: "build-id",
   };

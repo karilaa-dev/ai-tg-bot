@@ -12,7 +12,7 @@
     "resolveJsonModule": true,
     "outDir": "dist",
     "rootDir": ".",
-    "types": ["node", "vitest"],
+    "types": ["bun", "node", "vitest"],
     "jsx": "react-jsx"
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "e2b-template/**/*.ts"],

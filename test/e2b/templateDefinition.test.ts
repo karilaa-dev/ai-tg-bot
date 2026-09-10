@@ -25,8 +25,8 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.12");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.12");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.13");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.13");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
@@ -110,7 +110,7 @@ describe("E2B toolbox template definition", () => {
       scripts: Record<string, string>;
     };
     expect(packageJson.scripts.build).toContain("copy-e2b-template-assets");
-    expect(packageJson.scripts["e2b:release"]).toBe("tsx e2b-template/release.ts");
+    expect(packageJson.scripts["e2b:release"]).toBe("bun e2b-template/release.ts");
 
     const copySource = await fs.readFile("scripts/copy-e2b-template-assets.ts", "utf8");
     expect(copySource).toContain("e2b-template/assets");

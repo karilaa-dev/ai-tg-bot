@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { E2B_TOOLBOX_RELEASE_REF } from "../src/e2b/templateIdentity.js";
 import { E2BTemplateReleaseManager } from "../src/e2b/templateRelease.js";
 import { requireE2BApiKey } from "./validate.js";

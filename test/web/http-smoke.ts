@@ -17,6 +17,7 @@ import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
 
 const preview = process.argv.includes("--preview");
+assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
 const temp = await mkdtemp(path.join(os.tmpdir(), "conversation-browser-"));
 const config = loadTestConfig({ WEB_ENABLED: true, WEB_PORT: preview ? 3005 : 0, WEB_HOST: preview ? "0.0.0.0" : "127.0.0.1" });
 const postgres = process.argv.includes("--postgres");
@@ -67,7 +68,7 @@ if (preview) {
   await db.db.execute(sql`update messages set text_plain = ${`Let's take the lakeside route tomorrow.\n\n[[chat-file:${voiceFile.id}]] [Audio message transcribed above]`} where id = ${audioMessage.id}`);
 
 }
-const options = { config, repository: new ConversationRepository(db.db, repos, 999), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
+const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
 const web = (await startWebServer(options))!;
 if (preview) {
   console.log(`Preview: ${web.url}?user=${user.tg_id}&thread=${thread.id}`);
@@ -93,7 +94,7 @@ if (preview) {
     await once(rebound, "listening");
     await new Promise<void>((resolve, reject) => rebound.close(error => error ? reject(error) : resolve()));
     assert.equal(await startWebServer({ ...options, config: { ...config, WEB_ENABLED: false } }), undefined);
-    console.log("Node.js HTTP smoke passed: assets, history, downloads, bind failure, shutdown, disabled mode");
+    console.log("Bun HTTP smoke passed: assets, history, downloads, bind failure, shutdown, disabled mode");
   } finally { await web.stop(); await db.destroy();
     if (admin) { await admin.db.execute(sql.raw(`drop schema ${schema} cascade`)); await admin.destroy(); }
     await rm(temp, { recursive: true, force: true }); }

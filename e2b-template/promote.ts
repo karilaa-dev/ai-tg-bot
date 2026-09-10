@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { Template } from "e2b";
 import {
   E2B_TOOLBOX_PRODUCTION_TAG,
