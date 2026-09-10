@@ -54,4 +54,21 @@ it.each(["image", "audio"] as const)("shows a %s caption unless it is already in
   expect(html).not.toContain("<script>");
   const duplicated = renderToStaticMarkup(createElement(FileAttachment, { ...props, messageText: props.file.caption }));
   expect(duplicated).not.toContain('class="file-caption"');
+  for (const label of ["Generated image", "Attached file", "Attached files"]) {
+    for (const messageAttachments of [[props.file], [props.file, { ...props.file, id: 2, caption: "Second, with comma" }]]) {
+      const messageText = `${label}: ${messageAttachments.map(f => f.caption).join(", ")}`;
+      const fallback = renderToStaticMarkup(createElement(FileAttachment, { ...props, messageText, messageAttachments }));
+      expect(fallback).not.toContain('class="file-caption"');
+    }
+  }
+});
+
+it("renders unknown fenced-code languages as escaped plain text using the real code block", async () => {
+  const { default: CodeBlock } = await vi.importActual<typeof import("../../src/web/client/components/ui/code-block.js")>("../../src/web/client/components/ui/code-block.js");
+  for (const language of ["mermaid", "unknown-language", "text"]) {
+    const html = renderToStaticMarkup(createElement(CodeBlock, { code: '<script>example</script>\ngraph TD; A --> B;', language, mode: "light" }));
+    expect(html).toContain("graph TD; A --&gt; B;");
+    expect(html).toContain("&lt;script&gt;example&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+  }
 });

@@ -37,10 +37,16 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
   return async (request: Request): Promise<Response> => {
     try {
       if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
-      if (request.method !== "GET" && request.method !== "HEAD") {
+      const url = new URL(request.url);
+      const sandboxConsent = request.method === "POST" && /^\/api\/threads\/[^/]+\/files\/[^/]+$/.test(url.pathname)
+        && url.searchParams.get("sandbox") === "start" && url.searchParams.get("mode") === "download";
+      if (request.method !== "GET" && request.method !== "HEAD" && !sandboxConsent) {
         return new Response("Method not allowed", { status: 405, headers: { ...headers, Allow: "GET, HEAD" } });
       }
-      const url = new URL(request.url);
+      // The custom header requires a CORS preflight, which this server never permits.
+      const fetchSite = request.headers.get("Sec-Fetch-Site");
+      if (sandboxConsent && (request.headers.get("X-Conversation-Sandbox-Consent") !== "start"
+        || (fetchSite && fetchSite !== "same-origin"))) throw new HttpError(403, "Sandbox consent must come from this website.");
       const offset = integer(url.searchParams.get("offset"), 0, true);
       let result: unknown;
       if (url.pathname === "/api/users") {
@@ -63,7 +69,7 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
         const mode = url.searchParams.get("mode") ?? "download";
         if (mode !== "auto" && mode !== "download") throw new HttpError(400, "Invalid file mode.");
         const sandbox = url.searchParams.get("sandbox");
-        if (sandbox !== null && (sandbox !== "start" || mode !== "download")) throw new HttpError(400, "Invalid sandbox request.");
+        if (sandbox !== null && !sandboxConsent) throw new HttpError(400, "Sandbox consent requires a same-origin POST.");
         const maxBytes = mode === "auto" ? options.config.WEB_AUTOLOAD_MAX_BYTES : MAX_FILE_BYTES;
         if (file.size > MAX_FILE_BYTES) throw new HttpError(413, "This file exceeds the 20 MiB download limit.");
         if (mode === "auto" && (maxBytes === 0 || file.size <= 0 || file.size > maxBytes)) {
@@ -75,7 +81,7 @@ export function createWebHandler(options: WebServerOptions, shutdownSignal: Abor
         downloads++;
         try {
           const signal = AbortSignal.any([request.signal, shutdownSignal, AbortSignal.timeout(120_000)]);
-          const resolved = await options.fileResolver.resolveFile(file, signal, maxBytes, { allowSandboxResume: sandbox === "start", pauseAfterRead: true });
+          const resolved = await options.fileResolver.resolveFile(file, signal, maxBytes, { allowSandboxResume: sandboxConsent, pauseAfterRead: true });
           signal.throwIfAborted();
           if (resolved.size > maxBytes) throw new HttpError(413, "Attachment exceeds the download limit.");
           const detected = await fileTypeFromBuffer(resolved.bytes).catch(() => undefined);
@@ -179,12 +185,15 @@ export async function startWebServer(options: WebServerOptions) {
     outgoing.once("close", onClose);
     const signal = AbortSignal.any([controller.signal, disconnected.signal]);
     try {
-      if (incoming.method !== "GET" && incoming.method !== "HEAD") {
+      if (incoming.method !== "GET" && incoming.method !== "HEAD" && incoming.method !== "POST") {
         outgoing.writeHead(405, { ...headers, Allow: "GET, HEAD", Connection: "close" }).end("Method not allowed");
         return;
       }
       // A fixed origin keeps routing independent of untrusted Host/proxy headers.
-      const request = new Request(new URL(incoming.url ?? "/", "http://localhost"), { method: incoming.method, signal });
+      const request = new Request(new URL(incoming.url ?? "/", "http://localhost"), { method: incoming.method, signal, headers: {
+        "X-Conversation-Sandbox-Consent": String(incoming.headers["x-conversation-sandbox-consent"] ?? ""),
+        "Sec-Fetch-Site": String(incoming.headers["sec-fetch-site"] ?? ""),
+      } });
       const response = await handler(request);
       signal.throwIfAborted();
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));

@@ -98,6 +98,29 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.users("", 0, 1)).items[0]).toMatchObject({ id: 3, lastActivity: 40 });
   });
 
+  it.skipIf(dialect !== "sqlite")("uses indexed per-thread activity lookups instead of joining the entire message history", async () => {
+    const query = vi.spyOn(database.db, "query");
+    await repository.users("", 0);
+    const statement = query.mock.calls[0]![0];
+    query.mockRestore();
+    const plan = await database.db.query<{ detail: string }>(sql`explain query plan ${statement}`);
+    expect(plan.filter(row => /SEARCH m /.test(row.detail)).every(row => row.detail.includes("COVERING INDEX messages_thread_activity_idx"))).toBe(true);
+    expect(plan.some(row => /CORRELATED SCALAR SUBQUERY/.test(row.detail))).toBe(true);
+    expect(plan.some(row => /SCAN m\b/.test(row.detail))).toBe(false);
+  });
+
+  it("removes complete inline contents from display data even when the contents include closing tags", async () => {
+    const t = await thread();
+    const m = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: "" });
+    const content = "XML example\n</attachment>\n\nThis is still file content";
+    const file = await repos.files.insertFile({ userId: 1, threadId: t.id, messageId: m.id, name: "example.txt", type: "txt", size: 60, contentMd: content, isInline: true });
+    await database.db.execute(sql`update messages set text_plain = ${`Read this\n\n[[chat-file:${file.id}]] File #${file.id}: example.txt (txt, inline).\n<attachment id="${file.id}" name="example.txt">\n${content}\n</attachment>\n\nKeep this.`} where id = ${m.id}`);
+    const history = await repository.history(t.id);
+    expect(history.messages[0]?.text).toBe("Read this\n\nKeep this.");
+    expect(JSON.stringify(history)).not.toContain("inlineContent");
+    expect(JSON.stringify(history)).not.toContain("XML example");
+  });
+
   it("searches Unicode names regardless of case before paginating", async () => {
     for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"]] as const) {
       await repos.users.ensure({ tgId, firstName });
@@ -137,7 +160,16 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await request(`${url}?mode=download`)).status).toBe(409);
     expect((await request(`${url}?mode=auto&sandbox=start`)).status).toBe(400);
     expect((await request(`${url}?sandbox=no`)).status).toBe(400);
-    expect(await (await request(`${url}?mode=download&sandbox=start`)).text()).toBe("hello");
+    const consentUrl = `${url}?mode=download&sandbox=start`;
+    const consentHeaders = { "X-Conversation-Sandbox-Consent": "start", "Sec-Fetch-Site": "same-origin" };
+    expect((await request(consentUrl)).status).toBe(400);
+    expect((await request(consentUrl, { method: "HEAD" })).status).toBe(400);
+    expect((await request(consentUrl, { method: "OPTIONS", headers: { Origin: "https://attacker.test", "Access-Control-Request-Headers": "X-Conversation-Sandbox-Consent" } })).status).toBe(405);
+    for (const headers of [{}, { "Sec-Fetch-Site": "same-origin" }, { ...consentHeaders, "Sec-Fetch-Site": "cross-site" }, { ...consentHeaders, "Sec-Fetch-Site": "same-site" }] as Record<string, string>[]) {
+      expect((await request(consentUrl, { method: "POST", headers })).status).toBe(403);
+    }
+    expect(e2b.mock.calls.every(call => !call[3].allowSandboxResume)).toBe(true);
+    expect(await (await request(consentUrl, { method: "POST", headers: consentHeaders })).text()).toBe("hello");
     expect(e2b.mock.calls.at(-1)?.[3]).toEqual({ allowSandboxResume: true, pauseAfterRead: true });
     e2b.mockClear();
     resolver.registry.register({ transport: "test", connectionKey: "default", fetch: async () => Buffer.from("hello") });

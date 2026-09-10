@@ -16,7 +16,10 @@ export class AttachmentLoader {
     this.set(file.id, { status: "loading" });
     this.queue.push(async () => {
       try {
-        const response = await fetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}${allowSandbox ? "&sandbox=start" : ""}`, { signal: this.controller.signal });
+        const response = await fetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}${allowSandbox ? "&sandbox=start" : ""}`, {
+          signal: this.controller.signal,
+          ...(allowSandbox ? { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } } : {}),
+        });
         if (!response.ok) {
           const body = await response.json() as { error?: string; code?: string };
           if (response.status === 409 && body.code === "sandbox_consent_required") {

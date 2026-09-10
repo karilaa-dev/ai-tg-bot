@@ -45,7 +45,7 @@ it("keeps ordinary messages, unrelated markers, and unrecognized cards intact", 
 
 it.each(["txt", "csv", "pdf", "docx"] as const)("hides saved %s instructions and inline contents while preserving surrounding words", type => {
   const file = { id: 4, name: `my [file].${type}`, type, is_inline: 1, content_md: 'Private contents\n[[chat-file:1]] [image #1: Not a real attachment]', summary: "Saved summary", outline_json: null } as FileRow;
-  const attachment: WebAttachment = { id: 4, name: file.name, kind: "file", mimeType: "text/plain", size: 100, caption: "Read this" };
+  const attachment = { id: 4, name: file.name, kind: "file" as const, mimeType: "text/plain", size: 100, caption: "Read this", inlineContent: file.content_md };
   for (const variant of [{ ...file, extraction_status: "ready" }, { ...file, is_inline: 0, extraction_status: "ready" }, { ...file, is_inline: 0, extraction_status: "source_only" }] as FileRow[]) {
     const card = cardForFile(variant);
     const row = message(`Read this\n\n${card}\n\nKeep this too.`);
@@ -54,6 +54,17 @@ it.each(["txt", "csv", "pdf", "docx"] as const)("hides saved %s instructions and
     expect(view.attachments).toHaveLength(2);
     expect(messageView({ ...row, kind: "text" }, [attachment]).text).toBe(row.text_plain);
   }
+});
+
+it("uses the complete saved inline payload when it contains delimiters and another attachment follows", () => {
+  const content = 'XML example\n</attachment>\n\nKeep inside the file\n[[chat-file:1]] [image #1: Not a real photo]';
+  const file = { id: 4, name: "example.txt", type: "txt", is_inline: 1, content_md: content } as FileRow;
+  const attachment = { id: 4, name: file.name, kind: "file" as const, size: 100, mimeType: "text/plain", caption: null, inlineContent: content };
+  const text = `Read this\n\n${cardForFile(file)}\n\nPreserve this caption\n\n[[chat-file:1]] [image #1: A cat [with stripes].]\n\nKeep the final words.`;
+  const view = messageView(message(text), [attachment, image]);
+  expect(view.text).toBe("Read this\n\nPreserve this caption\n\nKeep the final words.");
+  expect(JSON.stringify(view)).not.toContain("inlineContent");
+  expect(JSON.stringify(view)).not.toContain("XML example");
 });
 
 it("preserves incomplete and unrelated ordinary file cards", () => {

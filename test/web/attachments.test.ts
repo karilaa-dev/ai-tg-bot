@@ -88,5 +88,6 @@ it("waits for explicit sandbox approval without retrying during refresh", async 
   loader.load(file, "download", true, true);
   await vi.waitFor(() => expect(states.get(3)?.status).toBe("ready"));
   expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe("/api/threads/9/files/3?mode=download&sandbox=start");
+  expect(vi.mocked(fetch).mock.calls.at(-1)?.[1]).toMatchObject({ method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } });
   loader.dispose();
 });

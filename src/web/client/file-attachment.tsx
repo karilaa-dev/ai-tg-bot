@@ -8,8 +8,8 @@ import { Button, buttonVariants } from "./components/ui/button.js";
 
 const fileSize = (size: number | null) => size === null ? "Unknown size" : size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
 
-export function FileAttachment({ file, state, maxBytes, load, messageText = "" }: {
-  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string;
+export function FileAttachment({ file, state, maxBytes, load, messageText = "", messageAttachments = [file] }: {
+  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string; messageAttachments?: WebAttachment[];
 }) {
   const [decoded, setDecoded] = useState<{ url: string; width: number; height: number }>();
   const [broken, setBroken] = useState<string>();
@@ -17,7 +17,9 @@ export function FileAttachment({ file, state, maxBytes, load, messageText = "" }
   const image = kind === "image";
   const audio = kind === "audio";
   const caption = file.caption?.trim();
-  const showCaption = caption && !`\n\n${messageText.trim()}\n\n`.includes(`\n\n${caption}\n\n`);
+  const fallbackNames = messageAttachments.map(f => f.caption?.trim() || f.name).filter(Boolean).join(", ");
+  const fallbackCaption = ["Generated image", "Attached file", "Attached files"].some(label => messageText.trim() === `${label}: ${fallbackNames}`);
+  const showCaption = caption && !fallbackCaption && !`\n\n${messageText.trim()}\n\n`.includes(`\n\n${caption}\n\n`);
   const oversized = file.size !== null && file.size > maxBytes;
   const readyImage = state?.url && imageMimeTypes.includes(state.mime ?? "");
   const readyAudio = state?.url && isAudioMime(state.mime ?? "");

@@ -3,10 +3,11 @@ import type { WebAttachment, WebMessage } from "./types.js";
 import { attachmentKind } from "./media.js";
 
 export interface SavedTranscript { id: string; messageId: number; fileId: number; text: string }
+export interface SavedAttachment extends WebAttachment { inlineContent?: string | null }
 
 /** Separate the bot's saved media cards from the words a person actually sent. */
-export function messageView(message: MessageRow, attachments: WebAttachment[], transcripts: SavedTranscript[] = []): WebMessage {
-  const files = attachments.map(file => ({ ...file }));
+export function messageView(message: MessageRow, attachments: SavedAttachment[], transcripts: SavedTranscript[] = []): WebMessage {
+  const files = attachments.map(({ inlineContent, ...file }) => file);
   const view = { id: message.id, threadId: message.thread_id, role: message.role, text: message.text_plain,
     thinking: message.thinking, createdAt: message.created_at, attachments: files };
   if (message.kind === "text" && message.role !== "assistant") return view;
@@ -59,7 +60,7 @@ export function messageView(message: MessageRow, attachments: WebAttachment[], t
       file.transcriptionTruncated = Boolean(long && !full);
       cursor = marker.index + marker[0].length + note.length;
     } else {
-      const end = fileCardEnd(tail, file);
+      const end = fileCardEnd(tail, file, attachments.find(saved => saved.id === file.id)?.inlineContent);
       if (end === null) continue;
       visible.push(prefix);
       cursor = marker.index + marker[0].length + end;
@@ -70,16 +71,17 @@ export function messageView(message: MessageRow, attachments: WebAttachment[], t
   return view;
 }
 
-function fileCardEnd(text: string, file: WebAttachment): number | null {
+function fileCardEnd(text: string, file: WebAttachment, inlineContent?: string | null): number | null {
   const prefix = `File #${file.id}: ${file.name} (`;
   if (!text.startsWith(prefix)) return null;
   const body = text.slice(prefix.length);
   const inline = body.match(/^(?:txt|csv|pdf|docx|other), inline\)\.\n/);
   if (inline) {
     const opening = `${inline[0]}<attachment id="${file.id}" name="${file.name}">\n`;
-    if (!body.startsWith(opening)) return null;
-    const end = body.slice(opening.length).search(/\n<\/attachment>(?=\n\n|$)/);
-    return end < 0 ? null : prefix.length + opening.length + end + "\n</attachment>".length;
+    // Match the saved payload exactly: file contents may themselves contain closing tags or other cards.
+    if (inlineContent == null) return null;
+    const framed = `${opening}${inlineContent}\n</attachment>`;
+    return body.startsWith(framed) ? prefix.length + framed.length : null;
   }
   const card = body.match(/^(?:txt|csv|pdf|docx|other), (?:sandbox source\)\. Use materialize_chat_files, then (?:PDF Inspector or render_pdf_pages|docx-cli)\.|\d+ chunks\)\.[\s\S]*?Use search_in_file or read_file_section\.)(?=\n\n|$)/);
   return card ? prefix.length + card[0].length : null;

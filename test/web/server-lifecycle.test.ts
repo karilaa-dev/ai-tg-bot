@@ -11,6 +11,7 @@ import { FileResolver } from "../../src/files/resolver.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
 import { deferred } from "../helpers/async.js";
+import { SandboxConsentRequired } from "../../src/files/source.js";
 
 let database: AppDatabase;
 let assetsDirectory: string;
@@ -81,6 +82,31 @@ function waitForCancellation() {
   }) });
   return { started, aborted, cleanup };
 }
+
+it("accepts explicit sandbox POSTs through the HTTP adapter and rejects cross-site requests", async () => {
+  let approved = 0;
+  resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async (_source, _signal, _max, policy) => {
+    if (!policy?.allowSandboxResume) throw new SandboxConsentRequired();
+    approved++;
+    return Buffer.from("hello");
+  } });
+  const consentUrl = new URL(fileUrl);
+  consentUrl.search = "?mode=download&sandbox=start";
+  expect((await fetch(fileUrl)).status).toBe(409);
+  expect((await fetch(consentUrl)).status).toBe(400);
+  const preflight = await fetch(consentUrl, { method: "OPTIONS", headers: { Origin: "https://attacker.test" } });
+  expect(preflight.status).toBe(405);
+  expect(preflight.headers.has("Access-Control-Allow-Origin")).toBe(false);
+  for (const headers of [{ Origin: "https://attacker.test" }, { "X-Conversation-Sandbox-Consent": "start", "Sec-Fetch-Site": "cross-site" }] as Record<string, string>[]) {
+    expect((await fetch(consentUrl, { method: "POST", headers })).status).toBe(403);
+  }
+  expect(approved).toBe(0);
+  // Fetch Metadata is unavailable on some HTTP origins; the non-simple header still prevents CSRF.
+  for (const headers of [{ "X-Conversation-Sandbox-Consent": "start" }, { "X-Conversation-Sandbox-Consent": "start", "Sec-Fetch-Site": "same-origin" }] as Record<string, string>[]) {
+    expect(await (await fetch(consentUrl, { method: "POST", headers })).text()).toBe("hello");
+  }
+  expect(approved).toBe(2);
+});
 
 it("cancels attachment retrieval when the browser disconnects", async () => {
   const pending = waitForCancellation();

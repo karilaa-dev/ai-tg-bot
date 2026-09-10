@@ -259,7 +259,7 @@ WEB_AUTOLOAD_MAX_BYTES=5242880
 
 Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes use Node.js 24.18 or newer. The website defaults to disabled and opens no listener in that mode.
 
-Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database.
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database. The explicit **Start sandbox and load** action uses POST on the attachment URL; allow that method through the proxy. Ordinary browsing and downloads use GET.
 
 Users appear by most recent activity. The browser uses saved usernames and names, with Telegram IDs as a fallback. Search accepts names, usernames, and IDs. The bot itself is excluded, including old records accidentally saved for it. Threads include archived conversations and inherited messages up to each fork point. The latest 50 messages open first; use **Load older** for earlier history. Visible lists and messages refresh every 10 seconds while the tab is active.
 
