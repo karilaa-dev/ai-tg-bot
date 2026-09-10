@@ -24,7 +24,7 @@ Baseline: `af793e2` (`Improve agent runtime and file delivery`). This continues 
 
 The reduction is 593 nonblank production lines and 10,305 emitted JavaScript bytes. Four additional files expose ownership boundaries. Emitted size uses esbuild with TypeScript removal and whitespace minification only, so source formatting and moving code do not account for the reduction. Counts cover `src/**/*.ts`; tests, scripts, and documentation are excluded.
 
-The visibility fixture contains six nested threads, 20 messages per thread, two files per thread, and a cutoff after each thread's eleventh message. Returned scopes are exactly equal. Reproduce it with `node --import tsx scripts/benchmark-visibility.ts [checkout-path]`. New SQLite/PostgreSQL tests also assert that a two-level fork takes three queries and returns no message or file bodies when building visibility.
+The visibility fixture contains six nested threads, 20 messages per thread, two files per thread, and a cutoff after each thread's eleventh message. Returned scopes are exactly equal. Reproduce it with `bun scripts/benchmark-visibility.ts [checkout-path]`. New SQLite/PostgreSQL tests also assert that a two-level fork takes three queries and returns no message or file bodies when building visibility.
 
 ## Behavioral validation
 

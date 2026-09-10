@@ -16,7 +16,7 @@ describe("stable SQLite adapter", () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("opens an existing node:sqlite file and preserves commit, rollback, WAL, and close behavior", async () => {
+  it("opens an existing SQLite file and preserves commit, rollback, WAL, and close behavior", async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-sqlite-adapter-"));
     const sqlitePath = path.join(tempDir, "existing.db");
     const legacy = new DatabaseSync(sqlitePath);
@@ -49,6 +49,7 @@ describe("stable SQLite adapter", () => {
     await expect(database.db.query<{ tg_id: number }>(sql`select tg_id from users order by tg_id`))
       .resolves.toEqual([{ tg_id: 101 }]);
 
+    await database.destroy();
     await database.destroy();
     database = undefined;
     const verifier = new DatabaseSync(sqlitePath, { readOnly: true });

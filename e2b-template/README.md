@@ -6,12 +6,12 @@ The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cl
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.12` uses `ai-tg-bot-tools:v2.0.12`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.0.13` uses `ai-tg-bot-tools:v2.0.13`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
 ```sh
-npm run e2b:release
+bun run e2b:release
 ```
 
 If the version tag already exists, the command reuses and validates it instead of rebuilding it. The command prints the exact `E2B_TEMPLATE` reference after the smoke passes. A bot process never builds a missing image during sandbox creation. It fails with the missing reference and this command instead.
@@ -19,15 +19,15 @@ If the version tag already exists, the command reuses and validates it instead o
 Low-level commands remain available for diagnostics and manual recovery:
 
 ```sh
-npm run e2b:template:build
-E2B_TEMPLATE=ai-tg-bot-tools:<tag> npm run live:e2b-check
-E2B_TEMPLATE=ai-tg-bot-tools:<tag> npm run e2b:template:check
+bun run e2b:template:build
+E2B_TEMPLATE=ai-tg-bot-tools:<tag> bun run live:e2b-check
+E2B_TEMPLATE=ai-tg-bot-tools:<tag> bun run e2b:template:check
 ```
 
 The legacy mutable production alias can still be assigned explicitly:
 
 ```sh
-E2B_PROMOTE_TAG=<tag> npm run e2b:template:promote
+E2B_PROMOTE_TAG=<tag> bun run e2b:template:promote
 ```
 
 The full live smoke checks the toolbox contract, outbound internet, allocated CPU and memory, and pause/resume persistence. An explicit `E2B_TEMPLATE` override can select an earlier tag for newly created sandboxes.
@@ -40,6 +40,6 @@ The Office bundle in `assets/office` contains the shared installer, locked Node 
 
 `office-contract` tests Word creation, targeted replacements, tracked changes and comments, new decks with artwork/tables/charts, preservation during existing-deck edits, Excel formula recalculation, and actual-file page rendering. It prints conversion time and peak child-process RSS. The image remains 2 vCPU / 2048 MiB; full contracts run inside that allocation. LibreOffice package versions come from the base distribution and are recorded in every rendering report.
 
-After releasing the image, run `npm run live:pi-image-check` to exercise model vision and continuation after generation, intentional image delivery, and embedding an original generated asset into a visually reviewed deck. The test uses disposable sessions and a separate sandbox namespace; it queues results without sending messages to Telegram.
+After releasing the image, run `bun run live:pi-image-check` to exercise model vision and continuation after generation, intentional image delivery, and embedding an original generated asset into a visually reviewed deck. The test uses disposable sessions and a separate sandbox namespace; it queues results without sending messages to Telegram.
 
-To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.6 npm run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources, removes obsolete bundle files, and serializes concurrent installers. See [the 2.0.7 review fixes](../docs/office-review-2.0.7.md) and [the original resource measurements](../docs/office-tools-2.0.6.md).
+To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.6 bun run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources, removes obsolete bundle files, and serializes concurrent installers. See [the 2.0.7 review fixes](../docs/office-review-2.0.7.md) and [the original resource measurements](../docs/office-tools-2.0.6.md).

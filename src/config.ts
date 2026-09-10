@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { z } from "zod";
 import { E2B_TOOLBOX_RELEASE_REF } from "./e2b/templateIdentity.js";
 

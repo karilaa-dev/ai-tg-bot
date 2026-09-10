@@ -1,3 +1,4 @@
+import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +9,7 @@ import { SandboxConsentRequired } from "../../src/files/source.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import { createLogger } from "../../src/logger.js";
 import { ConversationRepository } from "../../src/web/repository.js";
-import { createWebHandler, startWebServer } from "../../src/web/server.js";
+import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
 
@@ -21,6 +22,8 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   let resolver: FileResolver;
   let request: (path: string, init?: RequestInit) => Promise<Response>;
   let controller: AbortController;
+  let server: Server<undefined>;
+  let api: ReturnType<typeof createWebRoutes>;
   const config = loadTestConfig({ WEB_ENABLED: true });
 
   beforeEach(async () => {
@@ -39,11 +42,14 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     repository = new ConversationRepository(database.db, repos, 99);
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
-    const handler = createWebHandler({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
-    request = (url, init) => handler(new Request(`http://localhost${url}`, init));
+    api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
+    server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: api.routes, fetch: api.fetch });
+    request = (url, init) => fetch(new URL(url, server.url), init);
   });
   afterEach(async () => {
     controller.abort();
+    await server.stop(true);
+    await api.drain();
     await database.destroy();
     if (admin) { await admin.db.execute(sql.raw(`drop schema ${schema} cascade`)); await admin.destroy(); admin = undefined; }
   });

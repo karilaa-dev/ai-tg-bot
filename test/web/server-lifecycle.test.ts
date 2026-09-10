@@ -30,11 +30,15 @@ beforeEach(async () => {
   const file = await repos.files.insertFile({ userId: 1, threadId: thread.id, messageId: message.id, type: "txt", name: "test.txt", size: 5, mimeType: "text/plain", isInline: true });
   await repos.files.rememberSource(file.id, { transport: "fixture", connectionKey: "default", remoteKey: "file", locator: {} });
   resolver = new FileResolver(repos.files);
-  assetsDirectory = await mkdtemp(path.join(tmpdir(), "node-web-test-"));
+  assetsDirectory = await mkdtemp(path.join(tmpdir(), "bun-web-test-"));
   await Promise.all([
     writeFile(path.join(assetsDirectory, "index.html"), "<!doctype html><title>Archive</title>"),
     writeFile(path.join(assetsDirectory, "app.js"), "window.loaded = true;"),
     writeFile(path.join(assetsDirectory, "style.css"), "body { color: blue; }"),
+    writeFile(path.join(assetsDirectory, "index-123abc45.js"), "window.hashed = true;"),
+    writeFile(path.join(assetsDirectory, "index-123abc45.css"), "body { color: red; }"),
+    writeFile(path.join(assetsDirectory, "index-123abc45.html"), "<!doctype html><title>Uncached</title>"),
+    writeFile(path.join(assetsDirectory, "index-123abc45.js.map"), "source code"),
     writeFile(path.join(assetsDirectory, "private.txt"), "not an asset"),
   ]);
   await symlink(path.join(assetsDirectory, "private.txt"), path.join(assetsDirectory, "symlink.js"));
@@ -67,6 +71,26 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
   expect((await fetch(new URL("/api/users", web!.url), { method: "POST", body: "ignored" })).status).toBe(405);
   await writeFile(path.join(assetsDirectory, "app.js"), "window.rebuilt = true;");
   expect(await (await fetch(new URL("/app.js", web!.url))).text()).toBe("window.rebuilt = true;");
+});
+
+it("caches only hashed bundles and keeps HTML, API responses, downloads, and errors private", async () => {
+  resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async () => Buffer.from("hello") });
+  for (const asset of ["/index-123abc45.js", "/index-123abc45.css"]) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await fetch(new URL(asset, web!.url), { method });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    }
+  }
+  for (const url of [new URL("/", web!.url), new URL("/index-123abc45.html", web!.url), new URL("/api/users", web!.url), fileUrl, new URL("/missing", web!.url)]) {
+    expect((await fetch(url)).headers.get("cache-control")).toBe("no-store");
+  }
+  expect((await fetch(new URL("/index-123abc45.js.map", web!.url))).status).toBe(404);
+  expect((await fetch(new URL("/src/web/client/app.tsx", web!.url))).status).toBe(404);
+  expect((await fetch(new URL("/index-123abc45.js", web!.url), { method: "POST" })).status).toBe(405);
 });
 
 function waitForCancellation() {

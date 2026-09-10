@@ -43,7 +43,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Requirements
 
-- Node.js 24.18 or newer
+- Bun 1.4.2
 - A Telegram BotFather token
 - E2B, OpenRouter, and Tavily API keys
 - Optional Codex CLI OAuth credentials for primary inference
@@ -52,11 +52,15 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Local setup
 
+Install [Bun 1.4.2](https://bun.com/docs/installation). The application and its scripts run on Bun. SQLite uses Bun's built-in `node:sqlite` API, including Unicode name search; existing database files need no conversion.
+
+Bun loads `.env` automatically; environment variables supplied by your deployment take precedence. Configuration still passes through the same validation at startup.
+
 ```bash
 cp .env.example .env
 # Set BOT_TOKEN, E2B_API_KEY, OPENROUTER_API_KEY, and TAVILY_API_KEY.
-npm install
-npm run dev
+bun install --frozen-lockfile
+bun run dev
 ```
 
 To use Codex as the primary provider, sign in once with the official CLI:
@@ -75,7 +79,7 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 ## Dokploy
 
-Dokploy can deploy this repository with Railpack auto-detection. Railpack runs `npm run build` and starts the bot with `npm start`.
+Dokploy can deploy this repository with Railpack auto-detection. The `packageManager` field pins Bun 1.4.2, and `bun.lock` fixes dependency versions. Railpack runs `bun run build` and starts the bot with `bun run start`.
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
@@ -102,12 +106,12 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.12` uses `ai-tg-bot-tools:v2.0.12`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.13` uses `ai-tg-bot-tools:v2.0.13`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
 ```bash
-npm run e2b:release
+bun run e2b:release
 ```
 
 The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. If a configured image is missing, sandbox creation fails once with this release command in the error. The bot does not build images during a user turn. Existing thread mappings still reconnect their original sandboxes.
@@ -116,8 +120,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.12 is ai-tg-bot-tools:v2.0.12.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.12
+# Optional override. The default for version 2.0.13 is ai-tg-bot-tools:v2.0.13.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.13
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -210,27 +214,29 @@ Completion logs include the final provider and model. When the provider returns 
 Run the local checks before deploying:
 
 ```bash
-npm run typecheck
-npm test
-npm run build
+bun run typecheck
+bun run test
+bun run build
 ```
+
+Use `bun run test` to run the Vitest suite under Bun. `bun test` invokes Bun's separate test runner. The E2B toolbox contract tests also need Node.js 24 to exercise the scripts that run inside the sandbox.
 
 Provider checks require live credentials:
 
 ```bash
-npm run live:pi-check
-npm run live:pi-fallback
+bun run live:pi-check
+bun run live:pi-fallback
 ```
 
-`npm run live:pi-image-intent-check` checks the model's first action for retrieval and synthesis requests using the current prompts and tool schemas. It allows skill reads, then stops before executing the selected action. It makes live model calls without generating images, creating sandboxes, or sending Telegram messages. It does not check later tool choices or finished deliverables.
+`bun run live:pi-image-intent-check` checks the model's first action for retrieval and synthesis requests using the current prompts and tool schemas. It allows skill reads, then stops before executing the selected action. It makes live model calls without generating images, creating sandboxes, or sending Telegram messages. It does not check later tool choices or finished deliverables.
 
-`npx tsx scripts/live-pi-presentation-check.ts` exercises a plain Russian request for a Tokyo presentation, without adding instructions about imagery or tools. It saves the PPTX, PDF, rendered slides, and trace to a temporary directory (or `PRESENTATION_OUTPUT_DIR`), checks substantial imagery on at least two slides, and verifies delivery approval without a technical caption. This live check uses the configured model, search, and E2B accounts and sends no Telegram messages. Review its rendered slides separately; image counts do not measure design quality.
+`bun scripts/live-pi-presentation-check.ts` exercises a plain Russian request for a Tokyo presentation, without adding instructions about imagery or tools. It saves the PPTX, PDF, rendered slides, and trace to a temporary directory (or `PRESENTATION_OUTPUT_DIR`), checks substantial imagery on at least two slides, and verifies delivery approval without a technical caption. This live check uses the configured model, search, and E2B accounts and sends no Telegram messages. Review its rendered slides separately; image counts do not measure design quality.
 
 E2B and Browser Use each have an opt-in live check:
 
 ```bash
-npm run live:e2b-check
-npm run live:browser-use-check
+bun run live:e2b-check
+bun run live:browser-use-check
 ```
 
 Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to cover Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation.
@@ -240,8 +246,8 @@ Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to cov
 Run the CAD benchmark with real inference and E2B while all Telegram delivery is mocked:
 
 ```bash
-node --import tsx scripts/benchmark-harness.ts --provider codex --runs 3 --out data/benchmark-codex.jsonl
-node --import tsx scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/benchmark-openrouter.jsonl
+bun scripts/benchmark-harness.ts --provider codex --runs 3 --out data/benchmark-codex.jsonl
+bun scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/benchmark-openrouter.jsonl
 ```
 
 `--repo /path/to/checkout` measures another version with the same driver. That checkout needs its dependencies and released E2B image. The script uses a temporary SQLite database and Pi directory, and a separate E2B deployment namespace. Each pair uses a new sandbox for the cold run and the same sandbox with a cleared workspace and fresh model session for the warm run. Provider-side prompt caching is measured but cannot be reset. It removes its own sandboxes and temporary sessions afterward. These are live API calls and use the configured accounts.
@@ -257,7 +263,13 @@ WEB_PORT=3000
 WEB_AUTOLOAD_MAX_BYTES=5242880
 ```
 
-Run `npm ci`, `npm run build`, then `npm start`. Development uses `npm run dev`; rerun `npm run build:web` after frontend edits. Both modes use Node.js 24.18 or newer. The website defaults to disabled and opens no listener in that mode.
+Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both modes use Bun 1.4.2, pinned in `package.json`. The website defaults to disabled and opens no listener in that mode.
+
+`bun run dev` watches the backend and enables Bun's HTML development server when `WEB_ENABLED=true`. React and Tailwind edits update the browser through HMR, preserving React state without a separate frontend build. Use this mode for local development: Bun serves source maps and development diagnostics. API responses and attachments retain the production privacy and consent checks.
+
+`bun run build:web` bundles `src/web/client/index.html` with Bun and the Tailwind plugin. Production serves the generated JavaScript and CSS through `Bun.file`, with content hashes in filenames and immutable caching. HTML, conversation data, attachments, and errors use `Cache-Control: no-store`. The frontend targets current browsers with native JavaScript modules; Bun transpiles TypeScript and JSX but does not downlevel JavaScript syntax for older browsers.
+
+`bun-plugin-tailwind` 0.1.2 embeds a Tailwind 4.1.14 compiler, separately from the installed `tailwindcss` styles. The existing UI and HMR have been checked with this combination; newer Tailwind compiler features require an updated plugin.
 
 Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database. The explicit **Start sandbox and load** action uses POST on the attachment URL; allow that method through the proxy. Ordinary browsing and downloads use GET.
 
@@ -269,4 +281,4 @@ Attachments up to 5 MiB load into the page automatically with at most three conc
 
 The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), and [Rare UI Code Block](https://www.rareui.com/components/codeblock). Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
 
-For a local preview with synthetic conversations and files, run `npm run build:web` followed by `node --import tsx test/web/http-smoke.ts --preview`, then open `http://127.0.0.1:3005`. This uses an in-memory database and does not contact Telegram or E2B. `npm test` includes a real Node.js HTTP lifecycle smoke test. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
+For a local preview with synthetic conversations and files, run `bun test/web/http-smoke.ts --preview --web-dev`, then open `http://127.0.0.1:3005`. To preview production assets, run `bun run build:web` and omit `--web-dev`. This uses an in-memory database and does not contact Telegram or E2B. `bun run test` includes real Bun route and HTTP lifecycle tests. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { MotionConfig } from "motion/react";
 import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon } from "lucide-react";
 import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
@@ -228,4 +228,8 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
   </>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const container = document.getElementById("root")!;
+const root: Root = import.meta.hot
+  ? (import.meta.hot.data.root ??= createRoot(container))
+  : createRoot(container);
+root.render(<App />);
