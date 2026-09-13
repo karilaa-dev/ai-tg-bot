@@ -171,11 +171,27 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
 
   it("pages both usage sources without losing totals or retaining years of daily buckets", async () => {
     const first = await thread();
-    for (let i = 0; i < 501; i++) {
-      // Deliberately use timestamps out of ID order, including activity outside the graph.
-      await usageTurn(first.id, { timestamp: i % 2 ? Date.now() - 400 * 86_400_000 : Date.now(), result: false });
-      await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Untracked reply" });
-    }
+    const now = Date.now();
+    const users = await database.db.query<{ id: number }>(sql`
+      insert into messages(thread_id, role, kind, content_json, text_plain, created_at) values
+        ${sql.join(Array.from({ length: 501 }, () => sql`(${first.id}, 'user', 'text', '{}', 'Prompt', ${now})`), sql`, `)}
+      returning id
+    `);
+    await database.db.execute(sql`
+      insert into messages(thread_id, role, kind, content_json, text_plain, created_at) values
+        ${sql.join(users.map(() => sql`(${first.id}, 'assistant', 'text', '{}', 'Untracked reply', ${now})`), sql`, `)}
+    `);
+    const usage = JSON.stringify({ inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 2_000, cacheWriteTokens: 100 });
+    await database.db.execute(sql`
+      insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status,
+        provider, model, usage_json, accepted_at, started_at, finished_at, updated_at) values
+      ${sql.join(users.sort((a, b) => a.id - b.id).map((user, i) => {
+        // Deliberately use timestamps out of ID order, including activity outside the graph.
+        const timestamp = i % 2 ? now - 400 * 86_400_000 : now;
+        return sql`(1, ${first.id}, ${user.id}, 1, 'en', 'succeeded', 'openai-codex', 'gpt-test', ${usage},
+          ${timestamp}, ${timestamp}, ${timestamp}, ${timestamp})`;
+      }), sql`, `)}
+    `);
     const pageSizes: number[] = [];
     const transact = database.db.transaction;
     const transaction = vi.spyOn(database.db, "transaction").mockImplementation(callback => transact(tx => callback({
