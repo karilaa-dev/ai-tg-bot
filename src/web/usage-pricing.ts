@@ -1,6 +1,7 @@
 import type { InferenceUsageCall } from "../pi/usage.js";
 
 export const PRICING_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+export const MAX_PRICING_BYTES = 16 * 1024 * 1024;
 export type PricingCatalog = Record<string, Record<string, unknown>>;
 
 /** ccusage's token calculation method. Rates are USD per token, not per million.
@@ -68,7 +69,7 @@ export class UsagePricing {
     try {
       const response = await this.fetcher(PRICING_URL, { signal: AbortSignal.timeout(5_000) });
       if (!response.ok) throw new Error("Pricing download failed");
-      const value: unknown = await response.json();
+      const value: unknown = await readPricingJson(response);
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid pricing catalog");
       const catalog: PricingCatalog = Object.fromEntries(Object.entries(value).filter((entry): entry is [string, Record<string, unknown>] => {
         const rates = entry[1];
@@ -86,3 +87,29 @@ export class UsagePricing {
 }
 
 export const usagePricing = new UsagePricing();
+
+async function readPricingJson(response: Response): Promise<unknown> {
+  if (Number(response.headers.get("content-length")) > MAX_PRICING_BYTES) {
+    await response.body?.cancel();
+    throw new Error("Pricing catalog exceeds size limit");
+  }
+  if (!response.body) throw new Error("Empty pricing response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_PRICING_BYTES) throw new Error("Pricing catalog exceeds size limit");
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+}

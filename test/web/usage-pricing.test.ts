@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { estimateCallCost, UsagePricing, type PricingCatalog } from "../../src/web/usage-pricing.js";
+import { estimateCallCost, MAX_PRICING_BYTES, UsagePricing, type PricingCatalog } from "../../src/web/usage-pricing.js";
 import { summarizeUsage } from "../../src/web/usage.js";
 import type { InferenceUsageCall } from "../../src/pi/usage.js";
 
@@ -80,4 +80,26 @@ it("shares pricing downloads, refreshes daily, retains stale data, and backs off
   fetcher.mockResolvedValueOnce(Response.json(catalog));
   expect(await pricing.load()).toMatchObject({ fetchedAt: now, stale: false });
   expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it.each(["declared", "streamed"])("rejects oversized %s pricing responses and retains the last catalog", async mode => {
+  let now = 1_000;
+  const cancelled = vi.fn();
+  const fetcher = vi.fn().mockResolvedValueOnce(Response.json(catalog));
+  const pricing = new UsagePricing(fetcher, () => now);
+  await pricing.load();
+  now += 86_400_000;
+  let chunks = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); },
+    cancel: cancelled,
+  });
+  fetcher.mockResolvedValueOnce(new Response(stream, {
+    headers: mode === "declared" ? { "content-length": String(MAX_PRICING_BYTES + 1) } : { "content-length": "1" },
+  }));
+  expect(await pricing.load()).toMatchObject({ catalog, fetchedAt: 1_000, stale: true });
+  expect(cancelled).toHaveBeenCalledOnce();
+  expect(chunks).toBeLessThanOrEqual(mode === "declared" ? 1 : MAX_PRICING_BYTES / (1024 * 1024) + 2);
+  await pricing.load();
+  expect(fetcher).toHaveBeenCalledTimes(2);
 });

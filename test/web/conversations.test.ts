@@ -167,6 +167,29 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(overview.totals.recordedTurns).toBe(0);
   });
 
+  it("pages both usage sources without losing totals or retaining years of daily buckets", async () => {
+    const first = await thread();
+    for (let i = 0; i < 501; i++) {
+      // Deliberately use timestamps out of ID order, including activity outside the graph.
+      await usageTurn(first.id, { timestamp: i % 2 ? Date.now() - 400 * 86_400_000 : Date.now(), result: false });
+      await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Untracked reply" });
+    }
+    const query = vi.spyOn(database.db, "query");
+    const report = await repository.usageReport({ days: 0 });
+    const pages = query.mock.results.map(result => result.value);
+    query.mockRestore();
+    expect((await Promise.all(pages)).every(rows => rows.length <= 500)).toBe(true);
+    expect(report.totals).toMatchObject({ recordedTurns: 501, missingUsageTurns: 501, totalTokens: 501 * 3_200 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(501 * 0.00365);
+    expect(report.models).toHaveLength(1);
+    expect(report.models[0]?.recordedTurns).toBe(501);
+    expect(report.threads[0]?.totalTokens).toBe(501 * 3_200);
+    expect(report.dailyTruncated).toBe(true);
+    expect(report.daily).toHaveLength(365);
+    expect(report.daily.reduce((sum, day) => sum + day.recordedTurns, 0)).toBe(251);
+    expect(report.daily.at(-1)?.missingUsageTurns).toBe(501);
+  });
+
   it("validates usage filters and preserves hidden-user and method restrictions", async () => {
     const first = await thread();
     await thread(2);

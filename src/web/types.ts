@@ -64,6 +64,7 @@ export interface WebMessageUsage extends WebUsageTotals {
 }
 export interface WebUsageReport {
   totals: WebUsageTotals;
+  dailyTruncated: boolean;
   daily: (WebUsageTotals & { date: string })[];
   models: WebModelUsage[];
   threads: (WebUsageTotals & { id: number; userId: number; title: string; archived: boolean })[];

@@ -6,7 +6,7 @@ import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } f
 
 export interface UsageScope { userId?: number; threadId?: number; days?: number }
 interface UsageRow {
-  id: number; userId: number; title: string; archived: number;
+  rowId: number; id: number; userId: number; title: string; archived: number;
   messageId: number | null; provider: string | null; model: string | null; usage: string | null; timestamp: number;
 }
 const tokenKeys = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
@@ -104,54 +104,84 @@ export class UsageRepository {
   async report(scope: UsageScope, now = Date.now()): Promise<WebUsageReport> {
     const today = Math.floor(now / 86_400_000) * 86_400_000;
     const since = scope.days ? today - (scope.days - 1) * 86_400_000 : null;
-    const rows = await this.db.query<UsageRow>(sql`
-      select * from (
-        select t.id, t.user_id as "userId", t.title, t.archived, r.result_message_id as "messageId",
-          r.provider, r.model, r.usage_json as usage, coalesce(r.finished_at, r.started_at, r.accepted_at) as timestamp
-        from threads t join turn_runs r on r.thread_id = t.id and r.user_id = t.user_id where r.status <> 'queued'
-        union all
-        select t.id, t.user_id as "userId", t.title, t.archived, m.id as "messageId",
-          null as provider, null as model, null as usage, m.created_at as timestamp
-        from threads t join messages m on m.thread_id = t.id where m.role = 'assistant'
-          and not exists (select 1 from turn_runs r where r.result_message_id = m.id)
-      ) usage_rows
-      where ${this.botUserId === undefined ? sql`true` : sql`"userId" <> ${this.botUserId}`}
-        ${scope.userId === undefined ? sql`` : sql`and "userId" = ${scope.userId}`}
-        ${scope.threadId === undefined ? sql`` : sql`and id = ${scope.threadId}`}
-        ${since === null ? sql`` : sql`and timestamp >= ${since}`}
-        and timestamp <= ${now}
-      order by timestamp asc
-    `);
-    const pricing = rows.some(row => parseUsage(row)) ? await this.pricing.load()
-      : { catalog: {}, source: "LiteLLM" as const, fetchedAt: null, stale: true };
     const totals = emptyUsage();
     const days = new Map<string, WebUsageReport["daily"][number]>();
     const threads = new Map<number, WebUsageReport["threads"][number]>();
-    const models: WebModelUsage[] = [];
+    const models = new Map<string, WebModelUsage>();
+    let pricing: Awaited<ReturnType<UsagePricing["load"]>> = { catalog: {}, source: "LiteLLM", fetchedAt: null, stale: true };
+    let loadedPricing = false;
+    let firstDay = today, lastDay = scope.threadId !== undefined && since === null ? -Infinity : today;
+    // Page each source by its primary key. Never retain historical usage JSON or
+    // one model summary per turn after it has been folded into the totals.
+    for (const source of ["turns", "messages"] as const) {
+      let cursor = 0;
+      while (true) {
+        const selection = source === "turns" ? sql`
+          select r.id as "rowId", t.id, t.user_id as "userId", t.title, t.archived,
+            r.result_message_id as "messageId", r.provider, r.model, r.usage_json as usage,
+            coalesce(r.finished_at, r.started_at, r.accepted_at) as timestamp
+          from turn_runs r join threads t on r.thread_id = t.id and r.user_id = t.user_id
+          where r.id > ${cursor} and r.status <> 'queued'
+        ` : sql`
+          select m.id as "rowId", t.id, t.user_id as "userId", t.title, t.archived,
+            m.id as "messageId", null as provider, null as model, null as usage, m.created_at as timestamp
+          from messages m join threads t on m.thread_id = t.id
+          where m.id > ${cursor} and m.role = 'assistant'
+            and not exists (select 1 from turn_runs r where r.result_message_id = m.id)
+        `;
+        const rows = await this.db.query<UsageRow>(sql`
+          select * from (${selection}) usage_rows
+          where ${this.botUserId === undefined ? sql`true` : sql`"userId" <> ${this.botUserId}`}
+            ${scope.userId === undefined ? sql`` : sql`and "userId" = ${scope.userId}`}
+            ${scope.threadId === undefined ? sql`` : sql`and id = ${scope.threadId}`}
+            ${since === null ? sql`` : sql`and timestamp >= ${since}`}
+            and timestamp <= ${now}
+          order by "rowId" asc limit 500
+        `);
+        if (!loadedPricing && rows.some(row => parseUsage(row))) {
+          pricing = await this.pricing.load();
+          loadedPricing = true;
+        }
+        for (const row of rows) {
+          const summary = summarizeUsage(row, pricing.catalog);
+          addUsage(totals, summary);
+          const day = Math.floor(row.timestamp / 86_400_000) * 86_400_000;
+          firstDay = Math.min(firstDay, day);
+          const previousLastDay = lastDay;
+          lastDay = Math.max(lastDay, day);
+          // All-time totals remain complete; the daily graph covers at most a year.
+          const earliest = new Date(lastDay - 364 * 86_400_000).toISOString().slice(0, 10);
+          if (lastDay !== previousLastDay) {
+            for (const date of days.keys()) if (date < earliest) days.delete(date);
+          }
+          const date = new Date(day).toISOString().slice(0, 10);
+          if (date >= earliest) {
+            const bucket = days.get(date) ?? { ...emptyUsage(), date };
+            addUsage(bucket, summary);
+            days.set(date, bucket);
+          }
+          const thread = threads.get(row.id) ?? { ...emptyUsage(), id: row.id, userId: row.userId, title: row.title, archived: Boolean(row.archived) };
+          addUsage(thread, summary);
+          threads.set(row.id, thread);
+          for (const model of summary.models) mergeModel(models, model);
+        }
+        if (rows.length < 500) break;
+        cursor = rows.at(-1)!.rowId;
+      }
+    }
+    const end = Number.isFinite(lastDay) ? lastDay : today;
+    const start = Math.max(since ?? firstDay, end - 364 * 86_400_000);
     // Include quiet days so the graph's spacing represents elapsed time.
-    const start = since ?? (rows[0] ? Math.floor(rows[0].timestamp / 86_400_000) * 86_400_000 : today);
-    // An all-time thread graph spans its activity, not the idle months after it.
-    const end = scope.threadId !== undefined && since === null && rows.length
-      ? Math.floor(rows.at(-1)!.timestamp / 86_400_000) * 86_400_000 : today;
     for (let day = start; day <= end; day += 86_400_000) {
       const date = new Date(day).toISOString().slice(0, 10);
-      days.set(date, { ...emptyUsage(), date });
-    }
-    for (const row of rows) {
-      const summary = summarizeUsage(row, pricing.catalog);
-      addUsage(totals, summary);
-      const date = new Date(row.timestamp).toISOString().slice(0, 10);
-      addUsage(days.get(date)!, summary);
-      const thread = threads.get(row.id) ?? { ...emptyUsage(), id: row.id, userId: row.userId, title: row.title, archived: Boolean(row.archived) };
-      addUsage(thread, summary);
-      threads.set(row.id, thread);
-      models.push(...summary.models);
+      if (!days.has(date)) days.set(date, { ...emptyUsage(), date });
     }
     // A quiet period is zero; a period with untracked/unpriced work is unknown.
     for (const bucket of [totals, ...days.values()]) {
       if (!bucket.recordedTurns && !bucket.missingUsageTurns) bucket.estimatedCostUsd = 0;
     }
-    return { totals, daily: [...days.values()], models: mergeModels(models),
+    return { totals, daily: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)), dailyTruncated: start > (since ?? firstDay),
+      models: [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens),
       threads: [...threads.values()].sort((a, b) => (b.estimatedCostUsd ?? 0) - (a.estimatedCostUsd ?? 0) || b.totalTokens - a.totalTokens || b.id - a.id),
       pricing: { source: pricing.source, fetchedAt: pricing.fetchedAt, stale: pricing.stale }, since, until: now };
   }
@@ -159,11 +189,13 @@ export class UsageRepository {
 
 function mergeModels(items: WebModelUsage[]): WebModelUsage[] {
   const models = new Map<string, WebModelUsage>();
-  for (const item of items) {
-    const key = JSON.stringify([item.provider, item.model]);
-    const total = models.get(key) ?? { ...emptyUsage(), provider: item.provider, model: item.model };
-    addUsage(total, item);
-    models.set(key, total);
-  }
+  for (const item of items) mergeModel(models, item);
   return [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
+function mergeModel(models: Map<string, WebModelUsage>, item: WebModelUsage) {
+  const key = JSON.stringify([item.provider, item.model]);
+  const total = models.get(key) ?? { ...emptyUsage(), provider: item.provider, model: item.model };
+  addUsage(total, item);
+  models.set(key, total);
 }

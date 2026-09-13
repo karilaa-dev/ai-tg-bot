@@ -126,6 +126,7 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
         </div>
         <div className="usage-token-summary"><TokenBar usage={report.totals} /><TokenBreakdown usage={report.totals} /></div>
         {(report.totals.missingUsageTurns > 0 || report.totals.unpricedTurns > 0) && <p className="usage-coverage">{report.totals.missingUsageTurns > 0 && `${number(report.totals.missingUsageTurns)} replies or turns have no saved usage. `}{report.totals.unpricedTurns > 0 && `${number(report.totals.unpricedTurns)} recorded turns have incomplete pricing. `}Totals include only available data.</p>}
+        {report.dailyTruncated && <p className="usage-coverage">Graphs show the latest 365 days of this period. Totals and tables include the entire period.</p>}
         {!report.totals.recordedTurns ? <div className="notice"><h3>No recorded usage in this period</h3><p>Try a longer period. New bot replies will appear here after the model finishes.</p></div> : <UsageGraphs daily={report.daily} />}
         {report.models.length > 0 && <section className="usage-section"><h3>By model</h3><ModelTable models={report.models} /></section>}
         {report.threads.length > 0 && <section className="usage-section"><h3>By thread</h3><div className="usage-table-scroll"><table className="usage-table"><thead><tr><th>Thread</th><th>Tokens</th><th>Cache hit</th><th>Turns</th><th>Est. USD</th></tr></thead><tbody>{report.threads.map(thread => <tr key={thread.id}>
