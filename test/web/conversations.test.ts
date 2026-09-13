@@ -12,6 +12,8 @@ import { ConversationRepository } from "../../src/web/repository.js";
 import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
+import type { WebUsageReport } from "../../src/web/types.js";
+import { UsagePricing } from "../../src/web/usage-pricing.js";
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
   let database: AppDatabase;
@@ -39,7 +41,10 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     database = createDatabase({ DB_URL: dbUrl });
     await database.initialize();
     repos = createRepos(database.db, database.search);
-    repository = new ConversationRepository(database.db, repos, 99);
+    repository = new ConversationRepository(database.db, repos, 99, new UsagePricing(async () => Response.json({
+      "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
+        cache_read_input_token_cost: 0.2 / 1e6, cache_creation_input_token_cost: 2.5 / 1e6 },
+    })));
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
     api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
@@ -66,6 +71,113 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await repos.files.rememberSource(file.id, { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: { secret: "hidden" } });
     return file;
   }
+
+  async function usageTurn(threadId: number, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
+    const user = await message(threadId);
+    const assistant = options.result === false ? null : await repos.messages.insert({ threadId, role: "assistant", content: {}, textPlain: "Reply" });
+    const owner = (await repos.threads.get(threadId))!;
+    const timestamp = options.timestamp ?? Date.now();
+    const usage = options.usage === undefined ? JSON.stringify({ inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 2_000, cacheWriteTokens: 100 }) : options.usage;
+    await database.db.execute(sql`
+      insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status, result_message_id,
+        provider, model, usage_json, accepted_at, started_at, finished_at, updated_at)
+      values (${owner.user_id}, ${threadId}, ${user.id}, ${owner.user_id}, 'en', ${options.status ?? "succeeded"}, ${assistant?.id ?? null},
+        'openai-codex', ${options.model ?? "gpt-test"}, ${usage}, ${timestamp}, ${timestamp}, ${timestamp}, ${timestamp})
+    `);
+    return assistant;
+  }
+
+  it("aggregates usage by UTC day, model and thread, including archived and failed work", async () => {
+    const first = await thread();
+    const second = await thread(2, "Archived");
+    await repos.threads.archive(second.id);
+    await usageTurn(first.id);
+    await usageTurn(first.id, { timestamp: Date.now() - 9 * 86_400_000 });
+    await usageTurn(second.id, { status: "failed", result: false });
+    const bot = await thread(99);
+    await usageTurn(bot.id);
+    const response = await request("/api/usage?days=7");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const report = await response.json() as WebUsageReport;
+    expect(report.totals).toMatchObject({ inputTokens: 2_000, outputTokens: 200, cacheReadTokens: 4_000, cacheWriteTokens: 200,
+      totalTokens: 6_400, recordedTurns: 2, missingUsageTurns: 0, unpricedTurns: 0 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.0073);
+    expect(report.daily).toHaveLength(7);
+    expect(report.daily.at(-1)?.recordedTurns).toBe(2);
+    expect(report.daily.slice(0, -1).every(day => day.totalTokens === 0)).toBe(true);
+    expect(report.daily.slice(0, -1).every(day => day.estimatedCostUsd === 0)).toBe(true);
+    expect(report.threads).toHaveLength(2);
+    expect(report.threads.find(t => t.id === second.id)?.archived).toBe(true);
+    expect(report.models).toHaveLength(1);
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
+    expect((await repository.usageReport({ userId: 1, days: 0 })).totals.recordedTurns).toBe(2);
+  });
+
+  it("keeps fork costs separate and attaches usage to the correct inherited and own messages", async () => {
+    const parent = await thread();
+    const inherited = (await usageTurn(parent.id))!;
+    const child = await repos.threads.create({ userId: 1, title: "Fork", topicId: null, parentThreadId: parent.id, forkPointMessageId: inherited.id });
+    await usageTurn(parent.id);
+    const own = (await usageTurn(child.id))!;
+    const report = await repository.usageReport({ threadId: child.id, days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 1, totalTokens: 3_200 });
+    expect(report.threads.map(t => t.id)).toEqual([child.id]);
+    const history = await repository.history(child.id);
+    const replies = history.messages.filter(m => m.role === "assistant");
+    expect(replies.map(m => m.id)).toEqual([inherited.id, own.id]);
+    expect(replies.every(m => m.usage?.totalTokens === 3_200)).toBe(true);
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
+  });
+
+  it("reports incomplete coverage without treating missing usage or unknown prices as zero", async () => {
+    const first = await thread();
+    await repos.messages.insert({ threadId: first.id, role: "assistant", textPlain: "Old reply", content: {} });
+    await usageTurn(first.id, { usage: "broken" });
+    await usageTurn(first.id, { model: "unknown" });
+    await usageTurn(first.id);
+    const report = await repository.usageReport({ days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 2, missingUsageTurns: 2, unpricedTurns: 1, totalTokens: 6_400 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+    expect(report.models.find(m => m.model === "unknown")?.estimatedCostUsd).toBeNull();
+    expect((await repository.history(first.id)).messages.find(m => m.text === "Old reply")?.usage).toBeNull();
+  });
+
+  it("keeps thread totals independent of the 50-message history page", async () => {
+    const first = await thread();
+    for (let i = 0; i < 30; i++) await usageTurn(first.id);
+    expect((await repository.history(first.id)).messages).toHaveLength(50);
+    expect((await repository.usageReport({ threadId: first.id, days: 0 })).totals.recordedTurns).toBe(30);
+  });
+
+  it("shows an old thread's complete activity without trailing idle months", async () => {
+    const first = await thread();
+    const started = Date.UTC(2020, 0, 5, 12);
+    await usageTurn(first.id, { timestamp: started });
+    await usageTurn(first.id, { timestamp: started + 2 * 86_400_000 });
+    const response = await request(`/api/usage?thread=${first.id}&days=0`);
+    expect(response.status).toBe(200);
+    const report = await response.json() as WebUsageReport;
+    expect(report.totals).toMatchObject({ recordedTurns: 2, totalTokens: 6_400 });
+    expect(report.daily.map(day => day.date)).toEqual(["2020-01-05", "2020-01-06", "2020-01-07"]);
+    expect(report.daily[1]).toMatchObject({ totalTokens: 0, estimatedCostUsd: 0 });
+    // The overview still respects its selected reporting period.
+    const overview = await repository.usageReport({ days: 7 });
+    expect(overview.daily).toHaveLength(7);
+    expect(overview.totals.recordedTurns).toBe(0);
+  });
+
+  it("validates usage filters and preserves hidden-user and method restrictions", async () => {
+    const first = await thread();
+    await thread(2);
+    const bot = await thread(99);
+    for (const query of ["days=-1", "days=8", "days=NaN", "days=", "user=0", "thread=1.5"]) expect((await request(`/api/usage?${query}`)).status).toBe(400);
+    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, "thread=9999"]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
+    expect((await request("/api/usage", { method: "POST" })).status).toBe(405);
+    const head = await request("/api/usage", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+  });
 
   it("uses saved identity, literal search, stable recent activity ordering, and pages", async () => {
     const first = await thread();

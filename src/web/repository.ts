@@ -8,11 +8,25 @@ import type { MessageRow, ThreadRow } from "../db/types.js";
 import type { WebPage, WebThread, WebUser } from "./types.js";
 
 import { messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
+import { UsageRepository, type UsageScope } from "./usage.js";
+import type { UsagePricing } from "./usage-pricing.js";
 
 export class WebNotFound extends Error {}
 
 export class ConversationRepository {
-  constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number) {}
+  private readonly usage: UsageRepository;
+  constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number, pricing?: UsagePricing) {
+    this.usage = new UsageRepository(db, botUserId, pricing);
+  }
+
+  async usageReport(scope: UsageScope) {
+    if (scope.userId !== undefined) await this.user(scope.userId);
+    if (scope.threadId !== undefined) {
+      const { thread } = await this.scope(scope.threadId);
+      if (scope.userId !== undefined && thread.user_id !== scope.userId) throw new WebNotFound();
+    }
+    return this.usage.report(scope);
+  }
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
     const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
@@ -92,6 +106,8 @@ export class ConversationRepository {
     const transcripts = selected.some(m => m.text_plain.includes("[Audio transcript preview;"))
       ? await this.savedTranscripts(selected.map(m => m.id)) : [];
     const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts));
+    const usage = await this.usage.messages(selected.filter(m => m.role === "assistant").map(m => m.id));
+    for (const message of messages) if (message.role === "assistant") message.usage = usage.get(message.id) ?? null;
     return {
       user: await this.user(thread.user_id), thread: threadView(thread),
       chain: chain.map(t => ({ id: t.id, title: t.title, parentThreadId: t.parent_thread_id, forkPointMessageId: t.fork_point_message_id })),

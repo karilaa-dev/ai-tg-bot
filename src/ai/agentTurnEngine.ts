@@ -15,6 +15,7 @@ import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import {
   inferenceUsageDelta,
+  inferenceUsageFromEntries,
   type InferenceUsageDelta,
 } from "../pi/usage.js";
 import { budgetReasonText } from "../pi/turnBudget.js";
@@ -99,6 +100,8 @@ export const runTurn: TurnRunner = async (input) => {
         usageBefore,
         runtime.session.getSessionStats().tokens,
       );
+      const entryUsage = inferenceUsageFromEntries(newEntries);
+      if (entryUsage.calls?.length) inferenceUsage = entryUsage;
       const finalAssistant = [...newEntries].reverse().find(
         (entry) => entry.type === "message" && entry.message.role === "assistant",
       );
@@ -108,6 +111,14 @@ export const runTurn: TurnRunner = async (input) => {
           inferenceModel: finalAssistant.message.model,
         };
       }
+      // Save even if cancellation, a tool failure, or delivery failure follows.
+      await input.onInferenceUsage?.({
+        provider: inferenceBackend?.inferenceProvider,
+        model: inferenceBackend?.inferenceModel,
+        usage: inferenceUsage,
+      }).catch(error => input.logger.warn("failed to persist inference usage", {
+        turnRunId: input.turnRunId, error: String(error),
+      }));
       const userEntry = piEntries.find((entry) => entry.role === "user");
       if (userMessage && userEntry) {
         await input.repos.messages.setPiEntryId(userMessage.id, userEntry.id).catch((err) => {
