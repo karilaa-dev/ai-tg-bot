@@ -1,6 +1,6 @@
 import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
@@ -13,6 +13,8 @@ import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
 import type { WebUsageReport } from "../../src/web/types.js";
+import type { SqlExecutor } from "../../src/db/sql.js";
+import { UsageRepository } from "../../src/web/usage.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
@@ -174,11 +176,20 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
       await usageTurn(first.id, { timestamp: i % 2 ? Date.now() - 400 * 86_400_000 : Date.now(), result: false });
       await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Untracked reply" });
     }
-    const query = vi.spyOn(database.db, "query");
+    const pageSizes: number[] = [];
+    const transact = database.db.transaction;
+    const transaction = vi.spyOn(database.db, "transaction").mockImplementation(callback => transact(tx => callback({
+      ...tx,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await tx.query<T>(statement);
+        pageSizes.push(rows.length);
+        return rows;
+      },
+    })));
     const report = await repository.usageReport({ days: 0 });
-    const pages = query.mock.results.map(result => result.value);
-    query.mockRestore();
-    expect((await Promise.all(pages)).every(rows => rows.length <= 500)).toBe(true);
+    transaction.mockRestore();
+    expect(pageSizes.length).toBeGreaterThanOrEqual(4);
+    expect(pageSizes.every(size => size <= 500)).toBe(true);
     expect(report.totals).toMatchObject({ recordedTurns: 501, missingUsageTurns: 501, totalTokens: 501 * 3_200 });
     expect(report.totals.estimatedCostUsd).toBeCloseTo(501 * 0.00365);
     expect(report.models).toHaveLength(1);
@@ -188,6 +199,64 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(report.daily).toHaveLength(365);
     expect(report.daily.reduce((sum, day) => sum + day.recordedTurns, 0)).toBe(251);
     expect(report.daily.at(-1)?.missingUsageTurns).toBe(501);
+  });
+
+  it("keeps one snapshot when a queued turn finishes between the report scans", async () => {
+    const first = await thread();
+    await usageTurn(first.id, { status: "queued", result: false, timestamp: 1 });
+    const reply = await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Reply" });
+    let scanned!: () => void, resume!: () => void;
+    const firstScan = new Promise<void>(resolve => { scanned = resolve; });
+    const paused = new Promise<void>(resolve => { resume = resolve; });
+    let reads = 0;
+    const observe = (executor: SqlExecutor): SqlExecutor => ({
+      ...executor,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await executor.query<T>(statement);
+        if (++reads === 1) { scanned(); await paused; }
+        return rows;
+      },
+      transaction: callback => executor.transaction(tx => callback(observe(tx))),
+    });
+    const usage = new UsageRepository(observe(database.db), 99, new UsagePricing(async () => Response.json({
+      "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
+        cache_read_input_token_cost: 0.2 / 1e6, cache_creation_input_token_cost: 2.5 / 1e6 },
+    })));
+    const pending = usage.report({ days: 0 });
+    await firstScan;
+    const delivery = database.db.execute(sql`update turn_runs set status = 'succeeded', result_message_id = ${reply.id}
+      where thread_id = ${first.id}`);
+    try {
+      // PostgreSQL commits concurrently. SQLite queues the writer behind the snapshot.
+      if (dialect === "postgres") await delivery;
+    } finally { resume(); }
+    const during = await pending;
+    await delivery;
+    expect(during.totals).toMatchObject({ recordedTurns: 0, missingUsageTurns: 1 });
+    const after = await usage.report({ days: 0 });
+    expect(after.totals).toMatchObject({ recordedTurns: 1, missingUsageTurns: 0, totalTokens: 3_200 });
+    expect(after.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+  });
+
+  it("does not hold a database transaction while downloading pricing", async () => {
+    const first = await thread();
+    await usageTurn(first.id);
+    let downloading!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { downloading = resolve; });
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const pricing = new UsagePricing(async () => {
+      downloading(); await paused;
+      return Response.json({ "gpt-test": { input_cost_per_token: 1, output_cost_per_token: 1 } });
+    });
+    const transaction = vi.spyOn(database.db, "transaction");
+    const pending = new UsageRepository(database.db, 99, pricing).report({ days: 0 });
+    await started;
+    try {
+      expect(transaction).not.toHaveBeenCalled();
+      await database.db.execute(sql`update threads set title = 'Still writable' where id = ${first.id}`);
+    } finally { release(); }
+    await pending;
+    transaction.mockRestore();
   });
 
   it("validates usage filters and preserves hidden-user and method restrictions", async () => {

@@ -102,14 +102,23 @@ export class UsageRepository {
   }
 
   async report(scope: UsageScope, now = Date.now()): Promise<WebUsageReport> {
+    // Load external data before opening a snapshot, especially because SQLite
+    // serializes transactions with other work on its shared connection.
+    const pricing = await this.pricing.load();
+    return this.db.transaction(async tx => {
+      if (tx.dialect === "postgres") await tx.execute(sql`set transaction isolation level repeatable read read only`);
+      return this.reportSnapshot(tx, scope, now, pricing);
+    });
+  }
+
+  private async reportSnapshot(db: SqlExecutor, scope: UsageScope, now: number,
+    pricing: Awaited<ReturnType<UsagePricing["load"]>>): Promise<WebUsageReport> {
     const today = Math.floor(now / 86_400_000) * 86_400_000;
     const since = scope.days ? today - (scope.days - 1) * 86_400_000 : null;
     const totals = emptyUsage();
     const days = new Map<string, WebUsageReport["daily"][number]>();
     const threads = new Map<number, WebUsageReport["threads"][number]>();
     const models = new Map<string, WebModelUsage>();
-    let pricing: Awaited<ReturnType<UsagePricing["load"]>> = { catalog: {}, source: "LiteLLM", fetchedAt: null, stale: true };
-    let loadedPricing = false;
     let firstDay = today, lastDay = scope.threadId !== undefined && since === null ? -Infinity : today;
     // Page each source by its primary key. Never retain historical usage JSON or
     // one model summary per turn after it has been folded into the totals.
@@ -129,7 +138,7 @@ export class UsageRepository {
           where m.id > ${cursor} and m.role = 'assistant'
             and not exists (select 1 from turn_runs r where r.result_message_id = m.id)
         `;
-        const rows = await this.db.query<UsageRow>(sql`
+        const rows = await db.query<UsageRow>(sql`
           select * from (${selection}) usage_rows
           where ${this.botUserId === undefined ? sql`true` : sql`"userId" <> ${this.botUserId}`}
             ${scope.userId === undefined ? sql`` : sql`and "userId" = ${scope.userId}`}
@@ -138,10 +147,6 @@ export class UsageRepository {
             and timestamp <= ${now}
           order by "rowId" asc limit 500
         `);
-        if (!loadedPricing && rows.some(row => parseUsage(row))) {
-          pricing = await this.pricing.load();
-          loadedPricing = true;
-        }
         for (const row of rows) {
           const summary = summarizeUsage(row, pricing.catalog);
           addUsage(totals, summary);
