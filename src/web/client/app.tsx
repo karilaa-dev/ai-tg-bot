@@ -9,6 +9,7 @@ import { RichText } from "./rich-text.js";
 import { Button } from "./components/ui/button.js";
 import { FileAttachment } from "./file-attachment.js";
 import { cn } from "./lib/utils.js";
+import { ThreadActivity, activityLabel } from "./thread-activity.js";
 import { MessageUsage, ThreadUsage, UsageDashboard } from "./usage.js";
 
 async function get<T>(url: string, signal: AbortSignal): Promise<T> {
@@ -124,7 +125,7 @@ function App() {
       {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage for this person</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
-        {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <HookSidebar aria-label="Conversation list" color="var(--primary)" dashed={false} items={threads.items.map(t => ({ label: `${t.title}${t.archived ? " · Archived" : ""}${t.parentThreadId ? " · Fork" : ""}` }))} value={threads.items.findIndex(t => t.id === selected.threadId)} onChange={index => navigate(selected.userId, threads.items[index]!.id)} />}
+        {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <HookSidebar aria-label="Conversation list" color="var(--primary)" dashed={false} items={threads.items.map(t => ({ label: `${t.title}${t.archived ? " · Archived" : ""}${t.parentThreadId ? " · Fork" : ""}`, description: !threads.error && t.activity ? activityLabel(t.activity) : undefined }))} value={threads.items.findIndex(t => t.id === selected.threadId)} onChange={index => navigate(selected.userId, threads.items[index]!.id)} />}
         {threads.next !== null && <Button variant="outline" className="mt-4" disabled={threads.loading} onClick={threads.more}>Load more conversations</Button>}
       </div>
       <footer className="pane-footer">Newest activity first · Includes archived</footer>
@@ -196,11 +197,16 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
   }, [threadId]);
   useEffect(() => {
     controller.current = new AbortController();
-    void load();
-    const interval = setInterval(() => { if (!document.hidden) void load(); }, 10_000);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (!document.hidden) await load();
+      if (!stopped) timer = setTimeout(() => void poll(), dataRef.current?.thread.activity ? 3_000 : 10_000);
+    };
+    void poll();
     const visible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", visible);
-    return () => { controller.current?.abort(); clearInterval(interval); document.removeEventListener("visibilitychange", visible); };
+    return () => { stopped = true; controller.current?.abort(); clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
   }, [load, revision]);
   useEffect(() => () => loader.dispose(), [loader]);
   useEffect(() => {
@@ -210,7 +216,7 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
     }
   }, [data, loader]);
   return <>
-    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p></div>{data?.thread.archived && <span className="archive-label">Archived</span>}<ThemeToggle /></header>
+    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}<ThemeToggle /></header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
     <ThreadUsage threadId={threadId} initiallyOpen={showUsage} />
     {!data ? !error && <Loading /> : <>
@@ -232,7 +238,7 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
           </div>)}
         </div></div>{canJump && <Button className="jump-to-latest" variant="outline" size="icon-sm" aria-label="Jump to latest" onClick={() => { const node = viewport.current; if (node) node.scrollTop = node.scrollHeight; }}><ArrowDown /></Button>}
       </div>
-      <footer className="transcript-footer">{data.messages.length} messages loaded · Refreshes every 10 seconds</footer>
+      <footer className="transcript-footer">{data.messages.length} messages loaded · {data.thread.activity ? "Checking active response every 3 seconds" : "Refreshes every 10 seconds"}</footer>
     </>}
   </>;
 }

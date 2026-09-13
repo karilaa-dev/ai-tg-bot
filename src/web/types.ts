@@ -10,6 +10,11 @@ export function userLabel(user: Pick<WebUser, "id" | "name" | "username">): stri
   return user.username ? `@${user.username}` : user.name || `User ${user.id}`;
 }
 
+export interface WebThreadActivity {
+  state: "queued" | "generating" | "delivering" | "stopping" | "interrupted";
+  queuedTurns: number;
+}
+
 export interface WebThread {
   id: number;
   userId: number;
@@ -18,6 +23,7 @@ export interface WebThread {
   parentThreadId: number | null;
   forkPointMessageId: number | null;
   lastActivity: number;
+  activity: WebThreadActivity | null;
 }
 
 export interface WebAttachment {

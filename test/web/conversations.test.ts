@@ -12,7 +12,7 @@ import { ConversationRepository } from "../../src/web/repository.js";
 import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
-import type { WebUsageReport } from "../../src/web/types.js";
+import type { WebUsageReport, WebHistory } from "../../src/web/types.js";
 import type { SqlExecutor } from "../../src/db/sql.js";
 import { UsageRepository } from "../../src/web/usage.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
@@ -285,6 +285,36 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     const head = await request("/api/usage", { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(await head.text()).toBe("");
+  });
+
+  it("shows current thread activity through queue, generation, delivery, cancellation and completion", async () => {
+    const first = await thread();
+    expect((await repository.history(first.id)).thread.activity).toBeNull();
+    await usageTurn(first.id, { status: "queued", result: false });
+    expect((await repository.history(first.id)).thread.activity).toEqual({ state: "queued", queuedTurns: 1 });
+    await database.db.execute(sql`update turn_runs set status = 'running', lease_expires_at = ${Date.now() + 60_000}
+      where thread_id = ${first.id}`);
+    await usageTurn(first.id, { status: "queued", result: false });
+    const inherited = await message(first.id);
+    const fork = await repos.threads.create({ userId: 1, title: "Fork", topicId: null,
+      parentThreadId: first.id, forkPointMessageId: inherited.id });
+    expect((await repository.history(fork.id)).thread.activity).toBeNull();
+    const assertActivity = async (state: string) => {
+      const history = await (await request(`/api/threads/${first.id}/messages`)).json() as WebHistory;
+      expect(history.thread.activity).toEqual({ state, queuedTurns: 1 });
+      expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toEqual(history.thread.activity);
+    };
+    await assertActivity("generating");
+    await database.db.execute(sql`update turn_runs set cancel_requested_at = ${Date.now()} where thread_id = ${first.id} and status = 'running'`);
+    await assertActivity("stopping");
+    await database.db.execute(sql`update turn_runs set status = 'awaiting_delivery', cancel_requested_at = null
+      where thread_id = ${first.id} and status = 'running'`);
+    await assertActivity("delivering");
+    await database.db.execute(sql`update turn_runs set lease_expires_at = 1 where thread_id = ${first.id} and status = 'awaiting_delivery'`);
+    await assertActivity("interrupted");
+    await database.db.execute(sql`update turn_runs set status = 'succeeded' where thread_id = ${first.id}`);
+    expect((await repository.history(first.id)).thread.activity).toBeNull();
+    expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toBeNull();
   });
 
   it("uses saved identity, literal search, stable recent activity ordering, and pages", async () => {

@@ -8,7 +8,7 @@ const CORNER = 6;
 const DASH =
   "repeating-linear-gradient(to top, transparent 0 2px, currentColor 2px 4px)";
 
-export type HookSidebarItem = string | { label: string; href?: string };
+export type HookSidebarItem = string | { label: string; href?: string; description?: string };
 
 export type HookSidebarProps = Omit<ComponentProps<"nav">, "onChange"> & {
   items: HookSidebarItem[];
@@ -212,6 +212,7 @@ export function HookSidebar({
               aria-current={isActive ? "page" : undefined}
             >
               {text}
+              {typeof item !== "string" && item.description && <small className="hook-sidebar-description">{item.description}</small>}
             </a>
           ) : (
             <button
@@ -222,6 +223,7 @@ export function HookSidebar({
               aria-current={isActive ? "true" : undefined}
             >
               {text}
+              {typeof item !== "string" && item.description && <small className="hook-sidebar-description">{item.description}</small>}
             </button>
           );
         })}
