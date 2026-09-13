@@ -404,6 +404,14 @@ export class TurnRunsRepo {
     await this.search.indexMessage(message.id, message.thread_id, message.text_plain);
   }
 
+  async recordUsage(id: number, ownerId: string, input: { provider?: string; model?: string; usage: unknown }): Promise<void> {
+    await this.db.execute(sql`
+      update turn_runs set usage_json = ${JSON.stringify(input.usage)},
+        provider = coalesce(${input.provider ?? null}, provider), model = coalesce(${input.model ?? null}, model)
+      where id = ${id} and owner_id = ${ownerId} and status = 'running' and lease_expires_at > ${Date.now()}
+    `);
+  }
+
   async markAwaitingDelivery(id: number, input: {
     resultMessageId?: number | null;
     provider?: string | null;

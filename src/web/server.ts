@@ -108,6 +108,14 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   };
   return {
     routes: {
+      "/api/usage": read(async request => {
+        const query = new URL(request.url).searchParams;
+        const days = integer(query.get("days"), 30, true);
+        if (![0, 7, 30, 90].includes(days)) throw new HttpError(400, "Choose 7, 30, 90 days, or 0 for all time.");
+        return Response.json(await options.repository.usageReport({
+          userId: optionalInteger(query.get("user")), threadId: optionalInteger(query.get("thread")), days,
+        }), { headers });
+      }),
       "/api/users": read(async request => {
         const query = new URL(request.url).searchParams;
         const search = (query.get("q") ?? "").trim().replace(/^@/, "");

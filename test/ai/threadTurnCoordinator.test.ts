@@ -22,6 +22,30 @@ describe("ThreadTurnCoordinator", () => {
     await db.destroy();
   });
 
+  it.each(["failure", "cancel"])("retains inference usage when a turn ends in %s before delivery", async outcome => {
+    const { userId, threadId } = await ownership(repos, 899);
+    const started = deferred<void>();
+    const usage = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 200, cacheWriteTokens: 0, totalTokens: 310, cacheReadRatio: 2 / 3 };
+    const coordinator = createCoordinator(db, repos, async input => {
+      started.resolve();
+      if (outcome === "cancel") await waitForAbort(input.signal!);
+      await input.onInferenceUsage?.({ provider: "openai-codex", model: "gpt-test", usage });
+      if (outcome === "failure") throw new Error("tool failed after inference");
+    });
+    try {
+      await coordinator.accept(request(userId, threadId, 59_001, "work"));
+      await started.promise;
+      if (outcome === "cancel") await coordinator.cancelActive(threadId);
+      await coordinator.waitForIdle();
+      const run = (await repos.turnRuns.listForThread(threadId))[0]!;
+      expect(run.status).toBe(outcome === "cancel" ? "cancelled" : "failed");
+      expect(JSON.parse(run.usage_json!)).toEqual(usage);
+      expect(run.model).toBe("gpt-test");
+      await repos.turnRuns.recordUsage(run.id, "other-owner", { usage: {} });
+      expect((await repos.turnRuns.get(run.id))?.usage_json).toBe(run.usage_json);
+    } finally { await coordinator.shutdown(); }
+  });
+
   it.each(["success", "failure", "cancel"])("clears all source reactions after %s", async (outcome) => {
     const { userId, threadId } = await ownership(repos, 850);
     const started = deferred<void>();

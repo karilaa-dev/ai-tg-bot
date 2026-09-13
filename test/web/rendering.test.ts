@@ -6,6 +6,30 @@ import { expect, it, vi } from "vitest";
 vi.mock("../../src/web/client/components/ui/code-block.js", () => ({ default: ({ code }: { code: string }) => createElement("pre", null, code) }));
 import { FileAttachment } from "../../src/web/client/file-attachment.js";
 import { RichText } from "../../src/web/client/rich-text.js";
+import { MessageUsage, UsageGraphs } from "../../src/web/client/usage.js";
+import { emptyUsage } from "../../src/web/usage.js";
+
+it("renders unavailable usage and partial estimates without fabricating a zero cost", () => {
+  expect(renderToStaticMarkup(createElement(MessageUsage, {}))).toContain("Usage not recorded");
+  const html = renderToStaticMarkup(createElement(MessageUsage, { usage: {
+    ...emptyUsage(), totalTokens: 500, outputTokens: 500, recordedTurns: 1, unpricedTurns: 1,
+    estimatedCostUsd: 0.00001, modelCalls: 2, models: [], reasoningTokens: 100,
+  } }));
+  expect(html).toContain("&lt;$0.0001");
+  expect(html).toContain("partial");
+  expect(html).toContain("Reasoning is included in output");
+  expect(html).not.toMatch(/<details[^>]*open/);
+});
+
+it("renders empty and zero-value graphs with finite coordinates and a keyboard day selector", () => {
+  expect(renderToStaticMarkup(createElement(UsageGraphs, { daily: [] }))).toBe("");
+  const html = renderToStaticMarkup(createElement(UsageGraphs, { daily: [{ ...emptyUsage(), date: "2026-09-13" }] }));
+  expect(html).not.toMatch(/NaN|Infinity/);
+  expect(html).toContain('type="range"');
+  expect(html).toContain('aria-valuetext="2026-09-13"');
+  expect(html).toContain("Tokens per day");
+  expect(html).toContain("Estimated cost per day");
+});
 
 it("renders message formatting without active HTML, unsafe links, or external image loads", () => {
   const html = renderToStaticMarkup(createElement(RichText, { text: '**Hello**\n\n<script>window.pwned=true</script>\n\n<img src="https://example.test/track" onerror="alert(1)">\n\n![tracking](https://example.test/image.png)\n\n[unsafe](javascript:alert(1))\n\n[safe](https://example.test)\n\n```html\n<script>literal code</script>\n```' }));

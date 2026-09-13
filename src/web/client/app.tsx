@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MotionConfig } from "motion/react";
-import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon } from "lucide-react";
+import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined } from "lucide-react";
 import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
 import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
 import { HookSidebar } from "./components/ui/hook-sidebar.js";
@@ -9,6 +9,7 @@ import { RichText } from "./rich-text.js";
 import { Button } from "./components/ui/button.js";
 import { FileAttachment } from "./file-attachment.js";
 import { cn } from "./lib/utils.js";
+import { MessageUsage, ThreadUsage, UsageDashboard } from "./usage.js";
 
 async function get<T>(url: string, signal: AbortSignal): Promise<T> {
   const response = await fetch(url, { signal });
@@ -30,7 +31,10 @@ function Failure({ message, retry }: { message: string; retry?: () => void }) {
 function selection() {
   const params = new URLSearchParams(location.search);
   const parse = (name: string) => { const value = Number(params.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
-  return { userId: parse("user"), threadId: parse("thread") };
+  const threadId = parse("thread");
+  const usage = params.get("view") === "usage";
+  return { userId: parse("user"), threadId, usage: !threadId && usage,
+    threadUsage: Boolean(threadId && (params.get("usage") === "thread" || usage)) };
 }
 
 function usePages<T extends { id: number }>(url: string | null) {
@@ -90,17 +94,19 @@ function App() {
   const user = users.items.find(u => u.id === selected.userId);
   useEffect(() => { const timeout = setTimeout(() => setQuery(search), 250); return () => clearTimeout(timeout); }, [search]);
   useEffect(() => { const pop = () => setSelected(selection()); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
-  const navigate = (userId: number | null, threadId: number | null) => {
+  const navigate = (userId: number | null, threadId: number | null, usage = false) => {
     const params = new URLSearchParams();
     if (userId) params.set("user", String(userId));
     if (threadId) params.set("thread", String(threadId));
+    if (usage) { if (threadId) params.set("usage", "thread"); else params.set("view", "usage"); }
     history.pushState(null, "", `/${params.size ? `?${params}` : ""}`);
-    setSelected({ userId, threadId });
+    setSelected({ userId, threadId, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
   };
-  const screen = selected.threadId ? "messages" : selected.userId ? "threads" : "users";
-  return <MotionConfig reducedMotion="user"><div className="app-shell" data-screen={screen}>
+  const screen = selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
+  return <MotionConfig reducedMotion="user"><div className="app-shell" data-screen={screen} data-view={selected.usage ? "usage" : "conversations"}>
     <aside className="users-pane pane" aria-label="Users">
       <header className="brand"><MessageSquare aria-hidden="true" /><div><h1>Conversations</h1><p>Telegram bot archive</p></div><ThemeToggle /></header>
+      <div className="archive-navigation"><Button variant={selected.usage ? "outline" : "ghost"} onClick={() => navigate(null, null, true)} aria-current={selected.usage && !selected.userId && !selected.threadId ? "page" : undefined}><ChartNoAxesCombined /> All usage & cost</Button></div>
       <div className="pane-tools"><label htmlFor="user-search"><Search className="size-3.5" /> Find a person</label><input id="user-search" placeholder="Name, username or ID" value={search} onChange={e => setSearch(e.target.value)} /></div>
       <div className="list-caption"><Users className="size-3.5" /><span>Most recently active</span></div>
       <div className="pane-scroll">
@@ -115,6 +121,7 @@ function App() {
     </aside>
     <aside className="threads-pane pane" aria-label="Conversations">
       <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to users" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Conversations"}</h2><p>{selected.userId ? `Telegram ID ${selected.userId}` : "Choose a person to begin"}</p></div><ThemeToggle /></header>
+      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage for this person</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
         {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <HookSidebar aria-label="Conversation list" color="var(--primary)" dashed={false} items={threads.items.map(t => ({ label: `${t.title}${t.archived ? " · Archived" : ""}${t.parentThreadId ? " · Fork" : ""}` }))} value={threads.items.findIndex(t => t.id === selected.threadId)} onChange={index => navigate(selected.userId, threads.items[index]!.id)} />}
@@ -122,13 +129,13 @@ function App() {
       </div>
       <footer className="pane-footer">Newest activity first · Includes archived</footer>
     </aside>
-    <main className="messages-pane pane" aria-label="Message history">
-      {selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} /> : <div className="welcome"><MessageSquare className="size-12" /><Notice title="A place to catch up" description="Open a conversation to read its messages, thinking, and shared files." /></div>}
+    <main className="messages-pane pane" aria-label={selected.usage ? "Usage statistics" : "Message history"}>
+      {selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <div className="welcome"><MessageSquare className="size-12" /><Notice title="A place to catch up" description="Open a conversation to read its messages, thinking, and shared files." /></div>}
     </main>
   </div></MotionConfig>;
 }
 
-function Transcript({ threadId, back }: { threadId: number; back: () => void }) {
+function Transcript({ threadId, back, showUsage }: { threadId: number; back: () => void; showUsage: boolean }) {
   const [data, setData] = useState<WebHistory | null>(null);
   const dataRef = useRef<WebHistory | null>(null);
   const [error, setError] = useState("");
@@ -205,6 +212,7 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
   return <>
     <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p></div>{data?.thread.archived && <span className="archive-label">Archived</span>}<ThemeToggle /></header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
+    <ThreadUsage threadId={threadId} initiallyOpen={showUsage} />
     {!data ? !error && <Loading /> : <>
       {data.thread.parentThreadId && <div className="fork-note"><GitFork className="size-3.5" />Forked history · Inherited messages are labeled below</div>}
       <div className="message-scroller">
@@ -219,6 +227,7 @@ function Transcript({ threadId, back }: { threadId: number; back: () => void }) 
               {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
               {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
               <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
+              {message.role === "assistant" && <MessageUsage usage={message.usage} />}
             </article>
           </div>)}
         </div></div>{canJump && <Button className="jump-to-latest" variant="outline" size="icon-sm" aria-label="Jump to latest" onClick={() => { const node = viewport.current; if (node) node.scrollTop = node.scrollHeight; }}><ArrowDown /></Button>}

@@ -106,7 +106,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.13` uses `ai-tg-bot-tools:v2.0.13`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.14` uses `ai-tg-bot-tools:v2.0.14`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -120,8 +120,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.13 is ai-tg-bot-tools:v2.0.13.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.13
+# Optional override. The default for version 2.0.14 is ai-tg-bot-tools:v2.0.14.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.14
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -274,6 +274,10 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database. The explicit **Start sandbox and load** action uses POST on the attachment URL; allow that method through the proxy. Ordinary browsing and downloads use GET.
 
 Users appear by most recent activity. The browser uses saved usernames and names, with Telegram IDs as a fallback. Search accepts names, usernames, and IDs. The bot itself is excluded, including old records accidentally saved for it. Threads include archived conversations and inherited messages up to each fork point. The latest 50 messages open first; use **Load older** for earlier history. Visible lists and messages refresh every 10 seconds while the tab is active.
+
+Open **All usage & cost** or **Usage for this person** for token statistics, daily token and estimated-cost graphs, model breakdowns, and thread totals. These reports offer 7, 30, 90 days, or all time. Daily buckets use UTC and refresh every 30 seconds while the page is visible. Each conversation shows its all-time token total and estimated USD cost above the messages in a large summary. Totals load automatically and refresh every 30 seconds while the page is visible. Expand **Details** for token categories, cache hit rate, models, and recorded turns, using the same compact breakdown as message usage; selecting a thread in a usage report opens the conversation with these details expanded. Expand the token count beneath a bot reply for its input, output, cache reads, cache writes, reported reasoning, model calls, and estimated USD cost. A reply's usage includes the tool loop that produced it. Thread totals include only calls made in that thread, so inherited messages are not charged twice.
+
+Cost estimates follow [ccusage's token calculation method](https://ccusage.com/guide/cost-modes), multiplying each token category by its current [LiteLLM rate](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json). The server downloads the public catalog on demand, caches it for 24 hours, keeps the last successful catalog during outages, and retries failures after five minutes. No conversation data is sent to the pricing source. New turns retain per-call models, context sizes, one-hour cache writes, and reported reasoning; reasoning is already part of output. Context pricing tiers apply per call. Recorded compaction, branch-summary, and tool tokens are included; entries without model attribution use their saved costs when available. Older saved turn totals use their recorded model and standard rates. Saved nonzero model costs provide a fallback when a rate is unavailable. Missing usage or pricing is labeled, and partial totals are marked. These are API-equivalent estimates, not subscription bills; image generation, transcription, sandbox, search, and other tool fees are excluded. Historical estimates can change with current rates. Usage is saved after inference even when cancellation or delivery failure follows; abrupt process loss can still leave a turn untracked.
 
 Use the sun/moon button to switch between light and dark themes. The initial theme follows your system setting; an explicit choice is saved in your browser. Image attachments reserve preview space while loading. Expand **Image details** to see the saved description, filename, size, format, and loaded dimensions.
 
