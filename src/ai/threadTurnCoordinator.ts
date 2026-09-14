@@ -546,6 +546,7 @@ export class ThreadTurnCoordinator {
         resolveFile: (file, signal) => this.input.fileResolver.resolveFile(file, signal),
         pi: this.input.pi,
         t: (key, params) => this.input.t(run.locale, key, params),
+        onInferenceUsage: (result) => this.input.repos.turnRuns.recordUsage(run.id, this.ownerId, result),
         onAwaitingDelivery: (result) => finalizer.awaitingDelivery(result),
         onDeliveryStarting: () => finalizer.beginDelivery(),
         onDeliveryConfirmed: (result) => finalizer.confirmDelivery(result.assistantMessageId),

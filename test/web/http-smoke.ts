@@ -15,6 +15,7 @@ import { ConversationRepository } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
+import { UsagePricing } from "../../src/web/usage-pricing.js";
 
 const preview = process.argv.includes("--preview");
 assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
@@ -45,6 +46,21 @@ await repos.threads.archive(archived.id);
 for (let i = 0; i < 54; i++) await repos.messages.insert({ threadId: thread.id, role: i % 2 ? "assistant" : "user", textPlain: `Earlier message ${i + 1}`, content: {} });
 await repos.messages.insert({ threadId: thread.id, role: "user", textPlain: "Can you put together a short packing list for a week in the mountains?", content: {} });
 const response = await repos.messages.insert({ threadId: thread.id, role: "assistant", thinking: "Organize the list by weather, walking, and travel essentials.", textPlain: "Here's a starting point for a week away.\n\n- Waterproof jacket and warm layers\n- Comfortable walking shoes\n- Water bottle and a small daypack\n- Travel documents and a first-aid kit\n\nI've attached the list so you can add your own items.\n\n```json\n{\n  \"destination\": \"mountains\",\n  \"duration\": \"7 days\"\n}\n```", content: {} });
+// Synthetic usage makes the local preview and HTTP smoke exercise analytics too.
+const savedMessages = await repos.messages.listThread(thread.id);
+for (let i = 1; i < savedMessages.length; i += 2) {
+  const userMessage = savedMessages[i - 1]!;
+  const assistant = savedMessages[i]!;
+  const timestamp = Date.now() - Math.floor((savedMessages.length - i) / 8) * 86_400_000;
+  const call = { provider: "openai-codex", model: "gpt-6-astra", inputTokens: 1200 + i * 30, outputTokens: 400 + i * 20,
+    cacheReadTokens: i * 1400, cacheWriteTokens: 0, reasoningTokens: i * 10 };
+  await db.db.execute(sql`
+    insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status, result_message_id,
+      provider, model, usage_json, accepted_at, started_at, finished_at, updated_at)
+    values (${user.tg_id}, ${thread.id}, ${userMessage.id}, ${user.tg_id}, 'en', 'succeeded', ${assistant.id},
+      ${call.provider}, ${call.model}, ${JSON.stringify({ ...call, calls: [call] })}, ${timestamp}, ${timestamp}, ${timestamp}, ${timestamp})
+  `);
+}
 const file = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: response.id, type: "txt", name: "packing-list.txt", mimeType: "text/plain", size: 47, isInline: true });
 payloads.set(String(file.id), Buffer.from("Waterproof jacket\nWalking shoes\nWater bottle\n"));
 await repos.files.rememberSource(file.id, { transport: "fixture", connectionKey: "default", remoteKey: String(file.id), locator: {} });
@@ -68,7 +84,10 @@ if (preview) {
   await db.db.execute(sql`update messages set text_plain = ${`Let's take the lakeside route tomorrow.\n\n[[chat-file:${voiceFile.id}]] [Audio message transcribed above]`} where id = ${audioMessage.id}`);
 
 }
-const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
+const pricing = new UsagePricing(async () => Response.json({ "gpt-6-astra": {
+  input_cost_per_token: 10 / 1e6, output_cost_per_token: 50 / 1e6, cache_read_input_token_cost: 1 / 1e6,
+} }));
+const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
 const web = (await startWebServer(options))!;
 if (preview) {
   console.log(`Preview: ${web.url}?user=${user.tg_id}&thread=${thread.id}`);
@@ -83,6 +102,10 @@ if (preview) {
     const history = await historyResponse.json() as WebHistory;
     assert.equal(history.messages.length, 50);
     assert.equal(history.user.username, "alice_m");
+    assert.equal(history.messages.find(message => message.id === response.id)?.usage?.modelCalls, 1);
+    const usage = await (await fetch(new URL(`/api/usage?thread=${thread.id}&days=0`, web.url))).json();
+    assert.equal(usage.totals.recordedTurns, 28);
+    assert.ok(usage.totals.estimatedCostUsd > 0);
     assert.equal((await fetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=auto`, web.url))).status, 413);
     assert.equal((await fetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=download`, web.url))).status, 200);
     assert.equal((await fetch(new URL("/.env", web.url))).status, 404);

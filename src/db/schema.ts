@@ -175,6 +175,7 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`create index if not exists turn_runs_thread_fifo_idx on turn_runs(thread_id, status, id)`));
   await db.execute(sql.raw(`create index if not exists turn_runs_status_idx on turn_runs(status, id)`));
+  await db.execute(sql.raw(`create index if not exists turn_runs_result_message_idx on turn_runs(result_message_id)`));
   await db.execute(sql.raw(`create unique index if not exists turn_runs_one_active_thread_idx on turn_runs(thread_id) where status in ('running', 'awaiting_delivery')`));
   await db.execute(sql.raw(`
     create table if not exists turn_run_sources (

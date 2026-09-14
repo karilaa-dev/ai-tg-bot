@@ -29,6 +29,7 @@ export interface TurnInput {
   outgoingBuffers?: OutgoingBuffers;
   deliveryTiming?: { startedAt: number; firstTextMs?: number; firstFileMs?: number; lastFileMs?: number };
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
+  onInferenceUsage?: (result: { provider?: string; model?: string; usage: InferenceUsageDelta }) => Promise<void>;
   onAwaitingDelivery?: (result: {
     assistantMessageId: number;
     provider?: string;

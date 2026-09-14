@@ -404,6 +404,14 @@ export class TurnRunsRepo {
     await this.search.indexMessage(message.id, message.thread_id, message.text_plain);
   }
 
+  async recordUsage(id: number, ownerId: string, input: { provider?: string; model?: string; usage: unknown }): Promise<void> {
+    await this.db.execute(sql`
+      update turn_runs set usage_json = ${JSON.stringify(input.usage)},
+        provider = coalesce(${input.provider ?? null}, provider), model = coalesce(${input.model ?? null}, model)
+      where id = ${id} and owner_id = ${ownerId} and status = 'running' and lease_expires_at > ${Date.now()}
+    `);
+  }
+
   async markAwaitingDelivery(id: number, input: {
     resultMessageId?: number | null;
     provider?: string | null;
@@ -411,9 +419,9 @@ export class TurnRunsRepo {
     usage?: unknown;
   } = {}, ownerId?: string): Promise<boolean> {
     const now = Date.now();
-    const transitioned = await queryOne<{ id: number }>(this.db, sql`
+    const transitioned = await queryOne<{ status: string }>(this.db, sql`
       update turn_runs set
-        status = 'awaiting_delivery',
+        status = case when cancel_requested_at is null then 'awaiting_delivery' else status end,
         delivery_status = 'pending',
         result_message_id = coalesce(${input.resultMessageId ?? null}, result_message_id),
         provider = coalesce(${input.provider ?? null}, provider),
@@ -424,14 +432,15 @@ export class TurnRunsRepo {
         updated_at = ${now}
       where id = ${id}
         and status = 'running'
-        and cancel_requested_at is null
         and (
           ${ownerId === undefined ? 0 : 1} = 0
           or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
         )
-      returning id
+      returning status
     `);
-    return Boolean(transitioned);
+    // Preserve the saved reply and usage even when cancellation wins. The
+    // caller must still reject delivery unless the state actually transitioned.
+    return transitioned?.status === "awaiting_delivery";
   }
 
   markSucceeded(id: number, resultMessageId?: number | null, ownerId?: string): Promise<void> {

@@ -5,14 +5,29 @@ import type { Repos } from "../db/repos/index.js";
 import { messageSearchScopesForChain } from "../db/repos/messages.js";
 import { messageScopePredicate } from "../db/search.js";
 import type { MessageRow, ThreadRow } from "../db/types.js";
-import type { WebPage, WebThread, WebUser } from "./types.js";
+import type { WebPage, WebThread, WebThreadActivity, WebUser } from "./types.js";
 
 import { messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
+import { UsageRepository, type UsageScope } from "./usage.js";
+import type { UsagePricing } from "./usage-pricing.js";
 
 export class WebNotFound extends Error {}
 
 export class ConversationRepository {
-  constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number) {}
+  private readonly usage: UsageRepository;
+  constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number, pricing?: UsagePricing) {
+    this.usage = new UsageRepository(db, botUserId, pricing);
+  }
+
+  async usageReport(scope: UsageScope, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    if (scope.userId !== undefined) await this.user(scope.userId);
+    if (scope.threadId !== undefined) {
+      const { thread } = await this.scope(scope.threadId);
+      if (scope.userId !== undefined && thread.user_id !== scope.userId) throw new WebNotFound();
+    }
+    return this.usage.report(scope, Date.now(), signal);
+  }
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
     const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
@@ -47,7 +62,8 @@ export class ConversationRepository {
       from threads t where t.user_id = ${userId}
       order by "lastActivity" desc, t.id desc limit ${limit + 1} offset ${offset}
     `);
-    return page(rows.map(threadView), offset, limit);
+    const activities = await this.threadActivities(rows.map(row => row.id));
+    return page(rows.map(row => threadView(row, activities.get(row.id))), offset, limit);
   }
 
   async scope(threadId: number) {
@@ -92,13 +108,40 @@ export class ConversationRepository {
     const transcripts = selected.some(m => m.text_plain.includes("[Audio transcript preview;"))
       ? await this.savedTranscripts(selected.map(m => m.id)) : [];
     const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts));
+    const usage = await this.usage.messages(selected.filter(m => m.role === "assistant").map(m => m.id));
+    for (const message of messages) if (message.role === "assistant") message.usage = usage.get(message.id) ?? null;
+    const activities = await this.threadActivities([threadId]);
     return {
-      user: await this.user(thread.user_id), thread: threadView(thread),
+      user: await this.user(thread.user_id), thread: threadView(thread, activities.get(threadId)),
       chain: chain.map(t => ({ id: t.id, title: t.title, parentThreadId: t.parent_thread_id, forkPointMessageId: t.fork_point_message_id })),
       messages,
       olderCursor: after === undefined && hasMore ? selected[0]!.id : null,
       newerCursor: after !== undefined && hasMore ? selected.at(-1)!.id + 1 : null,
     };
+  }
+
+  private async threadActivities(threadIds: number[]): Promise<Map<number, WebThreadActivity>> {
+    if (!threadIds.length) return new Map();
+    const rows = await this.db.query<{
+      id: number; queued: number; status: string | null; cancelled: number | null; lease: number | null;
+    }>(sql`
+      select r.thread_id as id,
+        sum(case when r.status = 'queued' then 1 else 0 end) as queued,
+        max(case when r.status <> 'queued' then r.status end) as status,
+        max(case when r.status <> 'queued' then r.cancel_requested_at end) as cancelled,
+        max(case when r.status <> 'queued' then r.lease_expires_at end) as lease
+      from turn_runs r join threads t on t.id = r.thread_id and t.user_id = r.user_id
+      where r.thread_id in (${valueList(threadIds)}) and r.status in ('queued', 'running', 'awaiting_delivery')
+      group by r.thread_id
+    `);
+    const now = Date.now();
+    return new Map(rows.map(row => [row.id, {
+      state: row.status === null ? "queued"
+        : row.lease === null || row.lease <= now ? "interrupted"
+        : row.cancelled !== null ? "stopping"
+        : row.status === "awaiting_delivery" ? "delivering" : "generating",
+      queuedTurns: Number(row.queued),
+    }]));
   }
 
   private async attachments(messageIds: number[]): Promise<Map<number, SavedAttachment[]>> {
@@ -151,10 +194,10 @@ export class ConversationRepository {
   }
 }
 
-function threadView(t: ThreadRow & { lastActivity?: number }): WebThread {
+function threadView(t: ThreadRow & { lastActivity?: number }, activity: WebThreadActivity | null = null): WebThread {
   return { id: t.id, userId: t.user_id, title: t.title, archived: Boolean(t.archived),
     parentThreadId: t.parent_thread_id, forkPointMessageId: t.fork_point_message_id,
-    lastActivity: t.lastActivity ?? t.created_at };
+    lastActivity: t.lastActivity ?? t.created_at, activity };
 }
 
 function page<T>(rows: T[], offset: number, limit: number): WebPage<T> {

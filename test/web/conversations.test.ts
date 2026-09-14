@@ -1,6 +1,6 @@
 import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
@@ -12,6 +12,10 @@ import { ConversationRepository } from "../../src/web/repository.js";
 import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import { userLabel } from "../../src/web/types.js";
+import type { WebUsageReport, WebHistory } from "../../src/web/types.js";
+import type { SqlExecutor } from "../../src/db/sql.js";
+import { UsageRepository } from "../../src/web/usage.js";
+import { UsagePricing } from "../../src/web/usage-pricing.js";
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
   let database: AppDatabase;
@@ -39,7 +43,10 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     database = createDatabase({ DB_URL: dbUrl });
     await database.initialize();
     repos = createRepos(database.db, database.search);
-    repository = new ConversationRepository(database.db, repos, 99);
+    repository = new ConversationRepository(database.db, repos, 99, new UsagePricing(async () => Response.json({
+      "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
+        cache_read_input_token_cost: 0.2 / 1e6, cache_creation_input_token_cost: 2.5 / 1e6 },
+    })));
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
     api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
@@ -66,6 +73,309 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await repos.files.rememberSource(file.id, { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: { secret: "hidden" } });
     return file;
   }
+
+  async function usageTurn(threadId: number, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
+    const user = await message(threadId);
+    const assistant = options.result === false ? null : await repos.messages.insert({ threadId, role: "assistant", content: {}, textPlain: "Reply" });
+    const owner = (await repos.threads.get(threadId))!;
+    const timestamp = options.timestamp ?? Date.now();
+    const usage = options.usage === undefined ? JSON.stringify({ inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 2_000, cacheWriteTokens: 100 }) : options.usage;
+    await database.db.execute(sql`
+      insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status, result_message_id,
+        provider, model, usage_json, accepted_at, started_at, finished_at, updated_at)
+      values (${owner.user_id}, ${threadId}, ${user.id}, ${owner.user_id}, 'en', ${options.status ?? "succeeded"}, ${assistant?.id ?? null},
+        'openai-codex', ${options.model ?? "gpt-test"}, ${usage}, ${timestamp}, ${timestamp}, ${timestamp}, ${timestamp})
+    `);
+    return assistant;
+  }
+
+  it("aggregates usage by UTC day, model and thread, including archived and failed work", async () => {
+    const first = await thread();
+    const second = await thread(2, "Archived");
+    await repos.threads.archive(second.id);
+    await usageTurn(first.id);
+    await usageTurn(first.id, { timestamp: Date.now() - 9 * 86_400_000 });
+    await usageTurn(second.id, { status: "failed", result: false });
+    const bot = await thread(99);
+    await usageTurn(bot.id);
+    const response = await request("/api/usage?days=7");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const report = await response.json() as WebUsageReport;
+    expect(report.totals).toMatchObject({ inputTokens: 2_000, outputTokens: 200, cacheReadTokens: 4_000, cacheWriteTokens: 200,
+      totalTokens: 6_400, recordedTurns: 2, missingUsageTurns: 0, unpricedTurns: 0 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.0073);
+    expect(report.daily).toHaveLength(7);
+    expect(report.daily.at(-1)?.recordedTurns).toBe(2);
+    expect(report.daily.slice(0, -1).every(day => day.totalTokens === 0)).toBe(true);
+    expect(report.daily.slice(0, -1).every(day => day.estimatedCostUsd === 0)).toBe(true);
+    expect(report.threads).toHaveLength(2);
+    expect(report.threads.find(t => t.id === second.id)?.archived).toBe(true);
+    expect(report.models).toHaveLength(1);
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
+    expect((await repository.usageReport({ userId: 1, days: 0 })).totals.recordedTurns).toBe(2);
+  });
+
+  it("keeps fork costs separate and attaches usage to the correct inherited and own messages", async () => {
+    const parent = await thread();
+    const inherited = (await usageTurn(parent.id))!;
+    const child = await repos.threads.create({ userId: 1, title: "Fork", topicId: null, parentThreadId: parent.id, forkPointMessageId: inherited.id });
+    await usageTurn(parent.id);
+    const own = (await usageTurn(child.id))!;
+    const report = await repository.usageReport({ threadId: child.id, days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 1, totalTokens: 3_200 });
+    expect(report.threads.map(t => t.id)).toEqual([child.id]);
+    const history = await repository.history(child.id);
+    const replies = history.messages.filter(m => m.role === "assistant");
+    expect(replies.map(m => m.id)).toEqual([inherited.id, own.id]);
+    expect(replies.every(m => m.usage?.totalTokens === 3_200)).toBe(true);
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
+  });
+
+  it("reports incomplete coverage without treating missing usage or unknown prices as zero", async () => {
+    const first = await thread();
+    await repos.messages.insert({ threadId: first.id, role: "assistant", textPlain: "Old reply", content: {} });
+    await usageTurn(first.id, { usage: "broken" });
+    await usageTurn(first.id, { model: "unknown" });
+    await usageTurn(first.id);
+    const report = await repository.usageReport({ days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 2, missingUsageTurns: 2, unpricedTurns: 1, totalTokens: 6_400 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+    expect(report.models.find(m => m.model === "unknown")?.estimatedCostUsd).toBeNull();
+    expect((await repository.history(first.id)).messages.find(m => m.text === "Old reply")?.usage).toBeNull();
+  });
+
+  it("keeps thread totals independent of the 50-message history page", async () => {
+    const first = await thread();
+    for (let i = 0; i < 30; i++) await usageTurn(first.id);
+    expect((await repository.history(first.id)).messages).toHaveLength(50);
+    expect((await repository.usageReport({ threadId: first.id, days: 0 })).totals.recordedTurns).toBe(30);
+  });
+
+  it("shows an old thread's complete activity without trailing idle months", async () => {
+    const first = await thread();
+    const started = Date.UTC(2020, 0, 5, 12);
+    await usageTurn(first.id, { timestamp: started });
+    await usageTurn(first.id, { timestamp: started + 2 * 86_400_000 });
+    const response = await request(`/api/usage?thread=${first.id}&days=0`);
+    expect(response.status).toBe(200);
+    const report = await response.json() as WebUsageReport;
+    expect(report.totals).toMatchObject({ recordedTurns: 2, totalTokens: 6_400 });
+    expect(report.daily.map(day => day.date)).toEqual(["2020-01-05", "2020-01-06", "2020-01-07"]);
+    expect(report.daily[1]).toMatchObject({ totalTokens: 0, estimatedCostUsd: 0 });
+    // The overview still respects its selected reporting period.
+    const overview = await repository.usageReport({ days: 7 });
+    expect(overview.daily).toHaveLength(7);
+    expect(overview.totals.recordedTurns).toBe(0);
+  });
+
+  it("pages both usage sources without losing totals or retaining years of daily buckets", async () => {
+    const first = await thread();
+    const now = Date.now();
+    const users = await database.db.query<{ id: number }>(sql`
+      insert into messages(thread_id, role, kind, content_json, text_plain, created_at) values
+        ${sql.join(Array.from({ length: 501 }, () => sql`(${first.id}, 'user', 'text', '{}', 'Prompt', ${now})`), sql`, `)}
+      returning id
+    `);
+    await database.db.execute(sql`
+      insert into messages(thread_id, role, kind, content_json, text_plain, created_at) values
+        ${sql.join(users.map(() => sql`(${first.id}, 'assistant', 'text', '{}', 'Untracked reply', ${now})`), sql`, `)}
+    `);
+    const usage = JSON.stringify({ inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 2_000, cacheWriteTokens: 100 });
+    await database.db.execute(sql`
+      insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status,
+        provider, model, usage_json, accepted_at, started_at, finished_at, updated_at) values
+      ${sql.join(users.sort((a, b) => a.id - b.id).map((user, i) => {
+        // Deliberately use timestamps out of ID order, including activity outside the graph.
+        const timestamp = i % 2 ? now - 400 * 86_400_000 : now;
+        return sql`(1, ${first.id}, ${user.id}, 1, 'en', 'succeeded', 'openai-codex', 'gpt-test', ${usage},
+          ${timestamp}, ${timestamp}, ${timestamp}, ${timestamp})`;
+      }), sql`, `)}
+    `);
+    const pageSizes: number[] = [];
+    const transact = database.db.transaction;
+    const transaction = vi.spyOn(database.db, "transaction").mockImplementation(callback => transact(tx => callback({
+      ...tx,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await tx.query<T>(statement);
+        pageSizes.push(rows.length);
+        return rows;
+      },
+    })));
+    const report = await repository.usageReport({ days: 0 });
+    transaction.mockRestore();
+    expect(pageSizes.length).toBeGreaterThanOrEqual(4);
+    expect(pageSizes.every(size => size <= 500)).toBe(true);
+    expect(report.totals).toMatchObject({ recordedTurns: 501, missingUsageTurns: 501, totalTokens: 501 * 3_200 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(501 * 0.00365);
+    expect(report.models).toHaveLength(1);
+    expect(report.models[0]?.recordedTurns).toBe(501);
+    expect(report.threads[0]?.totalTokens).toBe(501 * 3_200);
+    expect(report.dailyTruncated).toBe(true);
+    expect(report.daily).toHaveLength(365);
+    expect(report.daily.reduce((sum, day) => sum + day.recordedTurns, 0)).toBe(251);
+    expect(report.daily.at(-1)?.missingUsageTurns).toBe(501);
+  });
+
+  it("keeps one snapshot when a queued turn finishes between the report scans", async () => {
+    const first = await thread();
+    await usageTurn(first.id, { status: "queued", result: false, timestamp: 1 });
+    const reply = await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Reply" });
+    let scanned!: () => void, resume!: () => void;
+    const firstScan = new Promise<void>(resolve => { scanned = resolve; });
+    const paused = new Promise<void>(resolve => { resume = resolve; });
+    let reads = 0;
+    const observe = (executor: SqlExecutor): SqlExecutor => ({
+      ...executor,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await executor.query<T>(statement);
+        if (++reads === 1) { scanned(); await paused; }
+        return rows;
+      },
+      transaction: callback => executor.transaction(tx => callback(observe(tx))),
+    });
+    const usage = new UsageRepository(observe(database.db), 99, new UsagePricing(async () => Response.json({
+      "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
+        cache_read_input_token_cost: 0.2 / 1e6, cache_creation_input_token_cost: 2.5 / 1e6 },
+    })));
+    const pending = usage.report({ days: 0 });
+    await firstScan;
+    const delivery = database.db.execute(sql`update turn_runs set status = 'succeeded', result_message_id = ${reply.id}
+      where thread_id = ${first.id}`);
+    try {
+      // PostgreSQL commits concurrently. SQLite queues the writer behind the snapshot.
+      if (dialect === "postgres") await delivery;
+    } finally { resume(); }
+    const during = await pending;
+    await delivery;
+    expect(during.totals).toMatchObject({ recordedTurns: 0, missingUsageTurns: 1 });
+    const after = await usage.report({ days: 0 });
+    expect(after.totals).toMatchObject({ recordedTurns: 1, missingUsageTurns: 0, totalTokens: 3_200 });
+    expect(after.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+  });
+
+  it("does not hold a database transaction while downloading pricing", async () => {
+    const first = await thread();
+    await usageTurn(first.id);
+    let downloading!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { downloading = resolve; });
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const pricing = new UsagePricing(async () => {
+      downloading(); await paused;
+      return Response.json({ "gpt-test": { input_cost_per_token: 1, output_cost_per_token: 1 } });
+    });
+    const transaction = vi.spyOn(database.db, "transaction");
+    const pending = new UsageRepository(database.db, 99, pricing).report({ days: 0 });
+    await started;
+    try {
+      expect(transaction).not.toHaveBeenCalled();
+      await database.db.execute(sql`update threads set title = 'Still writable' where id = ${first.id}`);
+    } finally { release(); }
+    await pending;
+    transaction.mockRestore();
+  });
+
+  it("validates usage filters and preserves hidden-user and method restrictions", async () => {
+    const first = await thread();
+    await thread(2);
+    const bot = await thread(99);
+    for (const query of ["days=-1", "days=8", "days=NaN", "days=", "user=0", "thread=1.5"]) expect((await request(`/api/usage?${query}`)).status).toBe(400);
+    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, "thread=9999"]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
+    expect((await request("/api/usage", { method: "POST" })).status).toBe(405);
+    const head = await request("/api/usage", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+  });
+
+  it("shows current thread activity through queue, generation, delivery, cancellation and completion", async () => {
+    const first = await thread();
+    expect((await repository.history(first.id)).thread.activity).toBeNull();
+    await usageTurn(first.id, { status: "queued", result: false });
+    expect((await repository.history(first.id)).thread.activity).toEqual({ state: "queued", queuedTurns: 1 });
+    await database.db.execute(sql`update turn_runs set status = 'running', lease_expires_at = ${Date.now() + 60_000}
+      where thread_id = ${first.id}`);
+    await usageTurn(first.id, { status: "queued", result: false });
+    const inherited = await message(first.id);
+    const fork = await repos.threads.create({ userId: 1, title: "Fork", topicId: null,
+      parentThreadId: first.id, forkPointMessageId: inherited.id });
+    expect((await repository.history(fork.id)).thread.activity).toBeNull();
+    const assertActivity = async (state: string) => {
+      const history = await (await request(`/api/threads/${first.id}/messages`)).json() as WebHistory;
+      expect(history.thread.activity).toEqual({ state, queuedTurns: 1 });
+      expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toEqual(history.thread.activity);
+    };
+    await assertActivity("generating");
+    await database.db.execute(sql`update turn_runs set cancel_requested_at = ${Date.now()} where thread_id = ${first.id} and status = 'running'`);
+    await assertActivity("stopping");
+    await database.db.execute(sql`update turn_runs set status = 'awaiting_delivery', cancel_requested_at = null
+      where thread_id = ${first.id} and status = 'running'`);
+    await assertActivity("delivering");
+    await database.db.execute(sql`update turn_runs set lease_expires_at = 1 where thread_id = ${first.id} and status = 'awaiting_delivery'`);
+    await assertActivity("interrupted");
+    await database.db.execute(sql`update turn_runs set status = 'succeeded' where thread_id = ${first.id}`);
+    expect((await repository.history(first.id)).thread.activity).toBeNull();
+    expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toBeNull();
+  });
+
+  it("counts a cancelled reply once when cancellation wins its delivery transition", async () => {
+    const first = await thread();
+    await usageTurn(first.id, { status: "running", result: false });
+    const reply = await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Unsent reply" });
+    const run = (await repos.turnRuns.listForThread(first.id))[0]!;
+    await database.db.execute(sql`update turn_runs set cancel_requested_at = ${Date.now()} where id = ${run.id}`);
+    expect(await repos.turnRuns.markAwaitingDelivery(run.id, { resultMessageId: reply.id })).toBe(false);
+    await repos.turnRuns.markCancelled(run.id);
+    const report = await repository.usageReport({ threadId: first.id, days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 1, missingUsageTurns: 0, unpricedTurns: 0, totalTokens: 3_200 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+    expect((await repository.history(first.id)).messages.find(m => m.id === reply.id)?.usage?.recordedTurns).toBe(1);
+    expect((await repos.turnRuns.listForThread(first.id))[0]).toMatchObject({ status: "cancelled", result_message_id: reply.id, delivery_status: "pending" });
+  });
+
+  it("aborts a usage scan between pages and releases its database snapshot", async () => {
+    const first = await thread();
+    await usageTurn(first.id);
+    const abort = new AbortController();
+    const transact = database.db.transaction;
+    let reads = 0;
+    const transaction = vi.spyOn(database.db, "transaction").mockImplementation(callback => transact(tx => callback({
+      ...tx,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await tx.query<T>(statement);
+        if (++reads === 1) setTimeout(() => abort.abort(new Error("Client disconnected")), 0);
+        return rows;
+      },
+    })));
+    try {
+      await expect(repository.usageReport({ days: 0 }, abort.signal)).rejects.toThrow("Client disconnected");
+      expect(reads).toBe(1);
+      await database.db.execute(sql`update threads set title = 'Writable after abort' where id = ${first.id}`);
+    } finally { transaction.mockRestore(); }
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(1);
+  });
+
+  it("passes a disconnected HTTP client's abort signal to usage reporting", async () => {
+    let entered!: () => void, cancelled!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const stopped = new Promise<void>(resolve => { cancelled = resolve; });
+    const report = vi.spyOn(repository, "usageReport").mockImplementation(async (_scope, signal) => {
+      expect(signal).toBeDefined();
+      entered();
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener("abort", () => {
+        cancelled(); reject(signal!.reason);
+      }, { once: true }));
+      throw new Error("Unexpected completion");
+    });
+    const abort = new AbortController();
+    const pending = request("/api/usage", { signal: abort.signal }).catch(error => error);
+    try {
+      await started;
+      abort.abort();
+      await stopped;
+      await pending;
+      await api.drain();
+    } finally { report.mockRestore(); }
+  });
 
   it("uses saved identity, literal search, stable recent activity ordering, and pages", async () => {
     const first = await thread();

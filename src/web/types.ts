@@ -10,6 +10,11 @@ export function userLabel(user: Pick<WebUser, "id" | "name" | "username">): stri
   return user.username ? `@${user.username}` : user.name || `User ${user.id}`;
 }
 
+export interface WebThreadActivity {
+  state: "queued" | "generating" | "delivering" | "stopping" | "interrupted";
+  queuedTurns: number;
+}
+
 export interface WebThread {
   id: number;
   userId: number;
@@ -18,6 +23,7 @@ export interface WebThread {
   parentThreadId: number | null;
   forkPointMessageId: number | null;
   lastActivity: number;
+  activity: WebThreadActivity | null;
 }
 
 export interface WebAttachment {
@@ -40,6 +46,37 @@ export interface WebMessage {
   thinking: string | null;
   createdAt: number;
   attachments: WebAttachment[];
+  usage?: WebMessageUsage | null;
+}
+
+export interface WebUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  reasoningTokens: number | null;
+  cacheReadRatio: number | null;
+  recordedTurns: number;
+  missingUsageTurns: number;
+  unpricedTurns: number;
+  estimatedCostUsd: number | null;
+}
+
+export interface WebModelUsage extends WebUsageTotals { provider: string; model: string }
+export interface WebMessageUsage extends WebUsageTotals {
+  models: WebModelUsage[];
+  modelCalls: number | null;
+}
+export interface WebUsageReport {
+  totals: WebUsageTotals;
+  dailyTruncated: boolean;
+  daily: (WebUsageTotals & { date: string })[];
+  models: WebModelUsage[];
+  threads: (WebUsageTotals & { id: number; userId: number; title: string; archived: boolean })[];
+  pricing: { source: "LiteLLM"; fetchedAt: number | null; stale: boolean };
+  since: number | null;
+  until: number;
 }
 
 export interface WebPage<T> { items: T[]; nextOffset: number | null }
