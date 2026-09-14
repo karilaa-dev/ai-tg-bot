@@ -25,9 +25,11 @@ export function estimateCallCost(call: InferenceUsageCall, catalog: PricingCatal
     const suffix = thresholds.length ? `_above_${Math.max(...thresholds)}k_tokens` : "";
     const rate = (key: string) => finiteRate(rates[`${key}${suffix}`]) ?? finiteRate(rates[key]);
     const longWrite = call.cacheWrite1hTokens ?? 0;
-    const longRate = rate("cache_creation_input_token_cost_above_1hr")
-      ?? (provider === "anthropic" || model.startsWith("anthropic/") || bare.startsWith("claude-")
-        ? multiply(rate("input_cost_per_token"), 2) : null);
+    const anthropic = provider === "anthropic" || model.startsWith("anthropic/") || bare.startsWith("claude-");
+    const longWriteKey = "cache_creation_input_token_cost_above_1hr";
+    const longRate = finiteRate(rates[`${longWriteKey}${suffix}`])
+      // A base one-hour rate must not override the active long-context tier.
+      ?? (anthropic ? multiply(rate("input_cost_per_token"), 2) : finiteRate(rates[longWriteKey]));
     const parts = [
       charge(call.inputTokens, rate("input_cost_per_token")),
       charge(call.outputTokens, rate("output_cost_per_token")),

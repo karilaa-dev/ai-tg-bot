@@ -37,6 +37,18 @@ describe("ccusage token pricing", () => {
     expect(estimateCallCost({ ...claude, inputTokens: 100_000, outputTokens: 0, cacheReadTokens: 100_000, cacheWriteTokens: 0, cacheWrite1hTokens: 0 }, prices)).toBeCloseTo(0.22);
   });
 
+  it("does not use a base one-hour cache rate for a long-context call", () => {
+    const prices = { "claude-test": { ...rates, input_cost_per_token_above_200k_tokens: 4 / 1e6,
+      cache_creation_input_token_cost_above_1hr: 4 / 1e6 } };
+    const cached = { ...call, provider: "anthropic", model: "claude-test", inputTokens: 200_000,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 100_000, cacheWrite1hTokens: 100_000 };
+    expect(estimateCallCost(cached, prices)).toBeCloseTo(1.6);
+    expect(estimateCallCost(cached, prices, false)).toBeCloseTo(0.8);
+    expect(estimateCallCost({ ...cached, inputTokens: 100_000 }, prices)).toBeCloseTo(0.6);
+    expect(estimateCallCost(cached, { "claude-test": { ...prices["claude-test"],
+      cache_creation_input_token_cost_above_1hr_above_200k_tokens: 9 / 1e6 } })).toBeCloseTo(1.7);
+  });
+
   it("does not show unknown models or missing cache prices as free", () => {
     expect(estimateCallCost(call, {})).toBeNull();
     expect(estimateCallCost(call, { "gpt-test": { input_cost_per_token: 1, output_cost_per_token: 1 } })).toBeNull();

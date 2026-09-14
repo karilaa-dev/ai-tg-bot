@@ -101,18 +101,21 @@ export class UsageRepository {
     return result;
   }
 
-  async report(scope: UsageScope, now = Date.now()): Promise<WebUsageReport> {
+  async report(scope: UsageScope, now = Date.now(), signal?: AbortSignal): Promise<WebUsageReport> {
     // Load external data before opening a snapshot, especially because SQLite
     // serializes transactions with other work on its shared connection.
+    signal?.throwIfAborted();
     const pricing = await this.pricing.load();
+    signal?.throwIfAborted();
     return this.db.transaction(async tx => {
+      signal?.throwIfAborted();
       if (tx.dialect === "postgres") await tx.execute(sql`set transaction isolation level repeatable read read only`);
-      return this.reportSnapshot(tx, scope, now, pricing);
+      return this.reportSnapshot(tx, scope, now, pricing, signal);
     });
   }
 
   private async reportSnapshot(db: SqlExecutor, scope: UsageScope, now: number,
-    pricing: Awaited<ReturnType<UsagePricing["load"]>>): Promise<WebUsageReport> {
+    pricing: Awaited<ReturnType<UsagePricing["load"]>>, signal?: AbortSignal): Promise<WebUsageReport> {
     const today = Math.floor(now / 86_400_000) * 86_400_000;
     const since = scope.days ? today - (scope.days - 1) * 86_400_000 : null;
     const totals = emptyUsage();
@@ -125,6 +128,7 @@ export class UsageRepository {
     for (const source of ["turns", "messages"] as const) {
       let cursor = 0;
       while (true) {
+        signal?.throwIfAborted();
         const selection = source === "turns" ? sql`
           select r.id as "rowId", t.id, t.user_id as "userId", t.title, t.archived,
             r.result_message_id as "messageId", r.provider, r.model, r.usage_json as usage,
@@ -147,6 +151,7 @@ export class UsageRepository {
             and timestamp <= ${now}
           order by "rowId" asc limit 500
         `);
+        signal?.throwIfAborted();
         for (const row of rows) {
           const summary = summarizeUsage(row, pricing.catalog);
           addUsage(totals, summary);
@@ -169,6 +174,12 @@ export class UsageRepository {
           addUsage(thread, summary);
           threads.set(row.id, thread);
           for (const model of summary.models) mergeModel(models, model);
+        }
+        // Yield to socket events between pages. SQLite queries can otherwise
+        // remain in the microtask queue and delay observing a disconnected client.
+        if (signal) {
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+          signal.throwIfAborted();
         }
         if (rows.length < 500) break;
         cursor = rows.at(-1)!.rowId;

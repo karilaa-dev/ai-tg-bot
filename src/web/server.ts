@@ -42,6 +42,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
           const response = await handler(request);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
         } catch (error) {
+          if (request.signal.aborted) return new Response(null, { status: 499, headers });
           const status = error instanceof HttpError ? error.status : error instanceof WebNotFound ? 404 : 500;
           if (status === 500) options.logger.error("website request failed", { error: error instanceof Error ? error.name : "unknown" });
           return new Response(request.method === "HEAD" ? null : JSON.stringify({ error: error instanceof HttpError ? error.message : status === 404 ? "Not found." : "Could not load conversations. Try again." }), {
@@ -114,7 +115,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         if (![0, 7, 30, 90].includes(days)) throw new HttpError(400, "Choose 7, 30, 90 days, or 0 for all time.");
         return Response.json(await options.repository.usageReport({
           userId: optionalInteger(query.get("user")), threadId: optionalInteger(query.get("thread")), days,
-        }), { headers });
+        }, AbortSignal.any([request.signal, shutdownSignal])), { headers });
       }),
       "/api/users": read(async request => {
         const query = new URL(request.url).searchParams;

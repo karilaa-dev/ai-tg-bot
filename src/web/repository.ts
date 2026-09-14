@@ -19,13 +19,14 @@ export class ConversationRepository {
     this.usage = new UsageRepository(db, botUserId, pricing);
   }
 
-  async usageReport(scope: UsageScope) {
+  async usageReport(scope: UsageScope, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     if (scope.userId !== undefined) await this.user(scope.userId);
     if (scope.threadId !== undefined) {
       const { thread } = await this.scope(scope.threadId);
       if (scope.userId !== undefined && thread.user_id !== scope.userId) throw new WebNotFound();
     }
-    return this.usage.report(scope);
+    return this.usage.report(scope, Date.now(), signal);
   }
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {

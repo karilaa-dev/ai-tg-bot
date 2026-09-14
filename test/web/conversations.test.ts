@@ -317,6 +317,66 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toBeNull();
   });
 
+  it("counts a cancelled reply once when cancellation wins its delivery transition", async () => {
+    const first = await thread();
+    await usageTurn(first.id, { status: "running", result: false });
+    const reply = await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Unsent reply" });
+    const run = (await repos.turnRuns.listForThread(first.id))[0]!;
+    await database.db.execute(sql`update turn_runs set cancel_requested_at = ${Date.now()} where id = ${run.id}`);
+    expect(await repos.turnRuns.markAwaitingDelivery(run.id, { resultMessageId: reply.id })).toBe(false);
+    await repos.turnRuns.markCancelled(run.id);
+    const report = await repository.usageReport({ threadId: first.id, days: 0 });
+    expect(report.totals).toMatchObject({ recordedTurns: 1, missingUsageTurns: 0, unpricedTurns: 0, totalTokens: 3_200 });
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.00365);
+    expect((await repository.history(first.id)).messages.find(m => m.id === reply.id)?.usage?.recordedTurns).toBe(1);
+    expect((await repos.turnRuns.listForThread(first.id))[0]).toMatchObject({ status: "cancelled", result_message_id: reply.id, delivery_status: "pending" });
+  });
+
+  it("aborts a usage scan between pages and releases its database snapshot", async () => {
+    const first = await thread();
+    await usageTurn(first.id);
+    const abort = new AbortController();
+    const transact = database.db.transaction;
+    let reads = 0;
+    const transaction = vi.spyOn(database.db, "transaction").mockImplementation(callback => transact(tx => callback({
+      ...tx,
+      query: async <T extends object>(statement: SQL): Promise<T[]> => {
+        const rows = await tx.query<T>(statement);
+        if (++reads === 1) setTimeout(() => abort.abort(new Error("Client disconnected")), 0);
+        return rows;
+      },
+    })));
+    try {
+      await expect(repository.usageReport({ days: 0 }, abort.signal)).rejects.toThrow("Client disconnected");
+      expect(reads).toBe(1);
+      await database.db.execute(sql`update threads set title = 'Writable after abort' where id = ${first.id}`);
+    } finally { transaction.mockRestore(); }
+    expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(1);
+  });
+
+  it("passes a disconnected HTTP client's abort signal to usage reporting", async () => {
+    let entered!: () => void, cancelled!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const stopped = new Promise<void>(resolve => { cancelled = resolve; });
+    const report = vi.spyOn(repository, "usageReport").mockImplementation(async (_scope, signal) => {
+      expect(signal).toBeDefined();
+      entered();
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener("abort", () => {
+        cancelled(); reject(signal!.reason);
+      }, { once: true }));
+      throw new Error("Unexpected completion");
+    });
+    const abort = new AbortController();
+    const pending = request("/api/usage", { signal: abort.signal }).catch(error => error);
+    try {
+      await started;
+      abort.abort();
+      await stopped;
+      await pending;
+      await api.drain();
+    } finally { report.mockRestore(); }
+  });
+
   it("uses saved identity, literal search, stable recent activity ordering, and pages", async () => {
     const first = await thread();
     const second = await thread(2);
