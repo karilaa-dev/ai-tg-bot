@@ -73,6 +73,8 @@ The bot reads `~/.codex/auth.json` by default. Set `CODEX_AUTH_FILE` to use anot
 
 An OAuth credential already stored in `PI_CODING_AGENT_DIR/auth.json` takes precedence over `CODEX_AUTH_FILE`. This keeps existing deployments compatible.
 
+Set `CODEX_FAST_MODE=true` to request the priority service tier for Codex main, helper, and image-generation requests. It defaults to `false`. OpenRouter requests never inherit this setting, including fallback after a Codex failure.
+
 ## Database
 
 The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `postgresql://` form.
