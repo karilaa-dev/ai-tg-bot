@@ -53,6 +53,24 @@ describe("Pi tool discovery and codemode", () => {
     expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({ modelCycles: 2, toolCalls: 4 });
   });
 
+  it("restores discovered specialists after reopening a persistent session", async () => {
+    const { runtime, contexts, reopen } = await setup([
+      { name: "tool_search", arguments: { query: "browser_navigate", limit: 1 } },
+      { name: "finish_response", arguments: { text: "Discovered" } },
+      { name: "finish_response", arguments: { text: "Resumed" } },
+    ], true);
+    await runtime.session.prompt("Discover browser navigation", { expandPromptTemplates: false });
+    const active = runtime.session.getActiveToolNames();
+    expect(active).toContain("browser_navigate");
+
+    const resumed = await reopen();
+
+    expect(resumed.session.getActiveToolNames()).toEqual(active);
+    expect(resumed.session.getCallableToolNames()).not.toContain("browser_navigate");
+    await resumed.session.prompt("Continue working", { expandPromptTemplates: false });
+    expect(getCurrentTools(contexts.at(-1)!.messages).map((tool) => tool.name)).toContain("browser_navigate");
+  });
+
   it("returns structured failures to scripts and enforces the nested tool-call budget", async () => {
     const { runtime } = await setup([
       { name: "codemode", arguments: { code: "const results = await Promise.allSettled([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99998, chunk_index: 0}), tools.read_file_section({file_id: 99997, chunk_index: 0})]); text(results.map(r => r.status === 'fulfilled' ? r.value : {error: r.reason.message}));" } },
@@ -149,7 +167,7 @@ async function setup(calls: Array<{ name: string; arguments: JsonObject }>, brow
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Tool workflow" });
   const contexts: TranscriptContext[] = [];
   let cycle = 0;
-  const pi = new PiRuntimeManager({ config, db, repos, logger: createLogger(config), providerStreams: {
+  const input: ConstructorParameters<typeof PiRuntimeManager>[0] = { config, db, repos, logger: createLogger(config), providerStreams: {
     openRouter: (model, context) => {
       contexts.push(structuredClone(context));
       const call = calls[cycle++];
@@ -163,9 +181,19 @@ async function setup(calls: Array<{ name: string; arguments: JsonObject }>, brow
       stream.push({ type: "done", reason: "toolUse", message });
       return stream;
     },
-  } });
+  } };
+  const pi = new PiRuntimeManager(input);
   cleanups.push(() => pi.dispose());
   const runtime = await pi.runtime(thread, user);
   await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file reload"); } });
-  return { runtime, contexts };
+  return { runtime, contexts, reopen: async () => {
+    await pi.dispose();
+    const savedThread = await repos.threads.get(thread.id);
+    if (!savedThread) throw new Error("Missing persistent thread");
+    const nextPi = new PiRuntimeManager(input);
+    cleanups.push(() => nextPi.dispose());
+    const resumed = await nextPi.runtime(savedThread, user);
+    await resumed.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file reload"); } });
+    return resumed;
+  } };
 }

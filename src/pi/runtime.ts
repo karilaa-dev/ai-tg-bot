@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { TextContent } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, type TextContent } from "@earendil-works/pi-ai";
 import { ThreadBridge, createChatFileContextExtension } from "./threadBridge.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -40,6 +40,7 @@ import { createBotToolSearchExtension } from "./toolPolicy.js";
 import { createContextPruningExtension } from "./contextPruning.js";
 
 const MAX_CACHED_RUNTIMES = 32;
+const INITIAL_ACTIVE_TOOL_NAMES = ["read", "bash", "finish_response", "codemode", "tool_search"];
 
 interface PiThreadRuntime {
   session: AgentSession;
@@ -219,7 +220,14 @@ export class PiRuntimeManager implements PiRuntimeService {
       sessionManager,
       settingsManager,
     });
-    session.setActiveToolsByName(["read", "bash", "finish_response", "codemode", "tool_search"]);
+    // The SDK's noTools selection overrides transcript restoration. Restore the
+    // branch's declared tools explicitly, retaining only bot-approved tools.
+    const persistedSystem = getCurrentSystemMessage(sessionManager.buildSessionContext().messages);
+    const approvedToolNames = new Set([...INITIAL_ACTIVE_TOOL_NAMES, ...customTools.map((tool) => tool.name)]);
+    const activeToolNames = persistedSystem
+      ? (persistedSystem.toolsAdded ?? []).map((tool) => tool.name).filter((name) => approvedToolNames.has(name))
+      : INITIAL_ACTIVE_TOOL_NAMES;
+    session.setActiveToolsByName(activeToolNames);
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("Pi persistent session did not return a session file.");
     await this.input.repos.threads.setPiSession(thread.id, sessionFile, session.sessionId);

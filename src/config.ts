@@ -17,6 +17,7 @@ const ConfigSchema = z.object({
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
   PI_THINKING_LEVEL: PiThinkingLevelSchema.default("medium"),
   PI_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(0),
+  PI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(900_000),
   PI_MAX_MODEL_CYCLES: z.coerce.number().int().min(0).default(0),
   PI_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(0),
   PI_MAX_CONSECUTIVE_TOOL_FAILURES: z.coerce.number().int().min(0).default(0),

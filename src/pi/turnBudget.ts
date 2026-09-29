@@ -54,9 +54,10 @@ export class TurnBudget {
     return { block: false };
   }
 
-  afterToolResult(toolCallId: string, isError: boolean): boolean {
+  afterToolResult(toolCallId: string, isError: boolean, successfulWrapper = false): boolean {
     const signature = this.callSignatures.get(toolCallId);
     this.callSignatures.delete(toolCallId);
+    if (successfulWrapper) return false;
     if (!isError) {
       this.consecutiveToolFailures = 0;
       return false;
@@ -124,7 +125,7 @@ export function createTurnBudgetExtension(source: TurnBudgetSource): InlineExten
         // nested results already updated the failure counter, including errors
         // caught by the script.
         const successfulWrapper = nestedParents.delete(event.toolCallId) && !failed;
-        if (!successfulWrapper && source.currentTurnBudget()?.afterToolResult(event.toolCallId, failed)) {
+        if (source.currentTurnBudget()?.afterToolResult(event.toolCallId, failed, successfulWrapper)) {
           context.abort();
         }
         // Bot tools return actionable JSON errors. Preserve their content and

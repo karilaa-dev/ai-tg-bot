@@ -151,17 +151,22 @@ async function* routeStream(input: {
   try {
     const auth = await input.registry.getApiKeyAndHeaders(input.codex);
     if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? "Missing openai-codex OAuth token" : auth.error);
-    const stream = input.streamCodex(input.codex, withModelIdentity(input.context, input.codex), {
-      ...input.options,
-      apiKey: auth.apiKey,
-      headers: { ...auth.headers, ...input.options?.headers },
-      timeoutMs: input.config.PI_TURN_TIMEOUT_MS || undefined,
-      maxRetries: 0,
-      onResponse: async (response, model) => {
-        status = response.status;
-        resetAt = resetAtFromHeaders(response.headers);
-        await input.options?.onResponse?.(response, model);
-      },
+    const stream = requestEvents({
+      timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
+      signal: input.options?.signal,
+      start: (signal) => input.streamCodex(input.codex, withModelIdentity(input.context, input.codex), {
+        ...input.options,
+        signal,
+        apiKey: auth.apiKey,
+        headers: { ...auth.headers, ...input.options?.headers },
+        timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
+        maxRetries: 0,
+        onResponse: async (response, model) => {
+          status = response.status;
+          resetAt = resetAtFromHeaders(response.headers);
+          await input.options?.onResponse?.(response, model);
+        },
+      }),
     });
     for await (const event of stream) {
       if (!emitted && event.type === "error") {
@@ -251,13 +256,63 @@ async function* openRouterEvents(input: {
   options?: SimpleStreamOptions;
   streamOpenRouter: typeof streamOpenRouter;
 }): AsyncGenerator<AssistantMessageEvent> {
-  const stream = input.streamOpenRouter(input.openRouter, withModelIdentity(input.context, input.openRouter), {
-    ...input.options,
-    apiKey: input.config.OPENROUTER_API_KEY,
-    timeoutMs: input.config.PI_TURN_TIMEOUT_MS || undefined,
-    maxRetries: 2,
+  const stream = requestEvents({
+    timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
+    signal: input.options?.signal,
+    start: (signal) => input.streamOpenRouter(input.openRouter, withModelIdentity(input.context, input.openRouter), {
+      ...input.options,
+      signal,
+      apiKey: input.config.OPENROUTER_API_KEY,
+      timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
+      maxRetries: 2,
+    }),
   });
   for await (const event of stream) yield event;
+}
+
+// Provider SDK timeouts may cover only connection setup. Bound the complete
+// streamed request and abort its transport, independently of the turn budget.
+async function* requestEvents(input: {
+  timeoutMs: number;
+  signal?: AbortSignal;
+  start: (signal: AbortSignal) => AssistantMessageEventStream;
+}): AsyncGenerator<AssistantMessageEvent> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  let iterator: AsyncIterator<AssistantMessageEvent> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      const error = new Error("Request was aborted");
+      reject(error);
+      controller.abort(error);
+    };
+    if (input.signal?.aborted) onAbort();
+    else input.signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      const error = new Error(`Provider request timed out after ${input.timeoutMs} ms.`);
+      reject(error);
+      controller.abort(error);
+    }, input.timeoutMs);
+  });
+  try {
+    // Attach the rejection handler before starting a transport that could throw.
+    void deadline.catch(() => undefined);
+    controller.signal.throwIfAborted();
+    iterator = input.start(controller.signal)[Symbol.asyncIterator]();
+    while (true) {
+      const next = await Promise.race([iterator.next(), deadline]);
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+    controller.abort();
+    // A stalled iterator may take time to react to cancellation. Do not hold the
+    // thread queue while waiting for its cleanup.
+    if (iterator?.return) void iterator.return().catch(() => undefined);
+  }
 }
 
 function isMeaningful(event: AssistantMessageEvent): boolean {

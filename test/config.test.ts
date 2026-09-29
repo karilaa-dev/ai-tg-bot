@@ -66,6 +66,14 @@ describe("agent execution limits", () => {
     for (const name of names) expect(config[name]).toBe(0);
   });
 
+  it("keeps a separately configurable provider request deadline", () => {
+    expect(loadConfig(required).PI_REQUEST_TIMEOUT_MS).toBe(900_000);
+    expect(loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: "60000" }).PI_REQUEST_TIMEOUT_MS).toBe(60_000);
+    for (const value of ["0", "-1", "1.5", "Infinity", "invalid"]) {
+      expect(() => loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: value })).toThrow();
+    }
+  });
+
   it.each(names)("accepts a positive cap or explicit unlimited value for %s", (name) => {
     expect(loadConfig({ ...required, [name]: "17" })[name]).toBe(17);
     expect(loadConfig({ ...required, [name]: "0" })[name]).toBe(0);

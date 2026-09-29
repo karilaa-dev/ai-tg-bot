@@ -48,6 +48,27 @@ describe("TurnBudget", () => {
     expect(budget.snapshot()).toMatchObject({ toolCalls: 2, terminationReason: "tool_call_limit" });
   });
 
+  it("releases successful wrapper signatures without resetting nested failures", async () => {
+    const budget = createBudget({ maxConsecutiveToolFailures: 3, maxIdenticalToolFailures: 10 });
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const extension = createTurnBudgetExtension({ currentTurnBudget: () => budget });
+    if (typeof extension === "function") throw new Error("Expected named extension");
+    await extension.factory({ on: (name: string, handler: (...args: any[]) => any) => { handlers[name] = handler; } } as never);
+    let aborted = false;
+    for (let index = 0; index < 3; index++) {
+      const outer = `outer-${index}`;
+      const inner = `inner-${index}`;
+      handlers.tool_call!({ toolCallId: outer, toolName: "codemode", input: { code: "research" } });
+      handlers.tool_call!({ toolCallId: inner, parentToolCallId: outer, toolName: "read_file_section", input: { file_id: index } });
+      handlers.tool_result!({ toolCallId: inner, isError: true }, { abort: () => { aborted = true; } });
+      handlers.tool_result!({ toolCallId: outer, isError: false }, { abort: () => { aborted = true; } });
+      expect(Reflect.get(budget, "callSignatures").size).toBe(0);
+      expect(budget.snapshot().consecutiveToolFailures).toBe(index + 1);
+      expect(aborted).toBe(index === 2);
+    }
+    expect(budget.snapshot().terminationReason).toBe("consecutive_tool_failures");
+  });
+
   it("stops after three normalized identical failing calls", () => {
     const budget = createBudget({ maxIdenticalToolFailures: 3 });
     for (const [id, args] of [
