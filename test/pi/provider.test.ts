@@ -11,6 +11,9 @@ import {
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { zstdDecompressSync } from "node:zlib";
+import { streamSimple as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { streamSimple as streamOpenRouter } from "@earendil-works/pi-ai/api/openai-completions";
 import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import {
   registerPiProviderRouter,
@@ -19,16 +22,48 @@ import {
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 describe("Pi automatic provider", () => {
-  it.each([false, true])("applies fast mode only to Codex when enabled=%s", async (enabled) => {
-    const harness = providerHarness({ config: { CODEX_FAST_MODE: enabled } });
-    await harness.run("main");
-    await harness.run("helper");
-    expect(harness.calls).toEqual(["codex", "codex"]);
-    for (const options of harness.requestOptions) {
-      const payload = { model: "test-model" };
-      const body = await options.onPayload?.(payload, harness.router.codexModel("main")) ?? payload;
-      expect(body).toEqual(enabled ? { ...payload, service_tier: "priority" } : payload);
+  it.each([false, true])("sends the configured fast-mode tier through the real Codex SDK when enabled=%s", async (enabled) => {
+    const transport = interceptedSdkTransport();
+    const harness = providerHarness({
+      config: { CODEX_FAST_MODE: enabled },
+      streams: { codex: streamCodex, openRouter: streamOpenRouter },
+      apiKey: testCodexToken(),
+      options: { transport: "sse", fetch: transport.fetch },
+    });
+    expect((await harness.run("main")).at(-1)?.type).toBe("done");
+    expect((await harness.run("helper")).at(-1)?.type).toBe("done");
+    expect(transport.requests.map(request => request.body.model)).toEqual([
+      harness.router.codexModel("main").id, harness.router.codexModel("helper").id,
+    ]);
+    for (const request of transport.requests) {
+      expect(request.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+      if (enabled) expect(request.body).toHaveProperty("service_tier", "priority");
+      else expect(request.body).not.toHaveProperty("service_tier");
     }
+  });
+
+  it("omits fast mode from real OpenRouter SDK requests after Codex fails and while its circuit is open", async () => {
+    const transport = interceptedSdkTransport({ codexFailure: true });
+    const harness = providerHarness({
+      config: { CODEX_FAST_MODE: true },
+      streams: { codex: streamCodex, openRouter: streamOpenRouter },
+      apiKey: testCodexToken(),
+      options: { transport: "sse", fetch: transport.fetch },
+    });
+    expect(textDeltas(await harness.run("main"))).toBe("openrouter answer");
+    expect(textDeltas(await harness.run("helper"))).toBe("openrouter answer");
+    expect(transport.requests.map(request => request.url)).toEqual([
+      "https://chatgpt.com/backend-api/codex/responses",
+      "https://openrouter.ai/api/v1/chat/completions",
+      "https://openrouter.ai/api/v1/chat/completions",
+    ]);
+    expect(transport.requests[0]!.body).toHaveProperty("service_tier", "priority");
+    expect(transport.requests[1]!.body).not.toHaveProperty("service_tier");
+    expect(transport.requests[2]!.body).not.toHaveProperty("service_tier");
+    expect(transport.requests.slice(1).map(request => request.body.model)).toEqual([
+      harness.router.openRouterModel("main").id, harness.router.openRouterModel("helper").id,
+    ]);
+    expect(harness.router.circuit.state().open).toBe(true);
   });
 
   it("does not carry fast mode into fallback or subsequent requests while the circuit is open", async () => {
@@ -267,6 +302,9 @@ describe("Pi automatic provider", () => {
 
 function providerHarness(input: {
   config?: Partial<AppConfig>;
+  streams?: PiProviderStreamOverrides;
+  apiKey?: string;
+  options?: SimpleStreamOptions;
   context?: TranscriptContext;
   models?: Record<string, string>;
   codexConfigured?: boolean;
@@ -310,7 +348,7 @@ function providerHarness(input: {
     hasConfiguredAuth: () => input.codexConfigured ?? true,
     getApiKeyAndHeaders: async () => input.authError
       ? { ok: false as const, error: input.authError }
-      : { ok: true as const, apiKey: "codex-token", headers: {} },
+      : { ok: true as const, apiKey: input.apiKey ?? "codex-token", headers: {} },
   };
   const streams: PiProviderStreamOverrides = {
     codex: ((model, context, options) => {
@@ -337,7 +375,7 @@ function providerHarness(input: {
     config: loadTestConfig({ ...input.models, ...input.config }),
     modelRegistry: registry as never,
     circuit: input.circuit,
-    streams,
+    streams: input.streams ?? streams,
   });
   return {
     calls,
@@ -353,11 +391,40 @@ function providerHarness(input: {
       for await (const event of registered.streamSimple(
         model,
         context,
-        { sessionId: "opaque-pi-session", signal, onPayload },
+        { sessionId: "opaque-pi-session", ...input.options, signal, onPayload },
       )) events.push(event);
       return events;
     },
   };
+}
+
+function testCodexToken(): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none" })}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })}.signature`;
+}
+
+function interceptedSdkTransport(input: { codexFailure?: boolean } = {}) {
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const fetch: NonNullable<SimpleStreamOptions["fetch"]> = Object.assign(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(url, init);
+    const bytes = Buffer.from(await request.arrayBuffer());
+    const decoded = request.headers.get("content-encoding") === "zstd" ? zstdDecompressSync(bytes) : bytes;
+    requests.push({ url: request.url, body: JSON.parse(decoded.toString("utf8")) });
+    if (request.url === "https://chatgpt.com/backend-api/codex/responses") {
+      if (input.codexFailure) return Response.json({ error: { message: "quota exhausted" } }, { status: 429 });
+      return new Response(`data: ${JSON.stringify({
+        type: "response.completed", response: { id: "test-response", status: "completed", output: [] },
+      })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    }
+    if (request.url === "https://openrouter.ai/api/v1/chat/completions") {
+      return new Response(`data: ${JSON.stringify({
+        id: "test-completion", object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: { role: "assistant", content: "openrouter answer" }, finish_reason: "stop" }],
+      })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    }
+    throw new Error(`Unexpected SDK request: ${request.url}`);
+  }, { preconnect: vi.fn() });
+  return { requests, fetch };
 }
 
 function stalledStream(model: Model<Api>, text?: string) {
