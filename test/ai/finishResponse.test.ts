@@ -237,6 +237,7 @@ describe("finish_response", () => {
   it("persists and sends retained text before files after repair through create_file", async () => {
     const { input, runtime, read, calls } = await setupPi([
       [{ name: "finish_response", arguments: { text: "Ready to print", files: [{ path: "/model.stl" }, { path: "/model.final.png" }] } }],
+      [{ name: "tool_search", arguments: { query: "create_file", limit: 1 } }],
       [{ name: "create_file", arguments: { path: "/model.stl" } }],
       [{ name: "finish_response", arguments: {} }],
     ]);
@@ -255,7 +256,7 @@ describe("finish_response", () => {
       chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime }, t: (key) => key,
     });
 
-    expect(calls()).toBe(3);
+    expect(calls()).toBe(4);
     expect(sent).toEqual(["text", "STL", "photo"]);
     expect(currentTurnAssistantResult(runtime.session.messages)).toMatchObject({ completed: true, text: "Ready to print" });
     const messages = await input.repos.messages.listForThreadChain([input.thread]);

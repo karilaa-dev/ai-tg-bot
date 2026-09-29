@@ -23,17 +23,17 @@ export function e2bToolboxBuildRef(tag: string): string {
   return `${E2B_TOOLBOX_TEMPLATE_NAME}:${normalized}`;
 }
 
-export const PDF_INSPECTOR_VERSION = "1.17.0";
+export const PDF_INSPECTOR_VERSION = "1.25.2";
 
-export const OPENSCAD_VERSION = "2026.08.27";
-export const OPENSCAD_SOURCE_REVISION = "8020f9208e6c023086837ea07deaa9210bf50729";
-export const OPENSCAD_NODE_SHA256 = "6fb5a3bfd5580b6c65d559552b79d6c4bac456d2956864e0b5432a1a28ee4508";
+export const OPENSCAD_VERSION = "2026.09.29";
+export const OPENSCAD_SOURCE_REVISION = "be3ab1d231e30256f8b638108a08fdd7e72be1fd";
+export const OPENSCAD_NODE_SHA256 = "c04082eab7e7f504069ffa69fc9c67ea819cdb69bea0de8e8d0be03d5bcbdd1b";
 export const OPENSCAD_LICENSE_SHA256 = "1805a29c3bccbc0428ce0048a1dfdeb9b1867677410e99c89c3c30932ae8c7d5";
 export const POVRAY_VERSION = "3.7.0.10";
 
-const IMAGEMAGICK_VERSION = "7.1.2-30";
-export const IMAGEMAGICK_COMMIT = "344e9056f43764bfdf82456faf3bc2feee98a6fe";
-export const IMAGEMAGICK_SOURCE_SHA256 = "4a2329b539ae60e66e2e1f79e7f471ce5dbf35ef8261873059125248944fb1fc";
+const IMAGEMAGICK_VERSION = "7.1.2-32";
+export const IMAGEMAGICK_COMMIT = "ad98b244c995d2e3051757fa3b7855f45b550d24";
+export const IMAGEMAGICK_SOURCE_SHA256 = "b917080691e66e9f708818edbcf5155f9ed2112dd7b726e8b84a95160da3bdc5";
 
 export const E2B_TOOLBOX_APT_PACKAGES = [
   "autoconf",

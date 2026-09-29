@@ -44,14 +44,14 @@ describe("E2B toolbox template definition", () => {
   });
 
   it("pins ImageMagick supply-chain inputs", () => {
-    expect(PDF_INSPECTOR_VERSION).toBe("1.17.0");
+    expect(PDF_INSPECTOR_VERSION).toBe("1.25.2");
     expect(IMAGEMAGICK_COMMIT).toMatch(/^[a-f0-9]{40}$/);
     expect(IMAGEMAGICK_SOURCE_SHA256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("installs and contracts the PDF document tools", async () => {
     const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
-    expect(dockerfile).toContain("@firecrawl/pdf-inspector@1.17.0");
+    expect(dockerfile).toContain("@firecrawl/pdf-inspector@1.25.2");
     const contract = await fs.readFile("e2b-template/assets/tool-contract.sh", "utf8");
     expect(contract).toContain("pdf-inspector detect");
     expect(contract).toContain('.pdfType == "Scanned"');
@@ -61,9 +61,9 @@ describe("E2B toolbox template definition", () => {
 
   it("installs and smoke-tests the headless OpenSCAD build command", async () => {
     const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
-    expect(OPENSCAD_VERSION).toBe("2026.08.27");
-    expect(OPENSCAD_SOURCE_REVISION).toBe("8020f9208e6c023086837ea07deaa9210bf50729");
-    expect(OPENSCAD_NODE_SHA256).toBe("6fb5a3bfd5580b6c65d559552b79d6c4bac456d2956864e0b5432a1a28ee4508");
+    expect(OPENSCAD_VERSION).toBe("2026.09.29");
+    expect(OPENSCAD_SOURCE_REVISION).toBe("be3ab1d231e30256f8b638108a08fdd7e72be1fd");
+    expect(OPENSCAD_NODE_SHA256).toBe("c04082eab7e7f504069ffa69fc9c67ea819cdb69bea0de8e8d0be03d5bcbdd1b");
     expect(OPENSCAD_LICENSE_SHA256).toMatch(/^[a-f0-9]{64}$/u);
     expect(POVRAY_VERSION).toBe("3.7.0.10");
     expect(dockerfile).toContain(`OpenSCAD-${OPENSCAD_VERSION}-WebAssembly-node.zip`);

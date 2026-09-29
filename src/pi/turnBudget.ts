@@ -100,11 +100,14 @@ export function createTurnBudgetExtension(source: TurnBudgetSource): InlineExten
   return {
     name: "turn-budget",
     factory: (pi) => {
+      const nestedParents = new Set<string>();
       pi.on("turn_start", (_event, context) => {
+        nestedParents.clear();
         const budget = source.currentTurnBudget();
         if (budget && !budget.beforeModelCycle()) context.abort();
       });
       pi.on("tool_call", (event) => {
+        if (event.parentToolCallId) nestedParents.add(event.parentToolCallId);
         return source.currentTurnBudget()?.beforeToolCall(
           event.toolCallId,
           event.toolName,
@@ -114,7 +117,11 @@ export function createTurnBudgetExtension(source: TurnBudgetSource): InlineExten
       pi.on("tool_result", (event, context) => {
         const structuredFailure = toolResultFailed(event.details);
         const failed = event.isError || structuredFailure;
-        if (source.currentTurnBudget()?.afterToolResult(event.toolCallId, failed)) {
+        // A successful wrapper is not another successful research call. Its
+        // nested results already updated the failure counter, including errors
+        // caught by the script.
+        const successfulWrapper = nestedParents.delete(event.toolCallId) && !failed;
+        if (!successfulWrapper && source.currentTurnBudget()?.afterToolResult(event.toolCallId, failed)) {
           context.abort();
         }
         // Bot tools return actionable JSON errors. Preserve their content and

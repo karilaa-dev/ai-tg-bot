@@ -10,7 +10,7 @@ export const OFFICE_SKILLS = [
   {
     "name": "docx-cli",
     "relativePath": "skills/docx-cli/SKILL.md",
-    "sha256": "b47e5fc83bc2186e02b3ae1ccaa4af7541c73f1ccd5ac3a8d44a77952f653632"
+    "sha256": "c30e53dfcf5dba8dfa28102aac79290b6adc41cbdca3f23a1c2769aa91cb9acf"
   },
   {
     "name": "pptxgenjs",

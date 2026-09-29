@@ -2,7 +2,7 @@
 
 This directory defines the private `ai-tg-bot-tools` template used by thread sandboxes. It starts from E2B Base with 2 vCPU and 2 GiB RAM.
 
-The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cli `0.25.0`, PptxGenJS `4.0.1`, python-pptx `1.0.2`, openpyxl `3.1.5`, headless LibreOffice Writer/Impress/Calc and compatible fonts, the pinned OpenSCAD `2026.08.27` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.17.0`, and Poppler PDF rendering tools. The OpenSCAD pipeline exports binary STL and exact rendered PNG files without Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
+The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cli `0.26.0`, PptxGenJS `4.0.1`, python-pptx `1.0.2`, openpyxl `3.1.5`, headless LibreOffice Writer/Impress/Calc and compatible fonts, the pinned OpenSCAD `2026.09.29` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.25.2`, and Poppler PDF rendering tools. The OpenSCAD pipeline exports binary STL and exact rendered PNG files without Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
 ## Versioned release
 

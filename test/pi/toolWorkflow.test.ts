@@ -1,0 +1,157 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type JsonObject, type TranscriptContext } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadTestConfig } from "../../src/config.js";
+import { createDatabase } from "../../src/db/index.js";
+import { createRepos } from "../../src/db/repos/index.js";
+import { createLogger } from "../../src/logger.js";
+import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import { inferenceUsageFromEntries } from "../../src/pi/usage.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+describe("Pi tool discovery and codemode", () => {
+  it("starts with five tools and discovers a specialist without exposing mutations to scripts", async () => {
+    const { runtime, contexts } = await setup([
+      { name: "tool_search", arguments: { query: "browser_navigate", limit: 1 } },
+      { name: "finish_response", arguments: { text: "Done" } },
+    ], true);
+    expect(runtime.session.getActiveToolNames().sort()).toEqual(["bash", "codemode", "finish_response", "read", "tool_search"]);
+    expect(runtime.session.getCallableToolNames()).toEqual(expect.arrayContaining(["web_search", "web_extract", "read_file_section"]));
+    for (const name of ["bash", "finish_response", "create_file", "generate_image", "browser_navigate", "materialize_chat_files"]) {
+      expect(runtime.session.getCallableToolNames()).not.toContain(name);
+    }
+
+    await runtime.session.prompt("Find the browser navigation tool", { expandPromptTemplates: false });
+
+    expect(getCurrentTools(contexts[0]!.messages)).toHaveLength(5);
+    const initialChars = JSON.stringify(getCurrentTools(contexts[0]!.messages)).length;
+    const previousChars = JSON.stringify(runtime.session.getAllTools().filter((tool) => !["codemode", "tool_search"].includes(tool.name))
+      .map(({ name, description, parameters }) => ({ name, description, parameters }))).length;
+    expect(initialChars).toBeLessThan(previousChars * 0.65);
+    expect(getCurrentTools(contexts[1]!.messages).map((tool) => tool.name)).toContain("browser_navigate");
+    expect(runtime.session.getCallableToolNames()).not.toContain("browser_navigate");
+    expect(result(runtime.session.messages, "tool_search").details).toMatchObject({ loaded: ["browser_navigate"] });
+  });
+
+  it("runs independent reads with structured results and counts nested calls", async () => {
+    const { runtime } = await setup([
+      { name: "codemode", arguments: { code: "const results = await Promise.allSettled([tools.search_thread({query: 'alpha'}), tools.search_thread({query: 'beta'})]); text(results.map(r => r.status === 'fulfilled' ? {count: r.value.results.length} : {error: r.reason.message}));" } },
+      { name: "finish_response", arguments: { text: "Research complete" } },
+    ]);
+
+    await runtime.session.prompt("Read both subjects", { expandPromptTemplates: false });
+
+    const execution = result(runtime.session.messages, "codemode");
+    expect(execution.isError).toBe(false);
+    expect(JSON.stringify(execution.content)).toContain('count');
+    expect(JSON.stringify(execution.content)).not.toContain('Script failed');
+    expect(execution.nestedCalls?.calls.map((call) => call.name)).toEqual(["search_thread", "search_thread"]);
+    expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({ modelCycles: 2, toolCalls: 4 });
+  });
+
+  it("returns structured failures to scripts and enforces the nested tool-call budget", async () => {
+    const { runtime } = await setup([
+      { name: "codemode", arguments: { code: "const results = await Promise.allSettled([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99998, chunk_index: 0}), tools.read_file_section({file_id: 99997, chunk_index: 0})]); text(results.map(r => r.status === 'fulfilled' ? r.value : {error: r.reason.message}));" } },
+      { name: "finish_response", arguments: { text: "Handled" } },
+    ], false, 3);
+
+    await runtime.session.prompt("Read missing files", { expandPromptTemplates: false });
+
+    expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({ toolCalls: 3, terminationReason: "tool_call_limit" });
+    const execution = result(runtime.session.messages, "codemode");
+    expect(execution.nestedCalls?.calls.filter((call) => call.status === "error")).toHaveLength(3);
+    expect(JSON.stringify(execution.content)).toContain("file not found in this thread");
+  });
+
+  it("rejects delivery and workspace mutations inside scripts", async () => {
+    const { runtime } = await setup([
+      { name: "codemode", arguments: { code: "text(ALL_TOOLS.map(t => t.name)); await tools.finish_response({text: 'Must not deliver'});" } },
+      { name: "finish_response", arguments: { text: "Delivered directly" } },
+    ]);
+
+    await runtime.session.prompt("Check available script tools", { expandPromptTemplates: false });
+
+    const execution = result(runtime.session.messages, "codemode");
+    expect(execution.isError).toBe(true);
+    expect(JSON.stringify(execution.content)).not.toContain('"bash"');
+    expect(result(runtime.session.messages, "finish_response").details).toMatchObject({ text: "Delivered directly", completed: true });
+    expect(runtime.bridge.currentTurnBudget()!.snapshot().toolCalls).toBe(2);
+  });
+
+  it("keeps the failure limit across scripts that catch nested errors", async () => {
+    const { runtime } = await setup(Array.from({ length: 3 }, (_, index) => ({
+      name: "codemode", arguments: { code: `text(await tools.read_file_section({file_id: ${99000 + index}, chunk_index: 0}));` },
+    })), false, 40, 3);
+
+    await runtime.session.prompt("Read three missing files", { expandPromptTemplates: false });
+
+    expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({
+      modelCycles: 3, toolCalls: 6, terminationReason: "consecutive_tool_failures",
+    });
+    expect(result(runtime.session.messages, "codemode").isError).toBe(false);
+  });
+
+  it("persists pruning before the next model request without losing raw results or usage", async () => {
+    const { runtime, contexts } = await setup([
+      { name: "codemode", arguments: { code: "text('old inspection output '.repeat(500));" } },
+      ...Array.from({ length: 6 }, () => ({ name: "codemode", arguments: { code: "text('recent result');" } })),
+      { name: "finish_response", arguments: { text: "Done" } },
+    ]);
+
+    await runtime.session.prompt("Work through a long task", { expandPromptTemplates: false });
+
+    const entries = runtime.session.sessionManager.getEntries();
+    const original = entries.find((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "codemode");
+    if (!original || original.type !== "message") throw new Error("Missing raw codemode result");
+    expect(JSON.stringify(original.message).length).toBeGreaterThan(6000);
+    expect(entries.filter((entry) => entry.type === "context_edit").map((entry) => entry.targetId)).toEqual([original.id]);
+    const nextRequest = contexts.at(-1)!.messages.find((message) => message.role === "toolResult" && message.toolName === "codemode");
+    expect(JSON.stringify(nextRequest)).toContain("Earlier tool result shortened");
+    expect(JSON.stringify(nextRequest).length).toBeLessThan(5000);
+    expect(inferenceUsageFromEntries(entries).totalTokens).toBe(8 * 15);
+    expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({ modelCycles: 8, toolCalls: 8 });
+  });
+});
+
+function result(messages: Awaited<ReturnType<PiRuntimeManager["runtime"]>>["session"]["messages"], name: string) {
+  const message = messages.find((message) => message.role === "toolResult" && message.toolName === name);
+  if (!message || message.role !== "toolResult") throw new Error(`Missing ${name} result: ${JSON.stringify(messages)}`);
+  return message;
+}
+
+async function setup(calls: Array<{ name: string; arguments: JsonObject }>, browser = false, maxToolCalls = 40, maxConsecutiveToolFailures = 5) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tool-workflow-"));
+  cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
+  const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: browser ? "test-browser" : undefined, PI_MAX_TOOL_CALLS: maxToolCalls, PI_MAX_CONSECUTIVE_TOOL_FAILURES: maxConsecutiveToolFailures });
+  const db = createDatabase(config);
+  await db.initialize();
+  cleanups.push(() => db.destroy());
+  const repos = createRepos(db.db, db.search);
+  const user = await repos.users.ensure({ tgId: 99881, firstName: "Test", lang: "en" });
+  const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Tool workflow" });
+  const contexts: TranscriptContext[] = [];
+  let cycle = 0;
+  const pi = new PiRuntimeManager({ config, db, repos, logger: createLogger(config), providerStreams: {
+    openRouter: (model, context) => {
+      contexts.push(structuredClone(context));
+      const call = calls[cycle++];
+      if (!call) throw new Error("Unexpected extra model cycle");
+      const message: AssistantMessage = {
+        role: "assistant", content: [{ type: "toolCall", id: `call-${cycle}`, ...call }],
+        provider: model.provider, model: model.id, api: model.api, stopReason: "toolUse", timestamp: Date.now(),
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      };
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "toolUse", message });
+      return stream;
+    },
+  } });
+  cleanups.push(() => pi.dispose());
+  const runtime = await pi.runtime(thread, user);
+  await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file reload"); } });
+  return { runtime, contexts };
+}

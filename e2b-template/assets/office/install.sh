@@ -37,13 +37,13 @@ npm ci --prefix /opt/office/node --omit=dev --ignore-scripts --no-audit --no-fun
 python3 -m venv /opt/office/python
 /opt/office/python/bin/pip install --require-hashes -r "$bundle/requirements.txt"
 case $(uname -m) in
- x86_64) platform=x64; digest=e59d32f2a1ffd696bbb816015bea1f437cba4f3864e0e62f6b83df9acc55bfe6 ;;
- aarch64|arm64) platform=arm64; digest=d6581b9642081a6fa8b7c2c6ae512ee35b8a12ff77b224777a40989d6440f38d ;;
+ x86_64) platform=x64; digest=9429431c38bc2cebe67f689decc96bdb1043758887919fa7dbf447da003a2fa4 ;;
+ aarch64|arm64) platform=arm64; digest=f8a8c86a64571c7f3926c058c81b8b1e7456123ba22ce542ae1ec6e4ae6a5918 ;;
  *) printf 'Unsupported Office architecture\n' >&2; exit 1 ;;
 esac
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
-curl -fsSL "https://github.com/kklimuk/docx-cli/releases/download/v0.25.0/docx-linux-$platform" -o "$staging/docx"
+curl -fsSL "https://github.com/kklimuk/docx-cli/releases/download/v0.26.0/docx-linux-$platform" -o "$staging/docx"
 printf '%s  %s\n' "$digest" "$staging/docx" | sha256sum -c -
 install -m0755 "$staging/docx" /usr/local/bin/docx
 cp -R "$bundle/licenses/." /opt/office/licenses/

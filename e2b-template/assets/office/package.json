@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "jszip": "3.10.1",
+    "jszip": "3.10.2",
     "pptxgenjs": "4.0.1"
   }
 }

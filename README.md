@@ -106,7 +106,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.15` uses `ai-tg-bot-tools:v2.0.15`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.25.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.08.27` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.15` uses `ai-tg-bot-tools:v2.0.15`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -193,7 +193,13 @@ The bot rejects the workspace root and Telegram-file directory. It also verifies
 
 ## Prompt and provider behavior
 
-Normal turns keep the core system prompt, Office skill index, tool schemas, and prior Pi history stable. The bot creates one bounded `<session_context>` snapshot per turn for current time, timezone, user metadata, thread title, and inherited files. This untrusted block is not written to Pi history or compaction summaries.
+Normal turns keep the core system prompt and Office skill index stable. The bot creates one bounded `<session_context>` snapshot per turn for current time, timezone, user metadata, thread title, and inherited files. This untrusted block is not written to Pi history or compaction summaries.
+
+Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, and `tool_search`. Specialist tools are registered but loaded only when searched for; Pi records changes to the active tool set in its transcript. Codemode can batch chat searches, file reads, and web research with structured results. Workspace mutations, browser actions, image generation, publishing, and delivery cannot run inside scripts. Nested research calls share the turn's tool-call and failure limits. Only a direct `finish_response` completes delivery.
+
+Run `bun run live:pi-tools-check` to verify parallel research, specialist discovery, and final completion with the configured provider. Set `PI_SMOKE_FORCE_OPENROUTER=1` to check fallback. The command uses a disposable session and database, sends nothing to Telegram, and reports the initial tool declaration size against declaring every bot tool.
+
+At completed model-turn boundaries, the bot retains the latest six tool results and shortens older successful results containing images or more than 6,000 text characters. Summaries retain text excerpts and source/artifact references. Failed results, Office validation, and final delivery results are kept. These append-only context edits preserve raw history, usage, and branch history; only subsequent model requests use the shorter content.
 
 OpenRouter receives the opaque Pi session UUID for route affinity. No Telegram identifier or descriptive metadata is used. The bot does not opt into long-lived prompt retention, explicit cache-control blocks, or response caching.
 
