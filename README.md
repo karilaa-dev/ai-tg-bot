@@ -201,6 +201,8 @@ Agent turns have no tool-call, model-cycle, repeated-failure, or total-duration 
 
 Run `bun run live:pi-tools-check` to verify parallel research, specialist discovery, and final completion with the configured provider. Set `PI_SMOKE_FORCE_OPENROUTER=1` to check fallback. The command uses a disposable session and database, sends nothing to Telegram, and reports the initial tool declaration size against declaring every bot tool.
 
+Ownerless `running` or `awaiting_delivery` turns left by deployments before ownership leases are interrupted after 16 minutes without an update, so queued work can resume. Set `LEGACY_TURN_RECOVERY_GRACE_MS` to a positive integer in milliseconds to change this grace period. A positive `PI_TURN_TIMEOUT_MS` extends the grace period when its turn window plus one minute is longer. During rolling upgrades, allow enough time for work still running in an older deployment. Current turns with valid ownership leases can continue indefinitely.
+
 At completed model-turn boundaries, the bot retains the latest six tool results and shortens older successful results containing images or more than 6,000 text characters. Summaries retain text excerpts and source/artifact references. Failed results, Office validation, and final delivery results are kept. These append-only context edits preserve raw history, usage, and branch history; only subsequent model requests use the shorter content.
 
 OpenRouter receives the opaque Pi session UUID for route affinity. No Telegram identifier or descriptive metadata is used. The bot does not opt into long-lived prompt retention, explicit cache-control blocks, or response caching.

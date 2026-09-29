@@ -74,6 +74,14 @@ describe("agent execution limits", () => {
     }
   });
 
+  it("keeps a finite recovery grace period for legacy ownerless turns", () => {
+    expect(loadConfig(required).LEGACY_TURN_RECOVERY_GRACE_MS).toBe(960_000);
+    expect(loadConfig({ ...required, LEGACY_TURN_RECOVERY_GRACE_MS: "120000" }).LEGACY_TURN_RECOVERY_GRACE_MS).toBe(120_000);
+    for (const value of ["0", "-1", "1.5", "Infinity", "invalid"]) {
+      expect(() => loadConfig({ ...required, LEGACY_TURN_RECOVERY_GRACE_MS: value })).toThrow();
+    }
+  });
+
   it.each(names)("accepts a positive cap or explicit unlimited value for %s", (name) => {
     expect(loadConfig({ ...required, [name]: "17" })[name]).toBe(17);
     expect(loadConfig({ ...required, [name]: "0" })[name]).toBe(0);
