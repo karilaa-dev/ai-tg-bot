@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/pi-ai";
+import { contentText, getInitialSystemMessage, normalizeContext, type TranscriptContext } from "@earendil-works/pi-ai";
 
 function modelDisplayName(model: { id: string; name: string }): string {
   const id = model.id.split("/").at(-1)!;
@@ -10,6 +10,14 @@ function modelDisplayName(model: { id: string; name: string }): string {
 }
 
 // Request-local metadata: never modify the session prompt or persisted messages.
-export function withModelIdentity(context: Context, model: { id: string; name: string }): Context {
-  return { ...context, systemPrompt: `${context.systemPrompt ?? ""}\n\nModel: ${modelDisplayName(model)}`.trim() };
+export function withModelIdentity(context: TranscriptContext, model: { id: string; name: string }): TranscriptContext {
+  const identity = `Model: ${modelDisplayName(model)}`;
+  const initial = getInitialSystemMessage(context.messages);
+  if (!initial) return normalizeContext({ systemPrompt: identity, messages: context.messages });
+  return normalizeContext({
+    messages: [
+      { ...initial, content: `${contentText(initial.content)}\n\n${identity}`.trim() },
+      ...context.messages.slice(1),
+    ],
+  });
 }

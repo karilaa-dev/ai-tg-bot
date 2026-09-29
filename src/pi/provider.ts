@@ -4,7 +4,7 @@ import {
   type AssistantMessage,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
-  type Context,
+  type TranscriptContext,
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
@@ -57,7 +57,7 @@ export function registerPiProviderRouter(input: {
 
   const streamSimple = (
     selected: Model<Api>,
-    context: Context,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream => lazyStream(selected, async () => {
     const kind = selected.id === TELEGRAM_HELPER_MODEL ? "helper" : "main";
@@ -110,7 +110,7 @@ async function* routeStream(input: {
   circuit: CodexCircuitBreaker;
   codex: Model<"openai-codex-responses">;
   openRouter: Model<"openai-completions">;
-  context: Context;
+  context: TranscriptContext;
   options?: SimpleStreamOptions;
   streamCodex: typeof streamCodex;
   streamOpenRouter: typeof streamOpenRouter;
@@ -247,7 +247,7 @@ function providerErrorMessage(model: Model<Api>, message: string): AssistantMess
 async function* openRouterEvents(input: {
   config: AppConfig;
   openRouter: Model<"openai-completions">;
-  context: Context;
+  context: TranscriptContext;
   options?: SimpleStreamOptions;
   streamOpenRouter: typeof streamOpenRouter;
 }): AsyncGenerator<AssistantMessageEvent> {

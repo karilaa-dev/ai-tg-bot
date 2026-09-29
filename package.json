@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.14",
+  "version": "2.0.15",
   "private": true,
   "type": "module",
   "scripts": {
@@ -25,9 +25,9 @@
     "bun": "1.4.2"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.84.3",
-    "@earendil-works/pi-ai": "0.84.3",
-    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
     "@grammyjs/auto-retry": "^2.0.2",
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",

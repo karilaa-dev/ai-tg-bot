@@ -1,7 +1,10 @@
 import {
   createAssistantMessageEventStream,
   type Api,
-  type Context,
+  normalizeContext,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type TranscriptContext,
   type AssistantMessage,
   type AssistantMessageEvent,
   type Model,
@@ -21,10 +24,10 @@ describe("Pi automatic provider", () => {
     await harness.run("main");
     await harness.run("main");
     await harness.run("helper");
-    expect(harness.contexts.map((context) => context.systemPrompt)).toEqual([
-      "Core\n\nModel: GPT-6 Astra", "Core\n\nModel: GPT-6 Astra", "Core\n\nModel: GPT-5.6 Luna",
+    expect(harness.contexts.map((context) => getCurrentSystemPrompt(context.messages))).toEqual([
+      "Core\n\nModel: GPT-6.1 Sol", "Core\n\nModel: GPT-6.1 Sol", "Core\n\nModel: GPT-6 Luna",
     ]);
-    expect(harness.context).toEqual({ systemPrompt: "Core", messages: [] });
+    expect(harness.context).toEqual(normalizeContext({ systemPrompt: "Core", messages: [] }));
   });
 
   it("uses the actual configured fallback identity after a primary failure and for helper requests", async () => {
@@ -34,11 +37,34 @@ describe("Pi automatic provider", () => {
     } });
     await harness.run();
     await harness.run("helper");
-    expect(harness.contexts.map((context) => context.systemPrompt)).toEqual([
+    expect(harness.contexts.map((context) => getCurrentSystemPrompt(context.messages))).toEqual([
       "Core\n\nModel: GPT-6 Astra Custom", "Core\n\nModel: other-model-v2", "Core\n\nModel: GPT-5.6 Terra",
     ]);
-    expect(harness.contexts.every((context) => !/provider:|Model: (main|helper)/u.test(context.systemPrompt!))).toBe(true);
-    expect(harness.context.systemPrompt).toBe("Core");
+    expect(harness.contexts.every((context) => !/provider:|Model: (main|helper)/u.test(getCurrentSystemPrompt(context.messages)!))).toBe(true);
+    expect(getCurrentSystemPrompt(harness.context.messages)).toBe("Core");
+  });
+
+  it("preserves transcript prompt updates and tool changes across fallback", async () => {
+    const initialTool = { name: "old_tool", description: "Original tool", parameters: { type: "object" } };
+    const currentTool = { name: "current_tool", description: "Current tool", parameters: { type: "object" } };
+    const context = normalizeContext({ messages: [
+      { role: "system", content: [{ type: "text", text: "Core" }], sections: { policy: "Initial policy" }, toolsAdded: [initialTool], timestamp: 0 },
+      { role: "user", content: "First turn", timestamp: 1 },
+      { role: "system", content: "Updated instructions", sections: { policy: "Current policy" }, toolsRemoved: [{ name: "old_tool" }], toolsAdded: [currentTool], timestamp: 2 },
+      { role: "user", content: "Next turn", timestamp: 3 },
+    ] });
+    const original = structuredClone(context);
+    const harness = providerHarness({ codexError: "quota exhausted", context });
+
+    await harness.run();
+
+    expect(harness.contexts).toHaveLength(2);
+    for (const request of harness.contexts) {
+      expect(getCurrentSystemPrompt(request.messages)).toBe("Core\n\nModel: GPT-6.1 Sol\n\nUpdated instructions\n\nCurrent policy");
+      expect(getCurrentTools(request.messages)).toEqual([currentTool]);
+      expect(request.messages.slice(1)).toEqual(original.messages.slice(1));
+    }
+    expect(context).toEqual(original);
   });
 
   it("uses Codex exclusively while its OAuth and provider are available", async () => {
@@ -137,6 +163,7 @@ describe("Pi automatic provider", () => {
 });
 
 function providerHarness(input: {
+  context?: TranscriptContext;
   models?: Record<string, string>;
   codexConfigured?: boolean;
   codexError?: string;
@@ -146,13 +173,13 @@ function providerHarness(input: {
   discoveredOpenRouterCompat?: Model<"openai-completions">["compat"];
 }) {
   const calls: string[] = [];
-  const contexts: Context[] = [];
-  const context = { systemPrompt: "Core", messages: [] as [] };
+  const contexts: TranscriptContext[] = [];
+  const context = input.context ?? normalizeContext({ systemPrompt: "Core", messages: [] });
   const streamOptions: Array<{ provider: string; sessionId: string | undefined }> = [];
   let registered: {
     streamSimple: (
       model: Model<Api>,
-      context: { systemPrompt: string; messages: [] },
+      context: TranscriptContext,
       options?: SimpleStreamOptions,
     ) => AsyncIterable<AssistantMessageEvent>;
   } | undefined;

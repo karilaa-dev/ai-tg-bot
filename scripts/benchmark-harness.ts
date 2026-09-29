@@ -43,8 +43,8 @@ let failed = false;
 try {
   for (let pair = 1; pair <= runs; pair++) {
     const config = { ...base, DB_URL: "sqlite::memory:", E2B_DEPLOYMENT_ID: `${namespace}-${pair}`, E2B_TEMPLATE: `ai-tg-bot-tools:v${version}`,
-      PI_CODING_AGENT_DIR: path.join(directory, String(pair)), PI_THINKING_LEVEL: "low" as const,
-      CODEX_MODEL: "gpt-6-astra", OPENROUTER_MAIN_MODEL: "openai/gpt-6-astra",
+      PI_CODING_AGENT_DIR: path.join(directory, String(pair)), PI_THINKING_LEVEL: "medium" as const,
+      CODEX_MODEL: "gpt-6.1-sol", OPENROUTER_MAIN_MODEL: "openai/gpt-6.1-sol",
     };
     const db = createDatabase(config);
     await db.initialize();

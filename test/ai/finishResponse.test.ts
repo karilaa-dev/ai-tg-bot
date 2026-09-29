@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAssistantMessageEventStream, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type AssistantMessage, type TranscriptContext, type JsonObject } from "@earendil-works/pi-ai";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -215,8 +215,8 @@ describe("finish_response", () => {
     expect(currentTurnAssistantResult(runtime.session.messages)).toMatchObject({ completed: true, text: "Ready to print" });
     const stored = await fs.readFile(runtime.session.sessionFile!, "utf8");
     expect(stored).toContain("Ready to print");
-    expect(stored).not.toContain("Model: GPT-6 Astra");
-    expect(input.config.PI_THINKING_LEVEL).toBe("low");
+    expect(stored).not.toContain("Model: GPT-6.1 Sol");
+    expect(input.config.PI_THINKING_LEVEL).toBe("medium");
   });
 
   it("persists final text against the terminal result entry so forks retain a complete exchange", async () => {
@@ -339,13 +339,13 @@ async function setup() {
   return { input, read, execute };
 }
 
-async function setupPi(cycles: Array<Array<{ name: string; arguments: Record<string, unknown> }>>) {
+async function setupPi(cycles: Array<Array<{ name: string; arguments: JsonObject }>>) {
   const { input, read, execute } = await setup();
-  const contexts: Context[] = [];
+  const contexts: TranscriptContext[] = [];
   let call = 0;
   const pi = new PiRuntimeManager({ config: input.config, db: input.db, repos: input.repos, logger: input.logger!, commandRuntime: input.commandRuntime,
     providerStreams: { openRouter: (model, context) => {
-      contexts.push({ ...context, messages: structuredClone(context.messages), tools: undefined });
+      contexts.push({ ...context, messages: structuredClone(context.messages) });
       const tools = cycles[call++];
       if (!tools) throw new Error("Unexpected extra model cycle");
       const message: AssistantMessage = {
