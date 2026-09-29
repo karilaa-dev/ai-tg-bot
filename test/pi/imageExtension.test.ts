@@ -168,8 +168,8 @@ describe("Pi generate_image extension", () => {
 
   });
 
-  it("uses Pi Codex OAuth headers and the hosted image_generation payload", async () => {
-    const config = testConfig();
+  it.each([false, true])("uses Pi Codex OAuth headers and the hosted image_generation payload with fast mode=%s", async (fastMode) => {
+    const config = testConfig({ CODEX_FAST_MODE: fastMode });
     db = createDatabase(config);
     await db.initialize();
     const repos = createRepos(db.db, db.search);
@@ -224,6 +224,8 @@ describe("Pi generate_image extension", () => {
     expect(requestHeaders?.get("originator")).toBe("pi");
     expect(requestHeaders?.get("x-pi-auth")).toBe("kept");
     expect(requestHeaders?.has("x-removed")).toBe(false);
+    if (fastMode) expect(requestBody).toHaveProperty("service_tier", "priority");
+    else expect(requestBody).not.toHaveProperty("service_tier");
     expect(requestBody).toMatchObject({
       model: "codex-test",
       parallel_tool_calls: false,
@@ -382,15 +384,17 @@ describe("Pi generate_image extension", () => {
   });
 
   it("falls back from retryable Codex image failures through the shared circuit", async () => {
-    const config = testConfig();
+    const config = testConfig({ CODEX_FAST_MODE: true });
     db = createDatabase(config);
     await db.initialize();
     const repos = createRepos(db.db, db.search);
     const user = await repos.users.ensure({ tgId: 817, firstName: "FallbackImage" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Fallback Images" });
     const urls: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       urls.push(String(url));
+      bodies.push(JSON.parse(String(init?.body)));
       if (urls.length === 1) return new Response("quota", { status: 429, headers: { "retry-after": "30" } });
       return Response.json({ data: [{ b64_json: TEST_PNG.toString("base64") }] });
     }));
@@ -419,6 +423,8 @@ describe("Pi generate_image extension", () => {
       "https://chatgpt.com/backend-api/codex/responses",
       "https://openrouter.ai/api/v1/images",
     ]);
+    expect(bodies[0]).toHaveProperty("service_tier", "priority");
+    expect(bodies[1]).not.toHaveProperty("service_tier");
     expect(result.details).toMatchObject({ provider: "openrouter" });
     expect(router.circuit.state().open).toBe(true);
     expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));

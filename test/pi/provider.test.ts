@@ -19,6 +19,56 @@ import {
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 describe("Pi automatic provider", () => {
+  it.each([false, true])("applies fast mode only to Codex when enabled=%s", async (enabled) => {
+    const harness = providerHarness({ config: { CODEX_FAST_MODE: enabled } });
+    await harness.run("main");
+    await harness.run("helper");
+    expect(harness.calls).toEqual(["codex", "codex"]);
+    for (const options of harness.requestOptions) {
+      const payload = { model: "test-model" };
+      const body = await options.onPayload?.(payload, harness.router.codexModel("main")) ?? payload;
+      expect(body).toEqual(enabled ? { ...payload, service_tier: "priority" } : payload);
+    }
+  });
+
+  it("does not carry fast mode into fallback or subsequent requests while the circuit is open", async () => {
+    const harness = providerHarness({ codexError: "quota exhausted", config: { CODEX_FAST_MODE: true } });
+    await harness.run();
+    await harness.run("helper");
+    expect(harness.calls).toEqual(["codex", "openrouter", "openrouter"]);
+    expect(harness.requestOptions[0]!.onPayload).toBeTypeOf("function");
+    expect(harness.requestOptions[1]!.onPayload).toBeUndefined();
+    expect(harness.requestOptions[2]!.onPayload).toBeUndefined();
+  });
+
+  it.each([{ codexConfigured: false }, { authError: "OAuth refresh token failed" }])(
+    "omits fast mode when routing directly to OpenRouter: %j", async (input) => {
+      const harness = providerHarness({ ...input, config: { CODEX_FAST_MODE: true } });
+      await harness.run();
+      expect(harness.calls).toEqual(["openrouter"]);
+      expect(harness.requestOptions[0]!.onPayload).toBeUndefined();
+    },
+  );
+
+  it.each([false, true])("preserves caller payload hooks through fallback, replacement=%s", async (replace) => {
+    const onPayload = vi.fn(async (payload: unknown) => {
+      if (replace) return { custom: "kept" };
+      Object.assign(payload as object, { custom: "kept" });
+      return undefined;
+    });
+    const harness = providerHarness({ codexError: "quota exhausted", config: { CODEX_FAST_MODE: true } });
+    await harness.run("main", undefined, onPayload);
+    const payload = { model: "test-model" };
+    const codexBody = await harness.requestOptions[0]!.onPayload!(payload, harness.router.codexModel("main"));
+    expect(codexBody).toEqual({ ...(replace ? {} : { model: "test-model" }), custom: "kept", service_tier: "priority" });
+    expect(payload).not.toHaveProperty("service_tier");
+    expect(harness.requestOptions[1]!.onPayload).toBe(onPayload);
+    const fallbackBody = await harness.requestOptions[1]!.onPayload!(payload, harness.router.openRouterModel("main")) ?? payload;
+    expect(fallbackBody).toHaveProperty("custom", "kept");
+    expect(fallbackBody).not.toHaveProperty("service_tier");
+    expect(onPayload).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps provider deadlines independent of the overall turn limit", async () => {
     const harness = providerHarness({ codexError: "quota exhausted", config: { PI_TURN_TIMEOUT_MS: 0, PI_REQUEST_TIMEOUT_MS: 42_000 } });
     await harness.run();
@@ -232,7 +282,7 @@ function providerHarness(input: {
   const contexts: TranscriptContext[] = [];
   const context = input.context ?? normalizeContext({ systemPrompt: "Core", messages: [] });
   const streamOptions: Array<{ provider: string; sessionId: string | undefined }> = [];
-  const requestOptions: Array<{ timeoutMs?: number; signal?: AbortSignal }> = [];
+  const requestOptions: SimpleStreamOptions[] = [];
   let registered: {
     streamSimple: (
       model: Model<Api>,
@@ -267,7 +317,7 @@ function providerHarness(input: {
       contexts.push(context);
       calls.push("codex");
       streamOptions.push({ provider: "codex", sessionId: options?.sessionId });
-      requestOptions.push({ timeoutMs: options?.timeoutMs, signal: options?.signal });
+      requestOptions.push(options ?? {});
       if (input.codexStall) return stalledStream(model, input.codexPartial);
       if (input.codexPartial) {
         return eventStream(model, input.codexPartial, input.codexError);
@@ -278,7 +328,7 @@ function providerHarness(input: {
       contexts.push(context);
       calls.push("openrouter");
       streamOptions.push({ provider: "openrouter", sessionId: options?.sessionId });
-      requestOptions.push({ timeoutMs: options?.timeoutMs, signal: options?.signal });
+      requestOptions.push(options ?? {});
       if (input.openRouterStall) return stalledStream(model, "partial");
       return eventStream(model, "openrouter answer");
     }) as PiProviderStreamOverrides["openRouter"],
@@ -296,14 +346,14 @@ function providerHarness(input: {
     streamOptions,
     requestOptions,
     router,
-    run: async (kind: "main" | "helper" = "main", signal?: AbortSignal) => {
+    run: async (kind: "main" | "helper" = "main", signal?: AbortSignal, onPayload?: SimpleStreamOptions["onPayload"]) => {
       if (!registered) throw new Error("provider was not registered");
       const events: AssistantMessageEvent[] = [];
       const model = kind === "helper" ? router.helperModel : router.mainModel;
       for await (const event of registered.streamSimple(
         model,
         context,
-        { sessionId: "opaque-pi-session", signal },
+        { sessionId: "opaque-pi-session", signal, onPayload },
       )) events.push(event);
       return events;
     },

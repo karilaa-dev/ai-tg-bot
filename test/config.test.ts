@@ -8,6 +8,18 @@ const required = {
   E2B_API_KEY: "test-e2b",
 };
 
+describe("Codex fast mode configuration", () => {
+  it("defaults to disabled and accepts explicit true or false", () => {
+    expect(loadConfig(required).CODEX_FAST_MODE).toBe(false);
+    expect(loadConfig({ ...required, CODEX_FAST_MODE: "true" }).CODEX_FAST_MODE).toBe(true);
+    expect(loadConfig({ ...required, CODEX_FAST_MODE: "false" }).CODEX_FAST_MODE).toBe(false);
+  });
+
+  it("rejects invalid boolean values", () => {
+    expect(() => loadConfig({ ...required, CODEX_FAST_MODE: "invalid" })).toThrow();
+  });
+});
+
 describe("Browser Use configuration", () => {
   it("accepts an explicit Codex CLI credential cache path", () => {
     expect(loadConfig({ ...required, CODEX_AUTH_FILE: "/run/secrets/codex-auth.json" }).CODEX_AUTH_FILE)

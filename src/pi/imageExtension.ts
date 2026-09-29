@@ -394,6 +394,7 @@ async function requestCodexImage(
     },
     body: JSON.stringify({
       model: bridge.providerRouter.codexModel("main").id,
+      ...(bridge.config.CODEX_FAST_MODE ? { service_tier: "priority" } : {}),
       instructions: "",
       input: [{ role: "user", content }],
       tools: [imageTool],

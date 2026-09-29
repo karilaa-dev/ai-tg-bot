@@ -14,6 +14,7 @@ const ConfigSchema = z.object({
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),
   CODEX_AUTH_FILE: OptionalStringSchema,
+  CODEX_FAST_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
   PI_THINKING_LEVEL: PiThinkingLevelSchema.default("medium"),
   PI_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).default(0),

@@ -161,6 +161,14 @@ async function* routeStream(input: {
         headers: { ...auth.headers, ...input.options?.headers },
         timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
         maxRetries: 0,
+        // Pi's simple stream options do not forward the Codex serviceTier option.
+        onPayload: input.config.CODEX_FAST_MODE ? async (payload, model) => {
+          const replacement = await input.options?.onPayload?.(payload, model);
+          const body = replacement === undefined ? payload : replacement;
+          return body !== null && typeof body === "object"
+            ? { ...body, service_tier: "priority" }
+            : body;
+        } : input.options?.onPayload,
         onResponse: async (response, model) => {
           status = response.status;
           resetAt = resetAtFromHeaders(response.headers);
