@@ -1,8 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { toolResultFailed } from "../../src/pi/toolOutcome.js";
 import { createTurnBudgetExtension, TurnBudget } from "../../src/pi/turnBudget.js";
+import { loadTestConfig } from "../../src/config.js";
 
 describe("TurnBudget", () => {
+  it("tracks execution beyond the previous limits without stopping by default", () => {
+    const config = loadTestConfig();
+    const budget = createBudget({
+      maxModelCycles: config.PI_MAX_MODEL_CYCLES,
+      maxToolCalls: config.PI_MAX_TOOL_CALLS,
+      maxConsecutiveToolFailures: config.PI_MAX_CONSECUTIVE_TOOL_FAILURES,
+      maxIdenticalToolFailures: config.PI_MAX_IDENTICAL_TOOL_FAILURES,
+    });
+    for (let index = 0; index < 100; index++) {
+      expect(budget.beforeModelCycle()).toBe(true);
+      expect(budget.beforeToolCall(String(index), "same_failing_tool", { query: "same" }).block).toBe(false);
+      expect(budget.afterToolResult(String(index), true)).toBe(false);
+    }
+    expect(budget.snapshot()).toEqual({ modelCycles: 100, toolCalls: 100, consecutiveToolFailures: 100, terminationReason: undefined });
+  });
+
   it.each([{ status: "failed" }, { exit_code: 7 }, { exit_code: null }, { timed_out: true }, { error: "failed" }])("counts structured failures without depending on an error string: %j", async (details) => {
     const budget = createBudget();
     const handlers: Record<string, (...args: any[]) => any> = {};

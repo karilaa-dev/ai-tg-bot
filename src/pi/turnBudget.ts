@@ -32,7 +32,7 @@ export class TurnBudget {
   beforeModelCycle(): boolean {
     if (this.terminationReason) return false;
     this.modelCycles += 1;
-    if (this.modelCycles <= this.limits.maxModelCycles) return true;
+    if (this.limits.maxModelCycles === 0 || this.modelCycles <= this.limits.maxModelCycles) return true;
     this.terminationReason = "model_cycle_limit";
     return false;
   }
@@ -43,22 +43,25 @@ export class TurnBudget {
     terminate?: boolean;
   } {
     if (this.terminationReason) return this.blockedDecision();
-    if (this.toolCalls >= this.limits.maxToolCalls) {
+    if (this.limits.maxToolCalls > 0 && this.toolCalls >= this.limits.maxToolCalls) {
       this.terminationReason = "tool_call_limit";
       return this.blockedDecision();
     }
     this.toolCalls += 1;
-    this.callSignatures.set(toolCallId, `${toolName}:${stableJson(args)}`);
+    if (this.limits.maxIdenticalToolFailures > 0) {
+      this.callSignatures.set(toolCallId, `${toolName}:${stableJson(args)}`);
+    }
     return { block: false };
   }
 
   afterToolResult(toolCallId: string, isError: boolean): boolean {
+    const signature = this.callSignatures.get(toolCallId);
+    this.callSignatures.delete(toolCallId);
     if (!isError) {
       this.consecutiveToolFailures = 0;
       return false;
     }
     this.consecutiveToolFailures += 1;
-    const signature = this.callSignatures.get(toolCallId);
     if (signature) {
       const failures = (this.failedSignatures.get(signature) ?? 0) + 1;
       this.failedSignatures.set(signature, failures);
@@ -67,7 +70,7 @@ export class TurnBudget {
         return true;
       }
     }
-    if (this.consecutiveToolFailures >= this.limits.maxConsecutiveToolFailures) {
+    if (this.limits.maxConsecutiveToolFailures > 0 && this.consecutiveToolFailures >= this.limits.maxConsecutiveToolFailures) {
       this.terminationReason = "consecutive_tool_failures";
       return true;
     }

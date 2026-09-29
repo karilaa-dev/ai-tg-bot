@@ -58,6 +58,26 @@ describe("database configuration", () => {
   });
 });
 
+describe("agent execution limits", () => {
+  const names = ["PI_TURN_TIMEOUT_MS", "PI_MAX_MODEL_CYCLES", "PI_MAX_TOOL_CALLS", "PI_MAX_CONSECUTIVE_TOOL_FAILURES", "PI_MAX_IDENTICAL_TOOL_FAILURES"] as const;
+
+  it("defaults every execution limit to unlimited", () => {
+    const config = loadConfig(required);
+    for (const name of names) expect(config[name]).toBe(0);
+  });
+
+  it.each(names)("accepts a positive cap or explicit unlimited value for %s", (name) => {
+    expect(loadConfig({ ...required, [name]: "17" })[name]).toBe(17);
+    expect(loadConfig({ ...required, [name]: "0" })[name]).toBe(0);
+  });
+
+  it.each(names)("rejects invalid values for %s", (name) => {
+    for (const value of ["-1", "1.5", "Infinity", "invalid"]) {
+      expect(() => loadConfig({ ...required, [name]: value })).toThrow();
+    }
+  });
+});
+
 describe("transcription configuration", () => {
   it("defaults to Qwen3-ASR-1.7B and supports an override", () => {
     expect(loadConfig(required)).toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "qwen/qwen3-asr-1.7b", TRANSCRIPTION_TIMEOUT_MS: 120_000 });

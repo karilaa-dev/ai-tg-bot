@@ -95,6 +95,20 @@ describe("Pi tool discovery and codemode", () => {
     expect(result(runtime.session.messages, "codemode").isError).toBe(false);
   });
 
+  it("completes beyond the previous cycle, call and failure limits with default configuration", async () => {
+    const { runtime } = await setup([
+      ...Array.from({ length: 22 }, () => ({
+        name: "codemode", arguments: { code: "text(await Promise.all([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99999, chunk_index: 0})]));" },
+      })),
+      { name: "finish_response", arguments: { text: "Completed without a cap" } },
+    ]);
+
+    await runtime.session.prompt("Continue through many research attempts", { expandPromptTemplates: false });
+
+    expect(runtime.bridge.currentTurnBudget()!.snapshot()).toMatchObject({ modelCycles: 23, toolCalls: 67, terminationReason: undefined });
+    expect(result(runtime.session.messages, "finish_response").details).toMatchObject({ completed: true, text: "Completed without a cap" });
+  });
+
   it("persists pruning before the next model request without losing raw results or usage", async () => {
     const { runtime, contexts } = await setup([
       { name: "codemode", arguments: { code: "text('old inspection output '.repeat(500));" } },
@@ -123,7 +137,7 @@ function result(messages: Awaited<ReturnType<PiRuntimeManager["runtime"]>>["sess
   return message;
 }
 
-async function setup(calls: Array<{ name: string; arguments: JsonObject }>, browser = false, maxToolCalls = 40, maxConsecutiveToolFailures = 5) {
+async function setup(calls: Array<{ name: string; arguments: JsonObject }>, browser = false, maxToolCalls = 0, maxConsecutiveToolFailures = 0) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tool-workflow-"));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
   const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: browser ? "test-browser" : undefined, PI_MAX_TOOL_CALLS: maxToolCalls, PI_MAX_CONSECUTIVE_TOOL_FAILURES: maxConsecutiveToolFailures });
