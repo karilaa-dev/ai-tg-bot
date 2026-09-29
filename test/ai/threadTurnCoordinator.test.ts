@@ -379,7 +379,29 @@ describe("ThreadTurnCoordinator", () => {
       .toEqual(["interrupted", "running"]);
   });
 
-  it("preserves a pre-lease owner when the turn timeout is disabled", async () => {
+  it.each(["running", "awaiting_delivery"] as const)("recovers a stale legacy %s turn when normal turns are unlimited", async (status) => {
+    const { userId, threadId } = await ownership(repos, 834);
+    const first = await repos.turnRuns.accept(request(userId, threadId, 34_001, "stale legacy"));
+    await repos.turnRuns.accept(request(userId, threadId, 34_002, "queued successor"));
+    await repos.turnRuns.claimRunning(first.turnRun.id, "old-process", Date.now() + 60_000);
+    await db.db.execute(sql`
+      update turn_runs set status = ${status}, owner_id = null, lease_expires_at = null, updated_at = 100
+      where id = ${first.turnRun.id}
+    `);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    });
+    try {
+      await coordinator.waitForIdle(threadId);
+      expect(executed).toEqual(["queued successor"]);
+      expect((await repos.turnRuns.listForThread(threadId)).map((run) => run.status))
+        .toEqual(["interrupted", "succeeded"]);
+    } finally { await coordinator.shutdown(); }
+  });
+
+  it.each([0, 120_000])("preserves recent legacy work through its grace period with a %i ms turn timeout", async (turnTimeoutMs) => {
     vi.useFakeTimers();
     const target = await ownership(repos, 832);
     const idle = await ownership(repos, 833);
@@ -387,23 +409,50 @@ describe("ThreadTurnCoordinator", () => {
     await repos.turnRuns.accept(request(target.userId, target.threadId, 32_002, "queued successor"));
     await repos.turnRuns.claimRunning(first.turnRun.id, "old-process", Date.now() + 60_000);
     await db.db.execute(sql`
-      update turn_runs set owner_id = null, lease_expires_at = null, updated_at = 100
+      update turn_runs set owner_id = null, lease_expires_at = null, updated_at = ${Date.now()}
       where id = ${first.turnRun.id}
     `);
     const executed: string[] = [];
     const coordinator = createCoordinator(db, repos, async (input) => {
       executed.push(input.text);
       await confirmDelivery(input);
-    }, vi.fn(async () => false), { PI_TURN_TIMEOUT_MS: 0 });
+    }, vi.fn(async () => false), { PI_TURN_TIMEOUT_MS: turnTimeoutMs, LEGACY_TURN_RECOVERY_GRACE_MS: 15_000 });
     await coordinator.waitForIdle(idle.threadId);
 
-    await vi.advanceTimersByTimeAsync(10_000);
+    const graceMs = turnTimeoutMs > 0 ? turnTimeoutMs + 60_000 : 15_000;
+    await vi.advanceTimersByTimeAsync(graceMs - 1_000);
 
     expect(executed).toEqual([]);
     expect((await repos.turnRuns.listForThread(target.threadId)).map((run) => run.status))
       .toEqual(["running", "queued"]);
 
-    await repos.turnRuns.markSucceeded(first.turnRun.id);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await coordinator.waitForIdle(target.threadId);
+    expect(executed).toEqual(["queued successor"]);
+    expect((await repos.turnRuns.listForThread(target.threadId)).map((run) => run.status))
+      .toEqual(["interrupted", "succeeded"]);
+    await coordinator.shutdown();
+  });
+
+  it("preserves a valid remote ownership lease beyond the legacy recovery grace period", async () => {
+    vi.useFakeTimers();
+    const target = await ownership(repos, 835);
+    const idle = await ownership(repos, 836);
+    const first = await repos.turnRuns.accept(request(target.userId, target.threadId, 35_001, "remote leased turn"));
+    await repos.turnRuns.accept(request(target.userId, target.threadId, 35_002, "queued successor"));
+    await repos.turnRuns.claimRunning(first.turnRun.id, "remote-process", Date.now() + 60_000);
+    await db.db.execute(sql`update turn_runs set updated_at = 100 where id = ${first.turnRun.id}`);
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      executed.push(input.text);
+      await confirmDelivery(input);
+    }, undefined, { LEGACY_TURN_RECOVERY_GRACE_MS: 1_000 });
+    await coordinator.waitForIdle(idle.threadId);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(executed).toEqual([]);
+    expect((await repos.turnRuns.listForThread(target.threadId)).map((run) => run.status))
+      .toEqual(["running", "queued"]);
+    await repos.turnRuns.markSucceeded(first.turnRun.id, null, "remote-process");
     await vi.advanceTimersByTimeAsync(1_000);
     await coordinator.waitForIdle(target.threadId);
     expect(executed).toEqual(["queued successor"]);

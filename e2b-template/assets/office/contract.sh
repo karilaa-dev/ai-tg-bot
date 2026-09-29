@@ -3,7 +3,7 @@ set -euo pipefail
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
 cd "$task_dir"
-docx --version | grep -F '0.25.0'
+docx --version | grep -F '0.26.0'
 office-python - <<'PY'
 import pptx, openpyxl
 assert pptx.__version__ == '1.0.2'

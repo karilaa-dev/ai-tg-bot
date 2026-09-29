@@ -296,7 +296,7 @@ describe("thread E2B runtime manager", () => {
     await runtime.execute(commandRequest(userId, threadId));
 
     const toolboxChecks = client.onlySandbox().controlCommands.filter((command) =>
-      command.includes("@firecrawl/pdf-inspector@1.17.0")
+      command.includes("@firecrawl/pdf-inspector@1.25.2")
       && command.includes("command -v pdftoppm"));
     expect(toolboxChecks).toHaveLength(1);
   });

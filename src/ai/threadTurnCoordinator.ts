@@ -306,8 +306,8 @@ export class ThreadTurnCoordinator {
     const now = Date.now();
     const interrupted = await this.input.repos.turnRuns.interruptStaleRunning({
       now,
-      // Pre-lease deployments cannot heartbeat. Preserve their possible live
-      // work for at least the maximum turn window during a rolling rollout.
+      // Pre-lease deployments cannot heartbeat. Give their possible live work
+      // a finite rollout grace period, independent of unlimited current turns.
       legacyStaleBefore: this.legacyStaleBefore(now),
     });
     const threadIds = await this.input.repos.turnRuns.queuedThreadIds();
@@ -582,9 +582,11 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private legacyStaleBefore(now: number): number | undefined {
-    if (this.input.config.PI_TURN_TIMEOUT_MS === 0) return undefined;
-    return now - Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) - 60_000;
+  private legacyStaleBefore(now: number): number {
+    const finiteTurnWindow = this.input.config.PI_TURN_TIMEOUT_MS > 0
+      ? Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000
+      : 0;
+    return now - Math.max(this.input.config.LEGACY_TURN_RECOVERY_GRACE_MS, finiteTurnWindow);
   }
 
   private async releaseThreadBarrierWithRetry(

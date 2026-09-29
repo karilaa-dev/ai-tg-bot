@@ -20,6 +20,7 @@ import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
 
 import type { OutgoingFiles } from "../files/outgoingFiles.js";
+import { botToolPolicy } from "./toolPolicy.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -65,6 +66,7 @@ export function createGenerateImagePiTool(
 ): ToolDefinition {
   return {
     name: "generate_image",
+    ...botToolPolicy("generate_image"),
     label: "Generate image",
     description:
       "Synthesize one new image or generatively transform an image when the user clearly requests that operation. A request for a visual deliverable alone does not authorize synthesis. For existing content, use web_search/web_extract and assemble retrieved or supplied assets with installed tools; use those tools for cropping, resizing, labels, and layout. Do not generate incidental supporting artwork or replace failed retrieval. Returns a reusable workspace path and image preview for your inspection. Nothing is sent automatically and the turn continues. Inspect the result, then embed its path or send it with finish_response/create_file. References can be current-thread image file IDs or workspace image paths, five total.",

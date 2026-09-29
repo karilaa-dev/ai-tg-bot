@@ -1,10 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { TextContent } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, type TextContent } from "@earendil-works/pi-ai";
 import { ThreadBridge, createChatFileContextExtension } from "./threadBridge.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, readStoredCredential, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRegistry, ModelRuntime, readStoredCredential, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
@@ -36,8 +36,11 @@ import {
   resolveCodexAuthFile,
 } from "./codexCliCredentials.js";
 import { createTurnBudgetExtension } from "./turnBudget.js";
+import { createBotToolSearchExtension } from "./toolPolicy.js";
+import { createContextPruningExtension } from "./contextPruning.js";
 
 const MAX_CACHED_RUNTIMES = 32;
+const INITIAL_ACTIVE_TOOL_NAMES = ["read", "bash", "finish_response", "codemode", "tool_search"];
 
 interface PiThreadRuntime {
   session: AgentSession;
@@ -178,6 +181,9 @@ export class PiRuntimeManager implements PiRuntimeService {
         createTurnBudgetExtension(bridge),
         createTurnPromptContextExtension(bridge),
         createChatFileContextExtension(bridge),
+        createCodemodeExtension({ mode: "on", inlineBudget: 0, models: false }),
+        createBotToolSearchExtension(),
+        createContextPruningExtension(),
       ],
       additionalSkillPaths: approvedSkillPaths(),
       noSkills: true,
@@ -214,6 +220,14 @@ export class PiRuntimeManager implements PiRuntimeService {
       sessionManager,
       settingsManager,
     });
+    // The SDK's noTools selection overrides transcript restoration. Restore the
+    // branch's declared tools explicitly, retaining only bot-approved tools.
+    const persistedSystem = getCurrentSystemMessage(sessionManager.buildSessionContext().messages);
+    const approvedToolNames = new Set([...INITIAL_ACTIVE_TOOL_NAMES, ...customTools.map((tool) => tool.name)]);
+    const activeToolNames = persistedSystem
+      ? (persistedSystem.toolsAdded ?? []).map((tool) => tool.name).filter((name) => approvedToolNames.has(name))
+      : INITIAL_ACTIVE_TOOL_NAMES;
+    session.setActiveToolsByName(activeToolNames);
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("Pi persistent session did not return a session file.");
     await this.input.repos.threads.setPiSession(thread.id, sessionFile, session.sessionId);

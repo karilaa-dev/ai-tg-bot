@@ -13,7 +13,7 @@ confirmation — so even small, cheap models can drive it reliably.
 
 ## Installed tool and workspace
 
-The bot preinstalls docx-cli 0.25.0. Do not install, bootstrap, or upgrade it. Read the installed command help for syntax. Materialize attachments and copy them from the read-only Telegram directory into /home/user/workspace before editing. Keep an original copy for comparison.
+The bot preinstalls docx-cli 0.26.0. Do not install, bootstrap, or upgrade it. Read the installed command help for syntax. Materialize attachments and copy them from the read-only Telegram directory into /home/user/workspace before editing. Keep an original copy for comparison.
 
 ## 1. The contract is `--help` / `docx info` — start there
 

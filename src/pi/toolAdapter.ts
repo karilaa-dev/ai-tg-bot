@@ -5,6 +5,9 @@ import { buildToolRegistry } from "../ai/tools/index.js";
 import type { ToolBuildInput } from "../ai/tools/types.js";
 import { raceWithAbort } from "../files/cancel.js";
 import { asRecord, safeJson } from "../util/records.js";
+import { botToolPolicy } from "./toolPolicy.js";
+import { researchOutputSchema } from "./researchSchemas.js";
+import { toolResultFailed } from "./toolOutcome.js";
 
 const BASE_BOT_TOOL_NAMES = [
   "search_thread",
@@ -57,8 +60,11 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
   return names.map((name) => {
     const definition = initial[name];
     if (!definition) throw new Error(`Missing bot tool ${name}`);
+    const outputSchema = researchOutputSchema(name);
     return {
       name,
+      ...botToolPolicy(name),
+      outputSchema,
       label: toolLabel(name),
       description: definition.description,
       parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
@@ -109,7 +115,12 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
             details = { details_unavailable: true };
           }
         }
-        return { content, details, ...(name === "finish_response" && asRecord(output)?.completed === true ? { terminate: true } : {}) };
+        return {
+          content, details,
+          ...(outputSchema ? { structuredContent: JSON.parse(safeJson(output)) } : {}),
+          ...(toolResultFailed(output) ? { isError: true } : {}),
+          ...(name === "finish_response" && asRecord(output)?.completed === true ? { terminate: true } : {}),
+        };
       },
     } as ToolDefinition;
   });
