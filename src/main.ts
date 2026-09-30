@@ -9,7 +9,7 @@ import { createBrowserUseClient } from "./browserUse/client.js";
 import { createDatabase } from "./db/index.js";
 import { createRepos } from "./db/repos/index.js";
 import { createLogger, type Logger } from "./logger.js";
-import { PiRuntimeManager } from "./pi/runtime.js";
+import { CodexRuntimeManager } from "./codex/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
 import type { ThreadTurnCoordinator } from "./ai/threadTurnCoordinator.js";
 
@@ -17,13 +17,13 @@ const config = loadConfig();
 const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let web: Awaited<ReturnType<typeof startWebServer>>;
-let pi: PiRuntimeManager | undefined;
+let agent: CodexRuntimeManager | undefined;
 let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 let turnCoordinator: ThreadTurnCoordinator | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
-  inferenceProvider: "pi",
+  inferenceProvider: "codex",
   model: config.CODEX_MODEL,
   fallbackModel: config.OPENROUTER_MAIN_MODEL,
 });
@@ -38,15 +38,15 @@ try {
     repos,
     logger,
   });
-  pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime: sandboxRuntime });
-  await pi.initialize();
+  agent = new CodexRuntimeManager({ config, db, repos, logger, commandRuntime: sandboxRuntime });
+  await agent.initialize();
   const bot = createBot({
     config,
     db,
     logger,
     repos,
     commandRuntime: sandboxRuntime,
-    pi,
+    pi: agent,
   });
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
@@ -72,7 +72,7 @@ try {
 } finally {
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));
-  await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
+  await agent?.dispose().catch((err) => logger.warn("Codex runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;
     logger.warn("E2B runtime disposal failed", { err: String(err) });

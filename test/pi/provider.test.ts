@@ -18,8 +18,8 @@ import { loadTestConfig, type AppConfig } from "../../src/config.js";
 import {
   registerPiProviderRouter,
   type PiProviderStreamOverrides,
-} from "../../src/pi/provider.js";
-import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
+} from "../fixtures/pi-v2/provider.js";
+import { CodexCircuitBreaker } from "../fixtures/pi-v2/circuit.js";
 
 describe("Pi automatic provider", () => {
   it.each([false, true])("sends the configured fast-mode tier through the real Codex SDK when enabled=%s", async (enabled) => {

@@ -5,9 +5,9 @@ import type { Repos } from "../db/repos/index.js";
 import type { MessageKind, MessageRow, ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { FileRow } from "../db/types.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import type { ResolvedChatFile } from "../files/source.js";
-import { type InferenceUsageDelta } from "../pi/usage.js";
+import { type InferenceUsageDelta } from "../ai/usage.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
 
 export interface TurnInput {
@@ -42,7 +42,7 @@ export interface TurnInput {
   onDeliveryFailed?: (result: { assistantMessageId: number; failureCode: string }) => Promise<void>;
   onExecutionFailure?: (failureCode: string) => Promise<void>;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
-  pi?: Pick<PiRuntimeService, "runtime">;
+  pi?: Pick<AgentRuntimeService, "runtime">;
   t: (key: string, params?: Record<string, string | number>) => string;
 }
 

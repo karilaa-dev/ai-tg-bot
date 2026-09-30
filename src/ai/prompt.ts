@@ -49,8 +49,18 @@ export async function renderThreadSessionContext(input: {
 export async function renderSystemPrompt(input: {
   user: UserRow;
   config?: Pick<AppConfig, "BROWSER_USE_API_KEY" | "BROWSER_USE_DEFAULT_TIMEOUT_MINUTES">;
+  harness?: "codex" | "openrouter";
 }): Promise<string> {
+  const native = input.harness !== "openrouter";
   const values: Record<string, string> = {
+    research_guidance: native
+      ? "Use native web_search for discovery and opening sources; use exec_command for relevant raw URLs or APIs."
+      : "Use web_search for discovery, web_extract for readable pages, and bash for relevant raw URLs or APIs.",
+    execution_guidance: native
+      ? "Use exec_command for shell work, apply_patch for text edits, and view_image for image inspection. Use advertised tool discovery when needed."
+      : "Use bash for shell work and inspect_workspace_images or bash.inspect_images for image inspection.",
+    image_generation_tool: native ? "image_gen.imagegen" : "generate_image",
+    image_inspection_guidance: native ? "Inspect final rasters with view_image." : "Inspect final rasters with inspect_workspace_images or bash.inspect_images.",
     language: input.user.lang === "ru" ? "Russian" : "English",
     browser_guidance: browserGuidance(input.config),
     office_preview_guidance: officePreviewGuidance(),
@@ -144,11 +154,11 @@ function browserGuidance(
 ): string {
   if (!config || !isBrowserUseConfigured(config)) return "";
   return [
-    "Use browser_* for interactive pages, screenshots, login, and downloads. Snapshot after navigation before using element refs. Close the browser session when finished; let idle cleanup handle session_busy.",
-    `New sessions default to ${config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES} minutes. Extend only for long tasks; transient form state is lost on extension.`,
+    "Use browser_* for interactive pages, screenshots, login, and downloads. Snapshot after navigation before using refs. Close the browser session when finished; let idle cleanup handle session_busy.",
+    `Sessions default to ${config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES} minutes. Extend for long tasks; form state is lost on extension.`,
   ].join("\n");
 }
 
 function officePreviewGuidance(): string {
-  return "For Office delivery, call validate_office_file, use render_office_preview to inspect every page or slide, then record passing visual_reviews with the current source_sha256. All checks must pass before delivery. Edits invalidate the previous review. After three unsuccessful repair cycles explain the blocker without sending the draft.";
+  return "For Office delivery, call validate_office_file, use render_office_preview to inspect every page or slide, then record passing visual_reviews with the current source_sha256. All checks must pass. Edits invalidate review. After three unsuccessful repair cycles explain the blocker without sending the draft.";
 }

@@ -6,7 +6,7 @@ import {
   CODEX_PROVIDER_ID,
   discoverCodexCliCredentials,
   resolveCodexAuthFile,
-} from "../../src/pi/codexCliCredentials.js";
+} from "../fixtures/pi-v2/codexCliCredentials.js";
 
 const temporaryDirectories: string[] = [];
 

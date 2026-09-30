@@ -4,7 +4,7 @@ set -euo pipefail
 required_commands=(
   bash sh tail ls cp mv rm mkdir find grep sed awk cat cmp cut id mktemp
   tar gzip bzip2 xz zip unzip zstd curl wget git ssh jq rg fd file tree less
-  sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm
+  sqlite3 ps ip patch dig gcc g++ make gpg magick python python3 pip3 node npm codex ai-tg-codex-executor
   docx office-python pptxgenjs-run office-files libreoffice pdf-inspector pdfinfo pdftoppm openscad openscad-build povray
 )
 
@@ -30,6 +30,8 @@ python3 -m venv "${tmp_dir}/venv"
 
 node --version >/dev/null
 npm --version >/dev/null
+[[ "$(codex --version)" == "codex-cli 0.159.2" ]]
+codex exec-server --help >/dev/null
 openscad_version="$(openscad --version 2>&1 || true)"
 grep -Fxq "OpenSCAD version 2026.09.29" <<<"$openscad_version"
 dpkg-query -W -f='${Version}\n' povray | grep -Fq '3.7.0.10'

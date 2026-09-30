@@ -48,6 +48,120 @@ describe("thread E2B runtime manager", () => {
     await db.destroy();
   });
 
+  it("connects the native executor while automatically restoring attachments before preparation completes", async () => {
+    const bytes = Buffer.from("automatically restored");
+    const stored = await repos.files.insertFile({ userId, threadId, type: "txt", name: "old.txt", mimeType: "text/plain", size: bytes.length, isInline: true });
+    const [ref] = await repos.files.rememberTelegramFileRefs(stored.id, { direction: "inbound", mediaKind: "document", refs: [{ fileId: "tg-old", size: bytes.length, primary: true }] });
+    const release = deferred<void>();
+    const connected = deferred<void>();
+    await runtime.dispose();
+    runtime = new ThreadE2BSandboxRuntimeManager({ config, repos, client, downloadTelegramBytes: async () => { await release.promise; return bytes; } });
+    const ready = vi.fn(async (endpoint: { sandboxId: string; url: string; authBearerToken: string }) => {
+      expect(endpoint).toMatchObject({ sandboxId: "sandbox-1", url: "wss://8765-sandbox-1.e2b.test" });
+      expect(endpoint.authBearerToken).toMatch(/^[a-f0-9]{64}$/u);
+      connected.resolve();
+    });
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [descriptor(stored.id, stored.name, "tg-old", ref!.id, bytes.length)], onExecutorReady: ready });
+    await connected.promise;
+    expect(client.onlySandbox().files.has(`${E2B_TELEGRAM_FILES}/${stored.id}--old.txt`)).toBe(false);
+    release.resolve();
+    expect(await preparing).toMatchObject({ available: 1 });
+    expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--old.txt`)).toEqual(bytes);
+    expect(ready).toHaveBeenCalledOnce();
+  });
+
+  it("upgrades an old paused sandbox in place and stages native images at their original paths", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const originalWorkspace = `${E2B_WORKSPACE}/unfinished-project.txt`;
+    sandbox.files.set(originalWorkspace, Buffer.from("preserved old work"));
+    await runtime.dispose();
+    runtime = createRuntime();
+    const generatedPath = "/var/lib/ai-tg-bot/codex/generated_images/thread/call.png";
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/var/lib/ai-tg-bot/codex/generated_images", artifacts: [{ path: generatedPath, bytes: Buffer.from("native png") }], onExecutorReady: async () => undefined });
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
+    expect(sandbox.files.get(originalWorkspace)?.toString()).toBe("preserved old work");
+    expect(sandbox.files.get(generatedPath)?.toString()).toBe("native png");
+    expect(sandbox.controlCommands.some(command => command.includes("@openai/codex@0.159.2"))).toBe(true);
+    expect(sandbox.files.has("/usr/local/bin/ai-tg-codex-executor")).toBe(true);
+    const transfers = () => sandbox.writeFileCalls.filter(call => call.path.includes("native-artifact-")).length;
+    expect(transfers()).toBe(1);
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/var/lib/ai-tg-bot/codex/generated_images", artifacts: [{ path: generatedPath, bytes: Buffer.from("native png") }], onExecutorReady: async () => undefined });
+    expect(transfers()).toBe(1);
+  });
+
+  it("rejects native image staging outside its trusted generated image root", async () => {
+    await expect(runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/data/codex/generated_images", artifacts: [{ path: "/data/codex/auth.json", bytes: Buffer.from("untrusted") }], onExecutorReady: async () => undefined })).rejects.toThrow("outside its generated image root");
+    expect(client.onlySandbox().files.has("/data/codex/auth.json")).toBe(false);
+  });
+
+  it("renews active native commands without pausing and rotates at the next gated preparation boundary", async () => {
+    vi.useFakeTimers();
+    let lease: ReturnType<ThreadE2BSandboxRuntimeManager["acquireActivityLease"]> | undefined;
+    try {
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      lease = runtime.acquireActivityLease(userId, threadId, { native: true });
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+      const sandbox = client.onlySandbox();
+      sandbox.files.set(`${E2B_WORKSPACE}/native-command-output.txt`, Buffer.from("preserved command output"));
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      const timeoutsBeforeRenewal = sandbox.timeoutCalls.length;
+      vi.setSystemTime(Date.now() + 50 * 60_000);
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sandbox.timeoutCalls.length).toBeGreaterThan(timeoutsBeforeRenewal);
+      expect(sandbox.pauseCalls).toBe(0);
+      // Parallel bot filesystem work must not pause a native command either.
+      const output = await runtime.readWorkspaceFile({ userId, threadId, virtualPath: "/native-command-output.txt", maxBytes: 100 });
+      expect(output.bytes.toString()).toBe("preserved command output");
+      expect(sandbox.pauseCalls).toBe(0);
+      // Native process/start already replied, but the command may still be
+      // running. Mid-turn artifact restoration explicitly forbids rotation.
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], allowRotation: false, onExecutorReady: async () => undefined });
+      expect(sandbox.pauseCalls).toBe(0);
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+      lease.release();
+      lease = undefined;
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+      expect(sandbox.pauseCalls).toBe(1);
+      expect(client.createCalls).toBe(1);
+      expect(client.killCalls).toBe(0);
+      expect(client.onlySandbox().files.get(`${E2B_WORKSPACE}/native-command-output.txt`)?.toString()).toBe("preserved command output");
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      // A later OpenRouter turn owns the serialized command queue and may
+      // rotate normally even though this sandbox already has a native executor.
+      vi.setSystemTime(Date.now() + 50 * 60_000);
+      lease = runtime.acquireActivityLease(userId, threadId);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(sandbox.pauseCalls).toBe(2);
+    } finally {
+      lease?.release();
+      await runtime.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("requests a native refresh only when the partial attachment restore retry is due", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const bytes = Buffer.from("repair!");
+    const stored = await repos.files.insertFile({ userId, threadId, type: "txt", name: "retry.txt", mimeType: "text/plain", size: bytes.length, isInline: true });
+    const [ref] = await repos.files.rememberTelegramFileRefs(stored.id, { direction: "inbound", mediaKind: "document", refs: [{ fileId: "tg-retry", size: bytes.length, primary: true }] });
+    const request = { userId, threadId, files: [descriptor(stored.id, stored.name, "tg-retry", ref!.id, bytes.length)], onExecutorReady: async () => undefined };
+    expect(await runtime.prepareRemoteExecutor(request)).toMatchObject({ available: 0 });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    now += 5 * 60_000 - 1;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    now += 1;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+    client.telegramFiles.set("tg-retry", bytes);
+    expect(await runtime.prepareRemoteExecutor(request)).toMatchObject({ available: 1 });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(client.createCalls).toBe(1);
+  });
+
   it("throttles ordinary pruning, forces export checks, and renews each prepared operation once", async () => {
     const lease = runtime.acquireActivityLease(userId, threadId);
     try {
@@ -719,6 +833,7 @@ describe("thread E2B runtime manager", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
     const lease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
     const published = await runtime.publishWebsite({
       userId,
       threadId,
@@ -726,6 +841,7 @@ describe("thread E2B runtime manager", () => {
       siteDirectory: "/site",
       path: "/demo",
     });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
     lease.release();
 
     await vi.waitFor(() => {
@@ -738,6 +854,12 @@ describe("thread E2B runtime manager", () => {
     });
 
     now += 5 * 60_000;
+    const controlCommands = client.onlySandbox().controlCommands.length;
+    const timeoutCalls = client.onlySandbox().timeoutCalls.length;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(client.onlySandbox().controlCommands).toHaveLength(controlCommands);
+    expect(client.onlySandbox().timeoutCalls).toHaveLength(timeoutCalls);
     const sourcePath = `${E2B_FILE_SOURCES}/published-source`;
     client.onlySandbox().files.set(sourcePath, Buffer.from("source"));
     await expect(runtime.readSourceFile({
@@ -1752,6 +1874,14 @@ class FakeSandbox implements E2BSandbox {
     if (command.startsWith("'python3' '-c' ") && command.includes("server_site=os.path.realpath")) {
       if (this.failWebsiteScope) throw new Error("listener is outside the declared site directory");
       return { stdout: `${E2B_WORKSPACE}/site\n`, stderr: "", exitCode: 0 };
+    }
+    if (command.startsWith("'python3' '-c' ") && command.includes("native_artifact_atomic_publish")) {
+      const payload = command.match(/ '(\[.*\])'$/su)?.[1];
+      for (const move of JSON.parse(payload ?? "[]") as Array<{ source: string; destination: string }>) {
+        const bytes = this.files.get(move.source);
+        if (bytes) { this.files.set(move.destination, bytes); this.files.delete(move.source); }
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
     }
     if (command.startsWith("'python3' '-c' ")) {
       const candidate = command.match(/ '([^']+)'$/)?.[1];

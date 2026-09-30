@@ -43,6 +43,9 @@ interface ThreadsTable {
   topic_title_synced: number;
   pi_session_file: string | null;
   pi_session_id: string | null;
+  codex_thread_id?: string | null;
+  codex_migrated_at?: number | null;
+  codex_history_message_id?: number | null;
   archived: number;
   created_at: number;
 }

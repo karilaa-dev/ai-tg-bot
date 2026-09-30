@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { toolResultFailed } from "../../src/pi/toolOutcome.js";
-import { createTurnBudgetExtension, TurnBudget } from "../../src/pi/turnBudget.js";
+import { toolResultFailed } from "../fixtures/pi-v2/toolOutcome.js";
+import { createTurnBudgetExtension, TurnBudget } from "../fixtures/pi-v2/turnBudget.js";
 import { loadTestConfig } from "../../src/config.js";
 
 describe("TurnBudget", () => {

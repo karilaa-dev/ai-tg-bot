@@ -2,7 +2,7 @@ import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserUseRuntimeError } from "../../src/browserUse/pageOperations.js";
 import { loadTestConfig } from "../../src/config.js";
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
 
 const browserDownload = vi.hoisted(() => ({ download: vi.fn() }));
 

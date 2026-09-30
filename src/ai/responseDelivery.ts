@@ -6,7 +6,7 @@ import { MAX_CREATED_FILES_PER_ANSWER, TG_PHOTO_MAX_BYTES } from "../files/limit
 import type { CreatedFileAttachment } from "../files/types.js";
 import { escapeHtml } from "../util/text.js";
 import { telegramFileSource } from "../files/telegramSource.js";
-import { type InferenceUsageDelta } from "../pi/usage.js";
+import { type InferenceUsageDelta } from "../ai/usage.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
 import { AttachmentPreparation } from "./attachmentPreparation.js";
 

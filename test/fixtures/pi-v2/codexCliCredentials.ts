@@ -8,7 +8,7 @@ import type {
   CredentialStore,
   OAuthCredential,
 } from "@earendil-works/pi-ai";
-import type { AppConfig } from "../config.js";
+import type { AppConfig } from "../../../src/config.js";
 
 export const CODEX_PROVIDER_ID = "openai-codex";
 

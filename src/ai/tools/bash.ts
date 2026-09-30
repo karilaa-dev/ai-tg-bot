@@ -5,7 +5,7 @@ import { asRecord } from "../../util/records.js";
 import { bashModelHint, normalizeBashCwd } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 import { createInspectWorkspaceImagesTool, ImagePathsSchema, type InspectWorkspaceImagesResult } from "./inspectWorkspaceImages.js";
-import { toolResultFailed } from "../../pi/toolOutcome.js";
+import { toolResultFailed } from "../toolOutcome.js";
 
 type BashToolResult = {
   stdout: string;

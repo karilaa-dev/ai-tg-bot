@@ -2,23 +2,23 @@ import type { ThinkingDelivery } from "./types.js";
 import type { TurnInput, TurnRunner } from "./types.js";
 import { sendFinal, sendFinalVisible, refreshFinalThinkingVisible, normalizeTelegramAttachmentDeliveries, sendFinalThinkingVisible, sendPlainWithThreadFallback } from "./responseDelivery.js";
 import { formatMarkdownListItem } from "./turnOutput.js";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "./runtime.js";
+import type { AgentSessionEvent } from "./runtime.js";
 import type { MessageRow, UserRow } from "../db/types.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { isThreadNotFound } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { CreatedFileAttachment } from "../files/types.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import {
   inferenceUsageDelta,
   inferenceUsageFromEntries,
   type InferenceUsageDelta,
-} from "../pi/usage.js";
-import { budgetReasonText } from "../pi/turnBudget.js";
+} from "../ai/usage.js";
+import { budgetReasonText } from "../ai/turnBudget.js";
 import { currentTurnAssistantResult } from "./currentTurnResult.js";
 import { resolveTurnAnswer } from "./turnOutput.js";
 
@@ -37,7 +37,7 @@ export const runTurn: TurnRunner = async (input) => {
   });
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
-  let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
+  let activeBridge: Awaited<ReturnType<AgentRuntimeService["runtime"]>>["bridge"] | undefined;
   let inferenceUsage: InferenceUsageDelta | undefined;
   let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
   let currentTurnMessages: AgentMessage[] = [];
@@ -47,7 +47,7 @@ export const runTurn: TurnRunner = async (input) => {
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
     input.signal?.throwIfAborted();
-    if (!input.pi) throw new Error("Pi runtime is not configured.");
+    if (!input.pi) throw new Error("Agent runtime is not configured.");
     const userMessage = await resolveTurnUserMessage(input);
     const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
     const runtime = await input.pi.runtime(input.thread, input.user);
@@ -65,7 +65,7 @@ export const runTurn: TurnRunner = async (input) => {
     });
     input.outgoingBuffers = runtime.bridge.outgoingBuffers;
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
-    input.logger.info("Pi turn starting", {
+    input.logger.info("Agent turn starting", {
       turnRunId: input.turnRunId,
       threadId: input.thread.id,
       modelRole: runtime.session.model?.id,
@@ -77,7 +77,7 @@ export const runTurn: TurnRunner = async (input) => {
     const usageBefore = runtime.session.getSessionStats().tokens;
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
     try {
-      await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS, input.signal);
+      await runPiPromptWithTimeout(runtime.session, input.text, input.config.CODEX_TURN_TIMEOUT_MS ?? input.config.PI_TURN_TIMEOUT_MS, input.signal);
     } finally {
       unsubscribe();
       const newEntries = runtime.session.sessionManager.getEntries().filter(
@@ -130,7 +130,7 @@ export const runTurn: TurnRunner = async (input) => {
         });
       }
     }
-    input.logger.debug("Pi turn complete", {
+    input.logger.debug("Agent turn complete", {
       turnRunId: input.turnRunId,
       threadId: input.thread.id,
       contentEvents: stats.counts.contentEvents,
@@ -145,7 +145,7 @@ export const runTurn: TurnRunner = async (input) => {
     if (assistantResult.stopReason === "aborted" && !budgetReason) {
       await status?.finish(shaper.toolStatusMd());
       await streamer?.finish();
-      input.logger.info("Pi turn cancelled", {
+      input.logger.info("Agent turn cancelled", {
         threadId: input.thread.id,
         ...inferenceBackend,
         ...inferenceUsage,
@@ -206,6 +206,7 @@ export const runTurn: TurnRunner = async (input) => {
       },
       () => { deliveryStarted = true; },
     );
+    await runtime.session.acknowledgeDelivery?.(finalDelivery.assistantMessageId);
     const deliveredFinalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
@@ -308,7 +309,7 @@ export const runTurn: TurnRunner = async (input) => {
     try {
       await activeBridge?.endTurn();
     } catch (err) {
-      input.logger.error("Pi bridge cleanup failed", {
+      input.logger.error("Agent bridge cleanup failed", {
         threadId: input.thread.id,
         err: String(err),
       });
@@ -341,7 +342,7 @@ export function appendPublishedWebsiteNotice(
 }
 
 export async function runPiPromptWithTimeout(
-  session: Awaited<ReturnType<PiRuntimeService["runtime"]>>["session"],
+  session: Pick<Awaited<ReturnType<AgentRuntimeService["runtime"]>>["session"], "prompt" | "abort">,
   text: string,
   timeoutMs: number,
   signal?: AbortSignal,
@@ -370,7 +371,7 @@ export async function runPiPromptWithTimeout(
       operations.push(new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           shutdownRequested = true;
-          reject(new Error(`Pi turn timed out after ${timeoutMs} ms.`));
+          reject(new Error(`Agent turn timed out after ${timeoutMs} ms.`));
         }, timeoutMs);
       }));
     }
@@ -583,7 +584,7 @@ function createPiStreamLoop(
       const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
       counts.modelTiming.modelMs += ms;
       counts.modelTiming.peakContextTokens = Math.max(counts.modelTiming.peakContextTokens, contextTokens);
-      input.logger.info("Pi model cycle complete", {
+      input.logger.info("Agent model cycle complete", {
         threadId: input.thread.id, turnRunId: input.turnRunId, cycle, ms,
         provider: event.message.provider, model: event.message.model,
         inputTokens: usage.input, outputTokens: usage.output,
@@ -614,7 +615,7 @@ function createPiStreamLoop(
       shaper.onToolCall(event.toolName, event.args);
       counts.toolCalls += 1;
       if (event.toolName === "generate_image") counts.generateImageToolCalls += 1;
-      input.logger.info("Pi tool call started", {
+      input.logger.info("Agent tool call started", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
         toolName: event.toolName,
@@ -633,7 +634,7 @@ function createPiStreamLoop(
           ?? counts.generateImageToolError;
         if (!event.isError) counts.generateImageReadyAt = Date.now();
       }
-      input.logger.info("Pi tool call finished", {
+      input.logger.info("Agent tool call finished", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
         toolName: event.toolName,

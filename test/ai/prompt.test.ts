@@ -1,5 +1,5 @@
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { withModelIdentity } from "../../src/pi/modelIdentity.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
+import { withModelIdentity } from "../fixtures/pi-v2/modelIdentity.js";
 import { getCurrentSystemPrompt, normalizeContext } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
@@ -85,6 +85,18 @@ describe("renderSystemPrompt", () => {
     const schemas = JSON.stringify(tools.filter((tool) => tool.name !== "transcribe_audio").map(({ name, description, parameters }) => ({ name, description, parameters })));
     // Measured 2.0.4 core plus these same adapter schemas; unchanged skills/read/image tools cancel out.
     expect(prompt.length + schemas.length).toBeLessThan(browser ? 25676 : 16441);
+  });
+
+  it("advertises native Codex tools and automatic attachment restoration", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness: "codex" });
+    for (const name of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "native web_search", "restored automatically", "INDEX.json"]) expect(prompt).toContain(name);
+    for (const removed of ["codemode", "materialize_chat_files", "web_extract", "generate_image", "inspect_workspace_images", "bash.inspect_images"]) expect(prompt).not.toContain(removed);
+  });
+
+  it("uses the actual fallback tool names without requiring native Codex tools", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness: "openrouter" });
+    for (const name of ["web_search", "web_extract", "bash", "generate_image", "inspect_workspace_images", "restored automatically"]) expect(prompt).toContain(name);
+    for (const absent of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "codemode", "materialize_chat_files"]) expect(prompt).not.toContain(absent);
   });
 
   it("renders current time and the stored timezone as structured context", () => {

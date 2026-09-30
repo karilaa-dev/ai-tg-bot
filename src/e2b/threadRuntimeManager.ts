@@ -1,3 +1,4 @@
+import { prepareNativeExecutor, stageNativeArtifacts, type PrepareRemoteExecutorRequest, type RemoteExecutorEndpoint } from "./remoteExecutor.js";
 import { SandboxConsentRequired } from "../files/source.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
@@ -37,6 +38,7 @@ type SandboxScope = { userId: number; threadId: number };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
+  nativeLeases: number;
   websiteSandboxId?: string;
   websiteIdleUntil?: number;
   websitePublishedPending?: boolean;
@@ -47,6 +49,8 @@ type RuntimeState = {
   toolboxValidatedSandboxId?: string;
   sourcePruning?: { sandboxId: string; at: number };
   renewTimer?: NodeJS.Timeout;
+  nativeExecutor?: RemoteExecutorEndpoint;
+  nativeArtifactHashes?: Map<string, string>;
 };
 
 type FileSourceInventoryEntry = {
@@ -111,11 +115,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
+  acquireActivityLease(userId: number, threadId: number, options?: { native?: boolean }): SandboxActivityLease {
     if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
     const scope = { userId, threadId };
     const state = this.stateFor(scope);
     state.leases += 1;
+    if (options?.native) state.nativeLeases += 1;
     this.scheduleRenewal(scope, state);
     let released = false;
     return {
@@ -123,6 +128,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         if (released) return;
         released = true;
         state.leases = Math.max(0, state.leases - 1);
+        if (options?.native) state.nativeLeases = Math.max(0, state.nativeLeases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
         void this.enqueue(scope, undefined, async () => {
@@ -154,6 +160,34 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       const timeoutMs = Math.min(request.timeoutMs, MAX_FOREGROUND_COMMAND_MS);
       const prepared = await this.prepareSandbox(state, scope, request.threadFiles ?? [], timeoutMs, request.signal);
       return executeSandboxCommand(prepared.sandbox, request, timeoutMs, prepared.threadFiles, this.input.config.E2B_REQUEST_TIMEOUT_MS, this.input.logger);
+    });
+  }
+
+  needsRemoteExecutorRefresh(userId: number, threadId: number): boolean {
+    const state = this.states.get(scopeKey({ userId, threadId }));
+    if (!state?.nativeExecutor || state.continuousStartedAt === undefined) return false;
+    if (state.threadFilesSync?.retryAt !== undefined && Date.now() >= state.threadFilesSync.retryAt) return true;
+    // Match the cached-file preparation window, including a published site's
+    // remaining idle allowance. The next actual operation rotates if needed;
+    // this in-memory probe leaves paused and unstarted sandboxes untouched.
+    const preparationWindowMs = Math.max(2 * ROTATION_GUARD_MS, this.idleTimeout(state, state.sandboxId, false).timeoutMs);
+    return Date.now() - state.continuousStartedAt + preparationWindowMs + ROTATION_GUARD_MS >= CONTINUOUS_ROTATE_MS;
+  }
+
+  prepareRemoteExecutor(request: PrepareRemoteExecutorRequest): Promise<SandboxThreadFileSyncResult> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    return this.enqueue(scope, request.signal, async (state) => {
+      const prepared = await this.prepareSandbox(state, scope, request.files, ROTATION_GUARD_MS, request.signal, false,
+        async (sandbox) => {
+          const started = (async () => {
+            state.nativeExecutor = await prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal);
+            await request.onExecutorReady(state.nativeExecutor);
+          })();
+          state.nativeArtifactHashes ??= new Map();
+          const outcomes = await Promise.allSettled([started, stageNativeArtifacts(sandbox, request, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeArtifactHashes)]);
+          for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+        }, request.allowRotation !== false);
+      return prepared.threadFiles;
     });
   }
 
@@ -339,6 +373,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     requestedDurationMs: number,
     signal?: AbortSignal,
     forcePrune = false,
+    onSandboxReady?: (sandbox: E2BSandbox) => Promise<void>,
+    nativeRotationBoundary?: boolean,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
     const previousSync = state.threadFilesSync;
@@ -373,7 +409,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
-    sandbox = await this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal);
+    sandbox = await this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal, nativeRotationBoundary);
     effectiveWindowMs = Math.max(
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
@@ -381,7 +417,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     await sandbox.setTimeout(effectiveWindowMs, signal);
     await this.ensureSandboxToolbox(state, scope, sandbox, signal);
     await this.ensureLayout(sandbox, signal);
-    const threadFiles = await syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal);
+    const outcomes = await Promise.allSettled([
+      syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal),
+      onSandboxReady?.(sandbox),
+    ]);
+    for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+    const threadFiles = (outcomes[0] as PromiseFulfilledResult<SandboxThreadFileSyncResult>).value;
     if (forcePrune || state.sourcePruning?.sandboxId !== sandbox.id || Date.now() - state.sourcePruning.at >= 60_000) {
       state.sourcePruning = { sandboxId: sandbox.id, at: Date.now() };
       await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
@@ -669,7 +710,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     sandbox: E2BSandbox,
     requestedDurationMs: number,
     signal?: AbortSignal,
+    nativeRotationBoundary?: boolean,
   ): Promise<E2BSandbox> {
+    // Native commands travel directly over the persistent WebSocket instead of
+    // holding this control queue. A timer or concurrent bot filesystem tool
+    // must not pause their sandbox. The lazy adapter gates explicit preparation
+    // before releasing the next native operation at a turn boundary.
+    if (nativeRotationBoundary === false || state.nativeLeases > 0 && nativeRotationBoundary !== true) return sandbox;
     const startedAt = state.continuousStartedAt ?? Date.now();
     if (Date.now() - startedAt + requestedDurationMs + ROTATION_GUARD_MS < CONTINUOUS_ROTATE_MS) {
       return sandbox;
@@ -863,6 +910,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   ): void {
     if (state.sandboxId !== sandbox.id) {
       state.toolboxValidatedSandboxId = undefined;
+      state.nativeExecutor = undefined;
+      state.nativeArtifactHashes = undefined;
       state.websiteSandboxId = undefined;
       state.websiteIdleUntil = undefined;
       state.websitePublishedPending = false;
@@ -930,12 +979,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           E2B_IDLE_PAUSE_MS,
           this.idleTimeout(state, state.connection.id, false).timeoutMs,
         );
-        let sandbox = await this.rotateIfNeeded(
-          state,
-          scope,
-          state.connection,
-          requestedRenewalMs,
-        );
+        let sandbox = state.connection;
+        if (state.nativeLeases === 0) sandbox = await this.rotateIfNeeded(state, scope, sandbox, requestedRenewalMs);
         const renewalWindowMs = Math.max(
           E2B_IDLE_PAUSE_MS,
           this.idleTimeout(state, sandbox.id, false).timeoutMs,
@@ -962,7 +1007,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const key = scopeKey(scope);
     let state = this.states.get(key);
     if (!state) {
-      state = { tail: Promise.resolve(), leases: 0 };
+      state = { tail: Promise.resolve(), leases: 0, nativeLeases: 0 };
       this.states.set(key, state);
     }
     return state;

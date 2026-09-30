@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { valueList, type SqlExecutor } from "../db/sql.js";
-import type { InferenceUsageCall } from "../pi/usage.js";
+import type { InferenceUsageCall } from "../ai/usage.js";
 import { estimateCallCost, usagePricing, type PricingCatalog, type UsagePricing } from "./usage-pricing.js";
 import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } from "./types.js";
 

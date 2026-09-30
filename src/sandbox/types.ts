@@ -126,7 +126,10 @@ export interface SandboxActivityLease {
 }
 
 export interface CommandRuntime {
-  acquireActivityLease?(userId: number, threadId: number): SandboxActivityLease;
+  prepareRemoteExecutor?(request: import("../e2b/remoteExecutor.js").PrepareRemoteExecutorRequest): Promise<SandboxThreadFileSyncResult>;
+  /** Local lifecycle check; it never connects or starts a sandbox. */
+  needsRemoteExecutorRefresh?(userId: number, threadId: number): boolean;
+  acquireActivityLease?(userId: number, threadId: number, options?: { native?: boolean }): SandboxActivityLease;
   materializeFiles(request: SandboxFileMaterializeRequest): Promise<SandboxThreadFileSyncResult>;
   execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
   readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult>;

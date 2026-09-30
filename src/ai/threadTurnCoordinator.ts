@@ -7,7 +7,7 @@ import type { AcceptedTurnRun, DurableTurnAttachment, TelegramTurnSource } from 
 import type { Locale, MessageKind, TurnRunRow } from "../db/types.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import type { TurnRunner } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
 import { TurnActivityCoordinator } from "./turnActivity.js";
@@ -46,7 +46,7 @@ export class ThreadTurnCoordinator {
     db: AppDatabase;
     repos: Repos;
     logger: Logger;
-    pi: PiRuntimeService;
+    pi: AgentRuntimeService;
     fileResolver: FileResolver;
     turnRunner: TurnRunner;
     t(locale: Locale, key: string, params?: Record<string, string | number>): string;
@@ -583,8 +583,9 @@ export class ThreadTurnCoordinator {
   }
 
   private legacyStaleBefore(now: number): number {
-    const finiteTurnWindow = this.input.config.PI_TURN_TIMEOUT_MS > 0
-      ? Math.max(this.input.config.PI_TURN_TIMEOUT_MS, 60_000) + 60_000
+    const turnTimeout = this.input.config.CODEX_TURN_TIMEOUT_MS ?? this.input.config.PI_TURN_TIMEOUT_MS;
+    const finiteTurnWindow = turnTimeout > 0
+      ? Math.max(turnTimeout, 60_000) + 60_000
       : 0;
     return now - Math.max(this.input.config.LEGACY_TURN_RECOVERY_GRACE_MS, finiteTurnWindow);
   }

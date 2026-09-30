@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import { PiRuntimeManager } from "../fixtures/pi-v2/runtime.js";
 import { deferred } from "../helpers/async.js";
 
 describe("Pi runtime barrier operations", () => {

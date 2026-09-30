@@ -6,7 +6,7 @@ The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cl
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.15` uses `ai-tg-bot-tools:v2.0.15`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `3.0.0` uses `ai-tg-bot-tools:v3.0.0`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
@@ -40,6 +40,14 @@ The Office bundle in `assets/office` contains the shared installer, locked Node 
 
 `office-contract` tests Word creation, targeted replacements, tracked changes and comments, new decks with artwork/tables/charts, preservation during existing-deck edits, Excel formula recalculation, and actual-file page rendering. It prints conversion time and peak child-process RSS. The image remains 2 vCPU / 2048 MiB; full contracts run inside that allocation. LibreOffice package versions come from the base distribution and are recorded in every rendering report.
 
-After releasing the image, run `bun run live:pi-image-check` to exercise model vision and continuation after generation, intentional image delivery, and embedding an original generated asset into a visually reviewed deck. The test uses disposable sessions and a separate sandbox namespace; it queues results without sending messages to Telegram.
+After releasing the image, run `bun run live:codex-executor-check` to verify native shell, patching, image viewing, automatic attachment restoration, pause/resume, and recreation after deletion. This check uses a controlled Responses provider, so it makes no paid model calls and sends no Telegram messages. E2B sandbox execution and the existing attachment restoration pipeline are real; the Telegram download source is a deterministic fixture. It removes its disposable sandboxes and temporary Codex home.
 
 To verify an in-place upgrade, run `E2B_UPGRADE_FROM=ai-tg-bot-tools:v2.0.6 bun run live:e2b-check`. It creates a disposable sandbox from that earlier image and checks that upgrading preserves its identity, workspace, and saved sources, removes obsolete bundle files, and serializes concurrent installers. See [the 2.0.7 review fixes](../docs/office-review-2.0.7.md) and [the original resource measurements](../docs/office-tools-2.0.6.md).
+
+## Native Codex executor
+
+The v3 image includes Codex `0.159.2` and the `ai-tg-codex-executor` wrapper. The bot runs the persistent Codex app-server locally. Each conversation uses an authenticated local lazy adapter that starts or resumes E2B only when a native execution or filesystem operation needs it. Ordinary executor traffic uses one persistent secure WebSocket to the E2B port endpoint. The executor listens on port `8765` with capability-token authentication; it does not use stdin/stdout transport.
+
+The token is unique to the conversation sandbox and stored in a private directory with a mode `0600` token file. E2B receives no bot token, Codex subscription credentials, OpenRouter key, or other host credentials. Executor initialization overlaps automatic attachment restoration, and the first operation waits for both to finish. Telegram files keep their stable `/home/user/telegram-files` paths. Transfers use the current bounded materializer without a host attachment byte cache.
+
+Pause/resume preserves the executor process and workspace. If a sandbox has been deleted, its replacement restores every recoverable attachment visible to that conversation before execution. Existing v2 sandboxes are upgraded in place on their first native operation, installing the pinned executor once while preserving mappings, workspaces, and file sources. Native image outputs stay on the bot host for Telegram delivery; when a later sandbox tool needs them, their known generated paths are staged into E2B automatically.

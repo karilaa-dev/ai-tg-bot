@@ -7,7 +7,7 @@ import { loadConfig } from "../src/config.js";
 import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
-import { PiRuntimeManager } from "../src/pi/runtime.js";
+import { PiRuntimeManager } from "../test/fixtures/pi-v2/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
 
 // Exercise the application's prompts and tool schemas, stopping before any action

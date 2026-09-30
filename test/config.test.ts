@@ -28,7 +28,7 @@ describe("Browser Use configuration", () => {
 
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
-    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.15");
+    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v3.0.0");
     expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(config.BASH_TIMEOUT_MS).toBe(120_000);
     expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);
@@ -79,6 +79,9 @@ describe("agent execution limits", () => {
   });
 
   it("keeps a separately configurable provider request deadline", () => {
+    expect(loadConfig(required).CODEX_REQUEST_TIMEOUT_MS).toBe(900_000);
+    expect(loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: "60000" }).CODEX_REQUEST_TIMEOUT_MS).toBe(60_000);
+    expect(loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: "60000", CODEX_REQUEST_TIMEOUT_MS: "90000" }).CODEX_REQUEST_TIMEOUT_MS).toBe(90_000);
     expect(loadConfig(required).PI_REQUEST_TIMEOUT_MS).toBe(900_000);
     expect(loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: "60000" }).PI_REQUEST_TIMEOUT_MS).toBe(60_000);
     for (const value of ["0", "-1", "1.5", "Infinity", "invalid"]) {

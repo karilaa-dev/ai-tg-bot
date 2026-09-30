@@ -9,7 +9,7 @@ import { FileResolver } from "../../src/files/resolver.js";
 import type { ChatFileSourceAdapter } from "../../src/files/source.js";
 import { TELEGRAM_CONNECTION_KEY } from "../../src/files/telegramSource.js";
 import { createLogger } from "../../src/logger.js";
-import type { PiRuntimeService } from "../../src/pi/runtime.js";
+import type { AgentRuntimeService as PiRuntimeService } from "../../src/ai/runtime.js";
 
 describe("bot router file adapters", () => {
   let db: AppDatabase | undefined;

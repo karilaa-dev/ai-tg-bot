@@ -86,9 +86,14 @@ async function initializeCommonTables(
       pi_session_file text,
       pi_session_id text,
       archived integer not null default 0,
-      created_at ${intType} not null
+      created_at ${intType} not null,
+      codex_thread_id text,
+      codex_migrated_at ${intType},
+      codex_history_message_id ${intType}
     )
   `));
+  // Upgrades preserve Pi sessions and all existing conversation rows.
+  await addCodexThreadColumns(db, intType);
   await db.execute(sql.raw(`
     create table if not exists telegram_topic_titles (
       chat_id ${intType} not null,
@@ -323,4 +328,22 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
+}
+
+async function addCodexThreadColumns(db: SqlExecutor, intType: string): Promise<void> {
+  const columns = {
+    codex_thread_id: "text",
+    codex_migrated_at: intType,
+    codex_history_message_id: intType,
+  };
+  if (db.dialect === "postgres") {
+    for (const [name, type] of Object.entries(columns)) {
+      await db.execute(sql.raw(`alter table threads add column if not exists ${name} ${type}`));
+    }
+    return;
+  }
+  const existing = new Set((await db.query<{ name: string }>(sql`pragma table_info(threads)`)).map(row => row.name));
+  for (const [name, type] of Object.entries(columns)) {
+    if (!existing.has(name)) await db.execute(sql.raw(`alter table threads add column ${name} ${type}`));
+  }
 }

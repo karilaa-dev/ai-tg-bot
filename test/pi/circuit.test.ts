@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "../../src/pi/circuit.js";
+import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "../fixtures/pi-v2/circuit.js";
 
 describe("CodexCircuitBreaker", () => {
   it("waits until a near reset plus one minute and permits one probe", () => {

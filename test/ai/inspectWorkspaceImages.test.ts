@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createInspectWorkspaceImagesTool } from "../../src/ai/tools/inspectWorkspaceImages.js";
 import { createBashTool } from "../../src/ai/tools/bash.js";
 import { loadTestConfig } from "../../src/config.js";
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
 import type { CommandRuntime, SandboxCommandRequest, SandboxCommandResult } from "../../src/sandbox/types.js";
 
 const JPEG = Buffer.from([255, 216, 255, 224, 0]);

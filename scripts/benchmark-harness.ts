@@ -30,7 +30,9 @@ const { createRepos }: typeof import("../src/db/repos/index.js") = await moduleA
 const { ThreadE2BSandboxRuntimeManager }: typeof import("../src/e2b/threadRuntimeManager.js") = await moduleAt("src/e2b/threadRuntimeManager.ts");
 const { createE2BClient }: typeof import("../src/e2b/client.js") = await moduleAt("src/e2b/client.ts");
 const { E2BFileSourceAdapter }: typeof import("../src/e2b/fileSource.js") = await moduleAt("src/e2b/fileSource.ts");
-const { PiRuntimeManager }: typeof import("../src/pi/runtime.js") = await moduleAt("src/pi/runtime.ts");
+const legacyRuntime = await fs.access(path.join(root, "test/fixtures/pi-v2/runtime.ts"))
+  .then(() => "test/fixtures/pi-v2/runtime.ts", () => "src/pi/runtime.ts");
+const { PiRuntimeManager }: typeof import("../test/fixtures/pi-v2/runtime.js") = await moduleAt(legacyRuntime);
 const { currentTurnAssistantResult }: typeof import("../src/ai/currentTurnResult.js") = await moduleAt("src/ai/currentTurnResult.ts");
 const { sendFinal }: typeof import("../src/ai/responseDelivery.js") = await moduleAt(await fs.access(path.join(root, "src/ai/responseDelivery.ts")).then(() => "src/ai/responseDelivery.ts", () => "src/ai/agentTurnEngine.ts"));
 const base = loadConfig();

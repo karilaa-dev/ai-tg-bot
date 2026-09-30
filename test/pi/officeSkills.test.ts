@@ -16,7 +16,7 @@ import {
   officeSkillPaths,
   validateApprovedSkills,
   validateOfficeSkills,
-} from "../../src/pi/officeSkills.js";
+} from "../fixtures/pi-v2/officeSkills.js";
 
 const tempRoots: string[] = [];
 

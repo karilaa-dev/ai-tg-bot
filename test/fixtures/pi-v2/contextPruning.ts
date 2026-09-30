@@ -1,7 +1,7 @@
 import type { TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ContextEditEntryDraft, InlineExtension, ProjectedSessionEntry } from "@earendil-works/pi-coding-agent";
 import { toolResultFailed } from "./toolOutcome.js";
-import { asRecord } from "../util/records.js";
+import { asRecord } from "../../../src/util/records.js";
 
 const KEEP_RECENT_RESULTS = 6;
 const LARGE_RESULT_CHARS = 6000;

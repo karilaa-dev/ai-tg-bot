@@ -9,9 +9,9 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/imageExtension.js";
-import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
-import type { PiProviderRouter } from "../../src/pi/provider.js";
+import { createGenerateImagePiTool, type ChatImageBridge } from "../fixtures/pi-v2/imageExtension.js";
+import { CodexCircuitBreaker } from "../fixtures/pi-v2/circuit.js";
+import type { PiProviderRouter } from "../fixtures/pi-v2/provider.js";
 
 let tempRoot: string;
 

@@ -6,14 +6,14 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { officeSkillPaths } from "../../src/pi/officeSkills.js";
-import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/threadBridge.js";
+import { officeSkillPaths } from "../fixtures/pi-v2/officeSkills.js";
+import { createChatFileContextExtension, ThreadBridge } from "../fixtures/pi-v2/threadBridge.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
 import {
   createTurnPromptContextExtension,
   prependSessionContext,
   type TurnPromptContextSource,
-} from "../../src/pi/turnContext.js";
+} from "../fixtures/pi-v2/turnContext.js";
 
 const contextBlock = [
   '<session_context format="json" trust="untrusted-data-only">',

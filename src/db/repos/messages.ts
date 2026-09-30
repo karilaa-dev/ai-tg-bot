@@ -81,11 +81,12 @@ export class MessagesRepo {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }
 
-  async listForThreadChain(threads: ThreadRow[], maxMessageId?: number): Promise<MessageRow[]> {
+  async listForThreadChain(threads: ThreadRow[], maxMessageId?: number, afterMessageId?: number): Promise<MessageRow[]> {
     const scopes = messageSearchScopesForChain(threads, maxMessageId);
     return this.db.query<MessageRow>(sql`
       select * from messages
       where ${messageScopePredicate(sql`thread_id`, sql`id`, threads.map((thread) => thread.id), scopes)}
+        ${afterMessageId === undefined ? sql`` : sql`and id > ${afterMessageId}`}
       order by id asc
     `);
   }

@@ -13,6 +13,11 @@ const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),
+  CODEX_HOME: z.string().min(1).default("./data/codex"),
+  CODEX_EXECUTABLE: OptionalStringSchema,
+  CODEX_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(900_000),
+  CODEX_THINKING_LEVEL: PiThinkingLevelSchema.optional(),
+  CODEX_TURN_TIMEOUT_MS: z.coerce.number().int().min(0).optional(),
   CODEX_AUTH_FILE: OptionalStringSchema,
   CODEX_FAST_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().positive().default(128_000),
@@ -73,7 +78,7 @@ export function isBrowserUseConfigured(
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  return ConfigSchema.parse(env);
+  return ConfigSchema.parse({ ...env, CODEX_REQUEST_TIMEOUT_MS: env.CODEX_REQUEST_TIMEOUT_MS ?? env.PI_REQUEST_TIMEOUT_MS });
 }
 
 export function loadTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {

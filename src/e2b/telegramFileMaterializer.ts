@@ -706,7 +706,7 @@ async function readThreadFileIndex(
   }
 }
 
-function sanitizeFileName(value: string): string {
+export function sanitizeFileName(value: string): string {
   const normalized = value
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")

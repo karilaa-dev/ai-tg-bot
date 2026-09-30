@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferenceUsageDelta, inferenceUsageFromMessages, inferenceUsageFromEntries, type TokenTotals } from "../../src/pi/usage.js";
+import { inferenceUsageDelta, inferenceUsageFromMessages, inferenceUsageFromEntries, type TokenTotals } from "../fixtures/pi-v2/usage.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
