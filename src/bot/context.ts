@@ -7,7 +7,7 @@ import type { ThreadRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { TurnRunner } from "../ai/types.js";
 import type { AcceptedFileType } from "../files/ingest.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
@@ -68,7 +68,7 @@ export interface BotServices {
   turnCoordinator: ThreadTurnCoordinator;
   fileResolver: FileResolver;
   commandRuntime?: CommandRuntime;
-  pi: PiRuntimeService;
+  pi: AgentRuntimeService;
   threadTitles: ThreadTitleCoordinator;
   routerState: RouterState;
 }

@@ -85,6 +85,9 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect(scope.fileIds).not.toContain(inbound.id);
         expect((await repos.messages.listForThreadChain([parent, child], accepted.id)).map((row) => row.id)).toEqual(scope.messageIds);
         expect((await repos.messages.listForThreadChain([parent, child])).map((row) => row.id)).toEqual([beforeFork.id, accepted.id, queued.id]);
+        expect((await repos.messages.listForThreadChain([parent, child], accepted.id, beforeFork.id)).map((row) => row.id)).toEqual([accepted.id]);
+        expect((await repos.messages.listForThreadChain([parent, child], undefined, beforeFork.id)).map((row) => row.id)).toEqual([accepted.id, queued.id]);
+        expect(await repos.messages.listForThreadChain([parent, child], accepted.id, accepted.id)).toEqual([]);
         const currentScope = await threadVisibilityScope(repos, child);
         expect(currentScope.fileIds).toContain(inbound.id);
         expect(currentScope.fileIds).toContain(reusedQueued.id);

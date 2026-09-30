@@ -11,6 +11,6 @@ Open with `from pptx import Presentation; deck = Presentation(source_path)`. Ins
 
 Save to a new workspace path. Verify requested edits landed and untouched media, themes, masters, embedded objects, and unsupported package parts survived. Render the original when needed to compare layout. python-pptx does not support editing every PowerPoint feature; report unsupported edits clearly rather than flattening or deleting content. Do not promise animation or interactive behavior based on static previews.
 
-Generated artwork is a workspace asset: inspect the generate_image result and embed its path. Preserve image proportions and compare crops. Send only the requested deliverables.
+Inspect the available image-generation tool's result and embed its exact saved path. Preserve image proportions and compare crops. Send only the requested deliverables.
 
 Run validate_office_file, render_office_preview every slide, and record visual_reviews with the returned source_sha256. Check content, formatting, clipping, overlap, slide order, and the requested changes. Each edit invalidates the review. After three unsuccessful repair cycles explain the remaining blocker and keep the draft in the workspace. Use finish_response only when approved is true.

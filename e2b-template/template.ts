@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { CODEX_EXECUTOR_VERSION } from "../src/e2b/remoteExecutor.js";
 import { Template, type TemplateClass } from "e2b";
 import {
   E2B_TOOLBOX_PRODUCTION_REF,
@@ -101,6 +102,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .makeDir(["/cache/fontconfig", "/home/web_user/.cache/fontconfig"], { user: "root", mode: 0o777 })
     .makeDir("/home/user/workspace", { user: "user", mode: 0o700 })
     .copyItems([
+      { src: "assets/ai-tg-codex-executor", dest: "/usr/local/bin/ai-tg-codex-executor", user: "root", mode: 0o755 },
       { src: "assets/tool-contract.sh", dest: "/usr/local/bin/tool-contract.sh", user: "root", mode: 0o755 },
       { src: "assets/office", dest: "/usr/local/share/ai-tg-bot/office", user: "root" },
       { src: "assets/openscad", dest: "/usr/local/bin/openscad", user: "root", mode: 0o755 },
@@ -113,6 +115,7 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .runCmd(installImageMagickCommand(), { user: "root" })
     .runCmd("bash /usr/local/share/ai-tg-bot/office/install.sh", { user: "root" })
     .runCmd(installPdfInspectorCommand(), { user: "root" })
+    .runCmd(`npm install -g --omit=dev --no-audit --no-fund @openai/codex@${CODEX_EXECUTOR_VERSION} && test "$(codex --version)" = "codex-cli ${CODEX_EXECUTOR_VERSION}"`, { user: "root" })
     .runCmd("/usr/local/bin/tool-contract.sh", { user: "user" })
     .setWorkdir("/home/user/workspace")
     .setUser("user");

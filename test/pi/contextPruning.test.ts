@@ -1,8 +1,8 @@
 import { buildSessionProjection, SessionManager, type InlineExtension, type SessionMessageEntry, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createContextPruningExtension, pruneOldToolResults } from "../../src/pi/contextPruning.js";
-import { inferenceUsageFromEntries } from "../../src/pi/usage.js";
+import { createContextPruningExtension, pruneOldToolResults } from "../fixtures/pi-v2/contextPruning.js";
+import { inferenceUsageFromEntries } from "../fixtures/pi-v2/usage.js";
 
 describe("Pi context pruning", () => {
   it("shortens old successful results while retaining sources, artifacts and validation", () => {

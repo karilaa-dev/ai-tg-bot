@@ -6,20 +6,20 @@ import type {
   ModelRegistry,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AppConfig } from "../config.js";
-import type { Repos } from "../db/repos/index.js";
-import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
-import type { Logger } from "../logger.js";
-import type { CommandRuntime } from "../sandbox/types.js";
-import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../e2b/paths.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
-import { detectImageMediaType } from "../files/mediaType.js";
-import { createInspectWorkspaceImagesTool } from "../ai/tools/inspectWorkspaceImages.js";
-import { threadChainScope, type ThreadScope } from "../memory/retrieval.js";
+import type { AppConfig } from "../../../src/config.js";
+import type { Repos } from "../../../src/db/repos/index.js";
+import type { FileRow, ThreadRow, UserRow } from "../../../src/db/types.js";
+import type { Logger } from "../../../src/logger.js";
+import type { CommandRuntime } from "../../../src/sandbox/types.js";
+import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../../../src/e2b/paths.js";
+import { MAX_FILE_BYTES } from "../../../src/files/limits.js";
+import { detectImageMediaType } from "../../../src/files/mediaType.js";
+import { createInspectWorkspaceImagesTool } from "../../../src/ai/tools/inspectWorkspaceImages.js";
+import { threadChainScope, type ThreadScope } from "../../../src/memory/retrieval.js";
 import { resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import type { PiProviderRouter } from "./provider.js";
 
-import type { OutgoingFiles } from "../files/outgoingFiles.js";
+import type { OutgoingFiles } from "../../../src/files/outgoingFiles.js";
 import { botToolPolicy } from "./toolPolicy.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";

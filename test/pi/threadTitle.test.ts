@@ -3,7 +3,7 @@ import {
   buildThreadTitlePrompt,
   sanitizeThreadTitle,
   THREAD_TITLE_SYSTEM_PROMPT,
-} from "../../src/pi/threadTitle.js";
+} from "../fixtures/pi-v2/threadTitle.js";
 
 describe("thread title helper", () => {
   it("frames bounded opening messages as untrusted JSON data", () => {

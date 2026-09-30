@@ -70,6 +70,21 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
       .resolves.toEqual([expect.objectContaining({ id: message.id })]);
   });
 
+  it("upgrades old thread columns and retains Pi metadata when initialization repeats", async () => {
+    const repos = createRepos(database.db, database.search);
+    const user = await repos.users.ensure({ tgId: 84, firstName: "Legacy", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Old PostgreSQL chat" });
+    await repos.threads.setPiSession(thread.id, "/persistent/pi/pg.jsonl", "old-pg-session");
+    for (const column of ["codex_thread_id", "codex_migrated_at", "codex_history_message_id"]) {
+      await database.db.execute(sql.raw(`alter table threads drop column ${column}`));
+    }
+    await database.initialize();
+    await database.initialize();
+    expect(await repos.threads.get(thread.id)).toMatchObject({ pi_session_id: "old-pg-session", codex_thread_id: null, codex_migrated_at: null, codex_history_message_id: null });
+    await repos.threads.setCodexSession(thread.id, "codex-pg-thread", 67890, 123);
+    expect(await repos.threads.get(thread.id)).toMatchObject({ pi_session_file: "/persistent/pi/pg.jsonl", codex_thread_id: "codex-pg-thread", codex_migrated_at: 67890, codex_history_message_id: 123 });
+  });
+
   async function tableExists(table: string): Promise<boolean> {
     const rows = await database.db.query<{ exists: boolean }>(sql`
       select exists(

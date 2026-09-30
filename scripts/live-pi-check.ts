@@ -4,7 +4,7 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos } from "../src/db/repos/index.js";
 import { createLogger } from "../src/logger.js";
 import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
-import { PiRuntimeManager } from "../src/pi/runtime.js";
+import { PiRuntimeManager } from "../test/fixtures/pi-v2/runtime.js";
 
 const baseConfig = loadConfig();
 const config = { ...baseConfig, DB_URL: "sqlite::memory:" };

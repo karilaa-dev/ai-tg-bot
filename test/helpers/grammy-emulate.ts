@@ -9,7 +9,7 @@ import type { BotContext, BotServices } from "../../src/bot/context.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import { type TurnRunner } from "../../src/ai/types.js";
 import type { TelegramFileDownloader } from "../../src/files/telegram.js";
-import type { PiRuntimeService } from "../../src/pi/runtime.js";
+import type { AgentRuntimeService as PiRuntimeService } from "../../src/ai/runtime.js";
 
 export interface GrammyEmulator {
   bot: TestBot<BotContext>;

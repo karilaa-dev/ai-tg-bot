@@ -133,6 +133,26 @@ export class ThreadsRepo {
     `);
   }
 
+  async setCodexSession(
+    threadId: number,
+    sessionId: string,
+    migratedAt = Date.now(),
+    historyMessageId?: number | null,
+  ): Promise<void> {
+    await this.db.execute(sql`
+      update threads
+      set codex_thread_id = ${sessionId}, codex_migrated_at = ${migratedAt},
+          codex_history_message_id = ${historyMessageId ?? null}
+      where id = ${threadId}
+    `);
+  }
+
+  async setCodexHistoryMessageId(threadId: number, messageId: number): Promise<void> {
+    await this.db.execute(sql`
+      update threads set codex_history_message_id = ${messageId} where id = ${threadId}
+    `);
+  }
+
   async archive(id: number): Promise<void> {
     await this.db.execute(sql`update threads set archived = 1 where id = ${id}`);
   }

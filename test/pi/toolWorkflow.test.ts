@@ -7,8 +7,8 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { PiRuntimeManager } from "../../src/pi/runtime.js";
-import { inferenceUsageFromEntries } from "../../src/pi/usage.js";
+import { PiRuntimeManager } from "../fixtures/pi-v2/runtime.js";
+import { inferenceUsageFromEntries } from "../fixtures/pi-v2/usage.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });

@@ -1,19 +1,19 @@
 # ai-tg-bot
 
-`ai-tg-bot` is a private Telegram assistant built on persistent Pi sessions. Each Telegram thread gets its own persistent E2B sandbox when it first needs shell access.
+`ai-tg-bot` v3 is a private Telegram assistant built on the native Codex harness. Codex runs on the bot server; each Telegram conversation gets a persistent E2B sandbox only when a tool needs remote execution or files.
 
 ## Runtime model
 
 | Part | Behavior |
 | --- | --- |
 | Telegram | Receives messages and files, streams drafts, and sends generated files. |
-| Pi | Keeps one conversation session per Telegram thread. |
+| Codex app-server | Keeps native conversation threads, model/tool loops, compaction, search, and image generation on the bot server. |
 | Database | Uses SQLite by default. Set `DB_URL` for PostgreSQL. |
-| E2B | Gives each thread one isolated toolbox sandbox with a persistent filesystem and memory. |
+| E2B | Runs the native Codex executor in one isolated toolbox sandbox per conversation, with persistent filesystem and memory. |
 | Browser Use Cloud | Adds optional interactive browsing, screenshots, and downloads. |
-| Tavily | Handles `web_search` and the stateless `web_extract` tool. |
+| OpenRouter and Tavily | Supply fallback inference, fallback image generation/search/extraction, and audio transcription. |
 
-Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
+Codex `0.159.2` is pinned on the host and in the sandbox image. It uses the native subscription login and exposes native execution, patching, image viewing, web search, and image generation when the selected account/model supports them. If subscription authentication or service limits make Codex unavailable, the bot uses a small OpenRouter tool loop. Fallback keeps Tavily search/extraction and OpenRouter image generation available independently of the Codex subscription. A failure after native work has started is not replayed through fallback because that could repeat side effects. OpenRouter remains required for audio transcription.
 
 Telegram voice messages and audio messages are transcribed and used as prompts in the current thread. Captions are preserved alongside the transcript. `/stop` cancels downloading or transcription. Empty transcripts and failed requests show an error without starting an assistant turn. Audio is registered only after transcription succeeds, so failed or cancelled transcription leaves no unattached file records.
 
@@ -27,11 +27,11 @@ Accepted messages receive a 👀 reaction until their response finishes, fails, 
 
 ## Agent harness
 
-The core prompt, including optional browser guidance and runtime model identity, stays below 4,500 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Each provider request receives the selected model's display name, such as `Model: GPT-6 Astra`; this line is absent from persistent conversation history.
+The core prompt, including optional browser guidance, stays below 5,000 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Codex owns model identity and its native base instructions.
 
-`bash.inspect_images` combines command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends inference without another model request. It must be the only tool in its response. Partial failures retain successful attachments for repair. The normal OpenSCAD sequence is four model cycles: read the skill, build and inspect the preview, build and inspect final outputs, then finish with the STL and final photo.
+Codex uses native `exec_command`, `apply_patch`, and `view_image`. Fallback `bash.inspect_images` can combine command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends the turn after acknowledging its result to the harness. It must be the only tool in its response. Partial failures retain successful attachments for repair. The OpenSCAD workflow reads the skill, builds and inspects the preview, builds and inspects final outputs, then finishes with the STL and final photo.
 
-Final text precedes attachments. Two preparation workers prefetch files while text or the previous batch uploads; sends preserve queue order. Only adjacent compatible files form albums. Export reservations, cached file bodies, prefetch, and uploads share a 40 MiB budget per turn. Workspace exports retain immutable E2B recovery sources; browser download bytes can spill to private temporary files that are removed after the turn. Generated image originals remain in the thread workspace and enter this queue only when selected for delivery.
+Final text precedes attachments. Two preparation workers prefetch files while text or the previous batch uploads; sends preserve queue order. Only adjacent compatible files form albums. Export reservations, cached file bodies, prefetch, and uploads share a 40 MiB budget per turn. Workspace exports retain immutable E2B recovery sources; browser download bytes can spill to private temporary files that are removed after the turn. Native generated originals remain under `CODEX_HOME/generated_images` and enter this queue only when selected for delivery. Sandbox tools receive those known images automatically at the exact paths shown to Codex. Generating or directly delivering an image does not itself create an E2B sandbox.
 
 Turn logs include model-cycle latency, token/cache usage, peak request context, file preparation latency, and first-text/first-file/last-file delivery times. Snapshot pruning runs at most once per minute during ordinary operations; source-preserving exports still force a check.
 
@@ -46,7 +46,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 - Bun 1.4.2
 - A Telegram BotFather token
 - E2B, OpenRouter, and Tavily API keys
-- Optional Codex CLI OAuth credentials for primary inference
+- Codex subscription login for primary inference, with OpenRouter available when that login is unavailable
 - Optional Browser Use Cloud API key
 - An E2B API key that can build the versioned toolbox template
 
@@ -63,17 +63,25 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-To use Codex as the primary provider, sign in once with the official CLI:
+The bundled official CLI can sign in directly to the persistent native home:
 
 ```bash
-codex login
+CODEX_HOME=./data/codex bun node_modules/@openai/codex/bin/codex.js login --device-auth
 ```
 
-The bot reads `~/.codex/auth.json` by default. Set `CODEX_AUTH_FILE` to use another location. The containing directory must be writable because OAuth refresh replaces `auth.json` atomically. A single-file bind mount will break refreshes.
+`CODEX_HOME` defaults to `./data/codex`. Keep the whole directory writable and persistent, including its native authentication, conversation rollouts, generated images, and executor startup metadata. Codex owns OAuth refresh and replaces its token file atomically.
 
-An OAuth credential already stored in `PI_CODING_AGENT_DIR/auth.json` takes precedence over `CODEX_AUTH_FILE`. This keeps existing deployments compatible.
+`CODEX_AUTH_FILE` can select another native CLI credential source. The bot imports that source into `CODEX_HOME`; use the same path as its native `auth.json` when you want one shared store. Without an explicit source, an existing native home is used first, then old Pi OAuth credentials are imported, then the standard `~/.codex/auth.json` is imported. Existing Pi credentials and sessions are read without rewriting their files. Do not bind-mount only `auth.json`; a writable containing directory is needed for refresh.
 
-Set `CODEX_FAST_MODE=true` to request the priority service tier for Codex main, helper, and image-generation requests. It defaults to `false`. OpenRouter requests never inherit this setting, including fallback after a Codex failure.
+Set `CODEX_FAST_MODE=true` to request Codex's priority service tier for conversation turns. OpenRouter fallback does not inherit it. `CODEX_EXECUTABLE` optionally selects another host binary; the bundled pinned binary is the default.
+
+## Upgrade from Pi
+
+Preserve the existing database, `PI_CODING_AGENT_DIR`, `E2B_DEPLOYMENT_ID`, and `thread_sandboxes` mappings. Set `CODEX_HOME` to a new persistent writable directory and release `ai-tg-bot-tools:v3.0.0` before deployment. No database reset or sandbox deletion is required.
+
+The first native resume imports the selected old Pi branch, preserving its compaction summary and active context, then records that native thread ID in the database. Later turns resume the native rollout; missing rollouts can be rebuilt from durable conversation history. Fork boundaries, accepted message visibility, attachment IDs, saved transcripts, historical usage, and workspace mappings remain in the existing database. Old Pi transcripts stay unchanged. The Pi libraries remain for reading legacy transcripts and compatibility checks; Pi is not the production inference loop.
+
+Old paused E2B sandboxes resume in place with their existing tools. The bot never installs, updates, or repairs their toolbox. If missing or outdated tools block a task, it asks the user to recreate the chat; an old sandbox without a compatible native executor receives the same response. Deleted sandboxes are replaced, and every recoverable Telegram attachment visible to the conversation is restored automatically before the first operation.
 
 ## Database
 
@@ -83,32 +91,32 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 Dokploy can deploy this repository with Railpack auto-detection. The `packageManager` field pins Bun 1.4.2, and `bun.lock` fixes dependency versions. Railpack runs `bun run build` and starts the bot with `bun run start`.
 
-Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
+Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, set `CODEX_HOME=/app/data/codex`, and retain the previous `PI_CODING_AGENT_DIR=/app/data/pi` for legacy migration. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
 Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use remains optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
 ## E2B sandbox behavior
 
-- The bot creates a sandbox only when a thread calls a shell-backed tool.
+- Connecting a Codex thread, chatting, searching the web, or generating a new image leaves E2B stopped. A native execution/filesystem operation or another sandbox-backed bot tool starts or resumes it automatically.
 - `/home/user/workspace` is writable and persists across pause and resume.
-- `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
-- `generate_image` synthesizes or generatively edits one workspace asset when the user clearly requests it. Finding or arranging existing images uses retrieval and installed editing tools. A request for a document or presentation alone does not request generated artwork. The tool returns a model-only image preview, path, dimensions, and provider metadata. It neither queues delivery nor ends inference. Use chat-file IDs or workspace paths as references, five total. Explicitly requested artwork can be embedded in an Office file or sent through normal file delivery.
+- `/home/user/telegram-files` automatically receives all recoverable attachments visible to the conversation before sandbox access. `INDEX.json` records exact paths and restoration status. The directory remains read-only to agent commands; copy files into the workspace before editing them. No model-facing restoration or sandbox-start tool is required.
+- Native `image_gen.imagegen` handles requested synthesis and generative edits. Fallback exposes `generate_image`. Finding or arranging existing images uses retrieval and installed editing tools. A document or presentation request alone does not authorize generated artwork. Generation continues the turn and does not send Telegram files; choose exact saved paths for normal delivery.
 - `validate_office_file` returns named package, format, rendering, and formula checks plus visual review coverage. `render_office_preview` converts actual saved DOCX/PPTX/XLSX files through LibreOffice and Poppler, returning up to four model-only page images without Browser Use. Record per-page `visual_reviews` with the returned `source_sha256`; rendering alone does not approve delivery.
 - Office delivery requires every applicable check and every page review to pass for the exact exported bytes. Edits invalidate approval. Unvalidated browser downloads are staged in the workspace for review. Failed or incomplete checks withhold the file; successful delivery preserves the requested caption and keeps validation metadata internal. These checks do not certify Microsoft Office rendering, animations, or external workbook connections.
-- `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
-- `web_search` accepts `include_images: true` for image URLs and descriptions. The presentation skill uses this to find relevant photographs and illustrations, inspect downloaded originals, and retain source credits. It also supports generated artwork where the subject benefits from it.
+- Native `view_image` provides image inspection. Fallback `inspect_workspace_images` and `bash.inspect_images` provide workspace previews without sending them to Telegram.
+- Codex uses native live web search and source opening. Fallback uses Tavily `web_search` and `web_extract`, including `include_images: true`. Image retrieval follows the tools actually advertised by each provider.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
-- E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
+- E2B Base allows one hour of continuous runtime. The manager pauses and reconnects before the limit at an operation boundary, preserving filesystem and memory. Active native turns renew their timeout without being paused by the maintenance timer.
 - Public traffic does not resume a paused sandbox. A later bot operation reconnects it.
 
-There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Temporary outgoing spools last only for the current turn. Telegram bytes pass through the bot during intake, sandbox restoration, and delivery.
+The native executor communicates through a local authenticated lazy WebSocket adapter and one persistent secure WebSocket to E2B. Its capability token belongs only to that sandbox; bot, Codex subscription, E2B, and OpenRouter credentials are not sent to the executor. Initialization overlaps the existing bounded attachment restoration pipeline. Ordinary requests forward their payloads directly; health checks and timeout renewal stay outside individual native commands. Startup metadata is cached on the bot host, while Telegram attachment bytes have no persistent host cache. Temporary outgoing spools last only for the current turn.
 
 The implementation follows E2B's current documentation for [sandboxes](https://e2b.dev/docs/sandbox), [persistence](https://e2b.dev/docs/sandbox/persistence), and [auto-resume](https://e2b.dev/docs/sandbox/auto-resume).
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.15` uses `ai-tg-bot-tools:v2.0.15`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `3.0.0` uses `ai-tg-bot-tools:v3.0.0`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes native Codex exec-server 0.159.2 and its authenticated WebSocket startup wrapper, docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -122,8 +130,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.15 is ai-tg-bot-tools:v2.0.15.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.15
+# Optional override. The default for version 3.0.0 is ai-tg-bot-tools:v3.0.0.
+# E2B_TEMPLATE=ai-tg-bot-tools:v3.0.0
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -134,20 +142,20 @@ BASH_TIMEOUT_MS=120000
 
 Use a different `E2B_DEPLOYMENT_ID` for each independently active bot deployment and database that share an E2B account. The value is part of sandbox ownership and recovery.
 
-Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Existing sandboxes receive the same pinned Office bundle through a locked, idempotent installer. It preserves their workspace and file sources and removes the previous Office tools only after replacement capability checks pass. Do not delete `thread_sandboxes` mappings during a version change.
+Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Existing sandboxes keep their installed tools. A tool mismatch never triggers an automatic update or sandbox replacement. If old tools prevent completion, the bot asks the user to recreate the chat. Do not delete `thread_sandboxes` mappings during a version change.
 
 `E2B_REQUEST_TIMEOUT_MS` covers short control requests. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` covers Telegram restoration and large E2B file transfers. `E2B_FILE_SOURCE_MAX_BYTES` caps immutable snapshots for files that do not yet have a Telegram recovery source. `BASH_TIMEOUT_MS` allows exact OpenSCAD renders and other sandbox commands to run for up to two minutes. The bot removes or evicts old snapshots without touching the workspace copy.
 
-The bot creates secure sandboxes with outbound internet and public port traffic enabled. Their lifecycle action is `pause`, memory is kept, and automatic resume is disabled. Ordinary services should bind to `127.0.0.1`. A requested public site may bind to `0.0.0.0` and must pass through `publish_website`.
+The bot creates secure sandboxes with outbound internet and public port traffic enabled. Their lifecycle action is `pause`, memory is kept, and automatic resume is disabled. Ordinary services should bind to `127.0.0.1`. The authenticated native executor listens on `0.0.0.0:8765`. A requested public site may bind to `0.0.0.0` and must pass through `publish_website`.
 
 ## Files and retrieval
 
 - Telegram is the durable source for inbound files and outbound files that Telegram accepted.
-- `[[chat-file:<id>]]` markers are persistent Pi references.
+- `[[chat-file:<id>]]` markers remain durable attachment references across migration, compaction, and forks.
 - `load_message` can add selected attachment bytes to model context.
-- Before sandbox work, the bot restores visible Telegram files into `/home/user/telegram-files`.
+- Before sandbox work, the bot automatically restores all recoverable visible Telegram files into `/home/user/telegram-files`. Pause/resume reuses existing files; recreation restores them again.
 - Agent-created files get an E2B source locator. Delivery reuses buffered export bytes when available and reloads the durable source after eviction.
-- DOCX, PDF, CSV, and text content is extracted and either placed inline or split into searchable chunks. Images receive model-generated captions.
+- PDF and DOCX originals use sandbox source inspection; old extracted chunks remain available as a fallback. TXT/CSV content stays inline or searchable. Images retain model-generated captions and can be loaded into native vision context.
 - The per-file limit is 20 MiB. One answer can attach at most 25 created files.
 
 The bot retries partial Telegram restoration with exponential delays from five minutes to one hour. Recreating a sandbox or changing a file descriptor triggers an immediate retry. Ambiguous send results are stored separately from confirmed deliveries.
@@ -195,30 +203,24 @@ The bot rejects the workspace root and Telegram-file directory. It also verifies
 
 ## Prompt and provider behavior
 
-Normal turns keep the core system prompt and Office skill index stable. The bot creates one bounded `<session_context>` snapshot per turn for current time, timezone, user metadata, thread title, and inherited files. This untrusted block is not written to Pi history or compaction summaries.
+Normal turns keep the core prompt and reviewed skill index stable. A bounded untrusted `<session_context>` supplies time, timezone, user metadata, thread title, and visible inherited files. Native prompts use `exec_command`, `apply_patch`, `view_image`, native web search, and native image generation. OpenRouter prompts use its actual fallback tools. Neither path asks the model to start a sandbox or restore files.
 
-Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, and `tool_search`. Specialist tools are registered but loaded only when searched for; Pi records changes to the active tool set in its transcript. Codemode can batch chat searches, file reads, and web research with structured results. Workspace mutations, browser actions, image generation, publishing, and delivery cannot run inside scripts. Nested research calls share the turn's tool-call and failure limits. Only a direct `finish_response` completes delivery.
+Codex owns tool discovery and compaction. Bot tools remain available for conversation/file lookup, skills, Browser Use, Office checks, website publishing, and final delivery. The old custom codemode loop is not part of production. The OpenRouter fallback intentionally uses a smaller tool loop, with Tavily and the existing sandbox tools.
 
-Agent turns have no tool-call, model-cycle, repeated-failure, or total-duration limit by default. Set `PI_MAX_TOOL_CALLS`, `PI_MAX_MODEL_CYCLES`, `PI_MAX_CONSECUTIVE_TOOL_FAILURES`, `PI_MAX_IDENTICAL_TOOL_FAILURES`, or `PI_TURN_TIMEOUT_MS` to a positive integer to enable that limit; `0` disables it. Counts include nested codemode calls. `/stop` cancels an active turn even when these limits are disabled. Each provider request, including its streamed response, has a separate 15-minute deadline controlled by the positive integer `PI_REQUEST_TIMEOUT_MS` in milliseconds. Individual tool and network request timeouts remain separately configurable.
+`CODEX_THINKING_LEVEL`, `CODEX_TURN_TIMEOUT_MS`, and `CODEX_REQUEST_TIMEOUT_MS` control reasoning, the optional overall turn deadline, and the positive per-request deadline. Old `PI_THINKING_LEVEL`, `PI_TURN_TIMEOUT_MS`, and `PI_REQUEST_TIMEOUT_MS` values remain compatibility defaults. The request deadline is 15 minutes by default; the turn deadline defaults to unlimited. Existing `PI_MAX_*` bot budget settings apply to both providers; zero keeps model cycles and tool calls unlimited. `/stop` cancels active inference and tool work.
 
-Run `bun run live:pi-tools-check` to verify parallel research, specialist discovery, and final completion with the configured provider. Set `PI_SMOKE_FORCE_OPENROUTER=1` to check fallback. The command uses a disposable session and database, sends nothing to Telegram, and reports the initial tool declaration size against declaring every bot tool.
+Ownerless turns from older deployments use `LEGACY_TURN_RECOVERY_GRACE_MS` to allow abandoned queued work to recover. Current ownership leases continue to protect running turns during restarts and rolling upgrades.
 
-Ownerless `running` or `awaiting_delivery` turns left by deployments before ownership leases are interrupted after 16 minutes without an update, so queued work can resume. Set `LEGACY_TURN_RECOVERY_GRACE_MS` to a positive integer in milliseconds to change this grace period. A positive `PI_TURN_TIMEOUT_MS` extends the grace period when its turn window plus one minute is longer. During rolling upgrades, allow enough time for work still running in an older deployment. Current turns with valid ownership leases can continue indefinitely.
-
-At completed model-turn boundaries, the bot retains the latest six tool results and shortens older successful results containing images or more than 6,000 text characters. Summaries retain text excerpts and source/artifact references. Failed results, Office validation, and final delivery results are kept. These append-only context edits preserve raw history, usage, and branch history; only subsequent model requests use the shorter content.
-
-OpenRouter receives the opaque Pi session UUID for route affinity. No Telegram identifier or descriptive metadata is used. The bot does not opt into long-lived prompt retention, explicit cache-control blocks, or response caching.
-
-Completion logs include the final provider and model. When the provider returns usage, logs also contain input, output, cache-read, cache-write, total-token, and cache-read-ratio fields.
+Completion logs and saved usage keep the final provider/model and reported token/cache counts. Codex account unavailability falls back before model work can produce side effects. An operation already sent to a disconnected executor returns an explicit error and is never automatically replayed.
 
 ## Telegram commands
 
 - `/lang`: change language
 - `/timezone`: set the timezone
 - `/stream`: toggle draft streaming
-- `/stop`: cancel the active Pi turn
-- `/fork`: branch the current Pi session into a Telegram topic
-- `/compact`: compact Pi history
+- `/stop`: cancel the active turn
+- `/fork`: branch the conversation into a Telegram topic, preserving inherited visibility
+- `/compact`: ask native Codex to compact the current conversation
 - `/help`: show command help
 
 ## Verification
@@ -236,33 +238,28 @@ Use `bun run test` to run the Vitest suite under Bun. `bun test` invokes Bun's s
 Provider checks require live credentials:
 
 ```bash
-bun run live:pi-check
-bun run live:pi-fallback
+bun run live:codex-check
+bun run live:codex-fallback
 ```
 
-`bun run live:pi-image-intent-check` checks the model's first action for retrieval and synthesis requests using the current prompts and tool schemas. It allows skill reads, then stops before executing the selected action. It makes live model calls without generating images, creating sandboxes, or sending Telegram messages. It does not check later tool choices or finished deliverables.
+`CODEX_SMOKE_REQUIRE_PROVIDER=openai-codex` requires the native provider instead of silently accepting fallback. The native smoke includes old Pi history migration and restart/resume. These commands make live inference calls and send no Telegram messages.
 
-`bun scripts/live-pi-presentation-check.ts` exercises a plain Russian request for a Tokyo presentation, without adding instructions about imagery or tools. It saves the PPTX, PDF, rendered slides, and trace to a temporary directory (or `PRESENTATION_OUTPUT_DIR`), checks substantial imagery on at least two slides, and verifies delivery approval without a technical caption. This live check uses the configured model, search, and E2B accounts and sends no Telegram messages. Review its rendered slides separately; image counts do not measure design quality.
+The controlled executor smoke uses real E2B with a local Responses fixture, so it incurs sandbox usage without paid model inference:
 
-E2B and Browser Use each have an opt-in live check:
+```bash
+bun run live:codex-executor-check
+```
+
+It verifies lazy creation, native shell/patch/image tools, native image paths, absence of host credentials, automatic attachment restoration, pause/resume, and recreation after deletion. Its attachment source is a deterministic Telegram fixture; the existing restoration pipeline is real. Disposable sandboxes and the temporary native home are removed afterward.
+
+Additional live checks remain available:
 
 ```bash
 bun run live:e2b-check
 bun run live:browser-use-check
 ```
 
-Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to cover Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation.
-
-## Harness benchmark
-
-Run the CAD benchmark with real inference and E2B while all Telegram delivery is mocked:
-
-```bash
-bun scripts/benchmark-harness.ts --provider codex --runs 3 --out data/benchmark-codex.jsonl
-bun scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/benchmark-openrouter.jsonl
-```
-
-`--repo /path/to/checkout` measures another version with the same driver. That checkout needs its dependencies and released E2B image. The script uses a temporary SQLite database and Pi directory, and a separate E2B deployment namespace. Each pair uses a new sandbox for the cold run and the same sandbox with a cleared workspace and fresh model session for the warm run. Provider-side prompt caching is measured but cannot be reset. It removes its own sandboxes and temporary sessions afterward. These are live API calls and use the configured accounts.
+Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to exercise actual Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation. Set `E2B_RESUME_FROM` to an older image tag for an isolated check that resume preserves its tools, workspace, and saved sources. Scripts named `live:pi-*` and `benchmark-harness.ts` retain legacy Pi behavior for compatibility comparisons; they do not exercise the v3 production inference loop.
 
 ## Conversation website
 

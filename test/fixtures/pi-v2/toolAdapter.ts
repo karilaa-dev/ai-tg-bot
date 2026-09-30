@@ -1,10 +1,10 @@
 import type { ImageContent, TextContent, TSchema } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import type { InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { buildToolRegistry } from "../ai/tools/index.js";
-import type { ToolBuildInput } from "../ai/tools/types.js";
-import { raceWithAbort } from "../files/cancel.js";
-import { asRecord, safeJson } from "../util/records.js";
+import { buildToolRegistry } from "../../../src/ai/tools/index.js";
+import type { ToolBuildInput } from "../../../src/ai/tools/types.js";
+import { raceWithAbort } from "../../../src/files/cancel.js";
+import { asRecord, safeJson } from "../../../src/util/records.js";
 import { botToolPolicy } from "./toolPolicy.js";
 import { researchOutputSchema } from "./researchSchemas.js";
 import { toolResultFailed } from "./toolOutcome.js";

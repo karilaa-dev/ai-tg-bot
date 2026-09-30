@@ -2,25 +2,26 @@ import type { ThinkingDelivery } from "./types.js";
 import type { TurnInput, TurnRunner } from "./types.js";
 import { sendFinal, sendFinalVisible, refreshFinalThinkingVisible, normalizeTelegramAttachmentDeliveries, sendFinalThinkingVisible, sendPlainWithThreadFallback } from "./responseDelivery.js";
 import { formatMarkdownListItem } from "./turnOutput.js";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "./runtime.js";
+import type { AgentSessionEvent } from "./runtime.js";
 import type { MessageRow, UserRow } from "../db/types.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { isThreadNotFound } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
 import type { CreatedFileAttachment } from "../files/types.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import {
   inferenceUsageDelta,
   inferenceUsageFromEntries,
   type InferenceUsageDelta,
-} from "../pi/usage.js";
-import { budgetReasonText } from "../pi/turnBudget.js";
+} from "../ai/usage.js";
+import { budgetReasonText } from "../ai/turnBudget.js";
 import { currentTurnAssistantResult } from "./currentTurnResult.js";
 import { resolveTurnAnswer } from "./turnOutput.js";
+import { OUTDATED_SANDBOX_TOOLS_MESSAGE, outdatedSandboxToolsReply } from "../sandbox/toolPolicy.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 
@@ -37,7 +38,7 @@ export const runTurn: TurnRunner = async (input) => {
   });
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
-  let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
+  let activeBridge: Awaited<ReturnType<AgentRuntimeService["runtime"]>>["bridge"] | undefined;
   let inferenceUsage: InferenceUsageDelta | undefined;
   let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
   let currentTurnMessages: AgentMessage[] = [];
@@ -47,7 +48,7 @@ export const runTurn: TurnRunner = async (input) => {
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
     input.signal?.throwIfAborted();
-    if (!input.pi) throw new Error("Pi runtime is not configured.");
+    if (!input.pi) throw new Error("Agent runtime is not configured.");
     const userMessage = await resolveTurnUserMessage(input);
     const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
     const runtime = await input.pi.runtime(input.thread, input.user);
@@ -65,7 +66,7 @@ export const runTurn: TurnRunner = async (input) => {
     });
     input.outgoingBuffers = runtime.bridge.outgoingBuffers;
     await status?.start(buildThinkingStatus(input.t("thinking-placeholder"), shaper.toolStatusMd()));
-    input.logger.info("Pi turn starting", {
+    input.logger.info("Agent turn starting", {
       turnRunId: input.turnRunId,
       threadId: input.thread.id,
       modelRole: runtime.session.model?.id,
@@ -77,7 +78,7 @@ export const runTurn: TurnRunner = async (input) => {
     const usageBefore = runtime.session.getSessionStats().tokens;
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
     try {
-      await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS, input.signal);
+      await runPiPromptWithTimeout(runtime.session, input.text, input.config.CODEX_TURN_TIMEOUT_MS ?? input.config.PI_TURN_TIMEOUT_MS, input.signal);
     } finally {
       unsubscribe();
       const newEntries = runtime.session.sessionManager.getEntries().filter(
@@ -130,7 +131,7 @@ export const runTurn: TurnRunner = async (input) => {
         });
       }
     }
-    input.logger.debug("Pi turn complete", {
+    input.logger.debug("Agent turn complete", {
       turnRunId: input.turnRunId,
       threadId: input.thread.id,
       contentEvents: stats.counts.contentEvents,
@@ -145,7 +146,7 @@ export const runTurn: TurnRunner = async (input) => {
     if (assistantResult.stopReason === "aborted" && !budgetReason) {
       await status?.finish(shaper.toolStatusMd());
       await streamer?.finish();
-      input.logger.info("Pi turn cancelled", {
+      input.logger.info("Agent turn cancelled", {
         threadId: input.thread.id,
         ...inferenceBackend,
         ...inferenceUsage,
@@ -206,6 +207,7 @@ export const runTurn: TurnRunner = async (input) => {
       },
       () => { deliveryStarted = true; },
     );
+    await runtime.session.acknowledgeDelivery?.(finalDelivery.assistantMessageId);
     const deliveredFinalThinking = buildFinalThinkingSummary({
       t: input.t,
       shaper,
@@ -257,7 +259,7 @@ export const runTurn: TurnRunner = async (input) => {
       modelCycles: budgetSnapshot?.modelCycles,
       toolCalls: budgetSnapshot?.toolCalls,
       budgetTerminationReason: budgetReason,
-      ...stats.counts.modelTiming,
+      ...stats.counts.responseTiming,
       ...input.deliveryTiming,
       ...input.outgoingBuffers?.snapshot(),
     });
@@ -303,12 +305,15 @@ export const runTurn: TurnRunner = async (input) => {
     }
     const reference = input.turnRunId ? `#${input.turnRunId}` : "unavailable";
     const label = input.user.lang === "ru" ? "Код обращения" : "Turn reference";
-    await sendFinal(input, "", `${input.t("error-generic")}\n\n${label}: ${reference}`);
+    const failureReply = String(err).includes(OUTDATED_SANDBOX_TOOLS_MESSAGE)
+      ? outdatedSandboxToolsReply(input.user.lang)
+      : `${input.t("error-generic")}\n\n${label}: ${reference}`;
+    await sendFinal(input, "", failureReply);
   } finally {
     try {
       await activeBridge?.endTurn();
     } catch (err) {
-      input.logger.error("Pi bridge cleanup failed", {
+      input.logger.error("Agent bridge cleanup failed", {
         threadId: input.thread.id,
         err: String(err),
       });
@@ -341,7 +346,7 @@ export function appendPublishedWebsiteNotice(
 }
 
 export async function runPiPromptWithTimeout(
-  session: Awaited<ReturnType<PiRuntimeService["runtime"]>>["session"],
+  session: Pick<Awaited<ReturnType<AgentRuntimeService["runtime"]>>["session"], "prompt" | "abort">,
   text: string,
   timeoutMs: number,
   signal?: AbortSignal,
@@ -370,7 +375,7 @@ export async function runPiPromptWithTimeout(
       operations.push(new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           shutdownRequested = true;
-          reject(new Error(`Pi turn timed out after ${timeoutMs} ms.`));
+          reject(new Error(`Agent turn timed out after ${timeoutMs} ms.`));
         }, timeoutMs);
       }));
     }
@@ -437,10 +442,7 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
 
 class TurnDraftStreamer {
   private readonly thinking: DraftStreamer;
-  private readonly answer: DraftStreamer;
-  private answerStarted = false;
-  private answerReady = false;
-  private latestAnswerMd = "";
+  private finalized = false;
   private deliveredThinkingMd = "";
   private thinkingDelivery?: Promise<number[]>;
   private thinkingDeliveryError: unknown;
@@ -457,13 +459,15 @@ class TurnDraftStreamer {
       startedAt,
       updateMs: input.config.DRAFT_UPDATE_MS,
       t: input.t,
+      onDelivered: () => {
+        if (input.deliveryTiming) input.deliveryTiming.firstDraftMs ??= Date.now() - startedAt;
+      },
     };
     this.thinking = new DraftStreamer(common);
-    this.answer = new DraftStreamer({ ...common, answerOnly: true });
   }
 
   update(frame: { thinkingMd: string; answerMd: string }): void {
-    if (this.answerStarted) return;
+    if (this.finalized) return;
     // Text can precede more tool calls. Keep it inside the running draft until
     // the prompt completes and finish() can publish the final answer.
     this.thinking.update({
@@ -474,17 +478,15 @@ class TurnDraftStreamer {
 
   async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
     if (!frame) {
-      if (!this.answerStarted) {
+      if (!this.finalized) {
         await this.thinking.finish();
         return undefined;
       }
       const messageIds = await this.waitForThinkingDelivery();
-      await this.answer.finish();
       return { handled: true, messageIds };
     }
 
-    this.latestAnswerMd = frame.answerMd;
-    if (!this.answerStarted) this.startAnswer(frame.thinkingMd);
+    if (!this.finalized) this.finalizeThinking(frame.thinkingMd);
     let messageIds = await this.waitForThinkingDelivery();
     if (frame.thinkingMd !== this.deliveredThinkingMd) {
       messageIds = await refreshFinalThinkingVisible(
@@ -495,33 +497,24 @@ class TurnDraftStreamer {
       );
       this.deliveredThinkingMd = frame.thinkingMd;
     }
-    if (frame.answerMd.trim()) {
-      await this.answer.finish({ thinkingMd: "", answerMd: frame.answerMd });
-    } else {
-      this.answer.stop();
-    }
+    // sendFinalVisible confirms the answer next. Sending its exact text as a
+    // separate draft would add a serial Telegram request without streaming it.
     return { handled: true, messageIds };
   }
 
   stop(): void {
     this.thinking.stop();
-    this.answer.stop();
   }
 
-  private startAnswer(finalThinkingMd: string): void {
-    if (this.answerStarted) return;
-    this.answerStarted = true;
+  private finalizeThinking(finalThinkingMd: string): void {
+    if (this.finalized) return;
+    this.finalized = true;
     this.deliveredThinkingMd = finalThinkingMd;
     this.thinking.stop();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
     this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
       this.thinkingDeliveryError = err;
       return [];
-    });
-    void this.thinkingDelivery.then(() => {
-      if (this.thinkingDeliveryError) return;
-      this.answerReady = true;
-      this.updateAnswerDraft();
     });
   }
 
@@ -530,15 +523,10 @@ class TurnDraftStreamer {
     if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
     return messageIds;
   }
-
-  private updateAnswerDraft(): void {
-    if (!this.answerReady || !this.latestAnswerMd.trim()) return;
-    this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
-  }
 }
 
 interface TurnStreamStats {
-  modelTiming: { modelMs: number; peakContextTokens: number };
+  responseTiming: { responseCycleMs: number; peakContextTokens: number };
   contentEvents: number;
   toolCalls: number;
   toolResults: number;
@@ -554,7 +542,7 @@ function createPiStreamLoop(
   status: TurnStatusMessage | undefined,
 ): { counts: TurnStreamStats; onEvent: (event: AgentSessionEvent) => void } {
   const counts: TurnStreamStats = {
-    modelTiming: { modelMs: 0, peakContextTokens: 0 },
+    responseTiming: { responseCycleMs: 0, peakContextTokens: 0 },
     contentEvents: 0,
     toolCalls: 0,
     toolResults: 0,
@@ -581,10 +569,13 @@ function createPiStreamLoop(
       const usage = event.message.usage;
       const ms = Date.now() - cycleStartedAt;
       const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-      counts.modelTiming.modelMs += ms;
-      counts.modelTiming.peakContextTokens = Math.max(counts.modelTiming.peakContextTokens, contextTokens);
-      input.logger.info("Pi model cycle complete", {
+      // Codex exposes response completion, not upstream request start. The
+      // interval can include tool execution and sandbox preparation.
+      counts.responseTiming.responseCycleMs += ms;
+      counts.responseTiming.peakContextTokens = Math.max(counts.responseTiming.peakContextTokens, contextTokens);
+      input.logger.info("Agent response cycle complete", {
         threadId: input.thread.id, turnRunId: input.turnRunId, cycle, ms,
+        timingBasis: "response_completion_intervals",
         provider: event.message.provider, model: event.message.model,
         inputTokens: usage.input, outputTokens: usage.output,
         cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite,
@@ -596,11 +587,13 @@ function createPiStreamLoop(
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent;
       if (update.type === "text_delta") {
+        if (update.delta && input.deliveryTiming) input.deliveryTiming.firstModelTextMs ??= Date.now() - input.deliveryTiming.startedAt;
         shaper.onTextDelta(update.delta);
         counts.contentEvents += 1;
       } else if (update.type === "thinking_start") {
         shaper.onReasoningStart();
       } else if (update.type === "thinking_delta") {
+        if (update.delta && input.deliveryTiming) input.deliveryTiming.firstThinkingMs ??= Date.now() - input.deliveryTiming.startedAt;
         shaper.onReasoningDelta(update.delta);
         counts.contentEvents += 1;
       } else if (update.type === "thinking_end") {
@@ -614,7 +607,7 @@ function createPiStreamLoop(
       shaper.onToolCall(event.toolName, event.args);
       counts.toolCalls += 1;
       if (event.toolName === "generate_image") counts.generateImageToolCalls += 1;
-      input.logger.info("Pi tool call started", {
+      input.logger.info("Agent tool call started", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
         toolName: event.toolName,
@@ -626,6 +619,10 @@ function createPiStreamLoop(
     if (event.type === "tool_execution_end") {
       const startedAt = toolStartedAt.get(event.toolCallId);
       toolStartedAt.delete(event.toolCallId);
+      const details = asRecord(asRecord(event.result)?.details);
+      const duration = details?.durationMs;
+      const reportedDuration = typeof duration === "number" && Number.isFinite(duration) && duration >= 0 ? duration : undefined;
+      const notificationSpanMs = startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
       shaper.onToolResult(event.toolName, summarizeToolOutput(event.toolName, event.result));
       counts.toolResults += 1;
       if (event.toolName === "generate_image") {
@@ -633,12 +630,17 @@ function createPiStreamLoop(
           ?? counts.generateImageToolError;
         if (!event.isError) counts.generateImageReadyAt = Date.now();
       }
-      input.logger.info("Pi tool call finished", {
+      input.logger.info("Agent tool call finished", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
         toolName: event.toolName,
         error: event.isError || undefined,
-        latencyMs: startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt),
+        latencyMs: reportedDuration ?? notificationSpanMs,
+        durationSource: reportedDuration === undefined ? "notifications" : "harness",
+        notificationSpanMs,
+        // Report safe protocol fields, never commands or private tool output.
+        exitCode: typeof details?.exitCode === "number" ? details.exitCode : undefined,
+        status: ["completed", "failed", "declined"].includes(String(details?.status)) ? details?.status : undefined,
       });
       updatePresenter();
       updateStatus();

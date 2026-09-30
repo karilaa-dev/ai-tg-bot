@@ -25,11 +25,22 @@ import {
 describe("E2B toolbox template definition", () => {
   it("uses E2B Base with versioned and production identities plus fixed resources", () => {
     expect(E2B_TOOLBOX_PRODUCTION_REF).toBe("ai-tg-bot-tools:production");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.15");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.15");
+    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v3.0.0");
+    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v3.0.0");
     expect(E2B_TOOLBOX_CPU_COUNT).toBe(2);
     expect(E2B_TOOLBOX_MEMORY_MB).toBe(2048);
     expect(Template.toDockerfile(createE2BToolboxTemplate())).toContain("FROM e2bdev/base");
+  });
+
+  it("bakes the pinned native Codex executor and secure WebSocket startup wrapper", async () => {
+    const dockerfile = Template.toDockerfile(createE2BToolboxTemplate());
+    expect(dockerfile).toContain("@openai/codex@0.159.2");
+    expect(dockerfile).toContain("assets/ai-tg-codex-executor");
+    const wrapper = await fs.readFile("e2b-template/assets/ai-tg-codex-executor", "utf8");
+    expect(wrapper).toContain("--listen ws://0.0.0.0:8765");
+    expect(wrapper).toContain("--ws-auth capability-token");
+    expect(wrapper).toContain("--ws-token-file");
+    expect(wrapper).not.toContain("stdio");
   });
 
   it("contains the missing non-browser toolbox packages", () => {

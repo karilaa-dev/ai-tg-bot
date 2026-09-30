@@ -66,6 +66,7 @@ describe("SQLite schema initialization", () => {
       "id", "user_id", "topic_id", "parent_thread_id", "fork_point_message_id", "title",
       "title_source", "title_attempts", "topic_title_synced", "pi_session_file", "pi_session_id",
       "archived", "created_at",
+      "codex_thread_id", "codex_migrated_at", "codex_history_message_id",
     ]);
     await expect(columns(database, "messages")).resolves.toEqual([
       "id", "thread_id", "role", "kind", "content_json", "text_plain", "thinking",
@@ -134,6 +135,28 @@ describe("SQLite schema initialization", () => {
 
     await expect(database.db.query<{ count: number }>(sql`select count(*) as count from file_sources`))
       .resolves.toEqual([{ count: 0 }]);
+  });
+
+  it("adds Codex metadata to a version-two database without replacing old sessions or conversations", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    const repos = createRepos(database.db, database.search);
+    await repos.users.ensure({ tgId: 77, firstName: "Legacy", lang: "en" });
+    const thread = await repos.threads.create({ userId: 77, topicId: 123, title: "Legacy chat" });
+    await repos.threads.setPiSession(thread.id, "/persistent/pi/legacy.jsonl", "legacy-session");
+    const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: { file_ids: [12] }, textPlain: "Remember the old file", piEntryId: "old-entry" });
+    for (const column of ["codex_thread_id", "codex_migrated_at", "codex_history_message_id"]) {
+      await database.db.execute(sql.raw(`alter table threads drop column ${column}`));
+    }
+    await database.initialize();
+    await database.initialize();
+    expect(await repos.threads.get(thread.id)).toMatchObject({ title: "Legacy chat", topic_id: 123, pi_session_file: "/persistent/pi/legacy.jsonl", pi_session_id: "legacy-session", codex_thread_id: null, codex_migrated_at: null, codex_history_message_id: null });
+    expect(await repos.messages.get(message.id)).toMatchObject({ text_plain: "Remember the old file", pi_entry_id: "old-entry" });
+    await repos.threads.setCodexSession(thread.id, "new-codex-thread", 12345, message.id);
+    await database.initialize();
+    expect(await repos.threads.get(thread.id)).toMatchObject({ codex_thread_id: "new-codex-thread", codex_migrated_at: 12345, codex_history_message_id: message.id, pi_session_id: "legacy-session" });
+    await repos.threads.setCodexHistoryMessageId(thread.id, message.id + 1);
+    expect((await repos.threads.get(thread.id))?.codex_history_message_id).toBe(message.id + 1);
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.15",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,6 +14,9 @@
     "live:pi-image-check": "bun scripts/live-pi-image-check.ts",
     "live:pi-image-intent-check": "bun scripts/live-pi-image-intent-check.ts",
     "live:pi-fallback": "PI_SMOKE_FORCE_OPENROUTER=1 bun scripts/live-pi-check.ts",
+    "live:codex-check": "bun scripts/live-codex-check.ts",
+    "live:codex-fallback": "CODEX_SMOKE_FORCE_OPENROUTER=1 bun scripts/live-codex-check.ts",
+    "live:codex-executor-check": "bun scripts/live-codex-executor-check.ts",
     "live:e2b-check": "bun scripts/live-e2b-check.ts",
     "live:browser-use-check": "bun scripts/live-browser-use-check.ts",
     "e2b:template:build": "bun e2b-template/build.ts",
@@ -33,6 +36,7 @@
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",
     "@grammyjs/runner": "^2.0.3",
+    "@openai/codex": "0.159.2",
     "@tavily/core": "^0.7.13",
     "csv-parse": "^7.0.3",
     "drizzle-orm": "^0.45.3",
@@ -42,6 +46,7 @@
     "pg": "^8.23.0",
     "playwright-core": "1.63.0",
     "undici": "^8.11.2",
+    "ws": "8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -51,6 +56,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.2",
     "bun-plugin-tailwind": "0.1.2",
     "clsx": "^2.1.1",
     "lucide-react": "^1.48.0",

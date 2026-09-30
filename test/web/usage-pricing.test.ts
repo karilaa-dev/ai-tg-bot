@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { estimateCallCost, MAX_PRICING_BYTES, UsagePricing, type PricingCatalog } from "../../src/web/usage-pricing.js";
 import { summarizeUsage } from "../../src/web/usage.js";
-import type { InferenceUsageCall } from "../../src/pi/usage.js";
+import type { InferenceUsageCall } from "../fixtures/pi-v2/usage.js";
 
 const rates = {
   input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../src/config.js";
@@ -15,9 +16,14 @@ import {
 import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
 import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
+import { prepareNativeExecutor } from "../../src/e2b/remoteExecutor.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { deferred } from "../helpers/async.js";
-import { officeBundle, OFFICE_BUNDLE_PATH } from "../../src/e2b/officeBundle.js";
+import { OUTDATED_SANDBOX_TOOLS_MESSAGE } from "../../src/sandbox/toolPolicy.js";
+
+const OFFICE_BUNDLE_PATH = "/usr/local/share/ai-tg-bot/office";
+
+const nativeWrapper = await fs.readFile(new URL("../../e2b-template/assets/ai-tg-codex-executor", import.meta.url));
 
 describe("thread E2B runtime manager", () => {
   let config: AppConfig;
@@ -46,6 +52,217 @@ describe("thread E2B runtime manager", () => {
     vi.restoreAllMocks();
     await runtime.dispose();
     await db.destroy();
+  });
+
+  it("connects the native executor while automatically restoring attachments before preparation completes", async () => {
+    const bytes = Buffer.from("automatically restored");
+    const stored = await repos.files.insertFile({ userId, threadId, type: "txt", name: "old.txt", mimeType: "text/plain", size: bytes.length, isInline: true });
+    const [ref] = await repos.files.rememberTelegramFileRefs(stored.id, { direction: "inbound", mediaKind: "document", refs: [{ fileId: "tg-old", size: bytes.length, primary: true }] });
+    const release = deferred<void>();
+    const connected = deferred<void>();
+    await runtime.dispose();
+    runtime = new ThreadE2BSandboxRuntimeManager({ config, repos, client, downloadTelegramBytes: async () => { await release.promise; return bytes; } });
+    const ready = vi.fn(async (endpoint: { sandboxId: string; url: string; authBearerToken: string }) => {
+      expect(endpoint).toMatchObject({ sandboxId: "sandbox-1", url: "wss://8765-sandbox-1.e2b.test" });
+      expect(endpoint.authBearerToken).toMatch(/^[a-f0-9]{64}$/u);
+      connected.resolve();
+    });
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [descriptor(stored.id, stored.name, "tg-old", ref!.id, bytes.length)], onExecutorReady: ready });
+    await connected.promise;
+    expect(client.onlySandbox().files.has(`${E2B_TELEGRAM_FILES}/${stored.id}--old.txt`)).toBe(false);
+    release.resolve();
+    expect(await preparing).toMatchObject({ available: 1 });
+    expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--old.txt`)).toEqual(bytes);
+    expect(ready).toHaveBeenCalledOnce();
+  });
+
+  it("resumes the installed executor and stages native images at their original paths", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const originalWorkspace = `${E2B_WORKSPACE}/unfinished-project.txt`;
+    sandbox.files.set(originalWorkspace, Buffer.from("preserved old work"));
+    await runtime.dispose();
+    runtime = createRuntime();
+    const generatedPath = "/var/lib/ai-tg-bot/codex/generated_images/thread/call.png";
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/var/lib/ai-tg-bot/codex/generated_images", artifacts: [{ path: generatedPath, bytes: Buffer.from("native png") }], onExecutorReady: async () => undefined });
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
+    expect(sandbox.files.get(originalWorkspace)?.toString()).toBe("preserved old work");
+    expect(sandbox.files.get(generatedPath)?.toString()).toBe("native png");
+    expect(sandbox.controlCommands.some(command => command.includes("npm install"))).toBe(false);
+    expect(sandbox.files.has("/usr/local/bin/ai-tg-codex-executor")).toBe(true);
+    const transfers = () => sandbox.writeFileCalls.filter(call => call.path.includes("native-artifact-")).length;
+    expect(transfers()).toBe(1);
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/var/lib/ai-tg-bot/codex/generated_images", artifacts: [{ path: generatedPath, bytes: Buffer.from("native png") }], onExecutorReady: async () => undefined });
+    expect(transfers()).toBe(1);
+  });
+
+  it("overlaps pinned executor startup with layout preparation but gates the operation until both finish", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    await runtime.dispose();
+    runtime = createRuntime();
+    const validation = deferred<void>();
+    const connected = deferred<void>();
+    const original = sandbox.run.bind(sandbox);
+    vi.spyOn(sandbox, "run").mockImplementation(async command => {
+      if (command.startsWith("mkdir -p") && command.includes(E2B_TELEGRAM_FILES)) await validation.promise;
+      return original(command);
+    });
+    let completed = false;
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => { connected.resolve(); } }).then(value => { completed = true; return value; });
+    await connected.promise;
+    expect(completed).toBe(false);
+    expect(sandbox.controlCommands.some(command => command.includes("npm install -g") && command.includes("@openai/codex"))).toBe(false);
+    expect(sandbox.controlCommands.find(command => command.includes("start.lock"))).toContain("export PATH=");
+    const backgrounds = sandbox.backgroundCalls;
+    const queued = runtime.execute(commandRequest(userId, threadId));
+    await Promise.resolve();
+    expect(sandbox.backgroundCalls).toBe(backgrounds);
+    validation.resolve();
+    await preparing;
+    await queued;
+    expect(sandbox.backgroundCalls).toBe(backgrounds + 1);
+  });
+
+  it.each(["missing executor", "missing wrapper", "modified wrapper"])("leaves an old sandbox unchanged with %s and asks to recreate the chat", async missing => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const wrapperPath = "/usr/local/bin/ai-tg-codex-executor";
+    if (missing === "missing executor") sandbox.pinnedExecutor = false;
+    else if (missing === "missing wrapper") sandbox.files.delete(wrapperPath);
+    else sandbox.files.set(wrapperPath, Buffer.from("old wrapper"));
+    sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`, Buffer.from("unfinished work"));
+    const before = sandbox.files.get(wrapperPath);
+    const ready = vi.fn(async () => undefined);
+    await runtime.dispose();
+    runtime = createRuntime();
+    await expect(runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: ready })).rejects.toThrow(OUTDATED_SANDBOX_TOOLS_MESSAGE);
+    expect(ready).not.toHaveBeenCalled();
+    expect(sandbox.files.get(wrapperPath)).toEqual(before);
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("unfinished work");
+    expect(sandbox.writeFileCalls.some(call => call.path === wrapperPath)).toBe(false);
+    expect(sandbox.controlCommands.some(command => /npm install|apt-get|pip install|start\.lock/.test(command))).toBe(false);
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(client.createCalls).toBe(1);
+  });
+
+  it("caches the verified native path when reusing older endpoint metadata", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    const previous = { sandboxId: sandbox.id, url: "wss://existing.e2b.test", authBearerToken: "existing capability" };
+    const endpoint = await prepareNativeExecutor(sandbox, 30_000, previous);
+    expect(endpoint).toMatchObject(previous);
+    expect(endpoint.nativeBinaryDirectory).toMatch(/^\/usr\//u);
+    await prepareNativeExecutor(sandbox, 30_000, endpoint);
+    expect(sandbox.controlCommands.filter(command => command.includes("# codex_executor_metadata"))).toHaveLength(1);
+  });
+
+  it("drains parallel executor startup after layout failure before releasing the serialized queue", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    await runtime.dispose();
+    runtime = createRuntime();
+    const connected = deferred<void>();
+    const release = deferred<void>();
+    const original = sandbox.run.bind(sandbox);
+    let failed = false;
+    vi.spyOn(sandbox, "run").mockImplementation(async command => {
+      if (!failed && command.startsWith("mkdir -p") && command.includes(E2B_TELEGRAM_FILES)) { failed = true; throw new Error("layout preparation unavailable"); }
+      return original(command);
+    });
+    let settled = false;
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => { connected.resolve(); await release.promise; } });
+    void preparing.then(() => { settled = true; }, () => { settled = true; });
+    await connected.promise;
+    const backgrounds = sandbox.backgroundCalls;
+    const queued = runtime.execute(commandRequest(userId, threadId));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(sandbox.backgroundCalls).toBe(backgrounds);
+    release.resolve();
+    await expect(preparing).rejects.toThrow("layout preparation unavailable");
+    await queued;
+    expect(sandbox.backgroundCalls).toBe(backgrounds + 1);
+  });
+
+  it("rejects native image staging outside its trusted generated image root", async () => {
+    await expect(runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/data/codex/generated_images", artifacts: [{ path: "/data/codex/auth.json", bytes: Buffer.from("untrusted") }], onExecutorReady: async () => undefined })).rejects.toThrow("outside its generated image root");
+    expect(client.onlySandbox().files.has("/data/codex/auth.json")).toBe(false);
+  });
+
+  it("renews active native commands without pausing and rotates at the next gated preparation boundary", async () => {
+    vi.useFakeTimers();
+    let lease: ReturnType<ThreadE2BSandboxRuntimeManager["acquireActivityLease"]> | undefined;
+    try {
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      lease = runtime.acquireActivityLease(userId, threadId, { native: true });
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+      const sandbox = client.onlySandbox();
+      sandbox.files.set(`${E2B_WORKSPACE}/native-command-output.txt`, Buffer.from("preserved command output"));
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      const timeoutsBeforeRenewal = sandbox.timeoutCalls.length;
+      vi.setSystemTime(Date.now() + 50 * 60_000);
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sandbox.timeoutCalls.length).toBeGreaterThan(timeoutsBeforeRenewal);
+      expect(sandbox.pauseCalls).toBe(0);
+      // Parallel bot filesystem work must not pause a native command either.
+      const output = await runtime.readWorkspaceFile({ userId, threadId, virtualPath: "/native-command-output.txt", maxBytes: 100 });
+      expect(output.bytes.toString()).toBe("preserved command output");
+      expect(sandbox.pauseCalls).toBe(0);
+      // Native process/start already replied, but the command may still be
+      // running. Mid-turn artifact restoration explicitly forbids rotation.
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], allowRotation: false, onExecutorReady: async () => undefined });
+      expect(sandbox.pauseCalls).toBe(0);
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+      lease.release();
+      lease = undefined;
+      await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+      expect(sandbox.pauseCalls).toBe(1);
+      expect(client.createCalls).toBe(1);
+      expect(client.killCalls).toBe(0);
+      expect(client.onlySandbox().files.get(`${E2B_WORKSPACE}/native-command-output.txt`)?.toString()).toBe("preserved command output");
+      expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+      // A later OpenRouter turn owns the serialized command queue and may
+      // rotate normally even though this sandbox already has a native executor.
+      vi.setSystemTime(Date.now() + 50 * 60_000);
+      lease = runtime.acquireActivityLease(userId, threadId);
+      await runtime.execute(commandRequest(userId, threadId));
+      expect(sandbox.pauseCalls).toBe(2);
+    } finally {
+      lease?.release();
+      await runtime.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("requests a native refresh only when the partial attachment restore retry is due", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const bytes = Buffer.from("repair!");
+    const stored = await repos.files.insertFile({ userId, threadId, type: "txt", name: "retry.txt", mimeType: "text/plain", size: bytes.length, isInline: true });
+    const [ref] = await repos.files.rememberTelegramFileRefs(stored.id, { direction: "inbound", mediaKind: "document", refs: [{ fileId: "tg-retry", size: bytes.length, primary: true }] });
+    const request = { userId, threadId, files: [descriptor(stored.id, stored.name, "tg-retry", ref!.id, bytes.length)], onExecutorReady: async () => undefined };
+    expect(await runtime.prepareRemoteExecutor(request)).toMatchObject({ available: 0 });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    now += 5 * 60_000 - 1;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    now += 1;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(true);
+    client.telegramFiles.set("tg-retry", bytes);
+    expect(await runtime.prepareRemoteExecutor(request)).toMatchObject({ available: 1 });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(client.createCalls).toBe(1);
   });
 
   it("throttles ordinary pruning, forces export checks, and renews each prepared operation once", async () => {
@@ -247,58 +464,25 @@ describe("thread E2B runtime manager", () => {
     expect(sandbox.writeFileCalls.some(call=>call.user === "user" && call.path.includes("/.write-"))).toBe(false);
   });
 
-  it("upgrades Office once without replacing the sandbox or touching user files", async () => {
-    await runtime.execute(commandRequest(userId,threadId));
-    const sandbox=client.onlySandbox();
-    sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`,Buffer.from("keep"));
-    await runtime.execute(commandRequest(userId,threadId));
-    expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
-    expect(sandbox.writeFileCalls.some(call => call.path.startsWith(OFFICE_BUNDLE_PATH + "/"))).toBe(false);
-    expect(sandbox.files.get("/opt/office/installed-revision")?.toString()).toBe((await officeBundle()).revision);
-    await runtime.dispose();
-    runtime = createRuntime();
-    await runtime.execute(commandRequest(userId, threadId));
-    expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
-    expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("keep");
-    expect(client.createCalls).toBe(1);
-    expect(client.killCalls).toBe(0);
-  });
-
-  it("leaves the active bundle untouched on a failed upload and retries in a fresh directory", async () => {
+  it.each(["old", "missing"])("leaves %s Office and PDF tools untouched while unrelated operations still work", async revision => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
+    const officePath = `${OFFICE_BUNDLE_PATH}/install.sh`;
+    sandbox.files.set(officePath, Buffer.from("old installer"));
+    sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`, Buffer.from("unfinished work"));
+    if (revision === "old") sandbox.files.set("/opt/office/installed-revision", Buffer.from("old revision"));
+    else sandbox.files.delete("/opt/office/installed-revision");
     await runtime.dispose();
     runtime = createRuntime();
-    sandbox.files.set("/opt/office/installed-revision", Buffer.from("previous revision"));
-    sandbox.files.set(`${OFFICE_BUNDLE_PATH}/obsolete.txt`, Buffer.from("old asset"));
-    const before = Buffer.from(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/install.sh`)!);
-    const original = sandbox.writeFile.bind(sandbox);
-    let failedPath = "";
-    const writer = vi.spyOn(sandbox, "writeFile").mockImplementation(async (...args) => {
-      if (args[0].includes(".staging-")) {
-        failedPath = args[0];
-        throw new Error("upload interrupted");
-      }
-      return original(...args);
-    });
-    await expect(runtime.execute(commandRequest(userId, threadId))).rejects.toThrow("upload interrupted");
-    expect(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/install.sh`)).toEqual(before);
-    expect(sandbox.files.get(`${OFFICE_BUNDLE_PATH}/obsolete.txt`)?.toString()).toBe("old asset");
-    expect(sandbox.controlCommands.some(command => command.startsWith("'rm' '-rf' '--'") && failedPath.startsWith(command.split("'")[7]!))).toBe(true);
-    writer.mockRestore();
     await runtime.execute(commandRequest(userId, threadId));
-    expect(sandbox.files.has(`${OFFICE_BUNDLE_PATH}/obsolete.txt`)).toBe(false);
-    expect(sandbox.writeFileCalls.filter(call => call.path.includes(".staging-")).every(call => call.path !== failedPath)).toBe(true);
-  });
-
-  it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
-    await runtime.execute(commandRequest(userId, threadId));
-    await runtime.execute(commandRequest(userId, threadId));
-
-    const toolboxChecks = client.onlySandbox().controlCommands.filter((command) =>
-      command.includes("@firecrawl/pdf-inspector@1.25.2")
-      && command.includes("command -v pdftoppm"));
-    expect(toolboxChecks).toHaveLength(1);
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+    expect(sandbox.files.get("/opt/office/installed-revision")?.toString()).toBe(revision === "old" ? "old revision" : undefined);
+    expect(sandbox.files.get(officePath)?.toString()).toBe("old installer");
+    expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("unfinished work");
+    expect(sandbox.controlCommands.some(command => /apt-get|npm install|pip install|installed-revision|pdf-inspector|\/install\.sh/.test(command))).toBe(false);
+    expect(sandbox.writeFileCalls.some(call => call.path.startsWith(OFFICE_BUNDLE_PATH))).toBe(false);
+    expect(client.createCalls).toBe(1);
+    expect(client.killCalls).toBe(0);
   });
 
   it("reconnects a mapped sandbox after the configured template version changes", async () => {
@@ -719,6 +903,7 @@ describe("thread E2B runtime manager", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
     const lease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
     const published = await runtime.publishWebsite({
       userId,
       threadId,
@@ -726,6 +911,7 @@ describe("thread E2B runtime manager", () => {
       siteDirectory: "/site",
       path: "/demo",
     });
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
     lease.release();
 
     await vi.waitFor(() => {
@@ -738,6 +924,12 @@ describe("thread E2B runtime manager", () => {
     });
 
     now += 5 * 60_000;
+    const controlCommands = client.onlySandbox().controlCommands.length;
+    const timeoutCalls = client.onlySandbox().timeoutCalls.length;
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(runtime.needsRemoteExecutorRefresh(userId, threadId)).toBe(false);
+    expect(client.onlySandbox().controlCommands).toHaveLength(controlCommands);
+    expect(client.onlySandbox().timeoutCalls).toHaveLength(timeoutCalls);
     const sourcePath = `${E2B_FILE_SOURCES}/published-source`;
     client.onlySandbox().files.set(sourcePath, Buffer.from("source"));
     await expect(runtime.readSourceFile({
@@ -1695,6 +1887,7 @@ class FakeSandbox implements E2BSandbox {
   pauseCalls = 0;
   backgroundCalls = 0;
   inventoryCalls = 0;
+  pinnedExecutor = true;
   failSeal = false;
   failIndexWrite = false;
   failWebsiteScope = false;
@@ -1713,7 +1906,7 @@ class FakeSandbox implements E2BSandbox {
     readonly id: string,
     readonly metadata: Record<string, string>,
     readonly telegramFiles: Map<string, Buffer>,
-  ) {}
+  ) { this.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper); }
 
   info() {
     return {
@@ -1728,19 +1921,7 @@ class FakeSandbox implements E2BSandbox {
 
   async run(command: string) {
     this.controlCommands.push(command);
-    if (command.startsWith("cat /opt/office/installed-revision"))
-      return { stdout: this.files.get("/opt/office/installed-revision")?.toString() ?? "", stderr: "", exitCode: 0 };
-    const officeInstall = command.match(/^'bash' '([^']+\.staging-[^']+)\/install.sh' '([a-f0-9]{64})'$/);
-    if (officeInstall) {
-      const staged = [...this.files].filter(([name]) => name.startsWith(officeInstall[1]! + "/"));
-      for (const name of this.files.keys()) if (name.startsWith(OFFICE_BUNDLE_PATH + "/")) this.files.delete(name);
-      for (const [name, bytes] of staged) {
-        this.files.set(OFFICE_BUNDLE_PATH + name.slice(officeInstall[1]!.length), bytes);
-        this.files.delete(name);
-      }
-      this.files.set("/opt/office/installed-revision", Buffer.from(officeInstall[2]!));
-      return { stdout: "", stderr: "", exitCode: 0 };
-    }
+    if (command.includes("# codex_executor_metadata")) return { stdout: JSON.stringify({ status: this.pinnedExecutor ? this.files.get("/usr/local/bin/ai-tg-codex-executor")?.equals(nativeWrapper) ? "ready" : "pinned" : "missing", nativeBinaryDirectory: this.pinnedExecutor ? "/usr/local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin" : null }), stderr: "", exitCode: 0 };
     if (this.failSeal && command.includes("find '/home/user/telegram-files' -type f -exec chmod 444")) {
       throw new Error("seal failed");
     }
@@ -1752,6 +1933,14 @@ class FakeSandbox implements E2BSandbox {
     if (command.startsWith("'python3' '-c' ") && command.includes("server_site=os.path.realpath")) {
       if (this.failWebsiteScope) throw new Error("listener is outside the declared site directory");
       return { stdout: `${E2B_WORKSPACE}/site\n`, stderr: "", exitCode: 0 };
+    }
+    if (command.startsWith("'python3' '-c' ") && command.includes("native_artifact_atomic_publish")) {
+      const payload = command.match(/ '(\[.*\])'$/su)?.[1];
+      for (const move of JSON.parse(payload ?? "[]") as Array<{ source: string; destination: string }>) {
+        const bytes = this.files.get(move.source);
+        if (bytes) { this.files.set(move.destination, bytes); this.files.delete(move.source); }
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
     }
     if (command.startsWith("'python3' '-c' ")) {
       const candidate = command.match(/ '([^']+)'$/)?.[1];

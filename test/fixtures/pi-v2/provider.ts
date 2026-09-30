@@ -11,8 +11,8 @@ import {
 import { streamSimple as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { streamSimple as streamOpenRouter } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { AppConfig } from "../config.js";
-import type { Logger } from "../logger.js";
+import type { AppConfig } from "../../../src/config.js";
+import type { Logger } from "../../../src/logger.js";
 import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import { withModelIdentity } from "./modelIdentity.js";
 

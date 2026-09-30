@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && -r "$1" ]] || { printf 'Usage: ai-tg-codex-executor TOKEN_FILE\n' >&2; exit 64; }
+export HOME=/home/user
+export AGENT_WORKSPACE=/home/user/workspace
+export TELEGRAM_FILES_DIR=/home/user/telegram-files
+cd "$AGENT_WORKSPACE"
+exec codex exec-server --listen ws://0.0.0.0:8765 --ws-auth capability-token --ws-token-file "$1"

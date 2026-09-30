@@ -5,7 +5,7 @@ description: Create, read, and edit ordinary Excel XLSX workbooks with openpyxl,
 
 # Excel workbooks
 
-openpyxl 3.1.5 is preinstalled. Run scripts with `office-python`. Do not install packages. Restore attachments with materialize_chat_files and copy them into the workspace before editing. Keep the original.
+openpyxl 3.1.5 is preinstalled. Run scripts with `office-python`. Do not install packages. Attachments are restored automatically before workspace access; find their exact paths in `/home/user/telegram-files/INDEX.json` and copy them into the workspace before editing. Keep the original.
 
 Use `Workbook()` for new files and `load_workbook(path, data_only=False)` for edits. Inspect sheets, formulas, styles, merged cells, and print settings first. `data_only=True` reads cached results and must not be used for an edit/save workflow that needs to preserve formulas. openpyxl does not calculate formulas.
 

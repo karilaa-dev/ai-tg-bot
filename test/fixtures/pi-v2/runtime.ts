@@ -5,23 +5,23 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRegistry, ModelRuntime, readStoredCredential, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import type { AppConfig } from "../config.js";
-import type { AppDatabase } from "../db/index.js";
-import type { Repos } from "../db/repos/index.js";
-import type { ThreadRow, UserRow } from "../db/types.js";
-import { renderSystemPrompt } from "../ai/prompt.js";
-import type { Logger } from "../logger.js";
+import type { AppConfig } from "../../../src/config.js";
+import type { AppDatabase } from "../../../src/db/index.js";
+import type { Repos } from "../../../src/db/repos/index.js";
+import type { ThreadRow, UserRow } from "../../../src/db/types.js";
+import { renderSystemPrompt } from "../../../src/ai/prompt.js";
+import type { Logger } from "../../../src/logger.js";
 import { createGenerateImagePiTool } from "./imageExtension.js";
 import { registerPiProviderRouter, type PiProviderRouter, type PiProviderStreamOverrides } from "./provider.js";
 import { createPiToolAdapters, createFinishResponseGuard } from "./toolAdapter.js";
-import type { CommandRuntime } from "../sandbox/types.js";
+import type { CommandRuntime } from "../../../src/sandbox/types.js";
 import {
   buildThreadTitlePrompt,
   THREAD_TITLE_SYSTEM_PROMPT,
   type ThreadTitlePromptInput,
 } from "./threadTitle.js";
-import { isBrowserUseConfigured } from "../config.js";
-import { BrowserUseRuntimeManager } from "../browserUse/runtime.js";
+import { isBrowserUseConfigured } from "../../../src/config.js";
+import { BrowserUseRuntimeManager } from "../../../src/browserUse/runtime.js";
 import {
   APPROVED_PI_SKILLS,
   approvedSkillPaths,

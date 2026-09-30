@@ -8,7 +8,7 @@ import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
 import { audioFixture } from "../helpers/audio.js";
 import { workspaceRuntime } from "../helpers/workspaceRuntime.js";
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
 import type { TranscriptPage } from "../../src/audio/transcripts.js";
 
 describe("transcribe_audio", () => {

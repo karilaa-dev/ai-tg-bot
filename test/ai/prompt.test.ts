@@ -1,5 +1,5 @@
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { withModelIdentity } from "../../src/pi/modelIdentity.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
+import { withModelIdentity } from "../fixtures/pi-v2/modelIdentity.js";
 import { getCurrentSystemPrompt, normalizeContext } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
@@ -59,7 +59,7 @@ function browserConfig(defaultMinutes = 5) {
 }
 
 describe("renderSystemPrompt", () => {
-  it.each([false, true])("keeps core behavior below 4500 characters with browsing=%s and reduces the initial footprint", async (browser) => {
+  it.each([false, true])("keeps core behavior below 5000 characters with browsing=%s and bounds the initial footprint", async (browser) => {
     const config = loadTestConfig({ BROWSER_USE_API_KEY: browser ? "test" : undefined });
     const core = await renderSystemPrompt({ user: baseUser, config });
     const context = withModelIdentity(normalizeContext({ systemPrompt: core, messages: [] }), { id: "gpt-6.1-sol", name: "gpt-6.1-sol" });
@@ -78,13 +78,39 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain(thread.title);
     expect(prompt).not.toContain("{{");
     expect(prompt).not.toContain("provider:");
-    expect(prompt.length).toBeLessThanOrEqual(4500);
+    expect(prompt.length).toBeLessThanOrEqual(5000);
     const tools = createPiToolAdapters({ buildInput: () => ({ config, user: baseUser, thread, browserRuntime: browser ? {} : undefined }) as never });
     expect(tools.some((tool) => tool.name === "transcribe_audio")).toBe(true);
     // Transcription was added after this baseline; compare the same set of tools.
     const schemas = JSON.stringify(tools.filter((tool) => tool.name !== "transcribe_audio").map(({ name, description, parameters }) => ({ name, description, parameters })));
-    // Measured 2.0.4 core plus these same adapter schemas; unchanged skills/read/image tools cancel out.
-    expect(prompt.length + schemas.length).toBeLessThan(browser ? 25676 : 16441);
+    // Keep prompt and tool declarations bounded as behavior policies change.
+    expect(prompt.length + schemas.length).toBeLessThan(browser ? 26000 : 17000);
+  });
+
+  it("advertises native Codex tools and automatic attachment restoration", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness: "codex" });
+    for (const name of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "native web_search", "restored automatically", "INDEX.json"]) expect(prompt).toContain(name);
+    for (const removed of ["codemode", "materialize_chat_files", "web_extract", "generate_image", "inspect_workspace_images", "bash.inspect_images"]) expect(prompt).not.toContain(removed);
+    expect(prompt).toContain("filtering ALL_TOOLS with an exact name or narrow task term");
+    expect(prompt).toContain("at most five matching names");
+    expect(prompt).toContain("Never print the catalog");
+    expect(prompt).toContain("Use read_skill for bot workflows");
+    expect(prompt).toContain("host skill paths are unavailable in the remote workspace");
+  });
+
+  it.each(["codex", "openrouter"] as const)("asks users to recreate old chats instead of upgrading tools with %s", async harness => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness });
+    expect(prompt).toContain("Never install, update, or repair sandbox tools");
+    expect(prompt).toContain("missing or outdated tools block the task");
+    expect(prompt).toContain("tools in this thread are outdated");
+    expect(prompt).toContain("Ask them to recreate the chat");
+    expect(prompt).toContain("never recreate its sandbox yourself");
+  });
+
+  it("uses the actual fallback tool names without requiring native Codex tools", async () => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness: "openrouter" });
+    for (const name of ["web_search", "web_extract", "bash", "generate_image", "inspect_workspace_images", "restored automatically"]) expect(prompt).toContain(name);
+    for (const absent of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "codemode", "materialize_chat_files", "ALL_TOOLS"]) expect(prompt).not.toContain(absent);
   });
 
   it("renders current time and the stored timezone as structured context", () => {

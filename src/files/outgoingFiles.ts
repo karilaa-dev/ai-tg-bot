@@ -26,6 +26,8 @@ type Input = {
   officeValidation?: OfficeValidation;
   logger?: Logger;
   selectContextFiles?(ids: number[]): void;
+  isNativeArtifact?(path: string): boolean;
+  readNativeArtifact?(path: string, signal?: AbortSignal): Promise<{ bytes: Buffer; name: string; mime: string }>;
 };
 
 /** Owns the attachment queue and every export reservation for one turn. */
@@ -44,11 +46,15 @@ export class OutgoingFiles {
 
   async workspace(files: Array<FileOptions & { path: string }>, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    const paths = files.map((file) => normalizeCreatedFilePath(file.path));
+    const paths = files.map((file) => this.input.isNativeArtifact?.(file.path) ? file.path : normalizeCreatedFilePath(file.path));
     if (new Set(paths).size !== paths.length) throw new Error("File paths must be unique.");
     this.assertCapacity(paths.filter((key) => !this.slots.has(key)).length);
     for (const key of paths) if (!this.slots.has(key)) this.slots.set(key, undefined);
     const results = await prepareWithTwoWorkers(files, (file, index) => this.prepare(async () => {
+      if (this.input.isNativeArtifact?.(file.path) && this.input.readNativeArtifact) {
+        const artifact = await this.input.readNativeArtifact(file.path, signal);
+        return { file: { ...artifact, ...file, bytes: artifact.bytes, name: file.name ?? artifact.name, origin: "generated_image" as const, summary: "Generated image" } };
+      }
       if (!this.input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
       const exported = await this.input.commandRuntime.readWorkspaceFile({
         userId: this.input.user.tg_id, threadId: this.input.thread.id,
@@ -99,7 +105,7 @@ export class OutgoingFiles {
 
   async retainDrafts(paths: string[]): Promise<void> {
     for (const source of paths) {
-      const key = normalizeCreatedFilePath(source);
+      const key = this.input.isNativeArtifact?.(source) ? source : normalizeCreatedFilePath(source);
       this.slots.delete(key);
       const index = this.items.findIndex(file => file.sourceVirtualPath === key);
       if (index >= 0) await this.remove(this.items.splice(index, 1)[0]!);

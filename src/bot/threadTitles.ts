@@ -2,8 +2,8 @@ import { GrammyError, type Api } from "grammy";
 import type { Repos } from "../db/repos/index.js";
 import type { ThreadRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
-import { sanitizeThreadTitle } from "../pi/threadTitle.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
+import { sanitizeThreadTitle } from "../ai/threadTitle.js";
 
 const MAX_TITLE_ATTEMPTS = 3;
 const MAX_REMEMBERED_TOPIC_TITLES = 1_000;
@@ -22,7 +22,7 @@ export class ThreadTitleCoordinator {
 
   constructor(private readonly input: {
     repos: Repos;
-    pi: PiRuntimeService;
+    pi: AgentRuntimeService;
     logger: Logger;
   }) {}
 

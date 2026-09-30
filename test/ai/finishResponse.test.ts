@@ -1,3 +1,4 @@
+import type { AgentRuntimeService } from "../../src/ai/runtime.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,8 +9,8 @@ import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
-import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
-import { PiRuntimeManager } from "../../src/pi/runtime.js";
+import { createPiToolAdapters } from "../fixtures/pi-v2/toolAdapter.js";
+import { PiRuntimeManager } from "../fixtures/pi-v2/runtime.js";
 import { runTurn } from "../../src/ai/agentTurnEngine.js";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
@@ -224,7 +225,7 @@ describe("finish_response", () => {
     const send = vi.fn(async () => ({ message_id: 7 }));
     await runTurn({ ...input, user: { ...input.user, stream_mode: 0 }, logger: input.logger!,
       api: { raw: { sendRichMessage: send, editMessageText: async () => true }, sendChatAction: async () => true } as never,
-      chatId: input.user.tg_id, text: "Complete this", pi: { runtime: async () => runtime }, t: (key) => key,
+      chatId: input.user.tg_id, text: "Complete this", pi: { runtime: async () => runtime as unknown as Awaited<ReturnType<AgentRuntimeService["runtime"]>> }, t: (key) => key,
     });
     const messages = await input.repos.messages.listForThreadChain([input.thread]);
     const assistant = messages.find((message) => message.role === "assistant")!;
@@ -253,7 +254,7 @@ describe("finish_response", () => {
         sendPhoto: async () => { sent.push("photo"); return { message_id: 9, photo: [{ file_id: "photo" }] }; },
         sendChatAction: async () => true,
       } as never,
-      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime }, t: (key) => key,
+      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime as unknown as Awaited<ReturnType<AgentRuntimeService["runtime"]>> }, t: (key) => key,
     });
 
     expect(calls()).toBe(4);
@@ -284,7 +285,7 @@ describe("finish_response", () => {
     });
     await runTurn({ ...input, user: { ...input.user, stream_mode: 0 }, logger: input.logger!,
       api: { sendDocument, raw: { sendRichMessage: async () => ({ message_id: 8 }), editMessageText: async () => true }, sendChatAction: async () => true } as never,
-      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime }, t: (key) => key,
+      chatId: input.user.tg_id, text: "Send the model", pi: { runtime: async () => runtime as unknown as Awaited<ReturnType<AgentRuntimeService["runtime"]>> }, t: (key) => key,
     });
 
     expect(sendDocument).toHaveBeenCalledOnce();

@@ -1,5 +1,5 @@
+import { prepareNativeExecutor, stageNativeArtifacts, type PrepareRemoteExecutorRequest, type RemoteExecutorEndpoint } from "./remoteExecutor.js";
 import { SandboxConsentRequired } from "../files/source.js";
-import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
 import { publishWebsite, websiteTarget } from "./websitePublisher.js";
@@ -37,6 +37,7 @@ type SandboxScope = { userId: number; threadId: number };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
+  nativeLeases: number;
   websiteSandboxId?: string;
   websiteIdleUntil?: number;
   websitePublishedPending?: boolean;
@@ -44,9 +45,10 @@ type RuntimeState = {
   connection?: E2BSandbox;
   sandboxId?: string;
   continuousStartedAt?: number;
-  toolboxValidatedSandboxId?: string;
   sourcePruning?: { sandboxId: string; at: number };
   renewTimer?: NodeJS.Timeout;
+  nativeExecutor?: RemoteExecutorEndpoint;
+  nativeArtifactHashes?: Map<string, string>;
 };
 
 type FileSourceInventoryEntry = {
@@ -111,11 +113,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
+  acquireActivityLease(userId: number, threadId: number, options?: { native?: boolean }): SandboxActivityLease {
     if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
     const scope = { userId, threadId };
     const state = this.stateFor(scope);
     state.leases += 1;
+    if (options?.native) state.nativeLeases += 1;
     this.scheduleRenewal(scope, state);
     let released = false;
     return {
@@ -123,6 +126,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         if (released) return;
         released = true;
         state.leases = Math.max(0, state.leases - 1);
+        if (options?.native) state.nativeLeases = Math.max(0, state.nativeLeases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
         void this.enqueue(scope, undefined, async () => {
@@ -154,6 +158,41 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       const timeoutMs = Math.min(request.timeoutMs, MAX_FOREGROUND_COMMAND_MS);
       const prepared = await this.prepareSandbox(state, scope, request.threadFiles ?? [], timeoutMs, request.signal);
       return executeSandboxCommand(prepared.sandbox, request, timeoutMs, prepared.threadFiles, this.input.config.E2B_REQUEST_TIMEOUT_MS, this.input.logger);
+    });
+  }
+
+  needsRemoteExecutorRefresh(userId: number, threadId: number): boolean {
+    const state = this.states.get(scopeKey({ userId, threadId }));
+    if (!state?.nativeExecutor || state.continuousStartedAt === undefined) return false;
+    if (state.threadFilesSync?.retryAt !== undefined && Date.now() >= state.threadFilesSync.retryAt) return true;
+    // Match the cached-file preparation window, including a published site's
+    // remaining idle allowance. The next actual operation rotates if needed;
+    // this in-memory probe leaves paused and unstarted sandboxes untouched.
+    const preparationWindowMs = Math.max(2 * ROTATION_GUARD_MS, this.idleTimeout(state, state.sandboxId, false).timeoutMs);
+    return Date.now() - state.continuousStartedAt + preparationWindowMs + ROTATION_GUARD_MS >= CONTINUOUS_ROTATE_MS;
+  }
+
+  prepareRemoteExecutor(request: PrepareRemoteExecutorRequest): Promise<SandboxThreadFileSyncResult> {
+    const scope = { userId: request.userId, threadId: request.threadId };
+    const requestedAt = performance.now();
+    return this.enqueue(scope, request.signal, async (state) => {
+      const timings = { queueMs: Math.round(performance.now() - requestedAt) } as Record<string, number>;
+      try {
+        const prepared = await this.prepareSandbox(state, scope, request.files, ROTATION_GUARD_MS, request.signal, false,
+          async (sandbox) => {
+            state.nativeArtifactHashes ??= new Map();
+            await measurePreparation(timings, "artifactsMs", () => stageNativeArtifacts(sandbox, request, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeArtifactHashes));
+          }, request.allowRotation !== false,
+          async (sandbox) => {
+            state.nativeExecutor = await measurePreparation(timings, "executorStartMs", () => prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal));
+            await measurePreparation(timings, "executorConnectMs", () => request.onExecutorReady(state.nativeExecutor!));
+          }, timings);
+        this.input.logger?.info("Codex remote executor prepared", { ...scope, sandboxId: prepared.sandbox.id, totalMs: Math.round(performance.now() - requestedAt), timings });
+        return prepared.threadFiles;
+      } catch (error) {
+        this.input.logger?.warn("Codex remote executor preparation failed", { ...scope, sandboxId: state.sandboxId, totalMs: Math.round(performance.now() - requestedAt), timings, errorName: error instanceof Error ? error.name : "unknown" });
+        throw error;
+      }
     });
   }
 
@@ -339,6 +378,10 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     requestedDurationMs: number,
     signal?: AbortSignal,
     forcePrune = false,
+    onSandboxReady?: (sandbox: E2BSandbox) => Promise<void>,
+    nativeRotationBoundary?: boolean,
+    onSandboxAcquired?: (sandbox: E2BSandbox) => Promise<void>,
+    preparationTimings?: Record<string, number>,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
     const previousSync = state.threadFilesSync;
@@ -368,23 +411,28 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       operationWindowMs,
       this.idleTimeout(state, state.sandboxId, false).timeoutMs,
     );
-    let sandbox = await this.acquireConnection(state, scope, connectionWindowMs, signal);
+    let sandbox = await measurePreparation(preparationTimings, "acquireMs", () => this.acquireConnection(state, scope, connectionWindowMs, signal));
     let effectiveWindowMs = Math.max(
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
-    sandbox = await this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal);
+    sandbox = await measurePreparation(preparationTimings, "rotationMs", () => this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal, nativeRotationBoundary));
     effectiveWindowMs = Math.max(
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
-    await sandbox.setTimeout(effectiveWindowMs, signal);
-    await this.ensureSandboxToolbox(state, scope, sandbox, signal);
-    await this.ensureLayout(sandbox, signal);
-    const threadFiles = await syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal);
+    await measurePreparation(preparationTimings, "renewMs", () => sandbox.setTimeout(effectiveWindowMs, signal));
+    const layoutReady = measurePreparation(preparationTimings, "layoutMs", () => this.ensureLayout(sandbox, signal));
+    const outcomes = await Promise.allSettled([
+      layoutReady.then(() => measurePreparation(preparationTimings, "restorationMs", () => syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal))),
+      layoutReady.then(() => onSandboxReady?.(sandbox)),
+      onSandboxAcquired?.(sandbox),
+    ]);
+    for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+    const threadFiles = (outcomes[0] as PromiseFulfilledResult<SandboxThreadFileSyncResult>).value;
     if (forcePrune || state.sourcePruning?.sandboxId !== sandbox.id || Date.now() - state.sourcePruning.at >= 60_000) {
       state.sourcePruning = { sandboxId: sandbox.id, at: Date.now() };
-      await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
+      await measurePreparation(preparationTimings, "pruneMs", () => this.pruneFileSources(scope, sandbox, signal)).catch((error) => {
         this.input.logger?.warn("failed to prune E2B file sources", {
           ...scope,
           sandboxId: sandbox.id,
@@ -669,7 +717,13 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     sandbox: E2BSandbox,
     requestedDurationMs: number,
     signal?: AbortSignal,
+    nativeRotationBoundary?: boolean,
   ): Promise<E2BSandbox> {
+    // Native commands travel directly over the persistent WebSocket instead of
+    // holding this control queue. A timer or concurrent bot filesystem tool
+    // must not pause their sandbox. The lazy adapter gates explicit preparation
+    // before releasing the next native operation at a turn boundary.
+    if (nativeRotationBoundary === false || state.nativeLeases > 0 && nativeRotationBoundary !== true) return sandbox;
     const startedAt = state.continuousStartedAt ?? Date.now();
     if (Date.now() - startedAt + requestedDurationMs + ROTATION_GUARD_MS < CONTINUOUS_ROTATE_MS) {
       return sandbox;
@@ -703,74 +757,6 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       `chmod 555 ${quoteShellToken(E2B_TELEGRAM_FILES)}`,
     ].join(" && ");
     await runControl(sandbox, command, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-  }
-
-  private async ensureSandboxToolbox(
-    state: RuntimeState,
-    scope: SandboxScope,
-    sandbox: E2BSandbox,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    if (state.toolboxValidatedSandboxId === sandbox.id) return;
-    const script = [
-      "set -euo pipefail",
-      "ready() {",
-      "  command -v pdf-inspector >/dev/null",
-      "  [ \"$(pdf-inspector --version)\" = '1.25.2' ]",
-      "  command -v pdfinfo >/dev/null",
-      "  command -v pdftoppm >/dev/null",
-      "  command -v magick >/dev/null",
-
-      "}",
-      "if ready; then printf 'ready'; exit 0; fi",
-      "(",
-      "  flock -x 9",
-      "  if ready; then printf 'ready'; exit 0; fi",
-      "  export DEBIAN_FRONTEND=noninteractive",
-      "  apt-get update -qq",
-      "  apt-get install -y --no-install-recommends poppler-utils",
-      "  npm install -g --omit=dev --no-audit --no-fund '@firecrawl/pdf-inspector@1.25.2'",
-      "  ready",
-      "  printf 'upgraded'",
-      ") 9>/tmp/ai-tg-bot-toolbox-upgrade.lock",
-    ].join("\n");
-    const result = await runCommandResult(
-      sandbox,
-      shellJoin(["bash", "-c", script]),
-      this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
-      signal,
-      "root",
-    );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr.trim() || "Existing E2B sandbox toolbox upgrade failed.");
-    }
-    const bundle = await officeBundle();
-    const installed = await runCommandResult(sandbox, "cat /opt/office/installed-revision 2>/dev/null || true", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-    if (installed.stdout.trim() !== bundle.revision) {
-      this.input.logger?.info("upgrading Office tools in existing sandbox", {...scope, sandboxId:sandbox.id});
-      await sandbox.setTimeout(10 * 60_000, signal);
-      const staging = `${OFFICE_BUNDLE_PATH}.staging-${bundle.revision}-${randomUUID()}`;
-      const uploads = bundle.files.map(file => ({ ...file, path: `${staging}/${path.posix.relative(OFFICE_BUNDLE_PATH, file.path)}` }));
-      try {
-        const directories = [...new Set(uploads.map(file => path.posix.dirname(file.path)))];
-        await runControl(sandbox, shellJoin(["mkdir", "-p", "--", ...directories]), this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-        for (const file of uploads) await sandbox.writeFile(file.path, file.bytes, "root", signal, this.input.config.E2B_REQUEST_TIMEOUT_MS);
-      } catch (error) {
-        await runControl(sandbox, shellJoin(["rm", "-rf", "--", staging]), this.input.config.E2B_REQUEST_TIMEOUT_MS).catch(() => undefined);
-        throw error;
-      }
-      // The installer verifies this immutable upload, promotes it and installs it
-      // under its remote lock. Never overwrite the active bundle during upload.
-      const upgrade = await runCommandResult(sandbox, shellJoin(["bash", `${staging}/install.sh`, bundle.revision]), 8 * 60_000, signal);
-      if (upgrade.exitCode !== 0) throw new Error(upgrade.stderr || "Office toolbox upgrade failed. Workspace files were preserved.");
-      const verified = await runCommandResult(sandbox, "cat /opt/office/installed-revision", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-      if (verified.exitCode !== 0 || verified.stdout.trim() !== bundle.revision) throw new Error("Office installed revision differs from the requested bundle.");
-    }
-    state.toolboxValidatedSandboxId = sandbox.id;
-    this.input.logger?.info(
-      result.stdout.includes("upgraded") ? "upgraded existing E2B sandbox toolbox" : "validated E2B sandbox toolbox",
-      { ...scope, sandboxId: sandbox.id },
-    );
   }
 
   private async readCanonicalFile(
@@ -862,7 +848,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     continuousStartedAt?: number,
   ): void {
     if (state.sandboxId !== sandbox.id) {
-      state.toolboxValidatedSandboxId = undefined;
+      state.nativeExecutor = undefined;
+      state.nativeArtifactHashes = undefined;
       state.websiteSandboxId = undefined;
       state.websiteIdleUntil = undefined;
       state.websitePublishedPending = false;
@@ -930,12 +917,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           E2B_IDLE_PAUSE_MS,
           this.idleTimeout(state, state.connection.id, false).timeoutMs,
         );
-        let sandbox = await this.rotateIfNeeded(
-          state,
-          scope,
-          state.connection,
-          requestedRenewalMs,
-        );
+        let sandbox = state.connection;
+        if (state.nativeLeases === 0) sandbox = await this.rotateIfNeeded(state, scope, sandbox, requestedRenewalMs);
         const renewalWindowMs = Math.max(
           E2B_IDLE_PAUSE_MS,
           this.idleTimeout(state, sandbox.id, false).timeoutMs,
@@ -962,7 +945,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const key = scopeKey(scope);
     let state = this.states.get(key);
     if (!state) {
-      state = { tail: Promise.resolve(), leases: 0 };
+      state = { tail: Promise.resolve(), leases: 0, nativeLeases: 0 };
       this.states.set(key, state);
     }
     return state;
@@ -996,6 +979,16 @@ function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string,
 
 function scopeKey(scope: SandboxScope): string {
   return `${scope.userId}:${scope.threadId}`;
+}
+
+async function measurePreparation<T>(timings: Record<string, number> | undefined, stage: string, operation: () => Promise<T>): Promise<T> {
+  if (!timings) return operation();
+  const startedAt = performance.now();
+  try {
+    return await operation();
+  } finally {
+    timings[stage] = Math.round(performance.now() - startedAt);
+  }
 }
 
 async function inspectFileSourceInventory(

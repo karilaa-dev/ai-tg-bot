@@ -18,7 +18,8 @@ import { Localizer } from "./i18n.js";
 import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
-import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
+import { CodexRuntimeManager } from "../codex/runtime.js";
+import type { AgentRuntimeService } from "../ai/runtime.js";
 import {
   clearInlineKeyboard,
   editOrReply,
@@ -54,7 +55,7 @@ interface InstallOptions {
   downloadFile?: TelegramFileDownloader;
   fileResolver?: FileResolver;
   commandRuntime?: CommandRuntime;
-  pi?: PiRuntimeService;
+  pi?: AgentRuntimeService;
   awaitTurnProcessingOnAccept?: boolean;
 }
 
@@ -71,11 +72,11 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     hasCustomRepos: Boolean(options.repos),
     hasCustomLocalizer: Boolean(options.localizer),
     hasCustomTurnRunner: Boolean(options.turnRunner),
-    hasPiRuntime: Boolean(options.pi),
+    hasAgentRuntime: Boolean(options.pi),
   });
   const repos = options.repos ?? createRepos(options.db.db, options.db.search);
   const localizer = options.localizer ?? new Localizer();
-  const pi = options.pi ?? new PiRuntimeManager({
+  const pi = options.pi ?? new CodexRuntimeManager({
     config: options.config,
     db: options.db,
     repos,
@@ -238,14 +239,21 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     const thread = ctx.thread;
     if (!thread) return;
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
-    const count = await ctx.services.turnCoordinator.withThreadBarrier(
-      thread.id,
-      "compact",
-      async (_snapshotMessageId, signal) => runCompaction(ctx, thread, signal),
-    );
+    let completion: string;
+    try {
+      await ctx.services.turnCoordinator.withThreadBarrier(
+        thread.id,
+        "compact",
+        async (_snapshotMessageId, signal) => runCompaction(ctx, thread, signal),
+      );
+      completion = ctx.t("compacted");
+    } catch (error) {
+      options.logger.warn("Conversation compaction failed", { threadId: thread.id, error: String(error) });
+      completion = ctx.t("compaction-failed");
+    }
     await ctx.api
-      .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
-      .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
+      .editMessageText(ctx.chat!.id, status.message_id, completion)
+      .catch(() => replyWithThreadFallback(ctx, completion, threadExtra(ctx.thread)));
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");

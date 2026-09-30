@@ -1,4 +1,4 @@
-import type { InferenceUsageCall } from "../pi/usage.js";
+import type { InferenceUsageCall } from "../ai/usage.js";
 
 export const PRICING_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 export const MAX_PRICING_BYTES = 16 * 1024 * 1024;

@@ -25,6 +25,7 @@ interface DraftStreamerOptions {
   updateMs: number;
   t: RenderT;
   answerOnly?: boolean;
+  onDelivered?: () => void;
 }
 
 export class DraftStreamer {
@@ -196,6 +197,7 @@ export class DraftStreamer {
   private async send(payload: InputRichMessage): Promise<DraftSendResult> {
     try {
       await this.sendDraft(payload);
+      this.options.onDelivered?.();
       return "sent";
     } catch (err) {
       const waitMs = retryAfterMs(err);
@@ -204,6 +206,7 @@ export class DraftStreamer {
         this.threadUnavailable = true;
         try {
           await this.sendDraft(payload);
+          this.options.onDelivered?.();
           return "sent";
         } catch (retryErr) {
           const retryWaitMs = retryAfterMs(retryErr);
@@ -217,6 +220,7 @@ export class DraftStreamer {
       if (retry) {
         try {
           await this.sendDraft(retry);
+          this.options.onDelivered?.();
           return "sent";
         } catch (retryErr) {
           const retryWaitMs = retryAfterMs(retryErr);

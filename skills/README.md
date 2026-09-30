@@ -1,4 +1,4 @@
-# Approved Pi skills
+# Approved bot skills
 
 The bot advertises reviewed, checksum-verified local skills:
 
@@ -11,7 +11,7 @@ The bot advertises reviewed, checksum-verified local skills:
 
 The docx-cli skill is adapted from `kklimuk/docx-cli` release 0.25.0, commit `e528738ed22d1294be7938d7614525b4a585fa56`. Installation and updating are owned by the sandbox bundle. The other Office skills and PptxGenJS examples are maintained here; no MiniMax workflow is imported. The original Word skill license is included beside it, and binary notices are bundled in `e2b-template/assets/office/licenses`.
 
-`src/pi/officeSkills.ts` stores approved skill hashes and validates them at startup. The read tool only opens files under approved skill directories. The Office tools and locked dependencies live in `e2b-template/assets/office`; no skill installs packages during a user task.
+`src/codex/skills.ts` stores approved skill hashes and validates them at startup. `read_skill` opens only approved skills. The legacy Pi loader keeps matching pins for compatibility checks. The Office tools and locked dependencies live in `e2b-template/assets/office`; no skill installs packages during a user task.
 
 Office skills share enforced actual-file validation and explicit visual review through `validate_office_file` and `render_office_preview`. Changes invalidate review by content hash. Files with incomplete or failed checks stay in the workspace.
 

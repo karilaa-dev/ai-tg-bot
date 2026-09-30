@@ -10,22 +10,22 @@ export const OFFICE_SKILLS = [
   {
     "name": "docx-cli",
     "relativePath": "skills/docx-cli/SKILL.md",
-    "sha256": "c30e53dfcf5dba8dfa28102aac79290b6adc41cbdca3f23a1c2769aa91cb9acf"
+    "sha256": "e3b6458217b9c2e12d19074499f5276d172c9fec771501535ae535efd4776246"
   },
   {
     "name": "pptxgenjs",
     "relativePath": "skills/pptxgenjs/SKILL.md",
-    "sha256": "ee9bfdd5d1d1d7aa55e5b5cd2af40584ac0c6941fb1cea12b2eda89570e922c4"
+    "sha256": "59e90ed85ed1c9a7205b916761b4a3bda3ce8b62ecfa39a97d4ff3ae0bc90437"
   },
   {
     "name": "pptx-edit",
     "relativePath": "skills/pptx-edit/SKILL.md",
-    "sha256": "ede764eb9a1f1d2fddb7e52736f29f165535ba3fa5d90b86f76a1094d0cd349d"
+    "sha256": "071507abb38a94108d645f6038e4674b01d6e5573b9f306e4778dba87bce5818"
   },
   {
     "name": "xlsx",
     "relativePath": "skills/xlsx/SKILL.md",
-    "sha256": "c33eafaaf9d21ba5ebbd6d577f2859377c7fd764dbdf5ec45170a8ec90a41c23"
+    "sha256": "9dd8d8c1e008f60007be380509bf30f420f132671f86194c84fc759f7388952d"
   }
 ] as const;
 
@@ -33,7 +33,7 @@ const SANDBOX_FILE_SKILLS = [
   {
     name: "sandbox-files",
     relativePath: "skills/sandbox-files/SKILL.md",
-    sha256: "4540a0535723e4c9cd4c95b145f6ffe984609d56294feea5581acb2864e3f15c",
+    sha256: "065ed085355efc8bbc9cc9d870dee53956bed7dde1438ddaab624e4449f0a04c",
   },
 ] as const;
 
@@ -41,7 +41,7 @@ export const OPENSCAD_SKILLS = [
   {
     name: "openscad",
     relativePath: "skills/openscad/SKILL.md",
-    sha256: "f2248d26a38700b01272a669160174c5c2e7539e7ab76b5c8975e75de9a874ea",
+    sha256: "513896c7ac6bb87f46405ed9e920b524c08a9bfc60c7fa700478f2b2cc5ce874",
   },
 ] as const;
 
