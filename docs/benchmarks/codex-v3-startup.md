@@ -66,6 +66,8 @@ Plain questions and local image operations created no sandbox, including while a
 
 Native command durations in that OpenSCAD rollout were about 9.515 s for preview rendering and 7.140 s for final rendering, with other commands adding about 0.084 s. The approximately 16.74 s command total sits inside the 107.6 s turn. The two immediate failures were a missing host `unslop` skill path with exit code 1 and unsupported `openscad-build --help` usage with exit code 2, rather than executor transport failures. Nine model round trips likely account for much of the remaining time, but the recorded response intervals include tools and cannot establish pure inference time.
 
+The later sandbox policy change removes automatic Office, PDF, and executor upgrades entirely. Existing tools stay in place; blocked tasks ask the user to recreate the chat. Preparation no longer includes the global Office/PDF preflight. The timings above describe the preceding measured implementation.
+
 ## Reproduction
 
 Run the real-protocol checks without credentials or external inference:

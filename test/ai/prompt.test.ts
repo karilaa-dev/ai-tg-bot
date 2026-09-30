@@ -59,7 +59,7 @@ function browserConfig(defaultMinutes = 5) {
 }
 
 describe("renderSystemPrompt", () => {
-  it.each([false, true])("keeps core behavior below 4800 characters with browsing=%s and reduces the initial footprint", async (browser) => {
+  it.each([false, true])("keeps core behavior below 5000 characters with browsing=%s and bounds the initial footprint", async (browser) => {
     const config = loadTestConfig({ BROWSER_USE_API_KEY: browser ? "test" : undefined });
     const core = await renderSystemPrompt({ user: baseUser, config });
     const context = withModelIdentity(normalizeContext({ systemPrompt: core, messages: [] }), { id: "gpt-6.1-sol", name: "gpt-6.1-sol" });
@@ -78,13 +78,13 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain(thread.title);
     expect(prompt).not.toContain("{{");
     expect(prompt).not.toContain("provider:");
-    expect(prompt.length).toBeLessThanOrEqual(4800);
+    expect(prompt.length).toBeLessThanOrEqual(5000);
     const tools = createPiToolAdapters({ buildInput: () => ({ config, user: baseUser, thread, browserRuntime: browser ? {} : undefined }) as never });
     expect(tools.some((tool) => tool.name === "transcribe_audio")).toBe(true);
     // Transcription was added after this baseline; compare the same set of tools.
     const schemas = JSON.stringify(tools.filter((tool) => tool.name !== "transcribe_audio").map(({ name, description, parameters }) => ({ name, description, parameters })));
-    // Measured 2.0.4 core plus these same adapter schemas; unchanged skills/read/image tools cancel out.
-    expect(prompt.length + schemas.length).toBeLessThan(browser ? 25676 : 16441);
+    // Keep prompt and tool declarations bounded as behavior policies change.
+    expect(prompt.length + schemas.length).toBeLessThan(browser ? 26000 : 17000);
   });
 
   it("advertises native Codex tools and automatic attachment restoration", async () => {
@@ -96,6 +96,15 @@ describe("renderSystemPrompt", () => {
     expect(prompt).toContain("Never print the catalog");
     expect(prompt).toContain("Use read_skill for bot workflows");
     expect(prompt).toContain("host skill paths are unavailable in the remote workspace");
+  });
+
+  it.each(["codex", "openrouter"] as const)("asks users to recreate old chats instead of upgrading tools with %s", async harness => {
+    const prompt = await renderSystemPrompt({ user: baseUser, harness });
+    expect(prompt).toContain("Never install, update, or repair sandbox tools");
+    expect(prompt).toContain("missing or outdated tools block the task");
+    expect(prompt).toContain("tools in this thread are outdated");
+    expect(prompt).toContain("Ask them to recreate the chat");
+    expect(prompt).toContain("never recreate its sandbox yourself");
   });
 
   it("uses the actual fallback tool names without requiring native Codex tools", async () => {

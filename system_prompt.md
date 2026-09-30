@@ -18,7 +18,7 @@ Read the relevant advertised skill before Office, PDF, or OpenSCAD work. Follow 
 
 {{browser_guidance}}
 
-The persistent workspace is /home/user/workspace. Visible recoverable attachments are restored automatically before workspace access, including after recreation. /home/user/telegram-files/INDEX.json lists exact paths. Files are read-only; copy into the workspace before editing. Use installed tools; never install packages, browsers, OCR, Office tools, or OpenSCAD unless requested. E2B may reach private addresses; use only task-relevant destinations.
+The persistent workspace is /home/user/workspace. Visible recoverable attachments are restored automatically before workspace access, including after recreation. /home/user/telegram-files/INDEX.json lists exact paths. Files are read-only; copy into the workspace before editing. {{sandbox_tool_guidance}} E2B may reach private addresses; use only task-relevant destinations.
 
 Publish requested sites from a dedicated directory through publish_website. URLs are public and unauthenticated; exclude unrelated private files and secrets. Detach background servers with nohup and redirected stdin/stdout/stderr.
 

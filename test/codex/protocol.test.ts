@@ -12,7 +12,8 @@ import { CodexRuntimeManager } from "../../src/codex/runtime.js";
 import { ThreadBridge } from "../../src/codex/threadBridge.js";
 import { dynamicToolSpecs, nativeToolSpecs } from "../../src/codex/tools.js";
 import { readSkill, skillInstructions } from "../../src/codex/skills.js";
-import { NATIVE_WORKSPACE_GUIDANCE } from "../../src/ai/prompt.js";
+import { NATIVE_WORKSPACE_GUIDANCE, NATIVE_TOOL_DISCOVERY_GUIDANCE } from "../../src/ai/prompt.js";
+import { SANDBOX_TOOL_GUIDANCE, SandboxToolsOutdatedError, OUTDATED_SANDBOX_TOOLS_MESSAGE } from "../../src/sandbox/toolPolicy.js";
 import { asRecord } from "../../src/util/records.js";
 import { workspaceRuntime, TEST_PNG } from "../helpers/workspaceRuntime.js";
 
@@ -71,6 +72,24 @@ enabled = false
 }
 
 describe("bundled native Codex protocol", () => {
+  it("returns an old sandbox failure to the model with recreation guidance without upgrading or replacing it", async () => {
+    const input = await setup((_body, step) => step === 1 ? {
+      type: "function_call", call_id: "old-sandbox-command", name: "exec_command",
+      arguments: JSON.stringify({ cmd: "python --version", workdir: "/home/user/workspace", login: false }),
+    } : { type: "message", id: "recreate-answer", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: OUTDATED_SANDBOX_TOOLS_MESSAGE }] });
+    input.commandRuntime.prepareRemoteExecutor.mockRejectedValue(new SandboxToolsOutdatedError());
+    const manager = new CodexRuntimeManager({ ...input, auth: async () => ({ home: input.config.CODEX_HOME, configured: true }) });
+    cleanup.push(() => manager.dispose());
+    const active = await input.repos.messages.insert({ threadId: input.thread.id, role: "user", content: {}, textPlain: "Use Python" });
+    const runtime = await manager.runtime(input.thread, input.user);
+    await runtime.bridge.beginTurn({ api: {} as Api, chatId: input.user.tg_id, userMessageId: active.id, resolveFile: async () => { throw new Error("No fixture files"); } });
+    await runtime.session.prompt("Use Python");
+    expect(input.commandRuntime.prepareRemoteExecutor).toHaveBeenCalledOnce();
+    expect(JSON.stringify(input.requests[1]!.input)).toContain(OUTDATED_SANDBOX_TOOLS_MESSAGE);
+    expect(JSON.stringify(input.requests[0]!.input)).toContain(SANDBOX_TOOL_GUIDANCE);
+    expect(input.commandRuntime.execute).not.toHaveBeenCalled();
+  }, 15_000);
+
   it("keeps native caption and title helpers without host command or filesystem tools", async () => {
     const input = await setup((_body, step) => step % 2 === 1 ? {
       type: "custom_tool_call", call_id: `inspect-${step}`, namespace: "functions", name: "exec",
@@ -231,7 +250,7 @@ describe("native skill catalog isolation", () => {
       if (method === "thread/start") {
         const values = asRecord(params) ?? {};
         params = { ...values,
-          developerInstructions: String(values.developerInstructions ?? "").replace(NATIVE_WORKSPACE_GUIDANCE, ""),
+          developerInstructions: String(values.developerInstructions ?? "").replace(NATIVE_TOOL_DISCOVERY_GUIDANCE, "").replace(SANDBOX_TOOL_GUIDANCE, ""),
           config: { ...asRecord(values.config), "skills.include_instructions": true } };
       }
       if (method === "turn/start") {
@@ -271,6 +290,7 @@ describe("native skill catalog isolation", () => {
     expect(resumed).toContain("A local protocol answer.");
     expect(resumed).toContain("Use read_skill for bot workflows");
     expect(resumed).toContain("host skill paths are unavailable in the remote workspace");
+    expect(resumed).toContain(SANDBOX_TOOL_GUIDANCE);
     await run(restarted);
     const next = JSON.stringify(input.requests[2]);
     expect(next.match(/resume-host-only\/SKILL\.md/g)).toHaveLength(1);

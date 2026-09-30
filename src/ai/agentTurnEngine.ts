@@ -21,6 +21,7 @@ import {
 import { budgetReasonText } from "../ai/turnBudget.js";
 import { currentTurnAssistantResult } from "./currentTurnResult.js";
 import { resolveTurnAnswer } from "./turnOutput.js";
+import { OUTDATED_SANDBOX_TOOLS_MESSAGE, outdatedSandboxToolsReply } from "../sandbox/toolPolicy.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 
@@ -304,7 +305,10 @@ export const runTurn: TurnRunner = async (input) => {
     }
     const reference = input.turnRunId ? `#${input.turnRunId}` : "unavailable";
     const label = input.user.lang === "ru" ? "Код обращения" : "Turn reference";
-    await sendFinal(input, "", `${input.t("error-generic")}\n\n${label}: ${reference}`);
+    const failureReply = String(err).includes(OUTDATED_SANDBOX_TOOLS_MESSAGE)
+      ? outdatedSandboxToolsReply(input.user.lang)
+      : `${input.t("error-generic")}\n\n${label}: ${reference}`;
+    await sendFinal(input, "", failureReply);
   } finally {
     try {
       await activeBridge?.endTurn();

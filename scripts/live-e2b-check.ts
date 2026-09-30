@@ -6,8 +6,6 @@ import { createDatabase } from "../src/db/index.js";
 import { createRepos, type Repos } from "../src/db/repos/index.js";
 import { ThreadE2BSandboxRuntimeManager } from "../src/e2b/threadRuntimeManager.js";
 import { OfficeValidation } from "../src/office/validation.js";
-import { officeBundle, OFFICE_BUNDLE_PATH } from "../src/e2b/officeBundle.js";
-import { shellJoin } from "../src/util/shell.js";
 import { createRenderOfficePreviewTool } from "../src/ai/tools/renderOfficePreview.js";
 import { createLogger } from "../src/logger.js";
 import type { SandboxThreadFile } from "../src/sandbox/types.js";
@@ -27,6 +25,19 @@ let repos: Repos | undefined;
 let sandboxId: string | undefined;
 
 try {
+  await check();
+} finally {
+  await runtime?.dispose();
+  if (sandboxId) {
+    await Sandbox.kill(sandboxId, {
+      apiKey: config.E2B_API_KEY,
+      requestTimeoutMs: config.E2B_REQUEST_TIMEOUT_MS,
+    }).catch(() => undefined);
+  }
+  await db.destroy();
+}
+
+async function check() {
   await db.initialize();
   repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({
@@ -39,40 +50,45 @@ try {
     topicId: null,
     title: "E2B smoke",
   });
-  const upgradeFrom = process.env.E2B_UPGRADE_FROM?.trim();
-  const upgradeMarker = `preserved-before-office-upgrade-${randomUUID()}`;
-  const upgradeSource = `/home/user/.ai-tg-bot/file-sources/${sha256Hex(Buffer.from(upgradeMarker))}`;
-  if (upgradeFrom) {
-    const previous = await Sandbox.create(upgradeFrom, {
+  const resumeFrom = process.env.E2B_RESUME_FROM?.trim() || process.env.E2B_UPGRADE_FROM?.trim();
+  const toolStateProbe = 'for tool in officecli docx-cli pdf-inspector codex; do command -v "$tool" || true; done; cat /opt/office/installed-revision 2>/dev/null || true';
+  let previousToolState = "";
+  const legacyOfficeAsset = "/usr/local/share/ai-tg-bot/office/legacy-smoke.txt";
+  const resumeMarker = `preserved-before-resume-${randomUUID()}`;
+  const resumeSource = `/home/user/.ai-tg-bot/file-sources/${sha256Hex(Buffer.from(resumeMarker))}`;
+  if (resumeFrom) {
+    const previous = await Sandbox.create(resumeFrom, {
       apiKey: config.E2B_API_KEY,
       timeoutMs: 10 * 60_000,
       secure: true,
       metadata: {
         app: "ai-tg-bot",
         deployment: config.E2B_DEPLOYMENT_ID,
-        template_ref: upgradeFrom,
+        template_ref: resumeFrom,
         telegram_user_id: String(user.tg_id),
         thread_id: String(thread.id),
       },
     });
     sandboxId = previous.sandboxId;
     await previous.files.write(
-      "/home/user/workspace/before-office-upgrade.txt",
-      upgradeMarker,
+      "/home/user/workspace/before-resume.txt",
+      resumeMarker,
       { user: "user" },
     );
     await previous.commands.run("mkdir -p /home/user/.ai-tg-bot/file-sources", {
       user: "root",
     });
-    await previous.files.write(upgradeSource, upgradeMarker, { user: "root" });
-    await previous.commands.run(`mkdir -p ${OFFICE_BUNDLE_PATH}`, {
+    await previous.files.write(resumeSource, resumeMarker, { user: "root" });
+    await previous.commands.run('mkdir -p /usr/local/share/ai-tg-bot/office', {
       user: "root",
     });
     await previous.files.write(
-      `${OFFICE_BUNDLE_PATH}/removed-in-next-release.txt`,
+      legacyOfficeAsset,
       "obsolete asset",
       { user: "root" },
     );
+    previousToolState = (await previous.commands.run(toolStateProbe, { user: "root" })).stdout;
+    await previous.pause({ keepMemory: true });
     await repos.threadSandboxes.insertIfAbsent({
       deploymentId: config.E2B_DEPLOYMENT_ID,
       userId: user.tg_id,
@@ -136,8 +152,8 @@ try {
     commandRequest(
       user.tg_id,
       thread.id,
-      upgradeFrom
-        ? "/usr/local/bin/office-contract"
+      resumeFrom
+        ? "printf existing-sandbox-resumed"
         : "/usr/local/bin/tool-contract.sh",
       [],
       threadFiles,
@@ -160,76 +176,33 @@ try {
     throw new Error(
       "sandbox mapping was not persisted after the toolbox contract",
     );
-  if (upgradeFrom) {
+  if (resumeFrom) {
     if (sandboxId !== initialMapping.sandbox_id)
-      throw new Error("Office upgrade replaced the existing sandbox");
+      throw new Error("Resuming replaced the existing sandbox");
     const kept = await runtime.readWorkspaceFile({
       userId: user.tg_id,
       threadId: thread.id,
-      virtualPath: "/before-office-upgrade.txt",
+      virtualPath: "/before-resume.txt",
       maxBytes: 1000,
     });
     const source = await runtime.readSourceFile({
       userId: user.tg_id,
       threadId: thread.id,
       sandboxId: sandboxId!,
-      canonicalPath: upgradeSource,
+      canonicalPath: resumeSource,
       maxBytes: 1000,
     });
     if (
-      kept.bytes.toString() !== upgradeMarker ||
-      source.toString() !== upgradeMarker
+      kept.bytes.toString() !== resumeMarker ||
+      source.toString() !== resumeMarker
     )
-      throw new Error("Office upgrade lost workspace or saved source bytes");
-    const removed = await runtime.execute(
-      commandRequest(user.tg_id, thread.id, "! command -v officecli"),
-    );
-    if (removed.exitCode !== 0)
-      throw new Error("OfficeCLI remained installed after replacement checks");
-    const bundle = await officeBundle();
-    const upgraded = await Sandbox.connect(sandboxId!, {
-      apiKey: config.E2B_API_KEY,
-    });
-    await upgraded.commands.run(
-      shellJoin([
-        "bash",
-        "-c",
-        [
-          "set -euo pipefail",
-          `test ! -e ${OFFICE_BUNDLE_PATH}/removed-in-next-release.txt`,
-          `test "$(cat /opt/office/installed-revision)" = ${bundle.revision}`,
-          "task_gate=$(mktemp -d)",
-          `stage_one=${OFFICE_BUNDLE_PATH}.lock-test-one`,
-          `stage_two=${OFFICE_BUNDLE_PATH}.lock-test-two`,
-          "holder= installer_one= installer_two=",
-          'trap \'touch "$task_gate/release"; wait ${holder:-} ${installer_one:-} ${installer_two:-} 2>/dev/null || true; rm -rf -- "$task_gate" "$stage_one" "$stage_two"\' EXIT',
-          `cp -a ${OFFICE_BUNDLE_PATH} "$stage_one"`,
-          `cp -a ${OFFICE_BUNDLE_PATH} "$stage_two"`,
-          `touch ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
-          'flock -x /var/lock/ai-tg-bot-office-install.lock bash -c \'touch "$1/held"; while [[ ! -e $1/release ]]; do sleep 0.05; done\' -- "$task_gate" &',
-          "holder=$!",
-          "for attempt in {1..100}; do [[ -e $task_gate/held ]] && break; sleep 0.05; done",
-          'test -e "$task_gate/held"',
-          `bash "$stage_one/install.sh" ${bundle.revision} >"$task_gate/one.log" 2>&1 &`,
-          "installer_one=$!",
-          `bash "$stage_two/install.sh" ${bundle.revision} >"$task_gate/two.log" 2>&1 &`,
-          "installer_two=$!",
-          "sleep 0.5",
-          'kill -0 "$installer_one" "$installer_two"',
-          `test -e ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
-          'test -d "$stage_one" && test -d "$stage_two"',
-          'touch "$task_gate/release"',
-          'wait "$holder"',
-          'wait "$installer_one" || { cat "$task_gate/one.log"; exit 1; }',
-          'wait "$installer_two" || { cat "$task_gate/two.log"; exit 1; }',
-          `test ! -e ${OFFICE_BUNDLE_PATH}/locked-sentinel`,
-          'test ! -e "$stage_one" && test ! -e "$stage_two"',
-          `test "$(cat /opt/office/installed-revision)" = ${bundle.revision}`,
-          "printf 'Concurrent Office promotions respected the remote lock\\n'",
-        ].join("\n"),
-      ]),
-      { user: "root", timeoutMs: 30_000 },
-    );
+      throw new Error("Resuming lost workspace or saved source bytes");
+    const existing = await Sandbox.connect(sandboxId!, { apiKey: config.E2B_API_KEY });
+    const currentToolState = (await existing.commands.run(toolStateProbe, { user: "root" })).stdout;
+    if (currentToolState !== previousToolState) throw new Error("Resuming changed the installed tools");
+    if (await existing.files.read(legacyOfficeAsset, { user: "root" }) !== "obsolete asset") throw new Error("Resuming removed an old Office asset");
+    process.stdout.write(`${JSON.stringify({ ok: true, sandboxId, resumedFrom: resumeFrom, toolsUnchanged: true, workspacePersisted: true, sourceBytesPersisted: true })}\n`);
+    return;
   }
   sandboxId = initialMapping.sandbox_id;
 
@@ -445,7 +418,7 @@ try {
     );
   }
   if (
-    sandboxInfo.metadata.template_ref !== (upgradeFrom ?? config.E2B_TEMPLATE)
+    sandboxInfo.metadata.template_ref !== (resumeFrom ?? config.E2B_TEMPLATE)
   ) {
     throw new Error(
       "sandbox metadata does not identify the configured custom template",
@@ -608,7 +581,6 @@ try {
         toolContractPassed: true,
         officeContractOutput: contract.stdout,
         officeBackendsChecked: true,
-        upgradedFrom: upgradeFrom ?? null,
         officePreviewRendered: Boolean(officePreview),
         officePreviewBytes: officePreview.images.reduce(
           (sum, image) => sum + image.size,
@@ -627,15 +599,6 @@ try {
       2,
     )}\n`,
   );
-} finally {
-  await runtime?.dispose();
-  if (sandboxId) {
-    await Sandbox.kill(sandboxId, {
-      apiKey: config.E2B_API_KEY,
-      requestTimeoutMs: config.E2B_REQUEST_TIMEOUT_MS,
-    }).catch(() => undefined);
-  }
-  await db.destroy();
 }
 
 function commandRequest(

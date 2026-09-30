@@ -4,13 +4,15 @@ import { formatUtcOffset } from "../bot/timezone.js";
 import type { Repos } from "../db/repos/index.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import { isBrowserUseConfigured, type AppConfig } from "../config.js";
+import { SANDBOX_TOOL_GUIDANCE } from "../sandbox/toolPolicy.js";
 
 export const MAX_SYSTEM_PROMPT_FILES = 25;
 export const MAX_PROMPT_USER_NAME_CHARS = 120;
 export const MAX_PROMPT_THREAD_TITLE_CHARS = 160;
 export const MAX_PROMPT_FILE_NAME_CHARS = 180;
 export const MAX_PROMPT_FILE_SUMMARY_CHARS = 160;
-export const NATIVE_WORKSPACE_GUIDANCE = "Discover tools by filtering ALL_TOOLS with an exact name or narrow task term; print at most five matching names, then inspect only their descriptions. Never print the catalog. Use read_skill for bot workflows; host skill paths are unavailable in the remote workspace.";
+export const NATIVE_TOOL_DISCOVERY_GUIDANCE = "Discover tools by filtering ALL_TOOLS with an exact name or narrow task term; print at most five matching names, then inspect only their descriptions. Never print the catalog. Use read_skill for bot workflows; host skill paths are unavailable in the remote workspace.";
+export const NATIVE_WORKSPACE_GUIDANCE = `${NATIVE_TOOL_DISCOVERY_GUIDANCE} ${SANDBOX_TOOL_GUIDANCE}`;
 
 const PLACEHOLDER_RE = /\{\{([a-z_]+)\}\}/gu;
 let templatePromise: Promise<string> | undefined;
@@ -58,13 +60,14 @@ export async function renderSystemPrompt(input: {
       ? "Use native web_search for discovery and opening sources; use exec_command for relevant raw URLs or APIs."
       : "Use web_search for discovery, web_extract for readable pages, and bash for relevant raw URLs or APIs.",
     execution_guidance: native
-      ? `Use exec_command for shell work, apply_patch for text edits, and view_image for image inspection. ${NATIVE_WORKSPACE_GUIDANCE}`
+      ? `Use exec_command for shell work, apply_patch for text edits, and view_image for image inspection. ${NATIVE_TOOL_DISCOVERY_GUIDANCE}`
       : "Use bash for shell work and inspect_workspace_images or bash.inspect_images for image inspection.",
     image_generation_tool: native ? "image_gen.imagegen" : "generate_image",
     image_inspection_guidance: native ? "Inspect final rasters with view_image." : "Inspect final rasters with inspect_workspace_images or bash.inspect_images.",
     language: input.user.lang === "ru" ? "Russian" : "English",
     browser_guidance: browserGuidance(input.config),
     office_preview_guidance: officePreviewGuidance(),
+    sandbox_tool_guidance: SANDBOX_TOOL_GUIDANCE,
   };
   return renderPromptTemplate(await loadTemplate(), values);
 }

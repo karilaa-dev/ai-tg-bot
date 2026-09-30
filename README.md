@@ -27,7 +27,7 @@ Accepted messages receive a 👀 reaction until their response finishes, fails, 
 
 ## Agent harness
 
-The core prompt, including optional browser guidance, stays below 4,500 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Codex owns model identity and its native base instructions.
+The core prompt, including optional browser guidance, stays below 5,000 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Codex owns model identity and its native base instructions.
 
 Codex uses native `exec_command`, `apply_patch`, and `view_image`. Fallback `bash.inspect_images` can combine command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends the turn after acknowledging its result to the harness. It must be the only tool in its response. Partial failures retain successful attachments for repair. The OpenSCAD workflow reads the skill, builds and inspects the preview, builds and inspects final outputs, then finishes with the STL and final photo.
 
@@ -81,7 +81,7 @@ Preserve the existing database, `PI_CODING_AGENT_DIR`, `E2B_DEPLOYMENT_ID`, and 
 
 The first native resume imports the selected old Pi branch, preserving its compaction summary and active context, then records that native thread ID in the database. Later turns resume the native rollout; missing rollouts can be rebuilt from durable conversation history. Fork boundaries, accepted message visibility, attachment IDs, saved transcripts, historical usage, and workspace mappings remain in the existing database. Old Pi transcripts stay unchanged. The Pi libraries remain for reading legacy transcripts and compatibility checks; Pi is not the production inference loop.
 
-Old paused E2B sandboxes resume in place. Their first native operation installs the pinned executor if needed while preserving their workspace and file sources. Deleted sandboxes are replaced, and every recoverable Telegram attachment visible to the conversation is restored automatically before the first operation.
+Old paused E2B sandboxes resume in place with their existing tools. The bot never installs, updates, or repairs their toolbox. If missing or outdated tools block a task, it asks the user to recreate the chat; an old sandbox without a compatible native executor receives the same response. Deleted sandboxes are replaced, and every recoverable Telegram attachment visible to the conversation is restored automatically before the first operation.
 
 ## Database
 
@@ -142,7 +142,7 @@ BASH_TIMEOUT_MS=120000
 
 Use a different `E2B_DEPLOYMENT_ID` for each independently active bot deployment and database that share an E2B account. The value is part of sandbox ownership and recovery.
 
-Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Existing sandboxes receive the same pinned Office bundle through a locked, idempotent installer. It preserves their workspace and file sources and removes the previous Office tools only after replacement capability checks pass. Do not delete `thread_sandboxes` mappings during a version change.
+Keep `E2B_DEPLOYMENT_ID` unchanged during rolling upgrades. Existing thread sandboxes keep their original image and workspace. Only newly created sandboxes use the new application version tag. Existing sandboxes keep their installed tools. A tool mismatch never triggers an automatic update or sandbox replacement. If old tools prevent completion, the bot asks the user to recreate the chat. Do not delete `thread_sandboxes` mappings during a version change.
 
 `E2B_REQUEST_TIMEOUT_MS` covers short control requests. `TELEGRAM_FILE_RESTORE_TIMEOUT_MS` covers Telegram restoration and large E2B file transfers. `E2B_FILE_SOURCE_MAX_BYTES` caps immutable snapshots for files that do not yet have a Telegram recovery source. `BASH_TIMEOUT_MS` allows exact OpenSCAD renders and other sandbox commands to run for up to two minutes. The bot removes or evicts old snapshots without touching the workspace copy.
 
@@ -259,7 +259,7 @@ bun run live:e2b-check
 bun run live:browser-use-check
 ```
 
-Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to exercise actual Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation. Scripts named `live:pi-*` and `benchmark-harness.ts` retain legacy Pi behavior for compatibility comparisons; they do not exercise the v3 production inference loop.
+Set `LIVE_TELEGRAM_FILE_ID` or `LIVE_TELEGRAM_FILE_IDS` for the E2B check to exercise actual Telegram restoration, read-only permissions, the toolbox contract, and ZIP creation. Set `E2B_RESUME_FROM` to an older image tag for an isolated check that resume preserves its tools, workspace, and saved sources. Scripts named `live:pi-*` and `benchmark-harness.ts` retain legacy Pi behavior for compatibility comparisons; they do not exercise the v3 production inference loop.
 
 ## Conversation website
 

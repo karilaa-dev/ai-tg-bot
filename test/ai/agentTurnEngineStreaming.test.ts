@@ -4,8 +4,32 @@ import { runTurn } from "../../src/ai/agentTurnEngine.js";
 import { type TurnInput } from "../../src/ai/types.js";
 import { loadTestConfig } from "../../src/config.js";
 import { deferred } from "../helpers/async.js";
+import { OUTDATED_SANDBOX_TOOLS_MESSAGE, outdatedSandboxToolsReply } from "../../src/sandbox/toolPolicy.js";
 
 describe("turn streaming", () => {
+  it.each(["en", "ru"] as const)("delivers the recreation request when an old executor aborts a turn in %s", async lang => {
+    const sent: string[] = [];
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    await runTurn({
+      api: { raw: {
+        sendRichMessageDraft: async () => true,
+        sendRichMessage: async (payload: { rich_message: { markdown: string } }) => {
+          sent.push(payload.rich_message.markdown);
+          return { message_id: sent.length };
+        },
+      } },
+      chatId: 123, config: loadTestConfig(), logger,
+      repos: { messages: {
+        insert: async () => ({ id: 99 }), setDeliveryContent: async () => undefined, setThinking: async () => undefined,
+      }, files: { listForMessage: async () => [] } },
+      user: { tg_id: 1, stream_mode: true, lang }, thread: { id: 2, title: "Old thread" },
+      text: "Create a file", t: (key: string) => key,
+      pi: { runtime: async () => { throw new Error(`Remote executor unavailable: ${OUTDATED_SANDBOX_TOOLS_MESSAGE}`); } },
+    } as unknown as TurnInput);
+    expect(sent).toEqual([outdatedSandboxToolsReply(lang)]);
+    expect(sent.join("\n")).not.toContain("error-generic");
+  });
+
   it("keeps working after provisional text and subsequent tool calls", async () => {
     const prompt = deferred<void>();
     let emit: ((event: AgentSessionEvent) => void) | undefined;

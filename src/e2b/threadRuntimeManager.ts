@@ -1,6 +1,5 @@
 import { prepareNativeExecutor, stageNativeArtifacts, type PrepareRemoteExecutorRequest, type RemoteExecutorEndpoint } from "./remoteExecutor.js";
 import { SandboxConsentRequired } from "../files/source.js";
-import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
 import { publishWebsite, websiteTarget } from "./websitePublisher.js";
@@ -46,7 +45,6 @@ type RuntimeState = {
   connection?: E2BSandbox;
   sandboxId?: string;
   continuousStartedAt?: number;
-  toolboxValidatedSandboxId?: string;
   sourcePruning?: { sandboxId: string; at: number };
   renewTimer?: NodeJS.Timeout;
   nativeExecutor?: RemoteExecutorEndpoint;
@@ -185,8 +183,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
             state.nativeArtifactHashes ??= new Map();
             await measurePreparation(timings, "artifactsMs", () => stageNativeArtifacts(sandbox, request, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeArtifactHashes));
           }, request.allowRotation !== false,
-          async (sandbox, toolboxReady) => {
-            state.nativeExecutor = await measurePreparation(timings, "executorStartMs", () => prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal, () => toolboxReady));
+          async (sandbox) => {
+            state.nativeExecutor = await measurePreparation(timings, "executorStartMs", () => prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal));
             await measurePreparation(timings, "executorConnectMs", () => request.onExecutorReady(state.nativeExecutor!));
           }, timings);
         this.input.logger?.info("Codex remote executor prepared", { ...scope, sandboxId: prepared.sandbox.id, totalMs: Math.round(performance.now() - requestedAt), timings });
@@ -382,7 +380,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     forcePrune = false,
     onSandboxReady?: (sandbox: E2BSandbox) => Promise<void>,
     nativeRotationBoundary?: boolean,
-    onSandboxAcquired?: (sandbox: E2BSandbox, toolboxReady: Promise<void>) => Promise<void>,
+    onSandboxAcquired?: (sandbox: E2BSandbox) => Promise<void>,
     preparationTimings?: Record<string, number>,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
@@ -424,13 +422,11 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
     await measurePreparation(preparationTimings, "renewMs", () => sandbox.setTimeout(effectiveWindowMs, signal));
-    const toolboxReady = measurePreparation(preparationTimings, "toolboxMs", () => this.ensureSandboxToolbox(state, scope, sandbox, signal));
     const layoutReady = measurePreparation(preparationTimings, "layoutMs", () => this.ensureLayout(sandbox, signal));
     const outcomes = await Promise.allSettled([
       layoutReady.then(() => measurePreparation(preparationTimings, "restorationMs", () => syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal))),
-      toolboxReady,
       layoutReady.then(() => onSandboxReady?.(sandbox)),
-      onSandboxAcquired?.(sandbox, toolboxReady),
+      onSandboxAcquired?.(sandbox),
     ]);
     for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
     const threadFiles = (outcomes[0] as PromiseFulfilledResult<SandboxThreadFileSyncResult>).value;
@@ -763,74 +759,6 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     await runControl(sandbox, command, this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
   }
 
-  private async ensureSandboxToolbox(
-    state: RuntimeState,
-    scope: SandboxScope,
-    sandbox: E2BSandbox,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    if (state.toolboxValidatedSandboxId === sandbox.id) return;
-    const script = [
-      "set -euo pipefail",
-      "ready() {",
-      "  command -v pdf-inspector >/dev/null",
-      "  [ \"$(pdf-inspector --version)\" = '1.25.2' ]",
-      "  command -v pdfinfo >/dev/null",
-      "  command -v pdftoppm >/dev/null",
-      "  command -v magick >/dev/null",
-
-      "}",
-      "if ready; then printf 'ready'; exit 0; fi",
-      "(",
-      "  flock -x 9",
-      "  if ready; then printf 'ready'; exit 0; fi",
-      "  export DEBIAN_FRONTEND=noninteractive",
-      "  apt-get update -qq",
-      "  apt-get install -y --no-install-recommends poppler-utils",
-      "  npm install -g --omit=dev --no-audit --no-fund '@firecrawl/pdf-inspector@1.25.2'",
-      "  ready",
-      "  printf 'upgraded'",
-      ") 9>/tmp/ai-tg-bot-toolbox-upgrade.lock",
-    ].join("\n");
-    const result = await runCommandResult(
-      sandbox,
-      shellJoin(["bash", "-c", script]),
-      this.input.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
-      signal,
-      "root",
-    );
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr.trim() || "Existing E2B sandbox toolbox upgrade failed.");
-    }
-    const bundle = await officeBundle();
-    const installed = await runCommandResult(sandbox, "cat /opt/office/installed-revision 2>/dev/null || true", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-    if (installed.stdout.trim() !== bundle.revision) {
-      this.input.logger?.info("upgrading Office tools in existing sandbox", {...scope, sandboxId:sandbox.id});
-      await sandbox.setTimeout(10 * 60_000, signal);
-      const staging = `${OFFICE_BUNDLE_PATH}.staging-${bundle.revision}-${randomUUID()}`;
-      const uploads = bundle.files.map(file => ({ ...file, path: `${staging}/${path.posix.relative(OFFICE_BUNDLE_PATH, file.path)}` }));
-      try {
-        const directories = [...new Set(uploads.map(file => path.posix.dirname(file.path)))];
-        await runControl(sandbox, shellJoin(["mkdir", "-p", "--", ...directories]), this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-        for (const file of uploads) await sandbox.writeFile(file.path, file.bytes, "root", signal, this.input.config.E2B_REQUEST_TIMEOUT_MS);
-      } catch (error) {
-        await runControl(sandbox, shellJoin(["rm", "-rf", "--", staging]), this.input.config.E2B_REQUEST_TIMEOUT_MS).catch(() => undefined);
-        throw error;
-      }
-      // The installer verifies this immutable upload, promotes it and installs it
-      // under its remote lock. Never overwrite the active bundle during upload.
-      const upgrade = await runCommandResult(sandbox, shellJoin(["bash", `${staging}/install.sh`, bundle.revision]), 8 * 60_000, signal);
-      if (upgrade.exitCode !== 0) throw new Error(upgrade.stderr || "Office toolbox upgrade failed. Workspace files were preserved.");
-      const verified = await runCommandResult(sandbox, "cat /opt/office/installed-revision", this.input.config.E2B_REQUEST_TIMEOUT_MS, signal);
-      if (verified.exitCode !== 0 || verified.stdout.trim() !== bundle.revision) throw new Error("Office installed revision differs from the requested bundle.");
-    }
-    state.toolboxValidatedSandboxId = sandbox.id;
-    this.input.logger?.info(
-      result.stdout.includes("upgraded") ? "upgraded existing E2B sandbox toolbox" : "validated E2B sandbox toolbox",
-      { ...scope, sandboxId: sandbox.id },
-    );
-  }
-
   private async readCanonicalFile(
     sandbox: E2BSandbox,
     candidate: string,
@@ -920,7 +848,6 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     continuousStartedAt?: number,
   ): void {
     if (state.sandboxId !== sandbox.id) {
-      state.toolboxValidatedSandboxId = undefined;
       state.nativeExecutor = undefined;
       state.nativeArtifactHashes = undefined;
       state.websiteSandboxId = undefined;

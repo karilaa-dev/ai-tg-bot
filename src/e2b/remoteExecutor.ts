@@ -8,6 +8,7 @@ import type { E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_WORKSPACE } from "./paths.js";
 import { sha256Hex } from "../files/hash.js";
 import { runCommandResult } from "./sandboxCommandExecutor.js";
+import { SandboxToolsOutdatedError } from "../sandbox/toolPolicy.js";
 
 export const CODEX_EXECUTOR_VERSION = "0.159.2";
 export const CODEX_EXECUTOR_PORT = 8765;
@@ -39,35 +40,18 @@ function executorWrapper(): Promise<string> {
   return wrapper ??= fs.readFile(fileURLToPath(new URL("../../e2b-template/assets/ai-tg-codex-executor", import.meta.url)), "utf8");
 }
 
-/** Upgrade an existing paused v2 image in place so its workspace is preserved. */
+/** Start only the executor already present in the sandbox image. */
 export async function prepareNativeExecutor(
   sandbox: E2BSandbox,
   requestTimeoutMs: number,
   previous?: RemoteExecutorEndpoint,
   signal?: AbortSignal,
-  beforeInstall?: () => Promise<void>,
 ): Promise<RemoteExecutorEndpoint> {
   let nativeBinaryDirectory = previous?.sandboxId === sandbox.id ? previous.nativeBinaryDirectory : undefined;
   if (!nativeBinaryDirectory) {
     const expectedWrapper = await executorWrapper();
-    let probe = await probeNativeExecutor(sandbox, sha256Hex(Buffer.from(expectedWrapper)), requestTimeoutMs, signal);
-    if (probe.status !== "ready") {
-      // Office upgrades also use the global package manager on old images.
-      // Fresh immutable images can initialize concurrently with validation;
-      // legacy installers must wait for that validation/upgrade to finish.
-      await beforeInstall?.();
-      if (probe.status !== "pinned") {
-        const installed = await runCommandResult(sandbox, shellJoin(["bash", "-c", `set -euo pipefail\nflock -x /tmp/ai-tg-codex-install.lock npm install -g --omit=dev --no-audit --no-fund @openai/codex@${CODEX_EXECUTOR_VERSION}`]), 180_000, signal);
-        if (installed.exitCode !== 0) throw new Error("Could not install the pinned Codex executor in the existing sandbox");
-      }
-      await sandbox.writeFile(EXECUTOR_WRAPPER, expectedWrapper, "root", signal);
-      const permissions = await runCommandResult(sandbox, shellJoin(["chmod", "755", EXECUTOR_WRAPPER]), requestTimeoutMs, signal);
-      if (permissions.exitCode !== 0) throw new Error("Could not prepare the Codex executor wrapper");
-      probe = await probeNativeExecutor(sandbox, sha256Hex(Buffer.from(expectedWrapper)), requestTimeoutMs, signal);
-      if (probe.status !== "ready") {
-        throw new Error("Could not verify the pinned Codex executor installation");
-      }
-    }
+    const probe = await probeNativeExecutor(sandbox, sha256Hex(Buffer.from(expectedWrapper)), requestTimeoutMs, signal);
+    if (probe.status !== "ready") throw new SandboxToolsOutdatedError();
     nativeBinaryDirectory = probe.nativeBinaryDirectory;
     if (!nativeBinaryDirectory) throw new Error("Could not locate the pinned native Codex executor");
   }
@@ -112,7 +96,7 @@ async function probeNativeExecutor(sandbox: E2BSandbox, wrapperHash: string, tim
   // paths without launching another complete Codex process just for --version.
   const script = `import hashlib,json,os,pathlib,platform,shutil,stat,sys
 # codex_executor_metadata
-def protected(location):
+def protected(location,seal=False):
  original=pathlib.Path(os.path.abspath(location))
  location=pathlib.Path(os.path.realpath(original))
  if location!=original: return False
@@ -123,7 +107,7 @@ def protected(location):
   # E2B's initial snapshot can restore root files with writable mode bits.
   # Seal only the selected files and their parents, without recursive chmod.
   mode=stat.S_IMODE(info.st_mode)
-  if mode & 0o022:
+  if seal and mode & 0o022:
    os.chmod(location,mode & ~0o022)
    if location.stat().st_mode & 0o022: return False
   if location.parent==location: return True
@@ -140,9 +124,10 @@ try:
  binary=next((p for p in candidates if p.is_file() and os.access(p,os.X_OK) and protected(p)),None)
  pinned=entry.name=='codex.js' and entry.parent.name=='bin' and package.get('name')=='@openai/codex' and package.get('version')==sys.argv[1] and binary is not None
  wrapper=pathlib.Path(sys.argv[3])
- if not protected(wrapper.parent): raise ValueError('unprotected wrapper parent')
- if wrapper.is_symlink(): wrapper.unlink()
- ready=pinned and wrapper.is_file() and os.access(wrapper,os.X_OK) and protected(wrapper) and hashlib.sha256(wrapper.read_bytes()).hexdigest()==sys.argv[2]
+ ready=pinned and not wrapper.is_symlink() and wrapper.is_file() and os.access(wrapper,os.X_OK) and protected(wrapper) and hashlib.sha256(wrapper.read_bytes()).hexdigest()==sys.argv[2]
+ # Old or missing tools are left untouched. Seal assets only after verifying
+ # that this sandbox already has the expected executor and wrapper.
+ if ready: ready=all(protected(p,seal=True) for p in [entry,metadata,binary,wrapper])
  print(json.dumps({'status':'ready' if ready else 'pinned' if pinned else 'missing','nativeBinaryDirectory':str(binary.parent.resolve()) if pinned else None}),end='')
 except (OSError,ValueError,KeyError): print(json.dumps({'status':'missing'}),end='')`;
   const result = await runCommandResult(sandbox, shellJoin(["python3", "-c", script, CODEX_EXECUTOR_VERSION, wrapperHash, EXECUTOR_WRAPPER]), timeoutMs, signal);
