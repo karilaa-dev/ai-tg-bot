@@ -20,6 +20,7 @@ class MockClient implements CodexClient {
   failure?: (method: string, params: Record<string, unknown>) => Error | undefined;
   additionalItems: unknown[] = [];
   resumeItems: unknown[] = [];
+  readonly rolloutPaths = new Map<string, string>();
   turnFailure?: { message: string; codexErrorInfo: unknown };
   compactEvent?: (threadId: string) => RpcNotification;
   readonly initialize = vi.fn(async () => {});
@@ -33,7 +34,7 @@ class MockClient implements CodexClient {
     if (failure) throw failure;
     if (method === "thread/start" || method === "thread/fork") return { thread: { id: `native-${++this.nextThread}` } } as T;
     if (method === "thread/resume") return { thread: { id: params.threadId, turns: [{ items: this.resumeItems }] } } as T;
-    if (method === "thread/read") return { thread: { id: params.threadId, turns: [{ items: [{ type: "userMessage" }, { type: "agentMessage" }] }] } } as T;
+    if (method === "thread/read") return { thread: { id: params.threadId, ...(this.rolloutPaths.has(String(params.threadId)) ? { path: this.rolloutPaths.get(String(params.threadId)) } : {}), turns: [{ items: [{ type: "userMessage" }, { type: "agentMessage" }] }] } } as T;
     if (method === "thread/compact/start") {
       setTimeout(() => this.emit(this.compactEvent?.(String(params.threadId)) ?? { method: "item/completed", params: { threadId: params.threadId, item: { type: "contextCompaction", id: "compact" } } }), 0);
       return {} as T;
@@ -103,6 +104,99 @@ async function accept(input: Awaited<ReturnType<typeof setup>>, text = "Current 
 }
 
 describe("Codex runtime integration", () => {
+  it.each(["inject", "database"] as const)("retries a native repair safely after an %s failure without changing the source history", async failure => {
+    const input = await setup();
+    const sourcePath = path.join(input.config.CODEX_HOME, "sessions", "retry-native.jsonl");
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+    const callId = "r".repeat(83);
+    const contents = [
+      { type: "session_meta", payload: { id: "retry-native" } },
+      { type: "response_item", payload: { type: "function_call", name: "read", arguments: "{}", call_id: callId } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: callId, output: "Preserved result [[chat-file:17]]" } },
+    ].map(value => JSON.stringify(value)).join("\n");
+    await fs.writeFile(sourcePath, contents);
+    input.client.rolloutPaths.set("retry-native", sourcePath);
+    await input.repos.threads.setCodexSession(input.thread.id, "retry-native");
+    if (failure === "inject") {
+      let attempts = 0;
+      input.client.failure = method => method === "thread/inject_items" && attempts++ === 0 ? new Error("Simulated repair failure") : undefined;
+    } else vi.spyOn(input.repos.threads, "setCodexSession").mockRejectedValueOnce(new Error("Simulated repair failure"));
+    const { runtime } = await accept(input);
+    await expect(runtime.session.prompt("Continue")).rejects.toThrow("Simulated repair failure");
+    expect((await input.repos.threads.get(input.thread.id))!.codex_thread_id).toBe("retry-native");
+    if (failure === "inject") {
+      await runtime.session.prompt("Continue");
+      expect(input.client.methods("thread/start")).toHaveLength(2);
+      expect(input.client.methods("thread/unsubscribe").some(call => call.params.threadId === "native-1")).toBe(true);
+      expect((await input.repos.threads.get(input.thread.id))!.codex_thread_id).toBe("native-2");
+    } else {
+      const checkpoint = JSON.parse(await fs.readFile(path.join(input.config.CODEX_HOME, "executor-metadata", `conversation-${input.thread.id}.json`), "utf8"));
+      expect(checkpoint.nativeId).toBe("native-1");
+      expect(checkpoint.historySources[0].nativeId).toBe("retry-native");
+      const replacement = new MockClient();
+      const restarted = input.create(replacement);
+      const resumed = await accept(input, "Retry after restart", input.thread, restarted);
+      await resumed.runtime.session.prompt("Retry after restart");
+      expect(replacement.methods("thread/start")).toHaveLength(0);
+      expect(replacement.methods("thread/resume")[0]!.params.threadId).toBe("native-1");
+      expect((await input.repos.threads.get(input.thread.id))!.codex_thread_id).toBe("native-1");
+    }
+    expect(await fs.readFile(sourcePath, "utf8")).toBe(contents);
+  });
+
+  it.each(["before", "after"] as const)("repairs malformed native history with the checkpoint %s a failed turn, preserving users and old fork cutoffs", async checkpoint => {
+    const input = await setup();
+    const callId = "legacy-" + "x".repeat(76);
+    const sourcePath = path.join(input.config.CODEX_HOME, "sessions", "old-native.jsonl");
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+    const record = (type: string, payload: object) => ({ type, payload });
+    const message = (role: string, text: string) => ({ type: "message", role, content: [{ type: role === "assistant" ? "output_text" : "input_text", text }] });
+    const turn = (id: string, text: string, reply?: string) => [
+      record("event_msg", { type: "task_started", turn_id: id }),
+      record("response_item", message("user", text)),
+      ...(reply ? [record("response_item", message("assistant", reply))] : []),
+      record("event_msg", { type: "task_complete", turn_id: id, ...(reply ? {} : { error: { message: "Rejected before output" } }) }),
+    ];
+    const contents = [record("session_meta", { id: "old-native", history_mode: "paginated" }),
+      record("response_item", message("user", "Legacy context [[chat-file:17]]")),
+      record("response_item", { type: "function_call", name: "read", arguments: "{}", call_id: callId }),
+      record("response_item", { type: "function_call_output", output: "Tool result [[chat-file:17]]", call_id: callId }),
+      ...turn("old-first", "First native question", "First native answer"),
+      ...turn("old-later", "Later native question", "Later native answer"),
+      ...turn("old-failed", "Previously rejected question"),
+    ].map(value => JSON.stringify(value)).join("\n");
+    await fs.writeFile(sourcePath, contents);
+    input.client.rolloutPaths.set("old-native", sourcePath);
+    const first = await input.repos.messages.insert({ threadId: input.thread.id, role: "assistant", content: {}, textPlain: "First native answer", piEntryId: "codex:old-first" });
+    const later = await input.repos.messages.insert({ threadId: input.thread.id, role: "assistant", content: {}, textPlain: "Later native answer", piEntryId: "codex:old-later" });
+    const failed = await input.repos.messages.insert({ threadId: input.thread.id, role: "user", content: {}, textPlain: "Previously rejected question", piEntryId: "codex:old-failed" });
+    await input.repos.threads.setCodexSession(input.thread.id, "old-native", Date.now(), checkpoint === "after" ? failed.id : later.id);
+    const { runtime } = await accept(input);
+    await runtime.session.prompt("Continue");
+    expect((await input.repos.threads.get(input.thread.id))!.codex_thread_id).toBe("native-1");
+    const injected = input.client.methods("thread/inject_items");
+    expect(injected).toHaveLength(1);
+    expect(JSON.stringify(injected[0]!.params.items)).toContain("Later native answer");
+    expect(JSON.stringify(injected[0]!.params.items).match(/Previously rejected question/g)).toHaveLength(1);
+    expect(await fs.readFile(sourcePath, "utf8")).toBe(contents);
+    const checkpointFile = path.join(input.config.CODEX_HOME, "executor-metadata", `conversation-${input.thread.id}.json`);
+    expect(JSON.parse(await fs.readFile(checkpointFile, "utf8")).historySources).toEqual([{ nativeId: "old-native", rolloutPath: sourcePath, turnIds: ["old-first", "old-later", "old-failed"] }]);
+    await runtime.bridge.endTurn();
+    const replacement = new MockClient();
+    const restarted = input.create(replacement);
+    const child = await input.repos.threads.create({ userId: input.user.tg_id, topicId: 7, title: "Old native fork", parentThreadId: input.thread.id, forkPointMessageId: first.id });
+    await restarted.fork((await input.repos.threads.get(input.thread.id))!, child, input.user, "codex:old-first");
+    expect(replacement.methods("thread/resume")[0]!.params.threadId).toBe("native-1");
+    expect(replacement.methods("thread/fork")).toHaveLength(0);
+    const forkItems = replacement.methods("thread/inject_items").at(-1)!.params.items;
+    expect(JSON.stringify(forkItems)).toContain("First native answer");
+    expect(JSON.stringify(forkItems)).not.toContain("Later native answer");
+    expect(JSON.stringify(forkItems)).not.toContain("Previously rejected question");
+    const linked = (forkItems as Array<Record<string, unknown>>).filter(item => item.call_id);
+    expect(String(linked[0]!.call_id).length).toBeLessThanOrEqual(64);
+    expect(linked[0]!.call_id).toBe(linked[1]!.call_id);
+    expect(input.commandRuntime.prepareRemoteExecutor).not.toHaveBeenCalled();
+  });
   it("protects native commands after a bot tool acquired activity without prematurely releasing either lease", async () => {
     const input = await setup();
     const releases = [vi.fn(), vi.fn()];

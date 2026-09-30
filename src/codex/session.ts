@@ -14,7 +14,7 @@ import type { ThreadBridge } from "./threadBridge.js";
 import { dynamicToolSpecs, executeBotTool, type ToolResult } from "./tools.js";
 import { OpenRouterError, runOpenRouterTurn, type OpenRouterMessage, type OpenRouterToolCall, type OpenRouterUsage } from "./openrouter.js";
 import { asRecord, safeJson } from "../util/records.js";
-import { renderSystemPrompt } from "../ai/prompt.js";
+import { NATIVE_WORKSPACE_GUIDANCE, renderSystemPrompt } from "../ai/prompt.js";
 
 interface Deferred { promise: Promise<void>; resolve(): void; reject(error: unknown): void }
 interface ActiveTurn {
@@ -188,7 +188,8 @@ export class CodexSession implements AgentSession {
     active.baseline = this.totalUsage;
     if (this.input.bridge.currentTurnBudget()?.beforeModelCycle() === false) throw new Error("The model-cycle limit was reached.");
     const response = await this.input.client.request<{ turn: { id: string } }>("turn/start", {
-      threadId, input: content, model: this.input.config.CODEX_MODEL,
+      threadId, input: content.map((part, index) => index === 0 && part.type === "text"
+        ? { ...part, text: `${NATIVE_WORKSPACE_GUIDANCE}\n\n${part.text}` } : part), model: this.input.config.CODEX_MODEL,
       effort: nativeEffort(this.input.config.CODEX_THINKING_LEVEL ?? this.input.config.PI_THINKING_LEVEL),
       serviceTier: this.input.config.CODEX_FAST_MODE ? "priority" : null,
       environments: [{ environmentId: `telegram:${this.input.bridge.user.tg_id}:${this.input.bridge.thread.id}`, cwd: "/home/user/workspace" }],
@@ -456,6 +457,7 @@ export class CodexSession implements AgentSession {
         normalized.reasoning = call.reasoningTokens;
         if (call.cost) normalized.cost = call.cost;
         this.recordAssistant(active, active.text.slice(lastText.value.length), normalized, call.model);
+        this.emit({ type: "turn_start" });
         lastText.value = active.text;
       }
       reportedCalls = usage.calls.length;
@@ -495,11 +497,13 @@ export class CodexSession implements AgentSession {
 
   private setTurnId(active: ActiveTurn, id: string): void { active.turnId = id; active.userEntry.id = `codex:${id}`; }
 
-  private recordAssistant(active: ActiveTurn, text: string, usage: ModelUsage, model?: string): void {
+  private recordAssistant(active: ActiveTurn, text: string, usage: ModelUsage, model?: string, error?: unknown): void {
     const message: AssistantMessage = {
       role: "assistant", content: [...(active.cycleReasoning ? [{ type: "thinking" as const, thinking: active.cycleReasoning }] : []), ...(text ? [{ type: "text" as const, text }] : [])],
       provider: active.provider === "codex" ? "openai-codex" : "openrouter", model: model ?? (active.provider === "codex" ? this.input.config.CODEX_MODEL : this.input.config.OPENROUTER_MAIN_MODEL),
-      usage, stopReason: "stop", timestamp: Date.now(),
+      usage, stopReason: error ? active.controller.signal.aborted ? "aborted" : "error" : "stop",
+      errorMessage: error ? error instanceof Error ? error.message : String(error) : undefined,
+      timestamp: Date.now(),
     };
     const entry = this.append(active, message) as Extract<SessionEntry, { type: "message" }> & { message: AssistantMessage };
     active.assistantEntries.push(entry);
@@ -508,7 +512,7 @@ export class CodexSession implements AgentSession {
   private finalizeAssistant(active: ActiveTurn, error?: unknown): void {
     const last = active.assistantEntries.at(-1);
     const text = active.finalText ?? (active.cycleText || active.text);
-    if (!last) this.recordAssistant(active, text, active.usage);
+    if (!last) this.recordAssistant(active, text, active.usage, undefined, error);
     const message = active.assistantEntries.at(-1)!.message;
     if (!active.terminalResult && text) message.content = [...(active.reasoning ? [{ type: "thinking" as const, thinking: active.reasoning }] : []), { type: "text", text }];
     if (error) { message.stopReason = active.controller.signal.aborted ? "aborted" : "error"; message.errorMessage = error instanceof Error ? error.message : String(error); }

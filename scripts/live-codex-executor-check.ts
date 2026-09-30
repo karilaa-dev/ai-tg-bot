@@ -28,6 +28,8 @@ const repos = createRepos(db.db, db.search);
 const artifactRoot = path.join(config.CODEX_HOME, "generated_images");
 const generatedPath = path.join(artifactRoot, "fixture", "image.png");
 const credentialProbe = 'for credential_name in BOT_TOKEN OPENROUTER_API_KEY E2B_API_KEY TAVILY_API_KEY OPENAI_API_KEY; do test -z "${!credential_name:-}" || { printf "Host credential reached sandbox" >&2; exit 72; }; done';
+const executorProtectionProbe = 'test ! -w /usr/local/bin/ai-tg-codex-executor && test ! -w /usr/local/bin && test ! -w "$(command -v codex)" || { printf "Native executor assets are writable" >&2; exit 73; }';
+const benchmark = process.env.CODEX_SMOKE_BENCHMARK === "1";
 const attachmentBytes = Buffer.from(`Restored conversation attachment ${randomUUID()}\n`);
 const sandboxIds = new Set<string>();
 let runtime: ThreadE2BSandboxRuntimeManager | undefined;
@@ -42,6 +44,9 @@ let currentThreadId = "";
 let attachmentPath = "";
 let runtimeThreadId: number | undefined;
 const nativeEvents: RpcNotification[] = [];
+const phaseTimings: Array<{ phase: string; durationMs: number }> = [];
+const commandTimings: Array<{ phase: string; status: unknown; exitCode: unknown; durationMs: unknown; notificationSpanMs?: number }> = [];
+const commandStarts = new Map<string, number>();
 
 try {
   await db.initialize();
@@ -74,10 +79,11 @@ try {
     const responseId = `controlled-response-${modelRequests}`;
     let item: Record<string, unknown> = { type: "message", role: "assistant", id: `message-${modelRequests}`, content: [{ type: "output_text", text: `Completed ${phase}.` }] };
     if ((phase === "local-image" || phase === "local-image-after-pause") && step === 0) item = { type: "function_call", call_id: `local-image-${modelRequests}`, name: "view_image", arguments: JSON.stringify({ path: generatedPath }) };
-    else if (phase === "native" && step === 0) item = { type: "function_call", call_id: `exec-${modelRequests}`, name: "exec_command", arguments: JSON.stringify({ cmd: `${credentialProbe}; cat '${attachmentPath}' > attachment-copy.txt; printf 'workspace survived pause\\n' > unfinished-project.txt`, workdir: E2B_WORKSPACE, login: false, yield_time_ms: 1_000 }) };
+    else if (phase === "native" && step === 0) item = { type: "function_call", call_id: `exec-${modelRequests}`, name: "exec_command", arguments: JSON.stringify({ cmd: `${credentialProbe}; ${executorProtectionProbe}; cat '${attachmentPath}' > attachment-copy.txt; printf 'workspace survived pause\\n' > unfinished-project.txt`, workdir: E2B_WORKSPACE, login: false, yield_time_ms: 1_000 }) };
     else if (phase === "native" && step === 1) item = { type: "custom_tool_call", call_id: `patch-${modelRequests}`, name: "apply_patch", input: `*** Begin Patch\n*** Add File: ${E2B_WORKSPACE}/native-patch.txt\n+Native patch worked.\n*** End Patch` };
     else if (phase === "native" && step === 2) item = { type: "function_call", call_id: `image-${modelRequests}`, name: "view_image", arguments: JSON.stringify({ path: generatedPath }) };
     else if ((phase === "resume" || phase === "recreated") && step === 0) item = { type: "function_call", call_id: `restore-${modelRequests}`, name: "exec_command", arguments: JSON.stringify({ cmd: `cat '${attachmentPath}' > ${phase}.txt${phase === "resume" ? "; test -f unfinished-project.txt" : ""}`, workdir: E2B_WORKSPACE, login: false, yield_time_ms: 1_000 }) };
+    else if ((phase === "warm" || phase === "controlled-error") && step === 0) item = { type: "function_call", call_id: `benchmark-${modelRequests}`, name: "exec_command", arguments: JSON.stringify({ cmd: phase === "warm" ? "printf warm-success" : "printf controlled-stderr >&2; exit 7", workdir: E2B_WORKSPACE, login: false, yield_time_ms: 1_000 }) };
     const events = [{ type: "response.created", response: { id: responseId } }, { type: "response.output_item.done", item }, { type: "response.completed", response: { id: responseId, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }];
     return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
   } });
@@ -86,7 +92,18 @@ try {
   // No Codex subscription/API credentials are copied into this scratch home.
   app = new CodexAppServer({ home: config.CODEX_HOME, executable: config.CODEX_EXECUTABLE, requestTimeoutMs: 180_000, logger, env: { HOME: scratch, RUST_LOG: "error" } });
   await app.initialize();
-  app.onNotification(event => { if (event.method === "item/completed" || event.method === "error") nativeEvents.push(event); });
+  app.onNotification(event => {
+    if (event.method === "item/completed" || event.method === "error") nativeEvents.push(event);
+    if (!benchmark) return;
+    const item = event.params.item as { type?: string; id?: string; durationMs?: number; status?: string; exitCode?: number } | undefined;
+    if (item?.type !== "commandExecution" || !item.id) return;
+    if (event.method === "item/started") commandStarts.set(item.id, performance.now());
+    if (event.method === "item/completed") {
+      const startedAt = commandStarts.get(item.id);
+      commandTimings.push({ phase, status: item.status, exitCode: item.exitCode, durationMs: item.durationMs, notificationSpanMs: startedAt === undefined ? undefined : Math.round(performance.now() - startedAt) });
+      commandStarts.delete(item.id);
+    }
+  });
   await app.request("environment/add", { environmentId: "e2b-smoke", execServerUrl: adapter.url, authBearerToken: adapter.authBearerToken });
   const started = await app.request<{ thread: { id: string } }>("thread/start", { model: config.CODEX_MODEL, modelProvider: "controlled", cwd: scratch, approvalPolicy: "never", sandbox: "danger-full-access", environments: [{ environmentId: "e2b-smoke", cwd: E2B_WORKSPACE }] });
   currentThreadId = started.thread.id;
@@ -108,7 +125,12 @@ try {
   assert.equal(await sandbox.files.read(`${E2B_WORKSPACE}/native-patch.txt`), "Native patch worked.\n");
   assert.ok(nativeEvents.some(event => (event.params.item as { type?: string })?.type === "imageView"));
   assert.equal(Buffer.from(await sandbox.files.read(generatedPath, { format: "bytes", user: "user" })).equals(image), true);
-  console.log("PASS: native exec, patch, image view, automatic attachments, native artifact paths, and absence of host credentials");
+  console.log("PASS: native exec, patch, image view, automatic attachments, native artifact paths, protected executor assets, and absence of host credentials");
+  if (benchmark) {
+    for (let index = 0; index < 8; index += 1) await runTurn("warm");
+    await runTurn("controlled-error");
+    assert.ok(commandTimings.some(item => item.phase === "controlled-error" && item.status === "failed" && item.exitCode === 7), "A real nonzero native exit must be recorded as failed");
+  }
   const originalId = mapping.sandbox_id;
   await sandbox.pause({ keepMemory: true });
   await new Promise(resolve => setTimeout(resolve, 1_000));
@@ -139,6 +161,10 @@ try {
   assert.equal(downloads, 2, "A replacement sandbox must automatically restore the attachment again");
   console.log("PASS: deleted sandbox recreation automatically restored conversation attachments");
   console.log(JSON.stringify({ status: "passed", template: config.E2B_TEMPLATE, modelRequests, inference: "controlled provider, no paid inference", attachmentSource: "controlled Telegram source, real restoration pipeline", sandboxes: sandboxIds.size }));
+  if (benchmark) {
+    const warm = phaseTimings.filter(item => item.phase === "warm").map(item => item.durationMs).sort((left, right) => left - right);
+    console.log(JSON.stringify({ benchmark: "codex-executor", phases: phaseTimings, warmMs: { samples: warm.length, median: (warm[3]! + warm[4]!) / 2, min: warm[0], max: warm.at(-1) }, commands: commandTimings }));
+  }
 } catch (error) {
   console.error("Codex executor smoke failed:", error);
   process.exitCode = 1;
@@ -157,6 +183,8 @@ try {
 }
 
 async function runTurn(nextPhase: string): Promise<void> {
+  const startedAt = performance.now();
+  const activity = ["native", "warm", "controlled-error", "resume", "recreated"].includes(nextPhase) ? runtime!.acquireActivityLease(9_999_111, runtimeThreadId!, { native: true }) : undefined;
   adapter!.beginTurn();
   phase = nextPhase; toolStep = 0;
   let timeout: NodeJS.Timeout | undefined;
@@ -175,7 +203,10 @@ async function runTurn(nextPhase: string): Promise<void> {
   try {
     await app!.request("turn/start", { threadId: currentThreadId, input: [{ type: "text", text: `Run controlled native executor smoke phase ${nextPhase}.` }] });
     await completion;
-  } finally { clearTimeout(timeout); detach?.(); }
+  } finally {
+    clearTimeout(timeout); detach?.(); activity?.release();
+    if (benchmark) phaseTimings.push({ phase: nextPhase, durationMs: Math.round(performance.now() - startedAt) });
+  }
 }
 
 function pngFixture(): Buffer {

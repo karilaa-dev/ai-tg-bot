@@ -59,7 +59,7 @@ function browserConfig(defaultMinutes = 5) {
 }
 
 describe("renderSystemPrompt", () => {
-  it.each([false, true])("keeps core behavior below 4500 characters with browsing=%s and reduces the initial footprint", async (browser) => {
+  it.each([false, true])("keeps core behavior below 4800 characters with browsing=%s and reduces the initial footprint", async (browser) => {
     const config = loadTestConfig({ BROWSER_USE_API_KEY: browser ? "test" : undefined });
     const core = await renderSystemPrompt({ user: baseUser, config });
     const context = withModelIdentity(normalizeContext({ systemPrompt: core, messages: [] }), { id: "gpt-6.1-sol", name: "gpt-6.1-sol" });
@@ -78,7 +78,7 @@ describe("renderSystemPrompt", () => {
     expect(prompt).not.toContain(thread.title);
     expect(prompt).not.toContain("{{");
     expect(prompt).not.toContain("provider:");
-    expect(prompt.length).toBeLessThanOrEqual(4500);
+    expect(prompt.length).toBeLessThanOrEqual(4800);
     const tools = createPiToolAdapters({ buildInput: () => ({ config, user: baseUser, thread, browserRuntime: browser ? {} : undefined }) as never });
     expect(tools.some((tool) => tool.name === "transcribe_audio")).toBe(true);
     // Transcription was added after this baseline; compare the same set of tools.
@@ -91,12 +91,17 @@ describe("renderSystemPrompt", () => {
     const prompt = await renderSystemPrompt({ user: baseUser, harness: "codex" });
     for (const name of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "native web_search", "restored automatically", "INDEX.json"]) expect(prompt).toContain(name);
     for (const removed of ["codemode", "materialize_chat_files", "web_extract", "generate_image", "inspect_workspace_images", "bash.inspect_images"]) expect(prompt).not.toContain(removed);
+    expect(prompt).toContain("filtering ALL_TOOLS with an exact name or narrow task term");
+    expect(prompt).toContain("at most five matching names");
+    expect(prompt).toContain("Never print the catalog");
+    expect(prompt).toContain("Use read_skill for bot workflows");
+    expect(prompt).toContain("host skill paths are unavailable in the remote workspace");
   });
 
   it("uses the actual fallback tool names without requiring native Codex tools", async () => {
     const prompt = await renderSystemPrompt({ user: baseUser, harness: "openrouter" });
     for (const name of ["web_search", "web_extract", "bash", "generate_image", "inspect_workspace_images", "restored automatically"]) expect(prompt).toContain(name);
-    for (const absent of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "codemode", "materialize_chat_files"]) expect(prompt).not.toContain(absent);
+    for (const absent of ["exec_command", "apply_patch", "view_image", "image_gen.imagegen", "codemode", "materialize_chat_files", "ALL_TOOLS"]) expect(prompt).not.toContain(absent);
   });
 
   it("renders current time and the stored timezone as structured context", () => {

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   buildSessionProjection,
   migrateSessionEntries,
@@ -146,7 +147,127 @@ export function convertPiSessionEntries(
   }));
   // Raw branch ids and text still represent summarized database rows. Keep
   // them as deduplication coverage without putting those rows back in context.
-  return { items: completeToolExchanges(items), entryIds: branch.map(entry => entry.id), allEntryIds: entries.map(entry => entry.id), messageKeys: piDatabaseMessageKeys(branch) };
+  return { items: normalizeHistoryCallIds(completeToolExchanges(items)), entryIds: branch.map(entry => entry.id), allEntryIds: entries.map(entry => entry.id), messageKeys: piDatabaseMessageKeys(branch) };
+}
+
+/** Responses limits call ids to 64 characters; Pi may persist longer ids. */
+export function normalizeHistoryCallIds<T extends object>(items: readonly T[]): T[] {
+  const ids = [...new Set(items.flatMap(item => {
+    const id = asRecord(item)?.call_id;
+    return typeof id === "string" ? [id] : [];
+  }))];
+  const reserved = new Set(ids.filter(id => id.length <= 64));
+  const replacements = new Map<string, string>();
+  for (const id of ids.filter(id => id.length > 64).sort()) {
+    let candidate = "";
+    for (let salt = 0; !candidate || reserved.has(candidate); salt++) {
+      candidate = `pi_${createHash("sha256").update(salt ? `${salt}\0${id}` : id).digest("base64url")}`;
+    }
+    reserved.add(candidate);
+    replacements.set(id, candidate);
+  }
+  return items.map(item => {
+    const id = asRecord(item)?.call_id;
+    return typeof id === "string" && replacements.has(id) ? { ...item, call_id: replacements.get(id)! } : item;
+  });
+}
+
+export interface CodexRolloutHistory {
+  items: Record<string, unknown>[];
+  invalidCallIds: number;
+  turnIds: string[];
+  artifactPaths: string[];
+}
+
+/** Read the effective native window, retaining compaction and rollback boundaries. */
+export function codexRolloutHistory(input: string, options: { lastTurnId?: string } = {}): CodexRolloutHistory {
+  const records = input.split("\n").filter(line => line.trim()).flatMap(line => {
+    let parsed: unknown;
+    // Native rollout loading ignores malformed audit lines and truncated tails.
+    try { parsed = JSON.parse(line); } catch { return []; }
+    const record = asRecord(parsed);
+    return record && typeof record.type === "string" && asRecord(record.payload) ? [record] : [];
+  });
+  if (!records.some(record => record.type === "session_meta")) throw new Error("Codex rollout session header is missing.");
+  const effective: Record<string, unknown>[] = [];
+  const starts: Array<{ id: string; index: number; user: boolean }> = [];
+  let hasNativeTurn = false;
+  let foundCutoff = options.lastTurnId === undefined;
+  let reachedCutoff = false;
+  for (const record of records) {
+    const payload = asRecord(record.payload)!;
+    const started = record.type === "event_msg" && (payload.type === "task_started" || payload.type === "turn_started");
+    if (started && typeof payload.turn_id === "string") {
+      if (reachedCutoff) break;
+      hasNativeTurn = true;
+      starts.push({ id: payload.turn_id, index: effective.length, user: false });
+      if (payload.turn_id === options.lastTurnId) { foundCutoff = true; reachedCutoff = true; }
+    }
+    if (record.type === "event_msg" && payload.type === "thread_rolled_back") {
+      let remaining = typeof payload.num_turns === "number" ? Math.max(0, payload.num_turns) : 0;
+      while (remaining-- > 0) {
+        const nativeIndex = starts.findLastIndex(start => start.user);
+        const native = starts[nativeIndex];
+        // Manual compaction starts a native task without accepting a new user.
+        // Remove that context-only suffix along with the newest real user turn.
+        const userIndex = effective.findLastIndex(value => value.type === "response_item"
+          && isNativeUserMessage(asRecord(value.payload)!));
+        if (!native && hasNativeTurn) break;
+        const cut = native?.index ?? userIndex;
+        if (cut === undefined || cut < 0) break;
+        effective.splice(cut);
+        if (native) starts.splice(nativeIndex);
+      }
+      continue;
+    }
+    if (record.type === "response_item" && isNativeUserMessage(payload) && starts.length) starts.at(-1)!.user = true;
+    effective.push(record);
+  }
+  if (!foundCutoff) throw new Error("The requested native fork turn is absent from the preserved rollout.");
+  let items: Record<string, unknown>[] = [];
+  const artifactPaths = new Set<string>();
+  for (const record of effective) {
+    const payload = asRecord(record.payload)!;
+    if (record.type === "response_item") items.push(payload);
+    if (record.type === "compacted") {
+      if (Array.isArray(payload.replacement_history)) {
+        items = payload.replacement_history.map(value => asRecord(asRecord(value)?.item ?? value)).filter((value): value is Record<string, unknown> => Boolean(value));
+      } else if (typeof payload.message === "string") {
+        // Old local checkpoints retained a bounded text fallback for recent
+        // users, never all earlier user messages or their discarded media.
+        const users: Record<string, unknown>[] = [];
+        let remaining = 80_000;
+        for (const item of items.toReversed()) {
+          if (item.type !== "message" || item.role !== "user" || !Array.isArray(item.content)) continue;
+          const text = item.content.map(value => asRecord(value)).flatMap(part => typeof part?.text === "string" ? [part.text] : []).join("\n");
+          if (!text || !remaining) continue;
+          const bounded = Buffer.from(text).subarray(0, remaining).toString("utf8");
+          users.unshift({ ...item, content: [{ type: "input_text", text: bounded }] });
+          remaining -= Buffer.byteLength(bounded);
+        }
+        items = [...users, asRecord(textMessage("user", payload.message || "(no summary available)"))!];
+      } else throw new Error("Codex compaction checkpoint is invalid.");
+    }
+    if (record.type === "event_msg" && payload.type === "item_completed") {
+      const item = asRecord(payload.item);
+      const saved = item?.savedPath ?? item?.saved_path;
+      if ((item?.type === "imageGeneration" || item?.type === "image_generation") && typeof saved === "string") artifactPaths.add(saved);
+    }
+    if (record.type === "event_msg" && payload.type === "image_generation_end" && typeof payload.saved_path === "string") artifactPaths.add(payload.saved_path);
+  }
+  // Current native instructions replace instructions persisted by the old process.
+  items = items.filter(item => item.type !== "message" || item.role !== "system" && item.role !== "developer");
+  const invalidCallIds = new Set(items.flatMap(item => typeof item.call_id === "string" && item.call_id.length > 64 ? [item.call_id] : [])).size;
+  return { items: normalizeHistoryCallIds(items), invalidCallIds, turnIds: starts.map(start => start.id), artifactPaths: [...artifactPaths] };
+}
+
+function isNativeUserMessage(item: Record<string, unknown>): boolean {
+  if (item.type !== "message" || item.role !== "user" || !Array.isArray(item.content)) return false;
+  const kinds = asRecord(item.internal_chat_message_metadata_passthrough)?.content_item_kinds;
+  if (Array.isArray(kinds) && kinds.some(kind => typeof kind === "string" && kind.startsWith("contextual."))) return false;
+  const text = item.content.flatMap(value => typeof asRecord(value)?.text === "string" ? [String(asRecord(value)!.text)] : []).join("\n").trimStart();
+  return !/^<(?:environment_context|permissions|skills_instructions|system_reminder|compaction_summary|summary)[>\s]/.test(text)
+    && !text.startsWith("Another language model started to solve this problem");
 }
 
 function piDatabaseMessageKeys(branch: readonly SessionEntry[]): string[] {

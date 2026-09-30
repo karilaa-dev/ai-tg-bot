@@ -314,6 +314,17 @@ describe("Codex conversation sessions", () => {
     expect(runFallback).toHaveBeenCalledOnce();
   });
 
+  it("reports an initial native failure as an error before notifying subscribers", async () => {
+    const { session, client } = setup({ codexUnavailable: () => false });
+    const reasons: string[] = [];
+    session.subscribe(event => {
+      if (event.type === "message_end" && event.message.role === "assistant") reasons.push(event.message.stopReason);
+    });
+    client.run = id => client.emit("turn/completed", { turn: { id, status: "failed", error: { message: "Invalid tool call ID" } } });
+    await expect(session.prompt("Continue")).rejects.toThrow("Invalid tool call ID");
+    expect(reasons).toEqual(["error"]);
+  });
+
   it.each(["text", "tool"])("does not replay a native turn after %s activity", async kind => {
     const runFallback = vi.fn(async () => fallbackResult());
     const { session, client } = setup({ runFallback });

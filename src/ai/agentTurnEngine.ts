@@ -258,7 +258,7 @@ export const runTurn: TurnRunner = async (input) => {
       modelCycles: budgetSnapshot?.modelCycles,
       toolCalls: budgetSnapshot?.toolCalls,
       budgetTerminationReason: budgetReason,
-      ...stats.counts.modelTiming,
+      ...stats.counts.responseTiming,
       ...input.deliveryTiming,
       ...input.outgoingBuffers?.snapshot(),
     });
@@ -438,10 +438,7 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
 
 class TurnDraftStreamer {
   private readonly thinking: DraftStreamer;
-  private readonly answer: DraftStreamer;
-  private answerStarted = false;
-  private answerReady = false;
-  private latestAnswerMd = "";
+  private finalized = false;
   private deliveredThinkingMd = "";
   private thinkingDelivery?: Promise<number[]>;
   private thinkingDeliveryError: unknown;
@@ -458,13 +455,15 @@ class TurnDraftStreamer {
       startedAt,
       updateMs: input.config.DRAFT_UPDATE_MS,
       t: input.t,
+      onDelivered: () => {
+        if (input.deliveryTiming) input.deliveryTiming.firstDraftMs ??= Date.now() - startedAt;
+      },
     };
     this.thinking = new DraftStreamer(common);
-    this.answer = new DraftStreamer({ ...common, answerOnly: true });
   }
 
   update(frame: { thinkingMd: string; answerMd: string }): void {
-    if (this.answerStarted) return;
+    if (this.finalized) return;
     // Text can precede more tool calls. Keep it inside the running draft until
     // the prompt completes and finish() can publish the final answer.
     this.thinking.update({
@@ -475,17 +474,15 @@ class TurnDraftStreamer {
 
   async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
     if (!frame) {
-      if (!this.answerStarted) {
+      if (!this.finalized) {
         await this.thinking.finish();
         return undefined;
       }
       const messageIds = await this.waitForThinkingDelivery();
-      await this.answer.finish();
       return { handled: true, messageIds };
     }
 
-    this.latestAnswerMd = frame.answerMd;
-    if (!this.answerStarted) this.startAnswer(frame.thinkingMd);
+    if (!this.finalized) this.finalizeThinking(frame.thinkingMd);
     let messageIds = await this.waitForThinkingDelivery();
     if (frame.thinkingMd !== this.deliveredThinkingMd) {
       messageIds = await refreshFinalThinkingVisible(
@@ -496,33 +493,24 @@ class TurnDraftStreamer {
       );
       this.deliveredThinkingMd = frame.thinkingMd;
     }
-    if (frame.answerMd.trim()) {
-      await this.answer.finish({ thinkingMd: "", answerMd: frame.answerMd });
-    } else {
-      this.answer.stop();
-    }
+    // sendFinalVisible confirms the answer next. Sending its exact text as a
+    // separate draft would add a serial Telegram request without streaming it.
     return { handled: true, messageIds };
   }
 
   stop(): void {
     this.thinking.stop();
-    this.answer.stop();
   }
 
-  private startAnswer(finalThinkingMd: string): void {
-    if (this.answerStarted) return;
-    this.answerStarted = true;
+  private finalizeThinking(finalThinkingMd: string): void {
+    if (this.finalized) return;
+    this.finalized = true;
     this.deliveredThinkingMd = finalThinkingMd;
     this.thinking.stop();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
     this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
       this.thinkingDeliveryError = err;
       return [];
-    });
-    void this.thinkingDelivery.then(() => {
-      if (this.thinkingDeliveryError) return;
-      this.answerReady = true;
-      this.updateAnswerDraft();
     });
   }
 
@@ -531,15 +519,10 @@ class TurnDraftStreamer {
     if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
     return messageIds;
   }
-
-  private updateAnswerDraft(): void {
-    if (!this.answerReady || !this.latestAnswerMd.trim()) return;
-    this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
-  }
 }
 
 interface TurnStreamStats {
-  modelTiming: { modelMs: number; peakContextTokens: number };
+  responseTiming: { responseCycleMs: number; peakContextTokens: number };
   contentEvents: number;
   toolCalls: number;
   toolResults: number;
@@ -555,7 +538,7 @@ function createPiStreamLoop(
   status: TurnStatusMessage | undefined,
 ): { counts: TurnStreamStats; onEvent: (event: AgentSessionEvent) => void } {
   const counts: TurnStreamStats = {
-    modelTiming: { modelMs: 0, peakContextTokens: 0 },
+    responseTiming: { responseCycleMs: 0, peakContextTokens: 0 },
     contentEvents: 0,
     toolCalls: 0,
     toolResults: 0,
@@ -582,10 +565,13 @@ function createPiStreamLoop(
       const usage = event.message.usage;
       const ms = Date.now() - cycleStartedAt;
       const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-      counts.modelTiming.modelMs += ms;
-      counts.modelTiming.peakContextTokens = Math.max(counts.modelTiming.peakContextTokens, contextTokens);
-      input.logger.info("Agent model cycle complete", {
+      // Codex exposes response completion, not upstream request start. The
+      // interval can include tool execution and sandbox preparation.
+      counts.responseTiming.responseCycleMs += ms;
+      counts.responseTiming.peakContextTokens = Math.max(counts.responseTiming.peakContextTokens, contextTokens);
+      input.logger.info("Agent response cycle complete", {
         threadId: input.thread.id, turnRunId: input.turnRunId, cycle, ms,
+        timingBasis: "response_completion_intervals",
         provider: event.message.provider, model: event.message.model,
         inputTokens: usage.input, outputTokens: usage.output,
         cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite,
@@ -597,11 +583,13 @@ function createPiStreamLoop(
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent;
       if (update.type === "text_delta") {
+        if (update.delta && input.deliveryTiming) input.deliveryTiming.firstModelTextMs ??= Date.now() - input.deliveryTiming.startedAt;
         shaper.onTextDelta(update.delta);
         counts.contentEvents += 1;
       } else if (update.type === "thinking_start") {
         shaper.onReasoningStart();
       } else if (update.type === "thinking_delta") {
+        if (update.delta && input.deliveryTiming) input.deliveryTiming.firstThinkingMs ??= Date.now() - input.deliveryTiming.startedAt;
         shaper.onReasoningDelta(update.delta);
         counts.contentEvents += 1;
       } else if (update.type === "thinking_end") {
@@ -627,6 +615,10 @@ function createPiStreamLoop(
     if (event.type === "tool_execution_end") {
       const startedAt = toolStartedAt.get(event.toolCallId);
       toolStartedAt.delete(event.toolCallId);
+      const details = asRecord(asRecord(event.result)?.details);
+      const duration = details?.durationMs;
+      const reportedDuration = typeof duration === "number" && Number.isFinite(duration) && duration >= 0 ? duration : undefined;
+      const notificationSpanMs = startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
       shaper.onToolResult(event.toolName, summarizeToolOutput(event.toolName, event.result));
       counts.toolResults += 1;
       if (event.toolName === "generate_image") {
@@ -639,7 +631,12 @@ function createPiStreamLoop(
         turnRunId: input.turnRunId,
         toolName: event.toolName,
         error: event.isError || undefined,
-        latencyMs: startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt),
+        latencyMs: reportedDuration ?? notificationSpanMs,
+        durationSource: reportedDuration === undefined ? "notifications" : "harness",
+        notificationSpanMs,
+        // Report safe protocol fields, never commands or private tool output.
+        exitCode: typeof details?.exitCode === "number" ? details.exitCode : undefined,
+        status: ["completed", "failed", "declined"].includes(String(details?.status)) ? details?.status : undefined,
       });
       updatePresenter();
       updateStatus();

@@ -16,7 +16,7 @@ const sandboxTools = new Set(["bash", "render_pdf_pages", "render_office_preview
 
 export function dynamicToolSpecs(bridge: ThreadBridge, fallback = false): DynamicToolSpec[] {
   return [
-    { name: "read_skill", description: "Read an installed workflow skill by name before its task.", inputSchema: { type: "object", properties: { name: { type: "string", enum: APPROVED_SKILLS.map(skill => skill.name) } }, required: ["name"], additionalProperties: false } },
+    { name: "read_skill", description: "Read the complete sandbox workflow guide by name before its task. This returns its content; no shell read is needed.", inputSchema: { type: "object", properties: { name: { type: "string", enum: APPROVED_SKILLS.map(skill => skill.name) } }, required: ["name"], additionalProperties: false } },
     ...Object.entries({ ...buildToolRegistry(bridge.buildInput()), ...(fallback ? { generate_image: createGenerateImageTool(bridge) } : {}) })
       .filter(([name]) => fallback ? name !== "materialize_chat_files" : !nativeReplacements.has(name))
       .map(([name, tool]) => ({ name, description: name === "load_message" ? "Load a previous chat message and its attachments. Select image bytes or extracted document context with file_ids. Source files are restored automatically before workspace access." : tool.description, inputSchema: z.toJSONSchema(tool.inputSchema, { io: "input" }) as Record<string, unknown>, deferLoading: !["finish_response", "create_file", "load_message"].includes(name) })),

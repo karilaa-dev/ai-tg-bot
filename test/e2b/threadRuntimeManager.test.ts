@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../src/config.js";
@@ -15,9 +16,12 @@ import {
 import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
 import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
+import { prepareNativeExecutor } from "../../src/e2b/remoteExecutor.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { deferred } from "../helpers/async.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "../../src/e2b/officeBundle.js";
+
+const nativeWrapper = await fs.readFile(new URL("../../e2b-template/assets/ai-tg-codex-executor", import.meta.url));
 
 describe("thread E2B runtime manager", () => {
   let config: AppConfig;
@@ -89,6 +93,117 @@ describe("thread E2B runtime manager", () => {
     expect(transfers()).toBe(1);
     await runtime.prepareRemoteExecutor({ userId, threadId, files: [], artifactRoot: "/var/lib/ai-tg-bot/codex/generated_images", artifacts: [{ path: generatedPath, bytes: Buffer.from("native png") }], onExecutorReady: async () => undefined });
     expect(transfers()).toBe(1);
+  });
+
+  it("overlaps pinned executor startup with toolbox validation but gates the operation until both finish", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    await runtime.dispose();
+    runtime = createRuntime();
+    const validation = deferred<void>();
+    const connected = deferred<void>();
+    const original = sandbox.run.bind(sandbox);
+    vi.spyOn(sandbox, "run").mockImplementation(async command => {
+      if (command.includes("command -v pdftoppm")) await validation.promise;
+      return original(command);
+    });
+    let completed = false;
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => { connected.resolve(); } }).then(value => { completed = true; return value; });
+    await connected.promise;
+    expect(completed).toBe(false);
+    expect(sandbox.controlCommands.some(command => command.includes("npm install -g") && command.includes("@openai/codex"))).toBe(false);
+    expect(sandbox.controlCommands.find(command => command.includes("start.lock"))).toContain("export PATH=");
+    const backgrounds = sandbox.backgroundCalls;
+    const queued = runtime.execute(commandRequest(userId, threadId));
+    await Promise.resolve();
+    expect(sandbox.backgroundCalls).toBe(backgrounds);
+    validation.resolve();
+    await preparing;
+    await queued;
+    expect(sandbox.backgroundCalls).toBe(backgrounds + 1);
+  });
+
+  it("waits for toolbox validation before a legacy executor install and reuses its verified native path", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    await runtime.dispose();
+    runtime = createRuntime();
+    const validation = deferred<void>();
+    const inspected = deferred<void>();
+    const original = sandbox.run.bind(sandbox);
+    vi.spyOn(sandbox, "run").mockImplementation(async command => {
+      if (command.includes("command -v pdftoppm")) await validation.promise;
+      const result = await original(command);
+      if (command.includes("# codex_executor_metadata")) inspected.resolve();
+      return result;
+    });
+    const ready = vi.fn(async () => undefined);
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: ready });
+    await inspected.promise;
+    expect(ready).not.toHaveBeenCalled();
+    expect(sandbox.pinnedExecutor).toBe(false);
+    validation.resolve();
+    await preparing;
+    expect(sandbox.pinnedExecutor).toBe(true);
+    const inspections = sandbox.controlCommands.filter(command => command.includes("# codex_executor_metadata")).length;
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: ready });
+    expect(sandbox.controlCommands.filter(command => command.includes("# codex_executor_metadata"))).toHaveLength(inspections);
+    expect(sandbox.controlCommands.some(command => command.includes("codex --version"))).toBe(false);
+  });
+
+  it("repairs a modified wrapper before native startup without reinstalling its pinned binary", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", Buffer.from("modified wrapper"));
+    await runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => undefined });
+    expect(sandbox.files.get("/usr/local/bin/ai-tg-codex-executor")).toEqual(nativeWrapper);
+    expect(sandbox.controlCommands.some(command => command.includes("npm install -g") && command.includes("@openai/codex"))).toBe(false);
+  });
+
+  it("caches the verified native path when reusing older endpoint metadata", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    const previous = { sandboxId: sandbox.id, url: "wss://existing.e2b.test", authBearerToken: "existing capability" };
+    const endpoint = await prepareNativeExecutor(sandbox, 30_000, previous);
+    expect(endpoint).toMatchObject(previous);
+    expect(endpoint.nativeBinaryDirectory).toMatch(/^\/usr\//u);
+    await prepareNativeExecutor(sandbox, 30_000, endpoint);
+    expect(sandbox.controlCommands.filter(command => command.includes("# codex_executor_metadata"))).toHaveLength(1);
+  });
+
+  it("drains parallel executor startup after validation failure before releasing the serialized queue", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    sandbox.pinnedExecutor = true;
+    sandbox.files.set("/usr/local/bin/ai-tg-codex-executor", nativeWrapper);
+    await runtime.dispose();
+    runtime = createRuntime();
+    const connected = deferred<void>();
+    const release = deferred<void>();
+    const original = sandbox.run.bind(sandbox);
+    let failed = false;
+    vi.spyOn(sandbox, "run").mockImplementation(async command => {
+      if (!failed && command.includes("command -v pdftoppm")) { failed = true; throw new Error("toolbox validation unavailable"); }
+      return original(command);
+    });
+    let settled = false;
+    const preparing = runtime.prepareRemoteExecutor({ userId, threadId, files: [], onExecutorReady: async () => { connected.resolve(); await release.promise; } });
+    void preparing.then(() => { settled = true; }, () => { settled = true; });
+    await connected.promise;
+    const backgrounds = sandbox.backgroundCalls;
+    const queued = runtime.execute(commandRequest(userId, threadId));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(sandbox.backgroundCalls).toBe(backgrounds);
+    release.resolve();
+    await expect(preparing).rejects.toThrow("toolbox validation unavailable");
+    await queued;
+    expect(sandbox.backgroundCalls).toBe(backgrounds + 1);
   });
 
   it("rejects native image staging outside its trusted generated image root", async () => {
@@ -1817,6 +1932,7 @@ class FakeSandbox implements E2BSandbox {
   pauseCalls = 0;
   backgroundCalls = 0;
   inventoryCalls = 0;
+  pinnedExecutor = false;
   failSeal = false;
   failIndexWrite = false;
   failWebsiteScope = false;
@@ -1850,6 +1966,11 @@ class FakeSandbox implements E2BSandbox {
 
   async run(command: string) {
     this.controlCommands.push(command);
+    if (command.includes("# codex_executor_metadata")) return { stdout: JSON.stringify({ status: this.pinnedExecutor ? this.files.get("/usr/local/bin/ai-tg-codex-executor")?.equals(nativeWrapper) ? "ready" : "pinned" : "missing", nativeBinaryDirectory: this.pinnedExecutor ? "/usr/local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin" : null }), stderr: "", exitCode: 0 };
+    if (command.includes("npm install -g") && command.includes("@openai/codex@0.159.2")) {
+      this.pinnedExecutor = true;
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }
     if (command.startsWith("cat /opt/office/installed-revision"))
       return { stdout: this.files.get("/opt/office/installed-revision")?.toString() ?? "", stderr: "", exitCode: 0 };
     const officeInstall = command.match(/^'bash' '([^']+\.staging-[^']+)\/install.sh' '([a-f0-9]{64})'$/);

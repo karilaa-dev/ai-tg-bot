@@ -18,7 +18,7 @@ import { asRecord, safeJson } from "../util/records.js";
 import { CodexAppServer, type CodexClient, type RpcNotification } from "./appServer.js";
 import { expandPath, prepareCodexAuth } from "./auth.js";
 import { CodexCircuitBreaker, retryableCodexError } from "./circuit.js";
-import { loadThreadHistory, type CodexHistoryItem } from "./history.js";
+import { codexRolloutHistory, loadThreadHistory, type CodexHistoryItem, type CodexRolloutHistory } from "./history.js";
 import { LazyCodexExecutor } from "./lazyExecutor.js";
 import { CodexSession } from "./session.js";
 import { ThreadBridge } from "./threadBridge.js";
@@ -40,7 +40,9 @@ interface ThreadRuntime {
   filesRevision?: string;
   rawEventsEnabled?: boolean;
   initializing?: Promise<string>;
+  historySources?: NativeHistorySource[];
 }
+interface NativeHistorySource { nativeId: string; rolloutPath: string; turnIds: string[] }
 interface RuntimeInput {
   config: AppConfig; db: AppDatabase; repos: Repos; logger: Logger; commandRuntime?: CommandRuntime;
   client?: CodexClient;
@@ -111,6 +113,7 @@ export class CodexRuntimeManager implements AgentRuntimeService {
       state.nativeId = checkpoint.nativeId;
       state.historyCheckpoint = checkpoint.historyMessageId ?? undefined;
       state.pendingSessionCheckpoint = checkpoint.historyMessageId;
+      state.historySources = checkpoint.historySources;
     }
     state.session = new CodexSession({
       client: this.client, bridge, config: this.input.config,
@@ -185,14 +188,49 @@ export class CodexRuntimeManager implements AgentRuntimeService {
     const maxMessageId = bridge.activeMessageId === undefined ? undefined : bridge.activeMessageId - 1;
     const developerInstructions = `${await renderSystemPrompt({ user: bridge.user, config: this.input.config })}\n\n${this.instructions}`;
     const settings = { model: this.input.config.CODEX_MODEL, cwd: E2B_WORKSPACE, approvalPolicy: "never", sandbox: "danger-full-access", developerInstructions, serviceTier: this.input.config.CODEX_FAST_MODE ? "priority" : null,
-      config: { "features.deferred_executor": true, "features.unified_exec": true, "features.shell_snapshot": false, web_search: "live", model_context_window: this.input.config.MODEL_CONTEXT_TOKENS } };
+      config: { "features.deferred_executor": true, "features.unified_exec": true, "features.shell_snapshot": false, "skills.include_instructions": false, web_search: "live", model_context_window: this.input.config.MODEL_CONTEXT_TOKENS } };
     if (!state.nativeId) state.nativeId = current.codex_thread_id ?? undefined;
     if (state.nativeId && !state.uncertainHistory) {
       if (!state.resumed) {
         try {
-          const resumed = await this.client.request("thread/resume", { threadId: state.nativeId, ...settings });
-          this.recoverArtifacts(state, resumed);
-          state.resumed = true; state.rawEventsEnabled = false;
+          const stored = await this.client.request("thread/read", { threadId: state.nativeId });
+          const rolloutPath = asRecord(stored.thread)?.path;
+          const history = typeof rolloutPath === "string" ? await this.readNativeHistory(rolloutPath).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+            throw error;
+          }) : undefined;
+          if (history?.invalidCallIds) {
+            const previousId = state.nativeId;
+            const started = await this.client.request("thread/start", { ...settings, dynamicTools: nativeToolSpecs(bridge), environments: [{ environmentId, cwd: E2B_WORKSPACE }], experimentalRawEvents: true, ephemeral: false });
+            const id = String(asRecord(started.thread)?.id ?? "");
+            if (!id) throw new Error("Codex did not return a repaired thread id.");
+            try { await this.client.request("thread/inject_items", { threadId: id, items: history.items }); }
+            catch (error) { await this.client.request("thread/unsubscribe", { threadId: id }).catch(() => undefined); throw error; }
+            const sources = [...state.historySources ?? [], { nativeId: previousId, rolloutPath: rolloutPath as string, turnIds: history.turnIds }];
+            const checkpoint = state.historyCheckpoint ?? current.codex_history_message_id ?? null;
+            await this.writeCheckpoint(current.id, id, checkpoint, sources);
+            state.nativeId = id; state.resumed = true; state.rawEventsEnabled = true; state.historySources = sources;
+            state.pendingSessionCheckpoint = checkpoint;
+            for (const filePath of history.artifactPaths) bridge.registerNativeArtifact(filePath);
+            await this.input.repos.threads.setCodexSession(current.id, id, Date.now(), checkpoint);
+            state.pendingSessionCheckpoint = undefined;
+            await this.client.request("thread/unsubscribe", { threadId: previousId }).catch(() => undefined);
+            this.input.logger.info("Repaired legacy Codex conversation call ids", { threadId: current.id, repairedCallIds: history.invalidCallIds, retainedItems: history.items.length });
+          } else {
+            const resumed = await this.client.request("thread/resume", { threadId: state.nativeId, ...settings });
+            this.recoverArtifacts(state, resumed);
+            state.resumed = true; state.rawEventsEnabled = false;
+          }
+          for (const source of state.historySources ?? []) {
+            try {
+              const original = await this.readNativeHistory(source.rolloutPath, source.turnIds.at(-1));
+              for (const filePath of original.artifactPaths) bridge.registerNativeArtifact(filePath);
+            } catch {
+              // A missing audit source must not prevent continuing the valid
+              // replacement. Exact historical forks still require that source.
+              this.input.logger.warn("Preserved Codex artifact history is unavailable", { threadId: current.id, sourceNativeId: source.nativeId });
+            }
+          }
         } catch (error) {
           if (!/thread.*(not found|does not exist|missing)|no rollout|unable to find.*thread/i.test(String(error))) throw error;
           this.input.logger.warn("Codex session missing; rebuilding from durable conversation history", { threadId: current.id });
@@ -215,7 +253,7 @@ export class CodexRuntimeManager implements AgentRuntimeService {
     state.nativeId = id; state.resumed = true; state.rawEventsEnabled = true; state.uncertainHistory = false;
     state.historyCheckpoint = history.snapshotMessageId ?? undefined;
     state.pendingSessionCheckpoint = history.snapshotMessageId;
-    await this.writeCheckpoint(current.id, id, history.snapshotMessageId);
+    await this.writeCheckpoint(current.id, id, history.snapshotMessageId, state.historySources);
     await this.input.repos.threads.setCodexSession(current.id, id, Date.now(), history.snapshotMessageId);
     state.pendingSessionCheckpoint = undefined;
     this.input.logger.info("Codex conversation ready", { threadId: current.id, importedFrom: history.source, importedItems: history.items.length });
@@ -233,6 +271,13 @@ export class CodexRuntimeManager implements AgentRuntimeService {
         if (record?.type === "imageGeneration" && typeof record.savedPath === "string") state.bridge.registerNativeArtifact(record.savedPath);
       }
     }
+  }
+
+  private async readNativeHistory(rolloutPath: string, lastTurnId?: string): Promise<CodexRolloutHistory> {
+    const [canonical, home] = await Promise.all([fs.realpath(rolloutPath), fs.realpath(this.home)]);
+    const relative = path.relative(home, canonical);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Codex rollout is outside the configured conversation directory.");
+    return codexRolloutHistory(await fs.readFile(canonical, "utf8"), { lastTurnId });
   }
 
   private recordUnavailable(error: unknown): boolean {
@@ -279,13 +324,29 @@ export class CodexRuntimeManager implements AgentRuntimeService {
     }
     const runtime = await this.runtime(source, user);
     const id = await this.ensureThread(runtime);
-    const forked = await this.client.request("thread/fork", { threadId: id, ...(entryId?.startsWith("codex:") ? { lastTurnId: entryId.slice(6) } : {}), cwd: E2B_WORKSPACE, approvalPolicy: "never", sandbox: "danger-full-access", config: { "features.shell_snapshot": false } }, signal);
+    const oldTurnId = entryId?.startsWith("codex:") ? entryId.slice(6) : undefined;
+    const original = oldTurnId ? runtime.historySources?.find(history => history.turnIds.includes(oldTurnId)) : undefined;
+    let forked: Record<string, unknown>;
+    let historySources = runtime.historySources;
+    if (original && oldTurnId) {
+      const history = await this.readNativeHistory(original.rolloutPath, oldTurnId);
+      const bridge = new ThreadBridge({ ...this.input, thread: target, user, browserRuntime: this.browserRuntime });
+      forked = await this.client.request("thread/start", { model: this.input.config.CODEX_MODEL, cwd: E2B_WORKSPACE, approvalPolicy: "never", sandbox: "danger-full-access", developerInstructions: `${await renderSystemPrompt({ user, config: this.input.config })}\n\n${this.instructions}`, serviceTier: this.input.config.CODEX_FAST_MODE ? "priority" : null,
+        config: { "features.deferred_executor": true, "features.unified_exec": true, "features.shell_snapshot": false, "skills.include_instructions": false, web_search: "live", model_context_window: this.input.config.MODEL_CONTEXT_TOKENS },
+        dynamicTools: nativeToolSpecs(bridge), environments: [], experimentalRawEvents: true, ephemeral: false }, signal);
+      const forkId = String(asRecord(forked.thread)?.id ?? "");
+      if (!forkId) throw new Error("Codex did not return a forked thread id.");
+      await this.client.request("thread/inject_items", { threadId: forkId, items: history.items }, signal);
+      historySources = [...runtime.historySources!.slice(0, runtime.historySources!.indexOf(original)), { ...original, turnIds: history.turnIds }];
+    } else {
+      forked = await this.client.request("thread/fork", { threadId: id, ...(oldTurnId ? { lastTurnId: oldTurnId } : {}), cwd: E2B_WORKSPACE, approvalPolicy: "never", sandbox: "danger-full-access", config: { "features.shell_snapshot": false, "skills.include_instructions": false } }, signal);
+    }
     const forkId = String(asRecord(forked.thread)?.id ?? "");
     if (!forkId) throw new Error("Codex did not return a forked thread id.");
     const chain = await this.input.repos.threads.chain(target);
     const rows = await this.input.repos.messages.listForThreadChain(chain);
     const checkpoint = rows.at(-1)?.id ?? null;
-    await this.writeCheckpoint(target.id, forkId, checkpoint);
+    await this.writeCheckpoint(target.id, forkId, checkpoint, historySources);
     await this.input.repos.threads.setCodexSession(target.id, forkId, Date.now(), checkpoint);
   }
 
@@ -310,7 +371,7 @@ export class CodexRuntimeManager implements AgentRuntimeService {
     if (auth.configured && this.circuit.acquire().allowed) {
       let id: string | undefined;
       try {
-        const started = await this.client.request("thread/start", { model: this.input.config.CODEX_HELPER_MODEL, developerInstructions: `${input.system}\nUse no tools.`, environments: [], ephemeral: true, approvalPolicy: "never", config: { "features.shell_snapshot": false, web_search: "disabled" } }, signal);
+        const started = await this.client.request("thread/start", { model: this.input.config.CODEX_HELPER_MODEL, developerInstructions: `${input.system}\nUse no tools.`, environments: [], ephemeral: true, approvalPolicy: "never", config: { "features.shell_snapshot": false, "skills.include_instructions": false, web_search: "disabled" } }, signal);
         id = String(asRecord(started.thread)?.id ?? "");
         let text = "";
         await this.waitForThread(id, event => {
@@ -353,27 +414,32 @@ export class CodexRuntimeManager implements AgentRuntimeService {
 
   private checkpointPath(threadId: number): string { return path.join(this.home, "executor-metadata", `conversation-${threadId}.json`); }
 
-  private async readCheckpoint(threadId: number): Promise<{ nativeId: string; historyMessageId: number | null; updatedAt: number } | undefined> {
+  private async readCheckpoint(threadId: number): Promise<{ nativeId: string; historyMessageId: number | null; updatedAt: number; historySources?: NativeHistorySource[] } | undefined> {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(this.checkpointPath(threadId), "utf8")));
       if (typeof value?.nativeId !== "string" || !value.nativeId || typeof value.updatedAt !== "number" || !Number.isFinite(value.updatedAt)) return;
       if (value.historyMessageId !== null && (typeof value.historyMessageId !== "number" || !Number.isSafeInteger(value.historyMessageId) || value.historyMessageId < 0)) return;
-      return { nativeId: value.nativeId, historyMessageId: value.historyMessageId as number | null, updatedAt: value.updatedAt };
+      const historySources = Array.isArray(value.historySources) ? value.historySources.flatMap(source => {
+        const record = asRecord(source);
+        return typeof record?.nativeId === "string" && typeof record.rolloutPath === "string" && Array.isArray(record.turnIds) && record.turnIds.every(id => typeof id === "string")
+          ? [{ nativeId: record.nativeId, rolloutPath: record.rolloutPath, turnIds: record.turnIds as string[] }] : [];
+      }) : undefined;
+      return { nativeId: value.nativeId, historyMessageId: value.historyMessageId as number | null, updatedAt: value.updatedAt, historySources };
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.input.logger.warn("Codex checkpoint metadata could not be read", { threadId }); }
   }
 
-  private async writeCheckpoint(threadId: number, nativeId: string, historyMessageId: number | null): Promise<void> {
+  private async writeCheckpoint(threadId: number, nativeId: string, historyMessageId: number | null, historySources?: NativeHistorySource[]): Promise<void> {
     const destination = this.checkpointPath(threadId);
     const temporary = `${destination}.${process.pid}.tmp`;
     try {
-      await fs.writeFile(temporary, JSON.stringify({ nativeId, historyMessageId, updatedAt: Date.now() }), { mode: 0o600 });
+      await fs.writeFile(temporary, JSON.stringify({ nativeId, historyMessageId, updatedAt: Date.now(), ...(historySources?.length ? { historySources } : {}) }), { mode: 0o600 });
       await fs.rename(temporary, destination);
     } finally { await fs.rm(temporary, { force: true }).catch(() => undefined); }
   }
 
   private async checkpointHistory(state: ThreadRuntime, messageId: number): Promise<void> {
     state.historyCheckpoint = Math.max(state.historyCheckpoint ?? 0, messageId);
-    if (state.nativeId) await this.writeCheckpoint(state.bridge.thread.id, state.nativeId, state.historyCheckpoint);
+    if (state.nativeId) await this.writeCheckpoint(state.bridge.thread.id, state.nativeId, state.historyCheckpoint, state.historySources);
     await this.input.repos.threads.setCodexHistoryMessageId(state.bridge.thread.id, state.historyCheckpoint);
   }
 

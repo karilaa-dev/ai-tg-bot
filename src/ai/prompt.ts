@@ -10,6 +10,7 @@ export const MAX_PROMPT_USER_NAME_CHARS = 120;
 export const MAX_PROMPT_THREAD_TITLE_CHARS = 160;
 export const MAX_PROMPT_FILE_NAME_CHARS = 180;
 export const MAX_PROMPT_FILE_SUMMARY_CHARS = 160;
+export const NATIVE_WORKSPACE_GUIDANCE = "Discover tools by filtering ALL_TOOLS with an exact name or narrow task term; print at most five matching names, then inspect only their descriptions. Never print the catalog. Use read_skill for bot workflows; host skill paths are unavailable in the remote workspace.";
 
 const PLACEHOLDER_RE = /\{\{([a-z_]+)\}\}/gu;
 let templatePromise: Promise<string> | undefined;
@@ -57,7 +58,7 @@ export async function renderSystemPrompt(input: {
       ? "Use native web_search for discovery and opening sources; use exec_command for relevant raw URLs or APIs."
       : "Use web_search for discovery, web_extract for readable pages, and bash for relevant raw URLs or APIs.",
     execution_guidance: native
-      ? "Use exec_command for shell work, apply_patch for text edits, and view_image for image inspection. Use advertised tool discovery when needed."
+      ? `Use exec_command for shell work, apply_patch for text edits, and view_image for image inspection. ${NATIVE_WORKSPACE_GUIDANCE}`
       : "Use bash for shell work and inspect_workspace_images or bash.inspect_images for image inspection.",
     image_generation_tool: native ? "image_gen.imagegen" : "generate_image",
     image_inspection_guidance: native ? "Inspect final rasters with view_image." : "Inspect final rasters with inspect_workspace_images or bash.inspect_images.",

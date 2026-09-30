@@ -176,18 +176,25 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
 
   prepareRemoteExecutor(request: PrepareRemoteExecutorRequest): Promise<SandboxThreadFileSyncResult> {
     const scope = { userId: request.userId, threadId: request.threadId };
+    const requestedAt = performance.now();
     return this.enqueue(scope, request.signal, async (state) => {
-      const prepared = await this.prepareSandbox(state, scope, request.files, ROTATION_GUARD_MS, request.signal, false,
-        async (sandbox) => {
-          const started = (async () => {
-            state.nativeExecutor = await prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal);
-            await request.onExecutorReady(state.nativeExecutor);
-          })();
-          state.nativeArtifactHashes ??= new Map();
-          const outcomes = await Promise.allSettled([started, stageNativeArtifacts(sandbox, request, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeArtifactHashes)]);
-          for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
-        }, request.allowRotation !== false);
-      return prepared.threadFiles;
+      const timings = { queueMs: Math.round(performance.now() - requestedAt) } as Record<string, number>;
+      try {
+        const prepared = await this.prepareSandbox(state, scope, request.files, ROTATION_GUARD_MS, request.signal, false,
+          async (sandbox) => {
+            state.nativeArtifactHashes ??= new Map();
+            await measurePreparation(timings, "artifactsMs", () => stageNativeArtifacts(sandbox, request, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeArtifactHashes));
+          }, request.allowRotation !== false,
+          async (sandbox, toolboxReady) => {
+            state.nativeExecutor = await measurePreparation(timings, "executorStartMs", () => prepareNativeExecutor(sandbox, this.input.config.E2B_REQUEST_TIMEOUT_MS, state.nativeExecutor, request.signal, () => toolboxReady));
+            await measurePreparation(timings, "executorConnectMs", () => request.onExecutorReady(state.nativeExecutor!));
+          }, timings);
+        this.input.logger?.info("Codex remote executor prepared", { ...scope, sandboxId: prepared.sandbox.id, totalMs: Math.round(performance.now() - requestedAt), timings });
+        return prepared.threadFiles;
+      } catch (error) {
+        this.input.logger?.warn("Codex remote executor preparation failed", { ...scope, sandboxId: state.sandboxId, totalMs: Math.round(performance.now() - requestedAt), timings, errorName: error instanceof Error ? error.name : "unknown" });
+        throw error;
+      }
     });
   }
 
@@ -375,6 +382,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     forcePrune = false,
     onSandboxReady?: (sandbox: E2BSandbox) => Promise<void>,
     nativeRotationBoundary?: boolean,
+    onSandboxAcquired?: (sandbox: E2BSandbox, toolboxReady: Promise<void>) => Promise<void>,
+    preparationTimings?: Record<string, number>,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
     const previousSync = state.threadFilesSync;
@@ -404,28 +413,30 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       operationWindowMs,
       this.idleTimeout(state, state.sandboxId, false).timeoutMs,
     );
-    let sandbox = await this.acquireConnection(state, scope, connectionWindowMs, signal);
+    let sandbox = await measurePreparation(preparationTimings, "acquireMs", () => this.acquireConnection(state, scope, connectionWindowMs, signal));
     let effectiveWindowMs = Math.max(
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
-    sandbox = await this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal, nativeRotationBoundary);
+    sandbox = await measurePreparation(preparationTimings, "rotationMs", () => this.rotateIfNeeded(state, scope, sandbox, effectiveWindowMs, signal, nativeRotationBoundary));
     effectiveWindowMs = Math.max(
       operationWindowMs,
       this.idleTimeout(state, sandbox.id, false).timeoutMs,
     );
-    await sandbox.setTimeout(effectiveWindowMs, signal);
-    await this.ensureSandboxToolbox(state, scope, sandbox, signal);
-    await this.ensureLayout(sandbox, signal);
+    await measurePreparation(preparationTimings, "renewMs", () => sandbox.setTimeout(effectiveWindowMs, signal));
+    const toolboxReady = measurePreparation(preparationTimings, "toolboxMs", () => this.ensureSandboxToolbox(state, scope, sandbox, signal));
+    const layoutReady = measurePreparation(preparationTimings, "layoutMs", () => this.ensureLayout(sandbox, signal));
     const outcomes = await Promise.allSettled([
-      syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal),
-      onSandboxReady?.(sandbox),
+      layoutReady.then(() => measurePreparation(preparationTimings, "restorationMs", () => syncThreadFiles({ ...this.input, downloadTelegramBytes: this.downloadTelegramBytes }, state, scope, sandbox, files, signal))),
+      toolboxReady,
+      layoutReady.then(() => onSandboxReady?.(sandbox)),
+      onSandboxAcquired?.(sandbox, toolboxReady),
     ]);
     for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
     const threadFiles = (outcomes[0] as PromiseFulfilledResult<SandboxThreadFileSyncResult>).value;
     if (forcePrune || state.sourcePruning?.sandboxId !== sandbox.id || Date.now() - state.sourcePruning.at >= 60_000) {
       state.sourcePruning = { sandboxId: sandbox.id, at: Date.now() };
-      await this.pruneFileSources(scope, sandbox, signal).catch((error) => {
+      await measurePreparation(preparationTimings, "pruneMs", () => this.pruneFileSources(scope, sandbox, signal)).catch((error) => {
         this.input.logger?.warn("failed to prune E2B file sources", {
           ...scope,
           sandboxId: sandbox.id,
@@ -1041,6 +1052,16 @@ function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string,
 
 function scopeKey(scope: SandboxScope): string {
   return `${scope.userId}:${scope.threadId}`;
+}
+
+async function measurePreparation<T>(timings: Record<string, number> | undefined, stage: string, operation: () => Promise<T>): Promise<T> {
+  if (!timings) return operation();
+  const startedAt = performance.now();
+  try {
+    return await operation();
+  } finally {
+    timings[stage] = Math.round(performance.now() - startedAt);
+  }
 }
 
 async function inspectFileSourceInventory(

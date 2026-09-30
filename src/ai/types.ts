@@ -27,7 +27,7 @@ export interface TurnInput {
   turnRunId?: number;
   signal?: AbortSignal;
   outgoingBuffers?: OutgoingBuffers;
-  deliveryTiming?: { startedAt: number; firstTextMs?: number; firstFileMs?: number; lastFileMs?: number };
+  deliveryTiming?: { startedAt: number; firstModelTextMs?: number; firstThinkingMs?: number; firstDraftMs?: number; firstTextMs?: number; firstFileMs?: number; lastFileMs?: number };
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
   onInferenceUsage?: (result: { provider?: string; model?: string; usage: InferenceUsageDelta }) => Promise<void>;
   onAwaitingDelivery?: (result: {

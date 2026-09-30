@@ -1,11 +1,12 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
-import { convertPiSessionEntries, loadThreadHistory } from "../../src/codex/history.js";
+import { codexRolloutHistory, convertPiSessionEntries, loadThreadHistory, normalizeHistoryCallIds } from "../../src/codex/history.js";
 
 function session(...entries: unknown[]): string {
   return [{ type: "session", version: 3, id: "old-session", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/old/bot" }, ...entries].map(entry => JSON.stringify(entry)).join("\n") + "\n";
@@ -15,7 +16,141 @@ function entry(id: string, parentId: string | null, role: string, content: unkno
   return { type: "message", id, parentId, timestamp: "2026-01-01T00:00:00.000Z", message: { role, content, ...extra } };
 }
 
+const nativeRecord = (type: string, payload: object) => ({ type, timestamp: "2026-01-01T00:00:00.000Z", payload });
+const nativeMessage = (role: string, text: string) => ({ type: "message", role, content: [{ type: role === "assistant" ? "output_text" : "input_text", text }] });
+const nativeTurn = (id: string, text: string, response?: string) => [
+  nativeRecord("event_msg", { type: "task_started", turn_id: id }),
+  nativeRecord("turn_context", { turn_id: id }),
+  nativeRecord("response_item", nativeMessage("user", text)),
+  ...(response ? [nativeRecord("response_item", nativeMessage("assistant", response))] : []),
+  nativeRecord("event_msg", { type: "task_complete", turn_id: id, ...(response ? {} : { error: { message: "Rejected before output" } }) }),
+];
+
+describe("persisted native history repair", () => {
+  it("rolls back the latest real user turn together with a newer manual compaction turn", () => {
+    const source = [
+      nativeRecord("session_meta", { id: "manual-compaction" }),
+      nativeRecord("response_item", nativeMessage("user", "Imported legacy user")),
+      ...nativeTurn("first", "First real native user", "First real native answer"),
+      ...nativeTurn("second", "Second real native user", "Second real native answer"),
+      nativeRecord("event_msg", { type: "task_started", turn_id: "manual" }),
+      nativeRecord("compacted", { replacement_history: [nativeMessage("user", "Manual summary of both native turns")] }),
+      nativeRecord("event_msg", { type: "task_complete", turn_id: "manual" }),
+      nativeRecord("event_msg", { type: "thread_rolled_back", num_turns: 1 }),
+    ].map(value => JSON.stringify(value)).join("\n");
+    const history = codexRolloutHistory(source);
+    expect(JSON.stringify(history.items)).toContain("Imported legacy user");
+    expect(JSON.stringify(history.items)).toContain("First real native answer");
+    expect(JSON.stringify(history.items)).not.toContain("Second real native");
+    expect(JSON.stringify(history.items)).not.toContain("Manual summary");
+    expect(history.turnIds).toEqual(["first"]);
+    const manual = codexRolloutHistory(source.split("\n").slice(0, -1).join("\n"), { lastTurnId: "manual" });
+    expect(JSON.stringify(manual.items)).toContain("Manual summary");
+  });
+
+  it("matches native tolerant loading for unknown audit records and a truncated tail", () => {
+    const source = [
+      JSON.stringify(nativeRecord("session_meta", { id: "truncated-audit" })),
+      JSON.stringify(nativeRecord("response_item", nativeMessage("user", "Preserved request"))),
+      JSON.stringify(nativeRecord("response_item", nativeMessage("assistant", "Preserved answer"))),
+      JSON.stringify({ type: "unknown_audit", payload: { future: true } }),
+      '{"type":"event_msg","payload":',
+    ].join("\n");
+    expect(codexRolloutHistory(source).items).toEqual([nativeMessage("user", "Preserved request"), nativeMessage("assistant", "Preserved answer")]);
+    expect(codexRolloutHistory(source).invalidCallIds).toBe(0);
+    expect(() => codexRolloutHistory('{"type":"session_meta"')).toThrow("header");
+  });
+
+  it("retains the active summary, later tools, and unanswered failed users while excluding rolled-back compactions and preserving old fork cutoffs", () => {
+    const long = "a".repeat(83);
+    const kept = "b".repeat(84);
+    const source = [
+      nativeRecord("session_meta", { id: "native-source", history_mode: "paginated" }),
+      nativeRecord("response_item", nativeMessage("user", "Old raw prefix")),
+      nativeRecord("response_item", { type: "function_call", name: "read", call_id: long, arguments: '{"file_id":17}' }),
+      nativeRecord("response_item", { type: "function_call_output", call_id: long, output: "Old raw result" }),
+      ...nativeTurn("before", "Before compaction", "Successful answer before compaction"),
+      nativeRecord("event_msg", { type: "task_started", turn_id: "after" }),
+      nativeRecord("turn_context", { turn_id: "after" }),
+      nativeRecord("response_item", nativeMessage("user", "After compaction")),
+      nativeRecord("compacted", { replacement_history: [nativeMessage("user", "Compacted summary [[chat-file:17]]"), { type: "function_call", call_id: kept, name: "read", arguments: "{}" }, { type: "function_call_output", call_id: kept, output: "Preserved compacted result" }] }),
+      nativeRecord("response_item", nativeMessage("assistant", "Successful answer after compaction")),
+      nativeRecord("event_msg", { type: "task_complete", turn_id: "after" }),
+      nativeRecord("event_msg", { type: "image_generation_end", saved_path: "/codex/generated_images/native-source/image.png" }),
+      nativeRecord("event_msg", { type: "item_completed", item: { type: "imageGeneration", savedPath: "/codex/generated_images/native-source/other.png" } }),
+      nativeRecord("event_msg", { type: "task_started", turn_id: "rollback" }),
+      nativeRecord("response_item", nativeMessage("user", "Rolled back request")),
+      nativeRecord("event_msg", { type: "image_generation_end", saved_path: "/codex/generated_images/native-source/rolled-back.png" }),
+      nativeRecord("compacted", { replacement_history: [nativeMessage("user", "Rolled back summary")] }),
+      nativeRecord("event_msg", { type: "thread_rolled_back", num_turns: 1 }),
+      ...nativeTurn("failed", "Unanswered failed request"),
+    ].map(value => JSON.stringify(value)).join("\n");
+    const history = codexRolloutHistory(source);
+    const serialized = JSON.stringify(history.items);
+    expect(serialized).toContain("Compacted summary [[chat-file:17]]");
+    expect(serialized).toContain("Preserved compacted result");
+    expect(serialized).toContain("Successful answer after compaction");
+    expect(serialized).not.toContain("Old raw prefix");
+    expect(serialized).not.toContain("Rolled back");
+    expect(serialized.match(/Unanswered failed request/g)).toHaveLength(1);
+    expect(history.invalidCallIds).toBe(1);
+    expect(history.turnIds).toEqual(["before", "after", "failed"]);
+    expect(history.artifactPaths).toEqual(["/codex/generated_images/native-source/image.png", "/codex/generated_images/native-source/other.png"]);
+    const calls = history.items.filter(item => item.call_id);
+    expect(calls[0]!.call_id).toBe(calls[1]!.call_id);
+    expect(String(calls[0]!.call_id).length).toBeLessThanOrEqual(64);
+    const fork = codexRolloutHistory(source, { lastTurnId: "before" });
+    expect(JSON.stringify(fork.items)).toContain("Old raw result");
+    expect(JSON.stringify(fork.items)).toContain("Successful answer before compaction");
+    expect(JSON.stringify(fork.items)).not.toContain("After compaction");
+    expect(fork.turnIds).toEqual(["before"]);
+    expect(fork.artifactPaths).toEqual([]);
+    const failedFork = codexRolloutHistory(source, { lastTurnId: "failed" });
+    expect(JSON.stringify(failedFork.items).match(/Unanswered failed request/g)).toHaveLength(1);
+    expect(failedFork.turnIds).toEqual(["before", "after", "failed"]);
+    expect(() => codexRolloutHistory(source, { lastTurnId: "absent" })).toThrow("fork turn");
+  });
+
+  it("does not repair invalid raw IDs that have already been replaced by a valid compacted window", () => {
+    const history = codexRolloutHistory([
+      nativeRecord("session_meta", { id: "valid-window" }),
+      nativeRecord("response_item", { type: "function_call", name: "old", call_id: "x".repeat(83), arguments: "{}" }),
+      nativeRecord("compacted", { replacement_history: [{ item: nativeMessage("user", "Valid current summary") }] }),
+    ].map(value => JSON.stringify(value)).join("\n"));
+    expect(history.invalidCallIds).toBe(0);
+    expect(history.items).toEqual([nativeMessage("user", "Valid current summary")]);
+  });
+
+  it("bounds old compaction text and discards old media instead of expanding the raw history", () => {
+    const history = codexRolloutHistory([
+      nativeRecord("session_meta", { id: "old-compaction" }),
+      nativeRecord("response_item", nativeMessage("user", "obsolete ".repeat(20_000))),
+      nativeRecord("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "Recent request" }, { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" }] }),
+      nativeRecord("compacted", { message: "Old local summary" }),
+    ].map(value => JSON.stringify(value)).join("\n"));
+    expect(JSON.stringify(history.items)).toContain("Recent request");
+    expect(JSON.stringify(history.items)).toContain("Old local summary");
+    expect(JSON.stringify(history.items)).not.toContain("input_image");
+    expect(JSON.stringify(history.items).length).toBeLessThan(81_000);
+  });
+});
+
 describe("Pi history conversion", () => {
+  it("normalizes long paired ids deterministically without truncation collisions or changing valid ids", () => {
+    const long = `call_${"a".repeat(78)}`;
+    const other = `${long.slice(0, -1)}b`;
+    const collision = `pi_${createHash("sha256").update(long).digest("base64url")}`;
+    const values = [long, other, collision, "valid-id"].flatMap(call_id => [{ type: "function_call", call_id }, { type: "function_call_output", call_id }]);
+    const normalized = normalizeHistoryCallIds(values);
+    expect(normalized).toEqual(normalizeHistoryCallIds(values));
+    expect(normalized.every(item => item.call_id.length <= 64)).toBe(true);
+    expect(new Set(normalized.map(item => item.call_id))).toHaveProperty("size", 4);
+    for (let index = 0; index < normalized.length; index += 2) expect(normalized[index]!.call_id).toBe(normalized[index + 1]!.call_id);
+    expect(normalized[4]!.call_id).toBe(collision);
+    expect(normalized[6]!.call_id).toBe("valid-id");
+    expect(values[0]!.call_id).toBe(long);
+    expect(normalizeHistoryCallIds(normalized)).toEqual(normalized);
+  });
   it("retains the active compacted branch, summary data, images, and paired tool results", () => {
     const input = session(
       entry("u1", null, "user", "Remember [[chat-file:41]] and the original request."),
