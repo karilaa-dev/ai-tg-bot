@@ -270,16 +270,25 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
-  it("records ambiguous Telegram delivery without replaying the accepted turn", async () => {
+  it.each(["confirmed", "unknown", "rejected"] as const)("persists %s delivery after a transient bookkeeping failure without replaying the turn", async (outcome) => {
     const { userId, threadId } = await ownership(repos, 804);
+    vi.spyOn(repos.turnRuns, outcome === "confirmed" ? "markSucceeded" : "markFailed")
+      .mockRejectedValueOnce(new Error("temporary database outage"));
     let executions = 0;
     const coordinator = createCoordinator(db, repos, async (input) => {
       executions += 1;
       await input.onAwaitingDelivery?.({ assistantMessageId: 77 });
-      await input.onDeliveryUnknown?.({
-        assistantMessageId: 77,
-        failureCode: "telegram_delivery_unknown",
-      });
+      try {
+        if (outcome === "confirmed") await input.onDeliveryConfirmed?.({ assistantMessageId: 77 });
+        else await (outcome === "unknown" ? input.onDeliveryUnknown : input.onDeliveryFailed)?.({
+          assistantMessageId: 77,
+          failureCode: `telegram_delivery_${outcome}`,
+        });
+      } catch {
+        // The engine reports errors but suppresses a duplicate final send once
+        // delivery has begun. Finalization must retain Telegram's actual outcome.
+        await input.onExecutionFailure?.("agent_execution_failed");
+      }
     });
 
     await coordinator.accept(request(userId, threadId, 4001, "ambiguous"));
@@ -288,10 +297,10 @@ describe("ThreadTurnCoordinator", () => {
     expect(executions).toBe(1);
     expect(await repos.turnRuns.listForThread(threadId)).toEqual([
       expect.objectContaining({
-        status: "failed",
-        delivery_status: "unknown",
+        status: outcome === "confirmed" ? "succeeded" : "failed",
+        delivery_status: outcome === "confirmed" ? "delivered" : outcome === "unknown" ? "unknown" : "failed",
         result_message_id: 77,
-        failure_code: "telegram_delivery_unknown",
+        failure_code: outcome === "confirmed" ? null : `telegram_delivery_${outcome}`,
       }),
     ]);
     await coordinator.shutdown();

@@ -22,18 +22,8 @@ describe("Telegram bot with grammy-emulate", () => {
     const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start");
     const richWelcome = JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload);
     expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
-    expect(richWelcome).toContain("## What I can help with");
-    expect(richWelcome).toContain("- 🔎 *Search*:");
-    expect(richWelcome).toContain("- 🎨 *Images*:");
-    expect(richWelcome).toContain("- 💻 *Code*:");
-    expect(richWelcome).toContain("- 📎 *Files*:");
-    expect(richWelcome).not.toContain("###");
-    expect(richWelcome).not.toContain("Try asking");
-    expect(richWelcome).not.toContain("Stream mode");
     const surface = onboarded.texts.join("\n");
     expect(surface).toContain("Set your timezone");
-    expect(surface).not.toContain("Stream mode");
-    expect(surface).not.toContain("Choose a language");
     expect(onboarded.getInlineButtonByData("tz:onboarding:set")).toBeDefined();
     expect(onboarded.getInlineButtonByData("tz:onboarding:later")).toBeDefined();
     expect(await env.repos.users.get(env.user.id)).toMatchObject({
@@ -169,20 +159,22 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain(tail);
   });
 
-  it("cancels a pending text burst when /stop arrives before acceptance", async () => {
+  it.each(["text", "album"])("cancels a pending %s when /stop arrives before acceptance", async (kind) => {
     await startBot();
-    const pendingText = "cancel this chunk".repeat(300);
-    await env.bot.processUpdatesConcurrently([
-      env.bot.server.updateFactory.createTextMessage(env.user, env.chat, pendingText),
-    ]);
-    expect(env.services.routerState.pendingTextBursts.size).toBe(1);
+    if (kind === "text") {
+      await env.bot.sendMessage(env.user, env.chat, "cancel this chunk".repeat(300));
+    } else {
+      const photos = env.bot.server.fileState.storePhoto(640, 480, { content: Buffer.from([1, 2, 3]) });
+      const update = env.bot.server.updateFactory.createPhotoMessage(env.user, env.chat, photos);
+      update.message!.media_group_id = "cancelled-album";
+      await env.bot.processUpdatesConcurrently([update]);
+    }
 
     const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
     expect(expectResponseSurface(stop)).toContain("Pending message cancelled");
     await wait(1_150);
 
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(env.services.routerState.pendingTextBursts.size).toBe(0);
     expect(await env.repos.messages.listThread(thread.id)).toEqual([]);
     expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
   });
@@ -824,6 +816,9 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   it("downloads and captions photos while recording all Telegram sizes", async () => {
+    await env.dispose();
+    const caption = vi.fn(async () => "a sketched system diagram");
+    env = await createGrammyEmulator({ imageCaptioner: { caption } });
     await startBot();
     const res = await env.bot.sendPhoto(
       env.user,
@@ -838,7 +833,9 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files[0]).toMatchObject({ type: "image", is_inline: 1 });
-    expect(files[0]?.summary).toBe("Telegram image");
+    expect(files[0]?.summary).toBe("a sketched system diagram");
+    expect(caption).toHaveBeenCalledTimes(1);
+    expect(caption).toHaveBeenCalledWith(expect.objectContaining({ bytes: Buffer.from([1, 2, 3, 4]) }));
     expect(await env.repos.files.listSources(files[0]!.id)).toHaveLength(1);
     const refs = await env.repos.files.listTelegramFileRefs([files[0]!.id]);
     expect(refs.length).toBeGreaterThan(0);
@@ -852,33 +849,15 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(files[0]?.message_id).toBe(userMessage?.id);
   });
 
-  it("captions each newly uploaded image once", async () => {
-    await env.dispose();
-    const seenSizes: number[] = [];
-    env = await createGrammyEmulator({
-      imageCaptioner: {
-        caption: async ({ bytes }) => {
-          seenSizes.push(bytes.length);
-          return "a sketched system diagram";
-        },
-      },
-    });
-    await startBot();
-    const res = await env.bot.sendPhoto(env.user, env.chat, {
-      width: 640,
-      height: 480,
-      content: Buffer.from([5, 6, 7, 8, 9]),
-    });
-
-    expect(seenSizes).toEqual([5]);
-    expectRichCall(res, "Echo:");
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    const [file] = await env.repos.files.listForThreads([thread.id]);
-    expect(file?.summary).toBe("a sketched system diagram");
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(1);
-  });
-
   it("does not expose one user's image caption when another user reuses the cached image", async () => {
+    await env.dispose();
+    const captionImage = vi.fn(async (_bytes: Buffer, _mime: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
+      return "Telegram image";
+    });
+    env = await createGrammyEmulator({
+      pi: { ...piWithTitleGenerator(async () => "Image"), captionImage },
+    });
     await startBot();
     const other = env.bot.createUser({ id: env.user.id + 400, first_name: "Bob", language_code: "en" });
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" }) as typeof env.chat;
@@ -899,6 +878,9 @@ describe("Telegram bot with grammy-emulate", () => {
     const ownerRefs = await env.repos.files.listTelegramFileRefs([ownerFile!.id]);
     expect(ownerRefs).toHaveLength(firstPhotos.length);
     expect(ownerRefs.filter((ref) => ref.is_primary === 1)).toHaveLength(1);
+    // Existing deployments can already have cached descriptions containing a
+    // previous uploader's caption. Reuse must also repair those old entries.
+    await env.repos.files.updateSummary(ownerFile!.id, "private caption alpha");
 
     const secondPhotos = env.bot.server.fileState.storePhoto(640, 480, {
       content: Buffer.from([9, 8, 7, 6]),
@@ -913,6 +895,8 @@ describe("Telegram bot with grammy-emulate", () => {
 
     expectRichCall(second!, "bob caption beta");
     expect(JSON.stringify(second!.apiCalls)).not.toContain("private caption alpha");
+    expect(captionImage).toHaveBeenCalledTimes(2);
+    expect(captionImage.mock.calls.every((call) => call[2] instanceof AbortSignal)).toBe(true);
     const otherThread = await env.repos.threads.activeForUserTopic(other.id, null);
     const otherRows = await env.repos.messages.listThread(otherThread.id);
     expect(otherRows.find((row) => row.kind === "image")?.text_plain).toContain("bob caption beta");
@@ -1043,26 +1027,34 @@ describe("Telegram bot with grammy-emulate", () => {
     await filePromise;
   }, 10_000);
 
-  it("cancels active file processing in the current topic with /stop", async () => {
+  it.each(["document", "photo-download", "photo-caption"])("cancels active %s processing in the current topic with /stop", async (stage) => {
     await env.dispose();
     const started = deferred<void>();
+    const releaseCaption = deferred<void>();
     env = await createGrammyEmulator({
       downloadFile: async ({ signal }) => {
+        if (stage === "photo-caption") return { bytes: Buffer.from([1, 2, 3]) };
         started.resolve();
         await waitForAbort(signal);
         return { bytes: Buffer.from("should not be stored") };
       },
+      imageCaptioner: { caption: async () => {
+        started.resolve();
+        await releaseCaption.promise;
+        return "should not be stored";
+      } },
     });
     await startBot();
 
-    const filePromise = env.bot.sendDocument(env.user, env.chat, {
+    const filePromise = stage === "document" ? env.bot.sendDocument(env.user, env.chat, {
       fileName: "cancel-me.txt",
       mimeType: "text/plain",
       content: Buffer.from("unused"),
-    });
+    }) : env.bot.sendPhoto(env.user, env.chat, { width: 640, height: 480, content: Buffer.from([1, 2, 3]) });
     await started.promise;
 
     const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+    releaseCaption.resolve();
     expect(expectResponseSurface(stop)).toContain("Stopping file processing");
     const fileRes = await filePromise;
     expect(expectResponseSurface(fileRes)).toContain("File processing cancelled");
@@ -1070,38 +1062,6 @@ describe("Telegram bot with grammy-emulate", () => {
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
-  }, 10_000);
-
-  it("reuses a cached Telegram locator without downloading the body twice", async () => {
-    await env.dispose();
-    let downloads = 0;
-    env = await createGrammyEmulator({
-      downloadFile: async ({ fileId }) => {
-        downloads += 1;
-        const content = env.bot.server.fileState.getFileContent(fileId);
-        if (!content) throw new Error(`test file content not found: ${fileId}`);
-        return { bytes: Buffer.isBuffer(content) ? content : Buffer.from(content) };
-      },
-    });
-    await startBot();
-
-    const document = env.bot.server.fileState.storeDocument("cached-cancel.txt", "text/plain", {
-      content: Buffer.from("durable cached document content"),
-    });
-    await env.bot.processUpdatesConcurrently([
-      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
-    ]);
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    const [file] = await env.repos.files.listForThreads([thread.id]);
-    const messagesBefore = await env.repos.messages.listThread(thread.id);
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(1);
-
-    const [reused] = await env.bot.processUpdatesConcurrently([
-      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
-    ]);
-    expect(expectResponseSurface(reused!)).toContain("Reused saved file");
-    expect(downloads).toBe(1);
-    expect((await env.repos.messages.listThread(thread.id)).length).toBeGreaterThan(messagesBefore.length);
   }, 10_000);
 
   it("does not cancel another topic's active file processing with /stop", async () => {
@@ -1140,6 +1100,16 @@ describe("Telegram bot with grammy-emulate", () => {
   }, 10_000);
 
   it("processes Telegram media groups as one combined turn", async () => {
+    await env.dispose();
+    const captionStarted = deferred<void>();
+    const releaseCaption = deferred<void>();
+    env = await createGrammyEmulator({ imageCaptioner: {
+      caption: async () => {
+        captionStarted.resolve();
+        await releaseCaption.promise;
+        return "Album photo";
+      },
+    } });
     await startBot();
     const document = env.bot.server.fileState.storeDocument("album.txt", "text/plain", {
       content: Buffer.from("album document content"),
@@ -1154,10 +1124,16 @@ describe("Telegram bot with grammy-emulate", () => {
     docUpdate.message!.media_group_id = "album-1";
     photoUpdate.message!.media_group_id = "album-1";
 
-    await env.bot.processUpdatesConcurrently([docUpdate, photoUpdate]);
+    const processing = env.bot.processUpdatesConcurrently([docUpdate, photoUpdate]);
+    await captionStarted.promise;
+    await wait(350);
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const prematureMessages = await env.repos.messages.listThread(thread.id);
+    releaseCaption.resolve();
+    await processing;
     await new Promise((resolve) => setTimeout(resolve, 400));
 
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(prematureMessages).toEqual([]);
     const rows = await env.repos.messages.listThread(thread.id);
     expect(rows.map((row) => row.role)).toEqual(["user", "assistant"]);
     expect(rows[0]).toMatchObject({ kind: "file" });

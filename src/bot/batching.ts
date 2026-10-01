@@ -72,6 +72,18 @@ export function cancelPendingTextBurstForContext(ctx: BotContext): boolean {
   return true;
 }
 
+export function cancelPendingMediaGroupsForContext(ctx: BotContext): boolean {
+  if (!ctx.chat || !ctx.thread) return false;
+  let cancelled = false;
+  for (const [key, pending] of ctx.services.routerState.pendingMediaGroups) {
+    if (pending.ctx.chat?.id !== ctx.chat.id || pending.ctx.thread?.id !== ctx.thread.id) continue;
+    clearTimeout(pending.timer);
+    ctx.services.routerState.pendingMediaGroups.delete(key);
+    cancelled = true;
+  }
+  return cancelled;
+}
+
 async function flushPendingTextBurst(ctx: BotContext, key: string): Promise<void> {
   const pendingTextBursts = ctx.services.routerState.pendingTextBursts;
   const pending = pendingTextBursts.get(key);

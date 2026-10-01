@@ -28,6 +28,7 @@ import {
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
 import {
+  cancelPendingMediaGroupsForContext,
   cancelPendingTextBurstForContext,
   enqueueUserText,
   flushPendingTextBurstForContext,
@@ -165,13 +166,14 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
     const textStopped = cancelPendingTextBurstForContext(ctx);
+    const mediaStopped = cancelPendingMediaGroupsForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
     const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
-    if (!textStopped && !fileStopped && !turnStopped) {
+    if (!textStopped && !mediaStopped && !fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-stopping"), threadExtra(ctx.thread));
-    } else if (textStopped) {
+    } else if (textStopped || mediaStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-pending-cancelled"), threadExtra(ctx.thread));
     }
   });

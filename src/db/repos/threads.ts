@@ -33,14 +33,18 @@ export class ThreadsRepo {
     title = "General",
     titleSource: ThreadTitleSource = "explicit",
   ): Promise<ThreadRow> {
-    const existing = await queryOne<ThreadRow>(
-      this.db,
-      topicId === null
-        ? sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id is null order by id desc limit 1`
-        : sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id = ${topicId} order by id desc limit 1`,
-    );
-    if (existing) return existing;
-    return this.create({ userId, topicId, title, titleSource });
+    return this.db.transaction(async tx => {
+      // Updates can arrive concurrently before any thread exists. SQLite's
+      // transaction is exclusive; PostgreSQL needs a stable row to lock.
+      if (tx.dialect === "postgres") await tx.query(sql`select tg_id from users where tg_id = ${userId} for update`);
+      const existing = await queryOne<ThreadRow>(
+        tx,
+        topicId === null
+          ? sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id is null order by id desc limit 1`
+          : sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id = ${topicId} order by id desc limit 1`,
+      );
+      return existing ?? new ThreadsRepo(tx).create({ userId, topicId, title, titleSource });
+    });
   }
 
   async create(input: {

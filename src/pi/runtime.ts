@@ -39,6 +39,7 @@ import { createTurnBudgetExtension } from "./turnBudget.js";
 import { createBotToolSearchExtension } from "./toolPolicy.js";
 import { createContextPruningExtension } from "./contextPruning.js";
 import { createCodexCompactionExtension } from "./codexCompaction.js";
+import { raceWithAbort } from "../files/cancel.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 const INITIAL_ACTIVE_TOOL_NAMES = ["read", "bash", "finish_response", "codemode", "tool_search"];
@@ -59,7 +60,7 @@ export interface PiRuntimeService {
     entryId?: string | null,
     signal?: AbortSignal,
   ): Promise<void>;
-  captionImage(bytes: Buffer, mimeType: string, userCaption?: string): Promise<string>;
+  captionImage(bytes: Buffer, mimeType: string, signal?: AbortSignal): Promise<string>;
   generateThreadTitle(input: ThreadTitlePromptInput): Promise<string>;
   abort(threadId: number): Promise<boolean>;
   dispose(): Promise<void>;
@@ -268,7 +269,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     signal?.throwIfAborted();
     const runtime = await this.runtime(thread, user);
     signal?.throwIfAborted();
-    const before = runtime.session.getSessionStats().totalMessages;
+    const before = contextMessageCount(runtime.session);
     const compaction = runtime.session.compact();
     const onAbort = () => runtime.session.abortCompaction();
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -276,7 +277,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     try {
       await compaction;
       signal?.throwIfAborted();
-      const after = runtime.session.getSessionStats().totalMessages;
+      const after = contextMessageCount(runtime.session);
       return Math.max(0, before - after);
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -318,15 +319,13 @@ export class PiRuntimeManager implements PiRuntimeService {
     return true;
   }
 
-  async captionImage(bytes: Buffer, mimeType: string, userCaption?: string): Promise<string> {
-    const prompt = userCaption?.trim()
-      ? `Describe this image. The Telegram caption was: ${userCaption.trim()}`
-      : "Describe this image for later conversation recall.";
+  async captionImage(bytes: Buffer, mimeType: string, signal?: AbortSignal): Promise<string> {
     return this.runIsolatedHelper({
       systemPrompt: "Describe the supplied image accurately in one compact paragraph for durable conversation memory. Mention visible text and details likely to matter later. Return only the description.",
-      prompt,
+      prompt: "Describe this image for later conversation recall.",
       images: [{ type: "image", data: bytes.toString("base64"), mimeType }],
       timeoutMs: this.input.config.PI_TURN_TIMEOUT_MS,
+      signal,
     });
   }
 
@@ -352,8 +351,11 @@ export class PiRuntimeManager implements PiRuntimeService {
     prompt: string;
     images?: ImageContent[];
     timeoutMs: number;
+    signal?: AbortSignal;
   }): Promise<string> {
+    input.signal?.throwIfAborted();
     await this.initialize();
+    input.signal?.throwIfAborted();
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
@@ -385,12 +387,15 @@ export class PiRuntimeManager implements PiRuntimeService {
     try {
       await withSessionTimeout(
         session,
-        session.prompt(input.prompt, {
+        (signal) => session.prompt(input.prompt, {
           images: input.images,
           expandPromptTemplates: false,
           source: "extension",
+          // Abort during SDK preflight must prevent a later provider request.
+          preflightResult: () => signal.throwIfAborted(),
         }),
         input.timeoutMs,
+        input.signal,
       );
       return lastAssistantText(session.messages).trim();
     } finally {
@@ -430,25 +435,40 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 }
 
+function contextMessageCount(session: AgentSession): number {
+  // Session statistics include compacted history. Count the raw message entries
+  // still represented in model context, excluding synthesized summaries.
+  return session.sessionManager.buildSessionProjection().entries.reduce((count, entry) =>
+    count + (entry.sourceEntry.type === "message" ? entry.messages.length : 0), 0);
+}
+
 function normalizeThinkingLevel(level: AppConfig["PI_THINKING_LEVEL"]): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
   return level === "off" ? "minimal" : level;
 }
 
-async function withSessionTimeout<T>(session: AgentSession, promise: Promise<T>, timeoutMs: number): Promise<T> {
-  if (timeoutMs <= 0) return promise;
-  let timer: NodeJS.Timeout | undefined;
+async function withSessionTimeout<T>(
+  session: AgentSession,
+  work: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  const deadline = new AbortController();
+  const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+  combined.throwIfAborted();
+  const onAbort = () => { void session.abort().catch(() => undefined); };
+  combined.addEventListener("abort", onAbort, { once: true });
+  const timer = timeoutMs > 0
+    ? setTimeout(() => deadline.abort(new Error(`Pi turn timed out after ${timeoutMs} ms.`)), timeoutMs)
+    : undefined;
+  let promise: Promise<T> | undefined;
   try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          void session.abort().catch(() => undefined);
-          reject(new Error(`Pi turn timed out after ${timeoutMs} ms.`));
-        }, timeoutMs);
-      }),
-    ]);
+    promise = work(combined);
+    return await raceWithAbort(promise, combined);
   } finally {
     if (timer) clearTimeout(timer);
+    combined.removeEventListener("abort", onAbort);
+    // Keep the helper alive until its cancelled prompt finishes unwinding.
+    if (combined.aborted) await promise?.catch(() => undefined);
   }
 }
 

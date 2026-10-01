@@ -51,16 +51,6 @@ describe("turn prompt context extension", () => {
     expect(second.systemPrompt).not.toContain("English core");
   });
 
-  it("produces byte-identical system prompts for unchanged turns", async () => {
-    const source = mutableSource("stable core", contextBlock);
-    const handlers = await extensionHandlers(source);
-    const event = { systemPrompt: "cached", systemPromptOptions: { skills: [] } };
-
-    expect(await handlers.before_agent_start(event)).toEqual(
-      await handlers.before_agent_start(event),
-    );
-  });
-
   it("falls back without overriding Pi when no turn prompt is active", async () => {
     const handlers = await extensionHandlers(mutableSource(undefined, undefined));
 

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { appendPublishedWebsiteNotice } from "../../src/ai/agentTurnEngine.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
 import { loadTestConfig } from "../../src/config.js";
-import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
 
 describe("E2B-backed agent tools", () => {
   it("publishes through the explicit tool and registers the final-answer notice", async () => {
@@ -14,10 +13,15 @@ describe("E2B-backed agent tools", () => {
       url: "https://3000-sandbox-1.e2b.app/",
       pausesAfterMinutes: 15,
     };
-    const runtime = fakeRuntime();
-    runtime.publishWebsite = vi.fn(async () => published);
+    const runtime = { publishWebsite: vi.fn(async () => published) };
     const register = vi.fn();
-    const tool = createPublishWebsiteTool(buildInput(runtime, register));
+    const tool = createPublishWebsiteTool({
+      config: loadTestConfig(),
+      user: { tg_id: 9, lang: "en" },
+      thread: { id: 10 },
+      commandRuntime: runtime,
+      registerPublishedWebsite: register,
+    } as never);
 
     const result = await tool.execute({ port: 3000, site_dir: "/site", path: "/" });
 
@@ -40,57 +44,4 @@ describe("E2B-backed agent tools", () => {
     expect(appendPublishedWebsiteNotice("Готово.", [published.url], "ru"))
       .toContain("останется активной 15 минут");
   });
-
 });
-
-function buildInput(runtime: CommandRuntime, registerPublishedWebsite?: (website: never) => void) {
-  return {
-    config: loadTestConfig(),
-    repos: {
-      threads: { chain: async (thread: unknown) => [thread] },
-      messages: { listIdsForScopes: async () => [] },
-      files: {
-        listForMessages: async () => [],
-        listForThreads: async () => [],
-        listRecoverableIds: async (fileIds: number[]) => fileIds,
-        listByIds: async () => [],
-        listTelegramFileRefs: async () => [],
-      },
-    },
-    user: { tg_id: 9, lang: "en" },
-    thread: { id: 10 },
-    commandRuntime: runtime,
-    resolveFile: async () => { throw new Error("not used"); },
-    registerPublishedWebsite,
-  } as never;
-}
-
-function fakeRuntime(): CommandRuntime {
-  return {
-    materializeFiles: async () => ({ directory: "/home/user/telegram-files", available: 0, files: [] }),
-    execute: async () => commandResult(),
-    readWorkspaceFile: async () => {
-      throw new Error("not used");
-    },
-    readSourceFile: async () => {
-      throw new Error("not used");
-    },
-    publishWebsite: async () => {
-      throw new Error("not used");
-    },
-    dispose: async () => undefined,
-  };
-}
-
-function commandResult(overrides: Partial<SandboxCommandResult> = {}): SandboxCommandResult {
-  return {
-    stdout: "",
-    stderr: "",
-    exitCode: 0,
-    timedOut: false,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    threadFiles: { directory: "/home/user/telegram-files", available: 0, files: [] },
-    ...overrides,
-  };
-}

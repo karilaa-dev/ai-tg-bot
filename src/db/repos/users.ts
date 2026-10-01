@@ -38,9 +38,11 @@ export class UsersRepo {
   }
 
   async toggleStream(tgId: number): Promise<UserRow> {
-    const user = await this.get(tgId);
-    const next = user?.stream_mode ? 0 : 1;
-    await this.db.execute(sql`update users set stream_mode = ${next} where tg_id = ${tgId}`);
-    return (await this.get(tgId))!;
+    const user = await queryOne<UserRow>(this.db, sql`
+      update users set stream_mode = case when stream_mode = 0 then 1 else 0 end
+      where tg_id = ${tgId} returning *
+    `);
+    if (!user) throw new Error(`User #${tgId} no longer exists.`);
+    return user;
   }
 }

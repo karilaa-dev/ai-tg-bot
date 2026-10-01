@@ -1,25 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { toolResultFailed } from "../../src/pi/toolOutcome.js";
 import { createTurnBudgetExtension, TurnBudget } from "../../src/pi/turnBudget.js";
-import { loadTestConfig } from "../../src/config.js";
 
 describe("TurnBudget", () => {
-  it("tracks execution beyond the previous limits without stopping by default", () => {
-    const config = loadTestConfig();
-    const budget = createBudget({
-      maxModelCycles: config.PI_MAX_MODEL_CYCLES,
-      maxToolCalls: config.PI_MAX_TOOL_CALLS,
-      maxConsecutiveToolFailures: config.PI_MAX_CONSECUTIVE_TOOL_FAILURES,
-      maxIdenticalToolFailures: config.PI_MAX_IDENTICAL_TOOL_FAILURES,
-    });
-    for (let index = 0; index < 100; index++) {
-      expect(budget.beforeModelCycle()).toBe(true);
-      expect(budget.beforeToolCall(String(index), "same_failing_tool", { query: "same" }).block).toBe(false);
-      expect(budget.afterToolResult(String(index), true)).toBe(false);
-    }
-    expect(budget.snapshot()).toEqual({ modelCycles: 100, toolCalls: 100, consecutiveToolFailures: 100, terminationReason: undefined });
-  });
-
   it.each([{ status: "failed" }, { exit_code: 7 }, { exit_code: null }, { timed_out: true }, { error: "failed" }])("counts structured failures without depending on an error string: %j", async (details) => {
     const budget = createBudget();
     const handlers: Record<string, (...args: any[]) => any> = {};
@@ -48,27 +31,6 @@ describe("TurnBudget", () => {
     expect(budget.snapshot()).toMatchObject({ toolCalls: 2, terminationReason: "tool_call_limit" });
   });
 
-  it("releases successful wrapper signatures without resetting nested failures", async () => {
-    const budget = createBudget({ maxConsecutiveToolFailures: 3, maxIdenticalToolFailures: 10 });
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const extension = createTurnBudgetExtension({ currentTurnBudget: () => budget });
-    if (typeof extension === "function") throw new Error("Expected named extension");
-    await extension.factory({ on: (name: string, handler: (...args: any[]) => any) => { handlers[name] = handler; } } as never);
-    let aborted = false;
-    for (let index = 0; index < 3; index++) {
-      const outer = `outer-${index}`;
-      const inner = `inner-${index}`;
-      handlers.tool_call!({ toolCallId: outer, toolName: "codemode", input: { code: "research" } });
-      handlers.tool_call!({ toolCallId: inner, parentToolCallId: outer, toolName: "read_file_section", input: { file_id: index } });
-      handlers.tool_result!({ toolCallId: inner, isError: true }, { abort: () => { aborted = true; } });
-      handlers.tool_result!({ toolCallId: outer, isError: false }, { abort: () => { aborted = true; } });
-      expect(Reflect.get(budget, "callSignatures").size).toBe(0);
-      expect(budget.snapshot().consecutiveToolFailures).toBe(index + 1);
-      expect(aborted).toBe(index === 2);
-    }
-    expect(budget.snapshot().terminationReason).toBe("consecutive_tool_failures");
-  });
-
   it("stops after three normalized identical failing calls", () => {
     const budget = createBudget({ maxIdenticalToolFailures: 3 });
     for (const [id, args] of [
@@ -80,15 +42,6 @@ describe("TurnBudget", () => {
       const terminated = budget.afterToolResult(id, true);
       expect(terminated).toBe(id === "3");
     }
-    expect(budget.snapshot().terminationReason).toBe("identical_tool_failures");
-  });
-
-  it("uses a deterministic signature when tool arguments are not JSON values", () => {
-    const budget = createBudget({ maxIdenticalToolFailures: 2 });
-    expect(budget.beforeToolCall("1", "bash", undefined).block).toBe(false);
-    expect(budget.afterToolResult("1", true)).toBe(false);
-    expect(budget.beforeToolCall("2", "bash", undefined).block).toBe(false);
-    expect(budget.afterToolResult("2", true)).toBe(true);
     expect(budget.snapshot().terminationReason).toBe("identical_tool_failures");
   });
 

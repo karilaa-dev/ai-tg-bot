@@ -60,7 +60,6 @@ const allowedHtmlTags = new Set([
 
 export function closeOpenStructures(md: string): string {
   let out = balanceFences(md);
-  out = trimIncompleteTableLine(out);
   out = closeTag(out, "summary");
   out = closeTag(out, "details");
   return out;
@@ -112,16 +111,6 @@ function fenceWholeBlocks(md: string): string {
 function balanceFences(md: string): string {
   const count = md.match(/^```/gm)?.length ?? 0;
   return count % 2 === 1 ? `${md}\n\`\`\`` : md;
-}
-
-function trimIncompleteTableLine(md: string): string {
-  const lines = md.split("\n");
-  const last = lines.at(-1);
-  if (last && last.includes("|") && !last.trim().endsWith("|")) {
-    lines.pop();
-    return lines.join("\n");
-  }
-  return md;
 }
 
 function closeTag(md: string, tag: string): string {

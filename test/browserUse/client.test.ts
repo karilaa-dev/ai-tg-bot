@@ -78,9 +78,9 @@ describe("BrowserUseClient", () => {
   });
 
   it("redacts API and browser connection credentials from errors", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      detail: "secret https://abc.cdp.browser-use.com?token=visible",
-    }), { status: 500, headers: { "content-type": "application/json" } })));
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("secret https://abc.cdp.browser-use.com?token=visible");
+    }));
     const client = createBrowserUseClient(loadTestConfig({ BROWSER_USE_API_KEY: "secret" }));
 
     await expect(client.listActiveBrowsers()).rejects.toSatisfy((error: Error) => {

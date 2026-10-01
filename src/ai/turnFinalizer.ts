@@ -3,6 +3,7 @@ import type { Logger } from "../logger.js";
 
 export class TurnFinalizer {
   private phase: "running" | "cancelled" | "delivering" | "confirmed" | "unknown" | "rejected" = "running";
+  private pendingDeliveryWrite?: () => Promise<void>;
   get deliveryUnknown(): boolean { return this.phase === "unknown"; }
   get cancelRequested(): boolean { return this.phase === "cancelled"; }
   executionFailed = false;
@@ -59,7 +60,8 @@ export class TurnFinalizer {
     // Set the in-memory terminal outcome before the database round trip so a
     // concurrent /stop cannot overwrite an already confirmed Telegram send.
     this.phase = "confirmed";
-    await this.persistConfirmed();
+    this.pendingDeliveryWrite = () => this.persistConfirmed();
+    await this.persistDeliveryOutcome();
   }
 
   private persistConfirmed(): Promise<void> {
@@ -71,20 +73,31 @@ export class TurnFinalizer {
   async unknownDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
     this.resultMessageId = assistantMessageId;
     this.phase = "unknown";
-    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown", this.input.ownerId);
+    this.pendingDeliveryWrite = () => this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown", this.input.ownerId);
+    await this.persistDeliveryOutcome();
   }
 
   async rejectDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
     this.resultMessageId = assistantMessageId;
     this.phase = "rejected";
-    await this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed", this.input.ownerId);
+    this.pendingDeliveryWrite = () => this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed", this.input.ownerId);
+    await this.persistDeliveryOutcome();
   }
 
   recordExecutionFailure(): void {
+    if (this.phase === "confirmed" || this.phase === "unknown" || this.phase === "rejected") return;
     this.executionFailed = true;
   }
 
+  private async persistDeliveryOutcome(): Promise<void> {
+    // Keep the actual send outcome across a failed bookkeeping write. The engine
+    // suppresses errors after delivery starts, so finalization must retry it.
+    await this.pendingDeliveryWrite?.();
+    this.pendingDeliveryWrite = undefined;
+  }
+
   async finishEngine(): Promise<{ deliveredSuccessfully: boolean }> {
+    await this.persistDeliveryOutcome();
     if (this.phase === "confirmed") {
       return { deliveredSuccessfully: !this.executionFailed };
     }
@@ -101,9 +114,9 @@ export class TurnFinalizer {
   }
 
   async finishException(): Promise<void> {
-    if (this.phase === "confirmed") {
-      await this.persistConfirmed().catch((error) => {
-        this.input.logger.error("confirmed turn outcome could not be persisted", {
+    if (this.phase === "confirmed" || this.phase === "unknown" || this.phase === "rejected") {
+      await this.persistDeliveryOutcome().catch((error) => {
+        this.input.logger.error("turn delivery outcome could not be persisted", {
           turnRunId: this.input.turnRunId,
           threadId: this.input.threadId,
           error: String(error),
@@ -111,7 +124,7 @@ export class TurnFinalizer {
       });
     } else if (this.cancelRequested) {
       await this.input.repos.turnRuns.markCancelled(this.input.turnRunId, this.input.ownerId);
-    } else if (this.phase !== "unknown" && this.phase !== "rejected") {
+    } else {
       await this.input.repos.turnRuns.markFailed(
         this.input.turnRunId,
         "turn_execution_failed",

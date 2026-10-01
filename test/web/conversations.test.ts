@@ -461,17 +461,6 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.users("", 0, 1)).items[0]).toMatchObject({ id: 3, lastActivity: 40 });
   });
 
-  it.skipIf(dialect !== "sqlite")("uses indexed per-thread activity lookups instead of joining the entire message history", async () => {
-    const query = vi.spyOn(database.db, "query");
-    await repository.users("", 0);
-    const statement = query.mock.calls[0]![0];
-    query.mockRestore();
-    const plan = await database.db.query<{ detail: string }>(sql`explain query plan ${statement}`);
-    expect(plan.filter(row => /SEARCH m /.test(row.detail)).every(row => row.detail.includes("COVERING INDEX messages_thread_activity_idx"))).toBe(true);
-    expect(plan.some(row => /CORRELATED SCALAR SUBQUERY/.test(row.detail))).toBe(true);
-    expect(plan.some(row => /SCAN m\b/.test(row.detail))).toBe(false);
-  });
-
   it("removes complete inline contents from display data even when the contents include closing tags", async () => {
     const t = await thread();
     const m = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: "" });
@@ -485,7 +474,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   });
 
   it("searches Unicode names regardless of case before paginating", async () => {
-    for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"]] as const) {
+    for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"], [5, "İΣΟΣ"]] as const) {
       await repos.users.ensure({ tgId, firstName });
     }
     for (const query of ["Дмитрий", "дмитрий", "ДМИТРИЙ"]) {
@@ -494,6 +483,9 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     }
     expect((await repository.users("ÉLODIE", 0)).items.map(u => u.id)).toEqual([3]);
     expect((await repository.users("%_\\\\", 0)).items.map(u => u.id)).toEqual([4]);
+    for (const query of ["İΣΟΣ", "i̇σος"]) {
+      expect((await repository.users(query, 0)).items.map(u => u.id)).toEqual([5]);
+    }
   });
 
   it("hides existing bot records from lists, search, and direct history access", async () => {

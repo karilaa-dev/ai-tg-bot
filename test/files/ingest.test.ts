@@ -111,6 +111,26 @@ describe("file ingestion", () => {
     expect(outline[0]?.chunk_index).toBe(chunks[0]?.idx);
   });
 
+  it("indexes CSV headers and record ranges consistently when creating and refreshing files", async () => {
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 229, firstName: "Csv", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const initial = await ingestFileBytes({
+      config, repo: repos.files, userId: user.tg_id, threadId: thread.id,
+      name: "records.csv", bytes: Buffer.from('id,note\n1,"two\nlines"\n2,last\n\n'),
+    });
+    expect(await repos.files.chunks(initial.fileId)).toMatchObject([{
+      heading_path: "rows 1-2", content: 'id,note\n1,"two\nlines"\n2,last',
+    }]);
+    await refreshExtractedFileBytes({
+      config, repo: repos.files, file: (await repos.files.get(initial.fileId))!,
+      bytes: Buffer.from("id,note\n3,changed\n"),
+    });
+    expect(await repos.files.chunks(initial.fileId)).toMatchObject([{
+      heading_path: "rows 1-1", content: "id,note\n3,changed",
+    }]);
+  });
+
   it("rebuilds durable lexical chunks when remote bytes change", async () => {
     const config = testConfig({ FILE_INLINE_TOKENS: 1 });
     const user = await repos.users.ensure({ tgId: 225, firstName: "Refresh", lang: "en" });

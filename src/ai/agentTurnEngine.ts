@@ -8,7 +8,7 @@ import type { MessageRow, UserRow } from "../db/types.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
 import { isThreadNotFound } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
-import { StreamShaper, type ToolCallMetadata } from "./shaper.js";
+import { StreamShaper } from "./shaper.js";
 import type { CreatedFileAttachment } from "../files/types.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import { asRecord, safeJson } from "../util/records.js";
@@ -549,9 +549,6 @@ interface TurnStreamStats {
   contentEvents: number;
   toolCalls: number;
   toolResults: number;
-  generateImageToolCalls: number;
-  generateImageToolError: string | undefined;
-  generateImageReadyAt: number | undefined;
 }
 
 function createPiStreamLoop(
@@ -565,9 +562,6 @@ function createPiStreamLoop(
     contentEvents: 0,
     toolCalls: 0,
     toolResults: 0,
-    generateImageToolCalls: 0,
-    generateImageToolError: undefined,
-    generateImageReadyAt: undefined,
   };
   let cycleStartedAt = Date.now();
   let cycle = 0;
@@ -575,7 +569,7 @@ function createPiStreamLoop(
   const updatePresenter = () => {
     streamer?.update({
       thinkingMd: shaper.streamingThinkingMd(),
-      answerMd: shaper.visibleAnswer(),
+      answerMd: shaper.finalAnswer(),
     });
   };
   const updateStatus = () => {
@@ -620,7 +614,6 @@ function createPiStreamLoop(
       toolStartedAt.set(event.toolCallId, Date.now());
       shaper.onToolCall(event.toolName, event.args);
       counts.toolCalls += 1;
-      if (event.toolName === "generate_image") counts.generateImageToolCalls += 1;
       input.logger.info("Pi tool call started", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
@@ -635,11 +628,6 @@ function createPiStreamLoop(
       toolStartedAt.delete(event.toolCallId);
       shaper.onToolResult(event.toolName, summarizeToolOutput(event.toolName, event.result));
       counts.toolResults += 1;
-      if (event.toolName === "generate_image") {
-        counts.generateImageToolError = toolErrorText(event.result, event.isError)
-          ?? counts.generateImageToolError;
-        if (!event.isError) counts.generateImageReadyAt = Date.now();
-      }
       input.logger.info("Pi tool call finished", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
@@ -785,65 +773,6 @@ export function buildFinalThinkingSummary(input: {
   return sections.join("\n\n");
 }
 
-type StreamEvent = "content" | "tool-call" | "tool-result";
-
-export function handleStreamPart(shaper: StreamShaper, part: unknown, metadata?: ToolCallMetadata): StreamEvent | undefined {
-  return handleNormalizedStreamPart(shaper, normalizeStreamPart(part), metadata);
-}
-
-function handleNormalizedStreamPart(
-  shaper: StreamShaper,
-  normalized: NormalizedStreamPart | undefined,
-  metadata?: ToolCallMetadata,
-): StreamEvent | undefined {
-  switch (normalized?.kind) {
-    case "text":
-      shaper.onTextDelta(normalized.text);
-      return "content";
-    case "text-final":
-      shaper.onTextFinal(normalized.text);
-      return "content";
-    case "reasoning":
-      shaper.onReasoningDelta(normalized.text);
-      return "content";
-    case "tool-call":
-      shaper.onToolCall(normalized.toolName, normalized.input, metadata);
-      return "tool-call";
-    case "tool-result":
-      shaper.onToolResult(normalized.toolName, summarizeToolOutput(normalized.toolName, normalized.output));
-      return "tool-result";
-    default:
-      return undefined;
-  }
-}
-
-type NormalizedStreamPart =
-  | { kind: "text"; text: string }
-  | { kind: "text-final"; text: string }
-  | { kind: "reasoning"; text: string }
-  | { kind: "tool-call"; toolName: string; input: unknown }
-  | { kind: "tool-result"; toolName: string; output: unknown };
-
-export function normalizeStreamPart(part: unknown): NormalizedStreamPart | undefined {
-  const anyPart = part as Record<string, unknown> & { type?: string };
-  switch (anyPart.type) {
-    case "text-delta":
-      return { kind: "text", text: String(anyPart.text ?? anyPart.delta ?? "") };
-    case "text-final":
-      return { kind: "text-final", text: String(anyPart.text ?? "") };
-    case "reasoning-delta":
-      return { kind: "reasoning", text: String(anyPart.text ?? anyPart.delta ?? "") };
-    case "tool-call":
-    case "tool-input-available":
-      return { kind: "tool-call", toolName: String(anyPart.toolName ?? "tool"), input: anyPart.input ?? anyPart.args };
-    case "tool-result":
-    case "tool-output-available":
-      return { kind: "tool-result", toolName: String(anyPart.toolName ?? "tool"), output: anyPart.output ?? anyPart.result };
-    default:
-      return undefined;
-  }
-}
-
 function summarizeToolOutput(toolName: string, value: unknown): string {
   const wrapper = asRecord(value);
   const record = asRecord(wrapper?.details) ?? wrapper;
@@ -909,21 +838,6 @@ function summarizeToolOutput(toolName: string, value: unknown): string {
 
   const text = typeof value === "string" ? value : safeJson(value);
   return text && text !== "{}" ? formatCount(1, "result") : "done";
-}
-
-export function toolErrorText(value: unknown, includeContentText = false): string | undefined {
-  const record = asRecord(value);
-  const details = asRecord(record?.details);
-  for (const candidate of [record?.error, details?.error, record?.message, details?.message]) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
-  if (!includeContentText) return undefined;
-  const content = Array.isArray(record?.content) ? record.content : [];
-  for (const part of content) {
-    const text = asRecord(part)?.text;
-    if (typeof text === "string" && text.trim()) return text.trim();
-  }
-  return undefined;
 }
 
 function formatCount(count: number, singular: string, plural = `${singular}s`): string {

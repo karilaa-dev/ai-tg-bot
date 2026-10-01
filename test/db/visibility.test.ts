@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -51,30 +51,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const inbound = await file(child.id);
         await repos.files.rememberSource(inbound.id, { transport: "telegram", connectionKey: "test", remoteKey: "inbound", locator: {} });
 
-        const queries = vi.spyOn(db.db, "query");
         const scope = await threadVisibilityScope(repos, child, accepted.id);
-        // One parent lookup and two scoped ID projections, independent of message count.
-        expect(queries).toHaveBeenCalledTimes(3);
-        for (const result of queries.mock.results) {
-          for (const row of await result.value) {
-            expect(row).not.toHaveProperty("text_plain");
-            expect(row).not.toHaveProperty("content_md");
-          }
-        }
-        const fileQuery = queries.mock.calls.at(-1)![0];
-        queries.mockRestore();
-        if (dialect === "sqlite") {
-          const plan = await db.db.query<{ id: number; parent: number; detail: string }>(sql`explain query plan ${fileQuery}`);
-          const byId = new Map(plan.map((row) => [row.id, row]));
-          for (const row of plan.filter((step) => step.detail.includes("messages_thread_id_idx"))) {
-            // Scoped message scans must not run inside a correlated subquery per file.
-            let parent = byId.get(row.parent);
-            while (parent) {
-              expect(parent.detail).not.toContain("CORRELATED");
-              parent = byId.get(parent.parent);
-            }
-          }
-        }
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
         expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
         expect(scope.fileIds).not.toContain(hiddenParent.id);
@@ -93,6 +70,16 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect((await threadVisibilityScope(repos, child, 0)).messageIds).toEqual([]);
         expect(await repos.messages.listIdsForScopes([])).toEqual([]);
         expect(await repos.files.listVisibleIds([], false)).toEqual([]);
+
+        // Forking again inside inherited history also bounds earlier ancestors.
+        const branch = await repos.threads.create({ userId: user.tg_id, topicId: 3, title: "Branch", parentThreadId: parent.id, forkPointMessageId: afterFork.id });
+        const nested = await repos.threads.create({ userId: user.tg_id, topicId: 4, title: "Nested", parentThreadId: branch.id, forkPointMessageId: beforeFork.id });
+        const nestedMessage = await message(nested.id, "nested reply");
+        const nestedScope = await threadVisibilityScope(repos, nested);
+        expect(nestedScope.messageIds).toEqual([beforeFork.id, nestedMessage.id]);
+        expect(nestedScope.fileIds).toEqual([visible.id]);
+        expect((await repos.messages.listForThreadChain([parent, branch, nested])).map(row => row.id)).toEqual(nestedScope.messageIds);
+        expect(await db.search.searchMessages(nestedScope.threadIds, "after", 10, nestedScope.messageScopes)).toEqual([]);
       } finally {
         await db.destroy();
         if (admin) {

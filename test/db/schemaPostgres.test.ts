@@ -32,7 +32,12 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
 
     const repos = createRepos(database.db, database.search);
     const user = await repos.users.ensure({ tgId: 42, firstName: "Current", lang: "en" });
-    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const threads = await Promise.all(Array.from({ length: 5 }, () => repos.threads.activeForUserTopic(user.tg_id, null)));
+    expect(new Set(threads.map(thread => thread.id)).size).toBe(1);
+    const thread = threads[0]!;
+    const toggled = await Promise.all([repos.users.toggleStream(user.tg_id), repos.users.toggleStream(user.tg_id)]);
+    expect(toggled.map(user => user.stream_mode).sort()).toEqual([0, 1]);
+    expect((await repos.users.get(user.tg_id))?.stream_mode).toBe(1);
     const message = await repos.messages.insert({
       threadId: thread.id,
       role: "user",

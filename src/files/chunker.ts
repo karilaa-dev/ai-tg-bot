@@ -1,3 +1,5 @@
+import { parse } from "csv-parse/sync";
+
 interface Chunk {
   idx: number;
   headingPath: string | null;
@@ -28,15 +30,18 @@ export function chunkMarkdown(md: string, targetChars = 1800, overlapChars = 270
 }
 
 export function chunkCsv(raw: string, targetRows = 500): Chunk[] {
-  const lines = raw.split(/\r?\n/);
-  const header = lines[0] ?? "";
+  const records = parse(raw, {
+    raw: true, relax_column_count: true, relax_quotes: true, skip_empty_lines: true,
+  }) as unknown as Array<{ raw: string }>;
+  const rows = records.map((record) => record.raw.replace(/(?:\r\n|\r|\n)$/, ""));
+  const header = rows[0] ?? "";
   const chunks: Chunk[] = [];
-  for (let start = 1; start < lines.length; start += targetRows) {
-    const end = Math.min(lines.length, start + targetRows);
+  for (let start = 1; start < rows.length; start += targetRows) {
+    const end = Math.min(rows.length, start + targetRows);
     chunks.push({
       idx: chunks.length,
       headingPath: `rows ${start}-${end - 1}`,
-      content: [header, ...lines.slice(start, end)].join("\n"),
+      content: [header, ...rows.slice(start, end)].join("\n"),
     });
   }
   return chunks;

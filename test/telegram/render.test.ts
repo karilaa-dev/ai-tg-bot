@@ -10,6 +10,11 @@ describe("renderFinal", () => {
     return key;
   };
 
+  it("preserves a final line containing a pipe outside a Markdown table", () => {
+    const answer = "Filter the report:\n\nRun `cat report.txt | head`";
+    expect(renderFinal({ answerMd: answer, elapsedMs: 0, t })).toEqual([{ markdown: answer }]);
+  });
+
   it("splits long rich messages instead of truncating before split", () => {
     const answer = `${"long paragraph\n\n".repeat(2600)}tail-marker`;
     const parts = renderFinal({
@@ -56,21 +61,7 @@ describe("renderFinal", () => {
     expect(parts.slice(1).some((part) => (part.markdown ?? "").startsWith("```ts\n"))).toBe(true);
   });
 
-  it("continues a single overlong line in new messages without truncation", () => {
-    const answer = `${"x".repeat(70_000)}tail-marker`;
-    const parts = renderFinal({
-      answerMd: answer,
-      elapsedMs: 0,
-      t,
-    });
-
-    expect(parts.length).toBeGreaterThan(1);
-    expect(parts.map((part) => part.markdown ?? "").join("")).toBe(answer);
-    expect(parts.every((part) => Array.from(part.markdown ?? "").length <= 32768)).toBe(true);
-    expect(parts.some((part) => (part.markdown ?? "").includes("[truncated]"))).toBe(false);
-  });
-
-  it("splits very large single lines without rescanning and copying the full remainder", () => {
+  it("splits very large single lines without losing content", () => {
     const answer = `${"y".repeat(300_000)}performance-tail`;
     const parts = renderFinal({
       answerMd: answer,

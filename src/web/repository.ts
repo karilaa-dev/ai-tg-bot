@@ -31,8 +31,27 @@ export class ConversationRepository {
   }
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
-    const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
-    const lower = this.db.dialect === "sqlite" ? sql`unicode_lower` : sql`lower`;
+    const visibleUser = this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`;
+    let matches = sql`true`;
+    if (search) {
+      const normalized = search.toLowerCase();
+      if (this.db.dialect === "postgres") {
+        // Scan identities only for searches so Unicode case mapping is independent
+        // of PostgreSQL's locale; activity ordering and pagination remain in SQL.
+        const identities = await this.db.query<Pick<WebUser, "id" | "name" | "username">>(sql`
+          select u.tg_id as id, u.first_name as name, u.username from users u where ${visibleUser}
+        `);
+        const ids = identities.filter(user => [user.name ?? "", user.username ?? "", String(user.id)]
+          .some(value => value.toLowerCase().includes(normalized))).map(user => user.id);
+        if (!ids.length) return page([], offset, limit);
+        matches = sql`u.tg_id = any(${sql.param(ids)}::bigint[])`;
+      } else {
+        const pattern = `%${normalized.replace(/[\\%_]/g, "\\$&")}%`;
+        matches = sql`unicode_lower(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
+          or unicode_lower(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
+          or cast(u.tg_id as text) like ${pattern} escape ${"\\"}`;
+      }
+    }
     const messageActivity = sql`max((select max(m.created_at) from messages m where m.thread_id = t.id))`;
     const rows = await this.db.query<WebUser>(sql`
       select u.tg_id as id, u.first_name as name, u.username,
@@ -40,10 +59,7 @@ export class ConversationRepository {
           else coalesce(max(t.created_at), u.created_at) end as "lastActivity",
         count(distinct t.id) as "threadCount"
       from users u left join threads t on t.user_id = u.tg_id
-      where ${this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`}
-        and (${lower}(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
-        or ${lower}(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
-        or cast(u.tg_id as text) like ${pattern} escape ${"\\"})
+      where ${visibleUser} and (${matches})
       group by u.tg_id, u.first_name, u.username, u.created_at
       order by "lastActivity" desc, u.tg_id desc limit ${limit + 1} offset ${offset}
     `);
@@ -84,13 +100,6 @@ export class ConversationRepository {
     }
     chain.reverse();
     const scopes = messageSearchScopesForChain(chain);
-    // A later fork can point into inherited history: apply its bound to all earlier ancestors.
-    let ceiling: number | undefined;
-    for (let i = scopes.length - 1; i >= 0; i--) {
-      const own = scopes[i]!.maxMessageId;
-      if (own !== undefined) ceiling = Math.min(ceiling ?? own, own);
-      if (ceiling !== undefined) scopes[i]!.maxMessageId = ceiling;
-    }
     return { thread, chain, scopes };
   }
 

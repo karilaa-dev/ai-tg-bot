@@ -1,5 +1,5 @@
 import type { FileRow } from "../db/types.js";
-import { isAbortError, throwIfAborted } from "../files/cancel.js";
+import { isAbortError, raceWithAbort, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { audioFormat, detectAudioType, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
@@ -175,7 +175,7 @@ async function ingestTelegramFile(
     const canonical = await claimTelegramSource(ctx, file, source, input);
     return {
       outcome: "ingested",
-      prepared: await preparedTelegramFile(ctx, input, canonical),
+      prepared: await preparedTelegramFile(ctx, input, canonical, signal),
     };
   }
 
@@ -218,7 +218,10 @@ async function ingestTelegramFile(
   }
   if (input.type === "image") {
     const mimeType = detectImageMediaType(bytes) ?? input.mime ?? "image/jpeg";
-    const summary = await ctx.services.pi.captionImage(bytes, mimeType, input.caption);
+    // The file cache is shared across users. Keep private attachment captions
+    // in the accepted turn, never in the reusable image description.
+    const summary = await raceWithAbort(ctx.services.pi.captionImage(bytes, mimeType, signal), signal);
+    throwIfAborted(signal);
     const file = await ctx.services.repos.files.insertFile({
       userId: ctx.user.tg_id,
       threadId: ctx.thread.id,
@@ -233,7 +236,7 @@ async function ingestTelegramFile(
     const canonical = await claimTelegramSource(ctx, file, { ...source, mimeType }, input);
     return {
       outcome: "ingested",
-      prepared: await preparedTelegramFile(ctx, input, canonical),
+      prepared: await preparedTelegramFile(ctx, input, canonical, signal),
     };
   }
   const ingested = await ingestFileBytes({
@@ -255,7 +258,7 @@ async function ingestTelegramFile(
   const canonical = await claimTelegramSource(ctx, stored, source, input);
   return {
     outcome: "ingested",
-    prepared: canonical.id === ingested.fileId ? ingested : await preparedTelegramFile(ctx, input, canonical),
+    prepared: canonical.id === ingested.fileId ? ingested : await preparedTelegramFile(ctx, input, canonical, signal),
   };
 }
 
@@ -265,10 +268,6 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   // paid transcription and status messages when Telegram redelivers accepted audio.
   if ((input.mediaKind === "voice" || input.mediaKind === "audio")
     && await ctx.services.repos.turnRuns.hasTelegramUpdate(ctx.update.update_id)) return;
-  if (input.type === "image") {
-    await handleTelegramImage(ctx, input);
-    return;
-  }
   const activeFileJobs = ctx.services.routerState.activeFileJobs;
   const jobKey = activeFileJobKey(ctx);
   if (!jobKey) return;
@@ -326,10 +325,16 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     failureKey = "error-generic";
     const result = await ingestTelegramFile(ctx, input, {
       signal: controller.signal,
-      status,
-      logLabel: "file",
+      status: input.type === "image" ? undefined : status,
+      logLabel: input.type === "image" ? "image" : "file",
     });
+    throwIfAborted(controller.signal);
     if (result === "too-big" || result === undefined) return;
+    if (input.type === "image") {
+      clearJob();
+      await handlePreparedTelegramFile(ctx, input, result.prepared);
+      return;
+    }
     if (transcript !== undefined) {
       const bounded = await boundTranscript(ctx.services.config, ctx.services.repos.audioTranscripts, {
         userId: ctx.user.tg_id, threadId: ctx.thread.id, fileId: result.prepared.fileId,
@@ -382,51 +387,6 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   }
 }
 
-async function handleTelegramImage(ctx: BotContext, input: TelegramFileInput): Promise<void> {
-  if (!ctx.user || !ctx.thread || !ctx.chat) return;
-  // image ingest is intentionally not /stop-able: media-group albums run one job per photo concurrently
-  const startedAt = Date.now();
-  ctx.services.logger.info("image ingest job starting", ctxLogMeta(ctx, {
-    name: input.name,
-    size: input.size ?? null,
-    mediaGroupId: input.mediaGroupId ?? null,
-  }));
-  try {
-    const result = await ingestTelegramFile(ctx, input, {
-      signal: undefined,
-      logLabel: "image",
-    });
-    if (result === "too-big" || result === undefined) return;
-    if (result.outcome === "reused-cached") {
-      ctx.services.logger.info("image ingest job reused cached image", ctxLogMeta(ctx, {
-        fileId: result.prepared.fileId,
-        name: input.name,
-        ms: Date.now() - startedAt,
-      }));
-    } else if (result.outcome === "reused-hash") {
-      ctx.services.logger.info("image ingest job reused content hash", ctxLogMeta(ctx, {
-        fileId: result.prepared.fileId,
-        name: input.name,
-        ms: Date.now() - startedAt,
-      }));
-    } else {
-      ctx.services.logger.info("image ingest job complete", ctxLogMeta(ctx, {
-        fileId: result.prepared.fileId,
-        name: input.name,
-        ms: Date.now() - startedAt,
-      }));
-    }
-    await handlePreparedTelegramFile(ctx, input, result.prepared);
-  } catch (err) {
-    if (isAbortError(err)) {
-      ctx.services.logger.info("image ingest job cancelled", ctxLogMeta(ctx, { name: input.name }));
-      return;
-    }
-    ctx.services.logger.warn("image ingest failed", { err: String(err), name: input.name });
-    await replyWithThreadFallback(ctx, ctx.t("error-generic"), threadExtra(ctx.thread));
-  }
-}
-
 async function prepareCachedTelegramFile(
   ctx: BotContext,
   input: TelegramFileInput,
@@ -441,7 +401,7 @@ async function prepareCachedTelegramFile(
     mimeType: input.mime,
   }), input);
   assertCompatibleTelegramFile(canonical, input);
-  const prepared = await preparedTelegramFile(ctx, input, canonical);
+  const prepared = await preparedTelegramFile(ctx, input, canonical, signal);
   ctx.services.logger.debug("prepared indexed telegram file", ctxLogMeta(ctx, {
     fileId: canonical.id,
     inline: prepared.inline,
@@ -487,8 +447,22 @@ async function preparedTelegramFile(
   ctx: BotContext,
   input: TelegramFileInput,
   file: FileRow,
+  signal?: AbortSignal,
 ): Promise<PreparedTelegramFile> {
+  throwIfAborted(signal);
   assertCompatibleTelegramFile(file, input);
+  if (file.type === "image" && file.user_id !== ctx.user!.tg_id) {
+    // Older cached descriptions (and generated images) may contain the owner's
+    // private prompt. Replace that description before sharing the file record.
+    const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
+      fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
+    }), signal);
+    const mimeType = detectImageMediaType(downloaded.bytes) ?? input.mime ?? "image/jpeg";
+    const summary = await raceWithAbort(ctx.services.pi.captionImage(downloaded.bytes, mimeType, signal), signal);
+    throwIfAborted(signal);
+    await ctx.services.repos.files.updateSummary(file.id, summary);
+    file = { ...file, summary };
+  }
   const chunks = file.is_inline ? [] : await ctx.services.repos.files.chunks(file.id);
   return {
     fileId: file.id,

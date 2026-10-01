@@ -17,6 +17,7 @@ import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./
 import { withModelIdentity } from "./modelIdentity.js";
 import { projectCodexCheckpoint } from "./codexCheckpoint.js";
 import { ProviderUsageCapture } from "./providerUsage.js";
+import { raceWithAbort } from "../files/cancel.js";
 
 const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
 const TELEGRAM_MAIN_MODEL = "main";
@@ -165,6 +166,7 @@ async function* routeStream(input: {
   let status: number | undefined;
   let resetAt: number | undefined;
   let emitted = false;
+  let fallback = false;
   const usage = new ProviderUsageCapture(input.codex.provider, input.codex.id, {
     fastMode: input.config.CODEX_FAST_MODE,
     ...(input.config.CODEX_FAST_MODE ? { requestedServiceTier: "priority" } : {}),
@@ -172,7 +174,13 @@ async function* routeStream(input: {
   });
   const buffered: AssistantMessageEvent[] = [];
   try {
-    const auth = await input.registry.getApiKeyAndHeaders(input.codex);
+    const auth = await raceWithAbort(
+      Promise.resolve().then(() => input.registry.getApiKeyAndHeaders(input.codex)),
+      AbortSignal.any([
+        AbortSignal.timeout(input.config.PI_REQUEST_TIMEOUT_MS),
+        ...(input.options?.signal ? [input.options.signal] : []),
+      ]),
+    );
     if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? "Missing openai-codex OAuth token" : auth.error);
     const projected = projectCodexCheckpoint(input.context, input.codex.id);
     const stream = requestEvents({
@@ -206,6 +214,10 @@ async function* routeStream(input: {
     for await (const event of stream) {
       if (event.type === "done") usage.record(event.message);
       else if (event.type === "error") usage.record(event.error);
+      if (event.type === "error" && input.options?.signal?.aborted) {
+        yield event;
+        return;
+      }
       if (!emitted && event.type === "error") {
         const message = event.error.errorMessage;
         if (retryableCodexError({ status, message })) {
@@ -215,8 +227,8 @@ async function* routeStream(input: {
             error: message,
             openRouterModel: input.openRouter.id,
           });
-          yield* openRouterEvents(input);
-          return;
+          fallback = true;
+          break;
         }
         attempt.recordSuccess();
         emitted = true;
@@ -240,30 +252,34 @@ async function* routeStream(input: {
       yield event;
       if (event.type === "done") attempt.recordSuccess();
     }
-    if (!emitted) {
+    if (!emitted && !fallback) {
       for (const pending of buffered) yield pending;
     }
-    attempt.recordSuccess();
+    if (!fallback) attempt.recordSuccess();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const retryable = retryableCodexError({ status, message });
-    if (retryable) attempt.recordFailure(resetAt);
-    else attempt.recordSuccess();
+    const retryable = !input.options?.signal?.aborted && retryableCodexError({ status, message });
+    if (!input.options?.signal?.aborted) {
+      if (retryable) attempt.recordFailure(resetAt);
+      else attempt.recordSuccess();
+    }
     if (!emitted && retryable) {
       input.logger?.warn("Codex provider setup failed; falling back to OpenRouter", {
         status,
         error: message,
         openRouterModel: input.openRouter.id,
       });
-      yield* openRouterEvents(input);
-      return;
+      fallback = true;
+    } else {
+      yield { type: "error", reason: "error", error: providerErrorMessage(input.codex, message) };
     }
-    yield { type: "error", reason: "error", error: providerErrorMessage(input.codex, message) };
-    return;
   } finally {
     usage.record();
     attempt.release();
   }
+  // Fallback failures belong to OpenRouter. Catching them as Codex failures
+  // would start another fallback, including after already emitting its output.
+  if (fallback) yield* openRouterEvents(input);
 }
 
 function providerErrorMessage(model: Model<Api>, message: string): AssistantMessage {

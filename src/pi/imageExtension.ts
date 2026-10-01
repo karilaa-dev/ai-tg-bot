@@ -313,7 +313,13 @@ async function generateWithFallback(
   const attempt = bridge.providerRouter.circuit.acquire();
   if (!attempt.allowed) return requestOpenRouterImage(bridge, request);
   try {
-    const auth = await bridge.modelRegistry.getApiKeyAndHeaders(codexModel);
+    const auth = await raceWithAbort(
+      Promise.resolve().then(() => bridge.modelRegistry.getApiKeyAndHeaders(codexModel)),
+      AbortSignal.any([
+        AbortSignal.timeout(bridge.config.PI_REQUEST_TIMEOUT_MS),
+        ...(request.signal ? [request.signal] : []),
+      ]),
+    );
     if (!auth.ok || !auth.apiKey)
       throw new Error(
         auth.ok ? "Missing openai-codex OAuth token" : auth.error,

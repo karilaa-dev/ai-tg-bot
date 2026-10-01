@@ -1,9 +1,8 @@
-import { SentenceAssembler } from "../telegram/sentences.js";
 import { asRecord, numberField, stringField } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 
 type ReasoningThinkingItem = {
-  kind: "reasoning" | "demoted";
+  kind: "reasoning";
   text: string;
 };
 
@@ -16,10 +15,6 @@ type ToolThinkingItem = {
 };
 
 type ThinkingItem = ReasoningThinkingItem | ToolThinkingItem;
-
-export type ToolCallMetadata = {
-  fileName?: string;
-};
 
 type ThinkingRunSummary = {
   reasoningSummaries: string[];
@@ -40,16 +35,11 @@ type ToolCallRecord = {
 };
 
 export class StreamShaper {
-  thinking: ThinkingItem[] = [];
-  private seg = new SentenceAssembler();
-  private finalText: string | undefined;
+  private thinking: ThinkingItem[] = [];
+  private text = "";
   private startsNewReasoningBlock = false;
   private toolStatus = new Map<string, { label: string; summary?: string }>();
   private toolCalls: ToolCallRecord[] = [];
-
-  private assembledText(): string {
-    return this.seg.completed.join("") + this.seg.remainder;
-  }
 
   private registerTool(
     name: string,
@@ -88,22 +78,12 @@ export class StreamShaper {
   }
 
   onTextDelta(text: string): void {
-    this.finalText = undefined;
-    this.seg.push(text);
+    this.text += text;
   }
 
-  onTextFinal(text: string): void {
-    this.finalText = text;
-    this.seg = new SentenceAssembler();
-    this.seg.push(text);
-  }
-
-  onToolCall(name: string, input?: unknown, metadata: ToolCallMetadata = {}): void {
-    const text = this.assembledText();
-    if (text.trim()) this.thinking.push({ kind: "demoted", text });
-    this.finalText = undefined;
-    this.registerTool(name, toolDisplay(name, input, metadata), { called: true });
-    this.seg = new SentenceAssembler();
+  onToolCall(name: string, input?: unknown): void {
+    this.registerTool(name, toolDisplay(name, input), { called: true });
+    this.text = "";
   }
 
   onToolResult(name: string, summary: string): void {
@@ -120,50 +100,18 @@ export class StreamShaper {
     this.registerTool(name, toolDisplay(name), { summary, called: false });
   }
 
-  visibleAnswer(): string {
-    return this.assembledText();
-  }
-
   finalAnswer(): string {
-    return this.finalText ?? this.assembledText();
-  }
-
-  thinkingMd(): string {
-    return this.compactThinkingMd();
+    return this.text;
   }
 
   streamingThinkingMd(): string {
     return this.thinking
       .map((item) => {
-        if (item.kind === "demoted") return "";
         if (item.kind === "tool") return formatToolLine(item.label, item.summary);
         return cleanReasoningMarkdown(item.text);
       })
       .filter(Boolean)
       .join("\n\n");
-  }
-
-  compactThinkingMd(): string {
-    const chunks: string[] = [];
-    let pendingReasoningTitles: string[] = [];
-    const flushReasoningTitles = () => {
-      if (!pendingReasoningTitles.length) return;
-      chunks.push(pendingReasoningTitles.join("\n"));
-      pendingReasoningTitles = [];
-    };
-    for (const item of this.thinking) {
-      if (item.kind === "demoted") continue;
-      if (item.kind === "reasoning") {
-        pendingReasoningTitles.push(...reasoningTitles(item.text));
-        continue;
-      }
-      if (item.kind === "tool") {
-        flushReasoningTitles();
-        chunks.push(formatToolLine(item.label, item.summary));
-      }
-    }
-    flushReasoningTitles();
-    return chunks.filter(Boolean).join("\n\n");
   }
 
   toolStatusMd(): string {
@@ -192,16 +140,6 @@ function aggregateToolCounts(tools: ToolCallRecord[]): ToolCountSummary[] {
   return [...counts.entries()].map(([label, count]) => ({ label, count }));
 }
 
-function reasoningTitles(text: string): string[] {
-  const title = cleanReasoningMarkdown(text).split("\n").map((line) => normalizeReasoningTitle(line)).find(Boolean);
-  return title && looksLikeReasoningTitle(title) ? [title] : [];
-}
-
-function looksLikeReasoningTitle(line: string): boolean {
-  if (!line || line.length > 120) return false;
-  return !/[.!?]$/.test(line);
-}
-
 function cleanReasoningMarkdown(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
@@ -214,10 +152,6 @@ function cleanReasoningMarkdown(text: string): string {
     .replace(/([.!?])(\*\*[^*\n]{1,120}\*\*(?=\n|$))/g, "$1\n\n$2")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function normalizeReasoningTitle(line: string): string {
-  return line.replace(/^#{1,6}\s+/, "").replace(/^\*\*(.*)\*\*$/, "$1").trim();
 }
 
 function toolLabel(name: string): string {
@@ -285,7 +219,7 @@ function formatToolLine(label: string, summary?: string): string {
   return compact ? `${label} (${compact})` : label;
 }
 
-function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata = {}): { key: string; label: string; summaryLabel?: string } {
+function toolDisplay(name: string, input?: unknown): { key: string; label: string; summaryLabel?: string } {
   if (name === "read") {
     const path = stringField(asRecord(input), "path")?.replaceAll("\\", "/");
     const skill = path?.match(/(?:^|\/)([^/]+)\/SKILL\.md$/)?.[1];
@@ -294,12 +228,12 @@ function toolDisplay(name: string, input?: unknown, metadata: ToolCallMetadata =
       return { key: `skill:${path}`, label, summaryLabel: label };
     }
   }
-  const subject = toolSubject(name, input, metadata);
+  const subject = toolSubject(name, input);
   const label = subject ? `${toolLabel(name)} <code>${escapeHtml(subject)}</code>` : toolLabel(name);
   return { key: `${name}:${subject ?? ""}`, label };
 }
 
-function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata = {}): string | undefined {
+function toolSubject(name: string, input?: unknown): string | undefined {
   const record = asRecord(input);
   switch (name) {
     case "read":
@@ -332,7 +266,7 @@ function toolSubject(name: string, input?: unknown, metadata: ToolCallMetadata =
       return truncateSubject(stringField(record, "path"), 64);
     case "search_in_file":
     case "read_file_section":
-      return metadata.fileName ?? fileIdSubject(record);
+      return fileIdSubject(record);
     case "materialize_chat_files": {
       const fileIds = record?.file_ids;
       if (!Array.isArray(fileIds)) return undefined;
