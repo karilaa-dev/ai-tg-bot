@@ -320,25 +320,23 @@ async function generateWithFallback(
       auth.apiKey,
       auth.headers,
     );
-    bridge.providerRouter.circuit.recordSuccess();
+    attempt.recordSuccess();
     return result;
   } catch (error) {
     const status = httpStatus(error);
     const message = error instanceof Error ? error.message : String(error);
     if (!retryableCodexError({ status, message })) {
-      bridge.providerRouter.circuit.recordSuccess();
+      attempt.recordSuccess();
       throw error;
     }
-    bridge.providerRouter.circuit.recordFailure(errorResetAt(error));
+    attempt.recordFailure(errorResetAt(error));
     bridge.logger?.warn(
       "Codex image generation failed; falling back to OpenRouter",
       { status, error: message },
     );
     return requestOpenRouterImage(bridge, request);
   } finally {
-    if (attempt.probe && bridge.providerRouter.circuit.state().probeActive) {
-      bridge.providerRouter.circuit.releaseProbe();
-    }
+    attempt.release();
   }
 }
 

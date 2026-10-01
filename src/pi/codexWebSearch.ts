@@ -63,15 +63,15 @@ async function requestSearch(runtime: CodexRequestRuntime, query: string, signal
         tools: [{ type: "web_search", external_web_access: runtime.config.CODEX_WEB_SEARCH_MODE === "live" }],
         tool_choice: { type: "web_search" }, include: ["web_search_call.action.sources"] }),
     });
-    circuit.recordSuccess();
+    attempt.recordSuccess();
     return result;
   } catch (error) {
     if (!signal?.aborted) {
-      if (retryableCodexError({ status, message: String(error) })) circuit.recordFailure(resetAt);
-      else circuit.recordSuccess();
+      if (retryableCodexError({ status, message: String(error) })) attempt.recordFailure(resetAt);
+      else attempt.recordSuccess();
     }
     throw error;
   } finally {
-    if (attempt.probe && circuit.state().probeActive) circuit.releaseProbe();
+    attempt.release();
   }
 }

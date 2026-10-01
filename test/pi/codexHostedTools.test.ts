@@ -95,7 +95,9 @@ describe("Codex hosted search transport", () => {
     const input = runtime();
     const circuit = new CodexCircuitBreaker(() => now);
     input.providerRouter.circuit = circuit;
-    circuit.recordFailure();
+    const failure = circuit.acquire();
+    if (!failure.allowed) throw new Error("Expected an allowed attempt");
+    failure.recordFailure();
     const requests = transport([{ type: "web_search_call", id: "ws_1", status: "completed" }]);
     await expect(searchCodexWeb(input, "facts", 1)).rejects.toThrow("temporarily unavailable");
     expect(requests).toHaveLength(0);
@@ -120,11 +122,41 @@ describe("Codex hosted search transport", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it.each([200, 400, 429])("keeps a newer inference cooldown when an older search finishes with HTTP %s", async status => {
+    transport([{ type: "web_search_call", id: "ws_1", status: "completed" }]);
+    if (status !== 200) vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+      { error: { message: status === 429 ? "quota exhausted" : "invalid request" } }, { status },
+    )));
+    const input = runtime();
+    const search = searchCodexWeb(input, "facts", 1);
+    const inference = input.providerRouter.circuit.acquire();
+    if (!inference.allowed) throw new Error("Expected an allowed inference attempt");
+    inference.recordFailure();
+    const cooldown = input.providerRouter.circuit.state();
+    if (status === 200) await search;
+    else await expect(search).rejects.toThrow();
+    expect(input.providerRouter.circuit.state()).toEqual(cooldown);
+    await expect(searchCodexWeb(input, "more facts", 1)).rejects.toThrow("temporarily unavailable");
+  });
+
+  it("ignores an older search failure after newer inference succeeds", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { message: "quota exhausted" } }, { status: 429 })));
+    const input = runtime();
+    const search = searchCodexWeb(input, "facts", 1);
+    const inference = input.providerRouter.circuit.acquire();
+    if (!inference.allowed) throw new Error("Expected an allowed inference attempt");
+    inference.recordSuccess();
+    await expect(search).rejects.toThrow();
+    expect(input.providerRouter.circuit.state().open).toBe(false);
+  });
+
   it("releases a cancelled recovery probe without extending the cooldown", async () => {
     let now = Date.now();
     const input = runtime();
     input.providerRouter.circuit = new CodexCircuitBreaker(() => now);
-    input.providerRouter.circuit.recordFailure();
+    const failure = input.providerRouter.circuit.acquire();
+    if (!failure.allowed) throw new Error("Expected an allowed attempt");
+    failure.recordFailure();
     now = input.providerRouter.circuit.state().nextProbeAt;
     const before = input.providerRouter.circuit.state();
     const controller = new AbortController();

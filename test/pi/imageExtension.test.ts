@@ -439,7 +439,9 @@ describe("Pi generate_image extension", () => {
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Rejected Images" });
     let now = 10_000;
     const circuit = new CodexCircuitBreaker(() => now);
-    circuit.recordFailure();
+    const failure = circuit.acquire();
+    if (!failure.allowed) throw new Error("Expected an allowed attempt");
+    failure.recordFailure();
     now += 30 * 60_000;
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
       error: {

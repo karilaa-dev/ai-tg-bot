@@ -2,35 +2,60 @@ const THIRTY_MINUTES_MS = 30 * 60_000;
 const RESET_GRACE_MS = 60_000;
 
 type CodexAttempt =
-  | { allowed: true; probe: boolean }
+  | { allowed: true; probe: boolean; recordSuccess(): void; recordFailure(resetAt?: number): void; release(): void }
   | { allowed: false; retryAt: number };
 
 export class CodexCircuitBreaker {
   private open = false;
   private blockedUntil = 0;
   private nextProbeAt = 0;
-  private probeActive = false;
+  private activeProbe: number | undefined;
+  private nextAttemptId = 0;
+  private lastSettledAttemptId = 0;
+  private failureGeneration = 0;
 
   constructor(private readonly now: () => number = Date.now) {}
 
   acquire(): CodexAttempt {
     const now = this.now();
-    if (!this.open) return { allowed: true, probe: false };
-    if (now < this.nextProbeAt || this.probeActive) {
+    if (this.open && (now < this.nextProbeAt || this.activeProbe !== undefined)) {
       return { allowed: false, retryAt: this.nextProbeAt };
     }
-    this.probeActive = true;
-    return { allowed: true, probe: true };
+    const id = ++this.nextAttemptId;
+    const generation = this.failureGeneration;
+    const probe = this.open;
+    if (probe) this.activeProbe = id;
+    let settled = false;
+    const release = () => {
+      settled = true;
+      if (this.activeProbe === id) this.activeProbe = undefined;
+    };
+    const settle = (update: () => void) => {
+      if (settled) return;
+      // A failure invalidates all requests already in flight. Otherwise, a
+      // newer request's settled outcome takes precedence over older requests.
+      const current = generation === this.failureGeneration && id > this.lastSettledAttemptId;
+      release();
+      if (!current) return;
+      this.lastSettledAttemptId = id;
+      update();
+    };
+    return {
+      allowed: true, probe,
+      recordSuccess: () => settle(() => this.recordSuccess()),
+      recordFailure: resetAt => settle(() => this.recordFailure(resetAt)),
+      release,
+    };
   }
 
-  recordSuccess(): void {
+  private recordSuccess(): void {
     this.open = false;
     this.blockedUntil = 0;
     this.nextProbeAt = 0;
-    this.probeActive = false;
   }
 
-  recordFailure(resetAt?: number): void {
+  private recordFailure(resetAt?: number): void {
+    this.failureGeneration++;
     const now = this.now();
     this.open = true;
     const knownReset = resetAt !== undefined && Number.isFinite(resetAt) && resetAt > now;
@@ -39,11 +64,6 @@ export class CodexCircuitBreaker {
     this.nextProbeAt = knownReset && effectiveReset - now <= THIRTY_MINUTES_MS
       ? effectiveReset + RESET_GRACE_MS
       : Math.min(effectiveReset, now + THIRTY_MINUTES_MS);
-    this.probeActive = false;
-  }
-
-  releaseProbe(): void {
-    this.probeActive = false;
   }
 
   state(): { open: boolean; blockedUntil: number; nextProbeAt: number; probeActive: boolean } {
@@ -51,7 +71,7 @@ export class CodexCircuitBreaker {
       open: this.open,
       blockedUntil: this.blockedUntil,
       nextProbeAt: this.nextProbeAt,
-      probeActive: this.probeActive,
+      probeActive: this.activeProbe !== undefined,
     };
   }
 }

@@ -23,7 +23,9 @@ describe("web_search providers", () => {
     const tool = createWebSearchTool({ config, codexWebSearch: (query: string, maxResults: number, signal?: AbortSignal) =>
       searchCodexWeb(runtime as never, query, maxResults, signal) } as never);
     // The breaker can open after tools were built, including during an earlier nested call.
-    circuit.recordFailure();
+    const failure = circuit.acquire();
+    if (!failure.allowed) throw new Error("Expected an allowed attempt");
+    failure.recordFailure();
     const result = await tool.execute({ query: "facts", max_results: 3 });
     expect(codexModel).not.toHaveBeenCalled();
     expect(search).toHaveBeenCalledTimes(fallback ? 1 : 0);
