@@ -62,7 +62,7 @@ export function createCodexCompactionExtension(runtime: CodexRequestRuntime & { 
           compact(preparation, model, undefined, undefined, event.customInstructions, signal,
             thinkingLevel, (selected, context, options) => runtime.modelRegistry.streamSimple(selected, context, options)),
           requestCodex(runtime, {
-            kind: "main", signal, sessionId: ctx.sessionManager.getSessionId(),
+            kind: "main", signal, sessionId: ctx.sessionManager.getSessionId(), source: "compaction",
             headers: { "x-codex-beta-features": "remote_compaction_v2" },
             reasoning: thinkingLevel === "off" ? "minimal" : thinkingLevel,
             context: { systemPrompt: ctx.getSystemPrompt(), messages: convertToLlm(messages),

@@ -12,6 +12,7 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createGenerateImagePiTool, type ChatImageBridge } from "../../src/pi/imageExtension.js";
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
+import { InferenceUsageCollector } from "../../src/pi/usage.js";
 
 let tempRoot: string;
 
@@ -40,6 +41,37 @@ describe("Pi generate_image extension", () => {
     vi.stubGlobal("fetch",vi.fn(async()=>Response.json({data:[{b64_json:TEST_PNG.toString("base64"),media_type:"image/png"}]})));
     return {bridge,commandRuntime};
   }
+
+  it.each([false, true])("retains cached-token usage from the image response, separate item=%s", async (separateItem) => {
+    const { bridge } = await reusableBridge();
+    bridge.config.CODEX_FAST_MODE = true;
+    bridge.modelRegistry = { hasConfiguredAuth: () => true, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("test-account"), headers: {} }) } as unknown as ModelRegistry;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const item = { type: "image_generation_call", id: "ig_usage", status: "completed", result: TEST_PNG.toString("base64") };
+      const events = [
+        ...(separateItem ? [{ type: "response.output_item.done", item }] : []),
+        { type: "response.completed", response: { id: "image-usage", model: "codex-test", service_tier: "priority", output: [item], usage: { input_tokens: 1_000, input_tokens_details: { cached_tokens: 900 }, output_tokens: 20, total_tokens: 1_020 } } },
+      ];
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    }));
+    const capture = new InferenceUsageCollector();
+    const result = await capture.run(() => createGenerateImagePiTool(bridge).execute("usage-image", { prompt: "blue circle" }, undefined, undefined, {} as never));
+    expect(result.usage).toMatchObject({ input: 100, cacheRead: 900, output: 20 });
+    expect(capture.usage().calls).toMatchObject([{ source: "image_generation", provider: "openai-codex", cacheReadTokens: 900, fastMode: true, serviceTier: "priority", cacheWriteReported: false }]);
+  });
+
+  it("captures OpenRouter image token usage without marking it as Codex fast mode", async () => {
+    const { bridge } = await reusableBridge();
+    bridge.config.CODEX_FAST_MODE = true;
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      data: [{ b64_json: TEST_PNG.toString("base64"), media_type: "image/png" }],
+      usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 50, cache_write_tokens: 10 } },
+    })));
+    const capture = new InferenceUsageCollector();
+    const result = await capture.run(() => createGenerateImagePiTool(bridge).execute("usage-fallback", { prompt: "blue circle" }, undefined, undefined, {} as never));
+    expect(result.usage).toMatchObject({ input: 40, cacheRead: 50, cacheWrite: 10, output: 20 });
+    expect(capture.usage().calls).toMatchObject([{ source: "image_generation", provider: "openrouter", cacheReadTokens: 50, cacheWriteTokens: 10, fastMode: false, cacheWriteReported: true }]);
+  });
 
   it("generates several assets, edits a saved asset, and queues only the selected result",async()=>{
     const {bridge,commandRuntime}=await reusableBridge();

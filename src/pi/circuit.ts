@@ -16,6 +16,13 @@ export class CodexCircuitBreaker {
 
   constructor(private readonly now: () => number = Date.now) {}
 
+  reset(): void {
+    // Requests made with the previous login cannot reopen the reset circuit.
+    this.failureGeneration++;
+    this.activeProbe = undefined;
+    this.recordSuccess();
+  }
+
   acquire(): CodexAttempt {
     const now = this.now();
     if (this.open && (now < this.nextProbeAt || this.activeProbe !== undefined)) {

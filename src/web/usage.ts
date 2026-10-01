@@ -10,8 +10,36 @@ interface UsageRow {
   messageId: number | null; provider: string | null; model: string | null; usage: string | null; timestamp: number;
 }
 const tokenKeys = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+const coverageKeys = ["fastModeCalls", "standardModeCalls", "unknownFastModeCalls", "cacheReadReportedCalls",
+  "cacheWriteReportedCalls", "cacheReadUnreportedCalls", "cacheWriteUnreportedCalls", "aggregateUsageEntries"] as const;
 const validCount = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 function record(value: unknown): Record<string, unknown> | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+
+function parseCall(raw: unknown): InferenceUsageCall | null {
+  const call = record(raw);
+  if (!call || typeof call.provider !== "string" || typeof call.model !== "string"
+    || !tokenKeys.every(key => validCount(call[key]))) return null;
+  const parsed: InferenceUsageCall = {
+    provider: call.provider, model: call.model, inputTokens: Number(call.inputTokens), outputTokens: Number(call.outputTokens),
+    cacheReadTokens: Number(call.cacheReadTokens), cacheWriteTokens: Number(call.cacheWriteTokens),
+  };
+  // Optional metadata must not hide otherwise valid token counts. Copy only the
+  // public usage fields, never arbitrary data stored alongside a call.
+  for (const key of ["fastMode", "cacheReadReported", "cacheWriteReported", "aggregate"] as const) {
+    if (typeof call[key] === "boolean") parsed[key] = call[key];
+  }
+  for (const key of ["serviceTier", "requestedServiceTier"] as const) {
+    if (typeof call[key] === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(call[key])) parsed[key] = call[key];
+  }
+  if (typeof call.source === "string" && call.source.length <= 120 && !/[\x00-\x1f]/.test(call.source)) parsed.source = call.source;
+  if (validCount(call.reasoningTokens) && call.reasoningTokens <= parsed.outputTokens) parsed.reasoningTokens = call.reasoningTokens;
+  if (validCount(call.cacheWrite1hTokens) && call.cacheWrite1hTokens <= parsed.cacheWriteTokens) parsed.cacheWrite1hTokens = call.cacheWrite1hTokens;
+  const cost = record(call.cost);
+  if (cost && ["input", "output", "cacheRead", "cacheWrite", "total"].every(key => typeof cost[key] === "number" && Number.isFinite(cost[key]) && Number(cost[key]) >= 0)) {
+    parsed.cost = { input: Number(cost.input), output: Number(cost.output), cacheRead: Number(cost.cacheRead), cacheWrite: Number(cost.cacheWrite), total: Number(cost.total) };
+  }
+  return parsed;
+}
 
 function parseUsage(row: Pick<UsageRow, "usage" | "provider" | "model">) {
   let value: Record<string, unknown> | undefined;
@@ -19,31 +47,28 @@ function parseUsage(row: Pick<UsageRow, "usage" | "provider" | "model">) {
   if (!value || !tokenKeys.every(key => validCount(value[key]))) return null;
   const totals = value as unknown as InferenceUsageCall;
   const rawCalls = value.calls;
-  if (Array.isArray(rawCalls) && rawCalls.length && rawCalls.every(raw => {
-    const call = record(raw);
-    return call && typeof call.provider === "string" && typeof call.model === "string"
-      && tokenKeys.every(key => validCount(call[key]))
-      && (call.aggregate === undefined || typeof call.aggregate === "boolean")
-      && (call.reasoningTokens === undefined || validCount(call.reasoningTokens) && call.reasoningTokens <= Number(call.outputTokens))
-      && (call.cacheWrite1hTokens === undefined || validCount(call.cacheWrite1hTokens) && call.cacheWrite1hTokens <= Number(call.cacheWriteTokens));
-  })) {
-    const calls = rawCalls as InferenceUsageCall[];
-    if (tokenKeys.every(key => calls.reduce((sum, call) => sum + call[key], 0) === totals[key])) return { calls, perCall: true };
+  if (Array.isArray(rawCalls) && rawCalls.length) {
+    const calls = rawCalls.map(parseCall);
+    if (calls.every((call): call is InferenceUsageCall => call !== null)
+      && tokenKeys.every(key => calls.reduce((sum, call) => sum + call[key], 0) === totals[key])) return { calls, perCall: true };
   }
   return { calls: [{
     provider: row.provider ?? "unknown", model: row.model ?? "Unknown model",
     inputTokens: totals.inputTokens, outputTokens: totals.outputTokens,
     cacheReadTokens: totals.cacheReadTokens, cacheWriteTokens: totals.cacheWriteTokens,
+    aggregate: true,
   }], perCall: false };
 }
 
 export function emptyUsage(): WebUsageTotals {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0,
-    reasoningTokens: null, cacheReadRatio: null, recordedTurns: 0, missingUsageTurns: 0, unpricedTurns: 0, estimatedCostUsd: null };
+    reasoningTokens: null, cacheReadRatio: null, recordedTurns: 0, missingUsageTurns: 0, unpricedTurns: 0, estimatedCostUsd: null,
+    fastModeCalls: 0, standardModeCalls: 0, unknownFastModeCalls: 0, cacheReadReportedCalls: 0, cacheWriteReportedCalls: 0,
+    cacheReadUnreportedCalls: 0, cacheWriteUnreportedCalls: 0, aggregateUsageEntries: 0 };
 }
 
 function addUsage(target: WebUsageTotals, source: WebUsageTotals) {
-  for (const key of [...tokenKeys, "recordedTurns", "missingUsageTurns", "unpricedTurns"] as const) target[key] += source[key];
+  for (const key of [...tokenKeys, ...coverageKeys, "recordedTurns", "missingUsageTurns", "unpricedTurns"] as const) target[key] += source[key];
   if (source.reasoningTokens !== null) target.reasoningTokens = (target.reasoningTokens ?? 0) + source.reasoningTokens;
   if (source.estimatedCostUsd !== null) target.estimatedCostUsd = (target.estimatedCostUsd ?? 0) + source.estimatedCostUsd;
   target.totalTokens = tokenKeys.reduce((sum, key) => sum + target[key], 0);
@@ -55,11 +80,18 @@ export function summarizeUsage(row: Pick<UsageRow, "usage" | "provider" | "model
   const parsed = parseUsage(row);
   const totals: WebMessageUsage = { ...emptyUsage(), models: [], modelCalls: parsed?.perCall && !parsed.calls.some(call => call.aggregate) ? parsed.calls.length : null };
   if (!parsed) { totals.missingUsageTurns = 1; return totals; }
+  if (parsed.perCall) totals.calls = parsed.calls;
   const models = new Map<string, WebModelUsage>();
   for (const call of parsed.calls) {
     const cost = estimateCallCost(call, catalog, parsed.perCall && !call.aggregate);
     const sample: WebUsageTotals = { ...emptyUsage(), ...Object.fromEntries(tokenKeys.map(key => [key, call[key]])),
-      reasoningTokens: call.reasoningTokens ?? null, estimatedCostUsd: cost };
+      reasoningTokens: call.reasoningTokens ?? null, estimatedCostUsd: cost,
+      fastModeCalls: call.fastMode === true ? 1 : 0, standardModeCalls: call.fastMode === false ? 1 : 0,
+      unknownFastModeCalls: call.fastMode === undefined ? 1 : 0, aggregateUsageEntries: call.aggregate ? 1 : 0,
+      cacheReadReportedCalls: call.cacheReadReported === true || call.cacheReadTokens > 0 ? 1 : 0,
+      cacheWriteReportedCalls: call.cacheWriteReported === true || call.cacheWriteTokens > 0 ? 1 : 0,
+      cacheReadUnreportedCalls: call.cacheReadReported !== true && call.cacheReadTokens === 0 ? 1 : 0,
+      cacheWriteUnreportedCalls: call.cacheWriteReported !== true && call.cacheWriteTokens === 0 ? 1 : 0 };
     addUsage(totals, sample);
     if (cost === null) totals.unpricedTurns = 1;
     const key = JSON.stringify([call.provider, call.model]);
@@ -96,6 +128,7 @@ export class UsageRepository {
         addUsage(previous, sample);
         previous.models = mergeModels([...previous.models, ...sample.models]);
         previous.modelCalls = previous.modelCalls === null || sample.modelCalls === null ? null : previous.modelCalls + sample.modelCalls;
+        previous.calls = previous.calls && sample.calls ? [...previous.calls, ...sample.calls] : undefined;
       } else result.set(row.messageId, sample);
     }
     return result;

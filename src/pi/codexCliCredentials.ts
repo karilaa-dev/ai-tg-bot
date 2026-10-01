@@ -9,6 +9,7 @@ import type {
   OAuthCredential,
 } from "@earendil-works/pi-ai";
 import type { AppConfig } from "../config.js";
+import { raceWithAbort } from "../files/cancel.js";
 
 export const CODEX_PROVIDER_ID = "openai-codex";
 
@@ -57,20 +58,48 @@ export function isOAuthCredential(value: unknown): value is OAuthCredential {
     && Number.isFinite(value.expires);
 }
 
-class CodexCliCredentialStore implements CredentialStore {
+export class CodexCliCredentialStore implements CredentialStore {
   private pending: Promise<void> = Promise.resolve();
   private volatileCredential?: OAuthCredential;
   private suppressed = false;
 
   constructor(
-    private readonly authFile: string,
+    private authFile: string,
     private readonly onPersistenceError?: (code: string) => void,
+    private format: "codex" | "pi" = "codex",
   ) {}
+
+  async status(): Promise<"available" | "missing" | "invalid"> {
+    if (this.volatileCredential) return "available";
+    return (await loadSnapshot(this.authFile, this.format)).status;
+  }
+
+  async saveLogin(piAuthFile: string, credential: OAuthCredential, signal?: AbortSignal): Promise<void> {
+    if (!isOAuthCredential(credential)) throw new Error("Invalid Codex OAuth credential.");
+    await this.exclusive(async () => {
+      signal?.throwIfAborted();
+      let document: JsonObject = {};
+      try {
+        const parsed: unknown = JSON.parse(await fs.readFile(piAuthFile, "utf8"));
+        if (isObject(parsed)) document = parsed;
+      } catch (error) {
+        if (!(error instanceof SyntaxError) && errorCode(error) !== "ENOENT") throw error;
+      }
+      await fs.mkdir(path.dirname(piAuthFile), { recursive: true, mode: 0o700 });
+      // Pi's OAuth SDK does not return the ID token required by Codex CLI's
+      // auth.json schema. Store new logins in the bot's native Pi auth file.
+      await persistCredential(piAuthFile, document, credential, "pi", signal);
+      this.authFile = piAuthFile;
+      this.format = "pi";
+      this.volatileCredential = undefined;
+      this.suppressed = false;
+    }, signal);
+  }
 
   async read(providerId: string): Promise<Credential | undefined> {
     if (providerId !== CODEX_PROVIDER_ID || this.suppressed) return undefined;
     if (this.volatileCredential) return this.volatileCredential;
-    const loaded = await loadSnapshot(this.authFile);
+    const loaded = await loadSnapshot(this.authFile, this.format);
     return loaded.status === "available" ? loaded.snapshot.credential : undefined;
   }
 
@@ -86,14 +115,14 @@ class CodexCliCredentialStore implements CredentialStore {
     if (providerId !== CODEX_PROVIDER_ID) return fn(undefined);
     return this.exclusive(async () => {
       this.suppressed = false;
-      const before = await loadSnapshot(this.authFile);
+      const before = await loadSnapshot(this.authFile, this.format);
       const diskCredential = before.status === "available" ? before.snapshot.credential : undefined;
       const current = this.volatileCredential ?? diskCredential;
       let next: Credential | undefined;
       try {
         next = await fn(current);
       } catch (error) {
-        const concurrent = await loadSnapshot(this.authFile);
+        const concurrent = await loadSnapshot(this.authFile, this.format);
         if (concurrent.status === "available"
           && fingerprint(concurrent.snapshot.credential) !== fingerprint(diskCredential)) {
           this.volatileCredential = undefined;
@@ -106,7 +135,7 @@ class CodexCliCredentialStore implements CredentialStore {
         throw new Error("Codex CLI credentials must use OAuth.");
       }
 
-      const latest = await loadSnapshot(this.authFile);
+      const latest = await loadSnapshot(this.authFile, this.format);
       if (latest.status === "available"
         && fingerprint(latest.snapshot.credential) !== fingerprint(diskCredential)) {
         this.volatileCredential = undefined;
@@ -124,7 +153,7 @@ class CodexCliCredentialStore implements CredentialStore {
         return next;
       }
       try {
-        await persistCredential(this.authFile, baseDocument, next);
+        await persistCredential(this.authFile, baseDocument, next, this.format);
         this.volatileCredential = undefined;
       } catch (error) {
         this.volatileCredential = next;
@@ -143,12 +172,15 @@ class CodexCliCredentialStore implements CredentialStore {
     });
   }
 
-  private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  private async exclusive<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const previous = this.pending;
     let release = () => {};
-    this.pending = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    // Cancelling a queued login must not release the refresh ahead of it.
+    this.pending = previous.then(() => current);
     try {
+      await raceWithAbort(previous, signal);
+      signal?.throwIfAborted();
       return await fn();
     } finally {
       release();
@@ -156,7 +188,7 @@ class CodexCliCredentialStore implements CredentialStore {
   }
 }
 
-async function loadSnapshot(authFile: string): Promise<
+async function loadSnapshot(authFile: string, format: "codex" | "pi" = "codex"): Promise<
   | { status: "available"; snapshot: CodexAuthSnapshot }
   | { status: "missing" | "invalid" }
 > {
@@ -168,6 +200,14 @@ async function loadSnapshot(authFile: string): Promise<
   }
   try {
     const document = JSON.parse(raw) as unknown;
+    if (format === "pi") {
+      if (!isObject(document)) return { status: "invalid" };
+      const credential = document[CODEX_PROVIDER_ID];
+      if (credential === undefined) return { status: "missing" };
+      return isOAuthCredential(credential)
+        ? { status: "available", snapshot: { document, credential } }
+        : { status: "invalid" };
+    }
     if (!isObject(document) || !isObject(document.tokens)) return { status: "invalid" };
     const access = document.tokens.access_token;
     const refresh = document.tokens.refresh_token;
@@ -201,10 +241,12 @@ async function persistCredential(
   authFile: string,
   document: JsonObject,
   credential: OAuthCredential,
+  format: "codex" | "pi" = "codex",
+  signal?: AbortSignal,
 ): Promise<void> {
   const tokens = isObject(document.tokens) ? document.tokens : {};
   const accountId = typeof credential.accountId === "string" ? credential.accountId : undefined;
-  const updated: JsonObject = {
+  const updated: JsonObject = format === "pi" ? { ...document, [CODEX_PROVIDER_ID]: credential } : {
     ...document,
     tokens: {
       ...tokens,
@@ -218,8 +260,8 @@ async function persistCredential(
   try {
     await fs.writeFile(temporary, `${JSON.stringify(updated, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await fs.chmod(temporary, 0o600);
+    signal?.throwIfAborted();
     await fs.rename(temporary, authFile);
-    await fs.chmod(authFile, 0o600);
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -234,7 +276,8 @@ function jwtExpiry(token: string): number | undefined {
 
 function jwtAccountId(token: string): string | undefined {
   const payload = jwtPayload(token);
-  const accountId = payload?.["https://api.openai.com/auth.chatgpt_account_id"];
+  const auth = payload?.["https://api.openai.com/auth"];
+  const accountId = isObject(auth) ? auth.chatgpt_account_id : payload?.["https://api.openai.com/auth.chatgpt_account_id"];
   return typeof accountId === "string" && accountId ? accountId : undefined;
 }
 

@@ -1,7 +1,7 @@
 // Codex image request structure is adapted from pi-better-openai (MIT).
 import { randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
-import type { ImageContent, ProviderHeaders } from "@earendil-works/pi-ai";
+import type { ImageContent, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
 import type {
   ModelRegistry,
   ToolDefinition,
@@ -21,6 +21,8 @@ import type { PiProviderRouter } from "./provider.js";
 
 import type { OutgoingFiles } from "../files/outgoingFiles.js";
 import { botToolPolicy } from "./toolPolicy.js";
+import { ProviderUsageCapture } from "./providerUsage.js";
+import { raceWithAbort } from "../files/cancel.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -59,6 +61,7 @@ type GeneratedImage = {
   revisedPrompt?: string;
   provider: "codex" | "openrouter";
   model: string;
+  usage?: Usage;
 };
 
 export function createGenerateImagePiTool(
@@ -255,6 +258,7 @@ export function createGenerateImagePiTool(
           })),
         ],
         details: result,
+        ...(generated.usage ? { usage: generated.usage } : {}),
       };
     },
   } as ToolDefinition;
@@ -406,17 +410,25 @@ async function requestCodexImage(
     signal,
   });
   if (!response.ok) throw await responseError(response);
-  const parsed = await parseCodexImageSse(
-    response,
-    mimeFor(request.outputFormat),
-  );
-  return {
-    bytes: Buffer.from(parsed.data, "base64"),
-    mimeType: parsed.mimeType,
-    revisedPrompt: parsed.revisedPrompt,
-    provider: "codex",
-    model: bridge.providerRouter.codexModel("main").id,
-  };
+  const model = bridge.providerRouter.codexModel("main");
+  const usage = new ProviderUsageCapture(model.provider, model.id, {
+    fastMode: bridge.config.CODEX_FAST_MODE,
+    ...(bridge.config.CODEX_FAST_MODE ? { requestedServiceTier: "priority" } : {}),
+    source: "image_generation",
+  });
+  try {
+    const parsed = await parseCodexImageSse(response, mimeFor(request.outputFormat), event => usage.observe(event), signal);
+    return {
+      bytes: Buffer.from(parsed.data, "base64"),
+      mimeType: parsed.mimeType,
+      revisedPrompt: parsed.revisedPrompt,
+      provider: "codex",
+      model: model.id,
+      usage: usage.record(),
+    };
+  } finally {
+    usage.record();
+  }
 }
 
 async function requestOpenRouterImage(
@@ -455,12 +467,17 @@ async function requestOpenRouterImage(
   });
   if (!response.ok) throw await responseError(response);
   const body = (await response.json()) as {
+    model?: string;
+    usage?: unknown;
     data?: Array<{
       b64_json?: string;
       media_type?: string;
       revised_prompt?: string;
     }>;
   };
+  const usage = new ProviderUsageCapture("openrouter", bridge.config.OPENROUTER_IMAGE_MODEL, { fastMode: false, source: "image_generation" });
+  usage.observe(body);
+  const recordedUsage = usage.record();
   const image = body.data?.[0];
   if (!image?.b64_json)
     throw new Error("OpenRouter returned no generated image.");
@@ -470,12 +487,15 @@ async function requestOpenRouterImage(
     revisedPrompt: image.revised_prompt,
     provider: "openrouter",
     model: bridge.config.OPENROUTER_IMAGE_MODEL,
+    usage: recordedUsage,
   };
 }
 
 async function parseCodexImageSse(
   response: Response,
   fallbackMimeType: string,
+  onEvent: (event: unknown) => void,
+  signal?: AbortSignal,
 ): Promise<{ data: string; mimeType: string; revisedPrompt?: string }> {
   if (!response.body) throw new Error("Codex image response had no body.");
   const reader = response.body.getReader();
@@ -485,6 +505,8 @@ async function parseCodexImageSse(
     | { data: string; mimeType: string; revisedPrompt?: string }
     | undefined;
   let imageCompleted = false;
+  let responseCompleted = false;
+  let completedImage: { data: string; mimeType: string; revisedPrompt?: string } | undefined;
   let partialImages = 0;
   const observedEvents = new Set<string>();
   const observedImageStatuses = new Set<string>();
@@ -503,6 +525,8 @@ async function parseCodexImageSse(
     } catch {
       return undefined;
     }
+    onEvent(event);
+    if (event.type === "response.completed") responseCompleted = true;
     if (typeof event.type === "string") observedEvents.add(event.type);
     const item =
       imageItem(event.item) ??
@@ -567,22 +591,24 @@ async function parseCodexImageSse(
     }
     return undefined;
   };
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split(/\r?\n\r?\n/);
-    buffer = chunks.pop() ?? "";
-    for (const chunk of chunks) {
-      const parsed = consume(chunk);
-      if (parsed) {
-        await reader.cancel().catch(() => undefined);
-        return parsed;
+  try {
+    while (true) {
+      const { done, value } = await raceWithAbort(reader.read(), signal);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split(/\r?\n\r?\n/);
+      buffer = chunks.pop() ?? "";
+      for (const chunk of chunks) {
+        completedImage = consume(chunk) ?? completedImage;
+        // Usage arrives on the terminal response after output_item.done.
+        if (responseCompleted && (completedImage || latestPartial)) return completedImage ?? latestPartial!;
       }
     }
+    completedImage = consume(buffer) ?? completedImage;
+    if (completedImage) return completedImage;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  const final = consume(buffer);
-  if (final) return final;
   // The hosted Codex endpoint can omit the base64 result from output_item.done
   // after streaming a usable final partial image. Keep only the newest partial
   // in memory and return it once the stream has completed.

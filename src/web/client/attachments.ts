@@ -1,4 +1,5 @@
 import type { WebAttachment } from "../types.js";
+import { apiFetch } from "./api.js";
 
 export interface LoadedAttachment { status: "loading" | "ready" | "error"; url?: string; text?: string; mime?: string; error?: string; needsSandbox?: boolean }
 
@@ -16,7 +17,7 @@ export class AttachmentLoader {
     this.set(file.id, { status: "loading" });
     this.queue.push(async () => {
       try {
-        const response = await fetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}${allowSandbox ? "&sandbox=start" : ""}`, {
+        const response = await apiFetch(`/api/threads/${this.threadId}/files/${file.id}?mode=${mode}${allowSandbox ? "&sandbox=start" : ""}`, {
           signal: this.controller.signal,
           ...(allowSandbox ? { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } } : {}),
         });

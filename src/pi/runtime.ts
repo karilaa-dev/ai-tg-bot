@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getCurrentSystemMessage, type TextContent } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, type OAuthCredential, type TextContent } from "@earendil-works/pi-ai";
 import { ThreadBridge, createChatFileContextExtension } from "./threadBridge.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -31,7 +31,7 @@ import {
 import { createTurnPromptContextExtension } from "./turnContext.js";
 import {
   CODEX_PROVIDER_ID,
-  discoverCodexCliCredentials,
+  CodexCliCredentialStore,
   isOAuthCredential,
   resolveCodexAuthFile,
 } from "./codexCliCredentials.js";
@@ -73,6 +73,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   private readonly runtimes = new Map<number, PiThreadRuntime>();
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
+  private codexCredentials!: CodexCliCredentialStore;
 
   constructor(private readonly input: {
     config: AppConfig;
@@ -102,19 +103,20 @@ export class PiRuntimeManager implements PiRuntimeService {
     await validateApprovedSkills();
     const piAuthPath = path.join(this.agentDir, "auth.json");
     const piCodexCredential = readStoredCredential(CODEX_PROVIDER_ID, piAuthPath);
-    const cliCredentials = isOAuthCredential(piCodexCredential)
-      ? undefined
-      : await discoverCodexCliCredentials({
-          authFile: resolveCodexAuthFile(this.input.config),
-          onPersistenceError: (errorCode) => {
-            this.input.logger.warn(
-              "Codex OAuth refresh could not be persisted; continuing with the refreshed in-memory credential",
-              { errorCode },
-            );
-          },
-        });
+    const usePiCredentials = isOAuthCredential(piCodexCredential);
+    this.codexCredentials = new CodexCliCredentialStore(
+      usePiCredentials ? piAuthPath : resolveCodexAuthFile(this.input.config),
+      (errorCode) => {
+        this.input.logger.warn(
+          "Codex OAuth refresh could not be persisted; continuing with the refreshed in-memory credential",
+          { errorCode },
+        );
+      },
+      usePiCredentials ? "pi" : "codex",
+    );
+    const credentialStatus = await this.codexCredentials.status();
     this.modelRuntime = await ModelRuntime.create({
-      ...(cliCredentials?.store ? { credentials: cliCredentials.store } : { authPath: piAuthPath }),
+      credentials: this.codexCredentials,
       modelsPath: path.join(this.agentDir, "models.json"),
     });
     await this.modelRuntime.setRuntimeApiKey(
@@ -128,13 +130,13 @@ export class PiRuntimeManager implements PiRuntimeService {
       codexConfigured,
       codexCredentialSource: isOAuthCredential(piCodexCredential)
         ? "pi"
-        : cliCredentials?.status === "available"
+        : credentialStatus === "available"
           ? "codex-cli"
           : "none",
     });
     if (!codexConfigured) {
       this.input.logger.warn("Codex OAuth is unavailable; Pi inference will use OpenRouter until Codex is configured", {
-        codexCredentialStatus: cliCredentials?.status ?? "missing",
+        codexCredentialStatus: credentialStatus,
       });
     }
     this.modelRegistry = new ModelRegistry(this.modelRuntime);
@@ -144,6 +146,23 @@ export class PiRuntimeManager implements PiRuntimeService {
       logger: this.input.logger,
       streams: this.input.providerStreams,
     });
+  }
+
+  async codexCredentialStatus(): Promise<"available" | "missing" | "invalid"> {
+    await this.initialize();
+    return this.codexCredentials.status();
+  }
+
+  async saveCodexCredentials(credential: OAuthCredential, signal?: AbortSignal): Promise<void> {
+    await this.initialize();
+    await this.codexCredentials.saveLogin(path.join(this.agentDir, "auth.json"), credential, signal);
+    // Keep the runtime and registries shared by existing chat sessions. Refreshing
+    // availability enables first-time login without recreating any conversation.
+    const result = await this.modelRuntime.refresh({ allowNetwork: false, providers: [CODEX_PROVIDER_ID], signal });
+    if (result.errors.size || !this.modelRuntime.hasConfiguredAuth(CODEX_PROVIDER_ID)) {
+      throw new Error("Codex credentials were saved but provider availability could not be refreshed.");
+    }
+    this.providerRouter.circuit.reset();
   }
 
   async runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime> {

@@ -6,8 +6,56 @@ import { expect, it, vi } from "vitest";
 vi.mock("../../src/web/client/components/ui/code-block.js", () => ({ default: ({ code }: { code: string }) => createElement("pre", null, code) }));
 import { FileAttachment } from "../../src/web/client/file-attachment.js";
 import { RichText } from "../../src/web/client/rich-text.js";
-import { MessageUsage, UsageGraphs } from "../../src/web/client/usage.js";
+import { MessageUsage, UsageGraphs, TokenBreakdown, FastModeSummary, UsageCalls } from "../../src/web/client/usage.js";
 import { emptyUsage } from "../../src/web/usage.js";
+import { AdminGate, LoginForm } from "../../src/web/client/auth.js";
+import { trustedVerificationUri } from "../../src/web/client/codex-connection.js";
+import { apiFetch, SESSION_EXPIRED_EVENT } from "../../src/web/client/api.js";
+
+it("expires the workspace for private request failures without treating an incorrect sign-in token as session expiry", async () => {
+  const dispatchEvent = vi.fn();
+  vi.stubGlobal("window", { dispatchEvent });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+  try {
+    await expect(apiFetch("/api/threads/1/files/2")).rejects.toMatchObject({ status: 401 });
+    expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(SESSION_EXPIRED_EVENT);
+    dispatchEvent.mockClear();
+    await expect(apiFetch("/api/auth/login", { method: "POST" })).rejects.toMatchObject({ status: 401 });
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("sends the admin mutation guard alongside explicit sandbox consent", async () => {
+  const fetch = vi.fn(async () => new Response(null, { status: 200 }));
+  vi.stubGlobal("fetch", fetch);
+  try {
+    await apiFetch("/api/threads/1/files/2?sandbox=start", { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } });
+    const options = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1];
+    const headers = new Headers(options.headers);
+    expect(headers.get("X-Admin-Request")).toBe("1");
+    expect(headers.get("X-Conversation-Sandbox-Consent")).toBe("start");
+    expect(options.credentials).toBe("same-origin");
+    expect(options.cache).toBe("no-store");
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("does not render private workspace content before the admin session is checked", () => {
+  const privateContent = vi.fn(() => createElement("div", null, "private conversation"));
+  const html = renderToStaticMarkup(createElement(AdminGate, { children: privateContent }));
+  expect(privateContent).not.toHaveBeenCalled();
+  expect(html).not.toContain("private conversation");
+  expect(html).toContain("Checking your session");
+  const login = renderToStaticMarkup(createElement(LoginForm, { onSuccess: () => {} }));
+  expect(login).toContain('type="password"');
+  expect(login).toMatch(/autocomplete="current-password"/i);
+});
+
+it("only links device authorization to the trusted HTTPS OpenAI login host", () => {
+  expect(trustedVerificationUri("https://auth.openai.com/codex/device")).toBe("https://auth.openai.com/codex/device");
+  for (const value of [undefined, "javascript:alert(1)", "http://auth.openai.com/codex/device", "https://auth.openai.com.evil.test/codex/device", "https://evil.test/", "https://user:password@auth.openai.com/codex/device", "https://auth.openai.com:444/codex/device"]) {
+    expect(trustedVerificationUri(value)).toBeNull();
+  }
+});
 
 it("renders unavailable usage and partial estimates without fabricating a zero cost", () => {
   expect(renderToStaticMarkup(createElement(MessageUsage, {}))).toContain("Usage not recorded");
@@ -20,6 +68,51 @@ it("renders unavailable usage and partial estimates without fabricating a zero c
   expect(html).toContain("Reasoning is included in output");
   expect(html).not.toMatch(/<details[^>]*open/);
 });
+
+it("distinguishes missing cache-write reporting from an explicitly reported zero", () => {
+  const missing = renderToStaticMarkup(createElement(TokenBreakdown, { usage: {
+    ...emptyUsage(), recordedTurns: 1, cacheWriteUnreportedCalls: 2,
+  } }));
+  expect(missing).toContain("Reported cache writes</dt><dd>Not reported</dd>");
+  expect(missing).toContain("Reported in 0 of 2 calls");
+  const zero = renderToStaticMarkup(createElement(TokenBreakdown, { usage: {
+    ...emptyUsage(), recordedTurns: 1, cacheWriteReportedCalls: 2,
+  } }));
+  expect(zero).toContain("Reported cache writes</dt><dd>0</dd>");
+  expect(zero).toContain("Reported in 2 of 2 calls");
+});
+
+it("keeps partial cache counts exact and labels historical aggregates as usage records", () => {
+  const html = renderToStaticMarkup(createElement(TokenBreakdown, { usage: {
+    ...emptyUsage(), recordedTurns: 3, aggregateUsageEntries: 1,
+    cacheReadTokens: 15_970_000, cacheWriteTokens: 21_294,
+    cacheWriteReportedCalls: 1, cacheWriteUnreportedCalls: 2,
+  } }));
+  expect(html).toContain(numberForTest(15_970_000));
+  expect(html).toContain(numberForTest(21_294));
+  expect(html).toContain("Reported in 1 of 3 usage records");
+});
+
+it("preserves unknown historical fast mode and distinguishes requested from delivered service tier", () => {
+  const modes = renderToStaticMarkup(createElement(FastModeSummary, { usage: {
+    ...emptyUsage(), recordedTurns: 4, fastModeCalls: 1, standardModeCalls: 1, unknownFastModeCalls: 2,
+  } }));
+  expect(modes).toContain("Unknown <strong>2</strong>");
+  const calls = renderToStaticMarkup(createElement(UsageCalls, { calls: [{
+    provider: "openai-codex", model: "gpt-6-astra", inputTokens: 3200, outputTokens: 418,
+    cacheReadTokens: 15_970_000, cacheWriteTokens: 0, cacheWriteReported: false,
+    fastMode: true, requestedServiceTier: "priority", serviceTier: "default",
+  }, { provider: "unknown", model: "Historical record", inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, aggregate: true }] }));
+  expect(calls).toContain("Fast mode on");
+  expect(calls).toContain("Fast mode unknown");
+  expect(calls).toContain("Requested tier</dt><dd>priority");
+  expect(calls).toContain("Delivered tier</dt><dd>default");
+  expect(calls).toContain(numberForTest(15_973_618));
+  expect(calls).toContain("Reported cache writes</dt><dd>Not reported");
+  expect(calls).toContain("This record combines usage");
+});
+
+const numberForTest = (value: number) => value.toLocaleString();
 
 it("renders empty and zero-value graphs with finite coordinates and a keyboard day selector", () => {
   expect(renderToStaticMarkup(createElement(UsageGraphs, { daily: [] }))).toBe("");

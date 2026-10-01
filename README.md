@@ -63,17 +63,15 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-To use Codex as the primary provider, sign in once with the official CLI:
+To use Codex as the primary provider, enable the [admin website](#conversation-website), sign in with your admin token, and open **Codex connection**. Choose **Connect Codex**, open the OpenAI link, and enter the one-time code. Enable device code login in your ChatGPT security settings first. This uses [OpenAI's headless device-code flow](https://developers.openai.com/codex/auth#login-on-headless-devices) and needs no terminal login. You can use the same page to sign in again when credentials expire or to switch accounts.
 
-```bash
-codex login
-```
+Existing credentials from `codex login` still work.
 
-The bot reads `~/.codex/auth.json` by default. Set `CODEX_AUTH_FILE` to use another location. The containing directory must be writable because OAuth refresh replaces `auth.json` atomically. A single-file bind mount will break refreshes.
+The bot can read existing CLI credentials from `~/.codex/auth.json`. Set `CODEX_AUTH_FILE` to use another location. The containing directory must be writable because OAuth refresh replaces `auth.json` atomically. A single-file bind mount will break refreshes.
 
-An OAuth credential already stored in `PI_CODING_AGENT_DIR/auth.json` takes precedence over `CODEX_AUTH_FILE`. This keeps existing deployments compatible.
+Website login saves credentials in `PI_CODING_AGENT_DIR/auth.json` and updates the running bot without restarting it. Pi credentials take precedence over `CODEX_AUTH_FILE`, including after a restart. Signing in through the website leaves the separate Codex CLI login file untouched.
 
-Set `CODEX_FAST_MODE=true` to request the priority service tier for Codex main, helper, and image-generation requests. It defaults to `false`. OpenRouter requests never inherit this setting, including fallback after a Codex failure.
+Set `CODEX_FAST_MODE=true` to request the priority service tier for Codex main, helper, and image-generation requests. It defaults to `false`. OpenRouter requests never inherit this setting, including fallback after a Codex failure. Usage records retain the setting for each call, the requested tier, and the delivered tier when the provider reports it. Changing the environment later does not change those records.
 
 ## Database
 
@@ -108,7 +106,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.17` uses `ai-tg-bot-tools:v2.0.17`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.18` uses `ai-tg-bot-tools:v2.0.18`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -122,8 +120,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.17 is ai-tg-bot-tools:v2.0.17.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.17
+# Optional override. The default for version 2.0.18 is ai-tg-bot-tools:v2.0.18.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.18
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -270,10 +268,11 @@ bun scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/bench
 
 ## Conversation website
 
-Set `WEB_ENABLED=true` to run a read-only conversation browser alongside the bot:
+Set `WEB_ENABLED=true` and a private `WEB_ADMIN_TOKEN` to run the admin website alongside the bot. The website refuses to start without a token:
 
 ```dotenv
 WEB_ENABLED=true
+WEB_ADMIN_TOKEN=replace-with-a-long-random-secret
 WEB_HOST=0.0.0.0
 WEB_PORT=3000
 WEB_AUTOLOAD_MAX_BYTES=5242880
@@ -287,15 +286,21 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 
 `bun-plugin-tailwind` 0.1.2 embeds a Tailwind 4.1.14 compiler, separately from the installed `tailwindcss` styles. The existing UI and HMR have been checked with this combination; newer Tailwind compiler features require an updated plugin.
 
-Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Apply access restrictions in the proxy. The app has no password or authentication, and everyone who can reach its port can read all saved conversations. Terminate HTTPS at the proxy and avoid publishing the upstream port directly. Persist the existing bot data volume as before; there is no separate website database. The explicit **Start sandbox and load** action uses POST on the attachment URL; allow that method through the proxy. Ordinary browsing and downloads use GET.
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Terminate HTTPS at the proxy, preserve the original `Host`, and set `X-Forwarded-Proto: https`. The login screen exchanges the admin token for a 12-hour, HttpOnly, SameSite=Strict session cookie. The token is never stored in browser storage or URLs. Conversation APIs, usage reports, file downloads, and Codex controls all require a valid session. Signing out revokes the session; restarting the app invalidates all sessions. To rotate access, change `WEB_ADMIN_TOKEN` and restart the app. Login attempts are rate-limited.
+
+Persist the existing bot data volume as before; there is no separate website database. Allow GET, HEAD, POST, and DELETE through the proxy. POST is used for sign-in, starting Codex login, and **Start sandbox and load**; DELETE signs out or cancels Codex login.
+
+Open **Codex connection** to check saved credentials and start or cancel a headless login. The page shows a one-time code and an OpenAI verification link, then confirms when the bot has connected. Existing credentials remain in use until a new login succeeds. Persist the credential directory and keep it writable so login and refresh survive restarts. For Dokploy, set `PI_CODING_AGENT_DIR=/app/data/pi` so website logins are saved on the data volume. No Codex CLI installation is needed for website login.
 
 Users appear by most recent activity. The browser uses saved usernames and names, with Telegram IDs as a fallback. Search accepts names, usernames, and IDs. The bot itself is excluded, including old records accidentally saved for it. Threads include archived conversations and inherited messages up to each fork point. The latest 50 messages open first; use **Load older** for earlier history. Visible lists and messages refresh every 10 seconds while the tab is active.
 
-Open **All usage & cost** or **Usage for this person** for token statistics, daily token and estimated-cost graphs, model breakdowns, and thread totals. These reports offer 7, 30, 90 days, or all time. Daily buckets use UTC and refresh every 30 seconds while the page is visible. The thread list and conversation header show when a response is queued, generating, sending, or stopping. Active conversations refresh every three seconds; inactive conversations refresh every ten seconds. Interrupted work and unavailable status are labeled. Each conversation shows its all-time token total and estimated USD cost above the messages in a large summary. Totals load automatically and refresh every 30 seconds while the page is visible. Expand **Details** for token categories, cache hit rate, models, and recorded turns, using the same compact breakdown as message usage; selecting a thread in a usage report opens the conversation with these details expanded. Expand the token count beneath a bot reply for its input, output, cache reads, cache writes, reported reasoning, model calls, and estimated USD cost. A reply's usage includes the tool loop that produced it. Thread totals include only calls made in that thread, so inherited messages are not charged twice.
+Open **Usage** or **Usage for this person** for token statistics, daily token and estimated-cost graphs, model breakdowns, and thread totals. These reports offer 7, 30, 90 days, or all time. Daily buckets use UTC and refresh every 30 seconds while the page is visible. The thread list and conversation header show when a response is queued, generating, sending, or stopping. Active conversations refresh every three seconds; inactive conversations refresh every ten seconds. Interrupted work and unavailable status are labeled. Each conversation shows its all-time token total and estimated USD cost above the messages in a large summary. Totals load automatically and refresh every 30 seconds while the page is visible. Expand **Details** for token categories, cache hit rate, models, and recorded turns, using the same compact breakdown as message usage; selecting a thread in a usage report opens the conversation with these details expanded. Expand the token count beneath a bot reply for its input, output, cache reads, cache writes, reported reasoning, model calls, and estimated USD cost. A reply's usage includes the tool loop that produced it. Thread totals include only calls made in that thread, so inherited messages are not charged twice.
 
 Usage reports read historical records in pages of 500 from one consistent database snapshot and retain combined totals. Pricing loads before the snapshot opens. All-time totals and tables include the full history; daily graphs show up to the latest 365 days of the period. Pricing downloads are limited to 16 MiB; failed or oversized downloads retain the last successful catalog.
 
-Cost estimates follow [ccusage's token calculation method](https://ccusage.com/guide/cost-modes), multiplying each token category by its current [LiteLLM rate](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json). The server downloads the public catalog on demand, caches it for 24 hours, keeps the last successful catalog during outages, and retries failures after five minutes. No conversation data is sent to the pricing source. New turns retain per-call models, context sizes, one-hour cache writes, and reported reasoning; reasoning is already part of output. Context pricing tiers apply per call. Recorded compaction, branch-summary, and tool tokens are included; entries without model attribution use their saved costs when available. Older saved turn totals use their recorded model and standard rates. Saved nonzero model costs provide a fallback when a rate is unavailable. Missing usage or pricing is labeled, and partial totals are marked. These are API-equivalent estimates, not subscription bills; image generation, transcription, sandbox, search, and other tool fees are excluded. Historical estimates can change with current rates. Usage is saved after inference even when cancellation or delivery failure follows; abrupt process loss can still leave a turn untracked.
+New turns capture usage at the provider response, including reported usage from failed attempts, in-turn summaries, hosted search, and image requests. This preserves calls that never become session entries and avoids counting tool or compaction entries twice. Expanded reply details show exact per-call counts and fast-mode history. Cache reads and cache writes are separate categories: a cached prefix can be reused many times, so reads can far exceed writes. The dashboard distinguishes a reported zero from a missing cache field. Missing writes cannot be inferred from uncached input or cache reads. Older records keep their saved counts; missing cache-reporting and fast-mode metadata remain unknown. Background work outside a reply's model turn is not attributed to that reply.
+
+Cost estimates follow [ccusage's token calculation method](https://ccusage.com/guide/cost-modes), multiplying each token category by its current [LiteLLM rate](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json). The server downloads the public catalog on demand, caches it for 24 hours, keeps the last successful catalog during outages, and retries failures after five minutes. No conversation data is sent to the pricing source. New turns retain per-call models, context sizes, one-hour cache writes, and reported reasoning; reasoning is already part of output. Context and service-tier pricing apply per call. A reported service tier takes precedence over the requested tier; if the provider omits it, the requested tier supplies the estimate. Missing priority rates are marked unpriced unless a saved cost is available. Recorded compaction, branch-summary, and tool tokens are included; entries without model attribution use their saved costs when available. Older saved turn totals use their recorded model and standard rates. Saved nonzero model costs provide a fallback when a rate is unavailable. Missing usage or pricing is labeled, and partial totals are marked. These are API-equivalent estimates, not subscription bills; image-generation fees, transcription, sandbox, search, and other tool fees are excluded; reported model tokens used by these tools are included when available. Historical estimates can change with current rates. Usage is saved after inference even when cancellation or delivery failure follows; abrupt process loss can still leave a turn untracked.
 
 Use the sun/moon button to switch between light and dark themes. The initial theme follows your system setting; an explicit choice is saved in your browser. Image attachments reserve preview space while loading. Expand **Image details** to see the saved description, filename, size, format, and loaded dimensions.
 
@@ -303,4 +308,4 @@ Attachments up to 5 MiB load into the page automatically with at most three conc
 
 The frontend uses React, Tailwind, [Rare UI Hook Sidebar](https://www.rareui.com/components/hooksidebar), and [Rare UI Code Block](https://www.rareui.com/components/codeblock). Rare UI components are copied into the repository; the sidebar uses ordinary links in place of Next.js routing.
 
-For a local preview with synthetic conversations and files, run `bun test/web/http-smoke.ts --preview --web-dev`, then open `http://127.0.0.1:3005`. To preview production assets, run `bun run build:web` and omit `--web-dev`. This uses an in-memory database and does not contact Telegram or E2B. `bun run test` includes real Bun route and HTTP lifecycle tests. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
+For a local preview with synthetic conversations and files, run `bun test/web/http-smoke.ts --preview --web-dev`, then open `http://127.0.0.1:3005` and sign in with `preview-admin-token`. The preview simulates Codex login with `DEMO-CODE` and completes after 30 seconds; do not enter that code on OpenAI. To preview production assets, run `bun run build:web` and omit `--web-dev`. This uses an in-memory database and does not contact Telegram or E2B. `bun run test` includes real Bun route and HTTP lifecycle tests. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.

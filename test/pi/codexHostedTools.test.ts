@@ -8,6 +8,7 @@ import { searchCodexWeb } from "../../src/pi/codexWebSearch.js";
 import { requestCodex, type CodexRequestRuntime } from "../../src/pi/codexRequest.js";
 import { replayCodexCheckpoint } from "../../src/pi/codexCompaction.js";
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
+import { InferenceUsageCollector } from "../../src/pi/usage.js";
 
 afterEach(() => vi.unstubAllGlobals());
 const model: Model<"openai-codex-responses"> = {
@@ -42,6 +43,17 @@ function transport(output: Record<string, unknown>[], completed = true) {
 }
 
 describe("Codex hosted search transport", () => {
+  it("captures hosted helper usage once with its original fast-mode setting", async () => {
+    transport([{ type: "web_search_call", id: "ws_usage", status: "completed" }]);
+    const input = runtime();
+    input.config.CODEX_FAST_MODE = true;
+    const capture = new InferenceUsageCollector();
+    await capture.run(() => searchCodexWeb(input, "facts", 1));
+    input.config.CODEX_FAST_MODE = false;
+    expect(capture.usage()).toMatchObject({ inputTokens: 20, cacheReadTokens: 10, outputTokens: 7, totalTokens: 37 });
+    expect(capture.usage().calls).toMatchObject([{ source: "web_search", fastMode: true, requestedServiceTier: "priority", cacheReadReported: true, cacheWriteReported: false }]);
+    expect(capture.usage().calls?.[0]).not.toHaveProperty("serviceTier");
+  });
   it("uses OAuth, forces hosted search and returns only annotated or searched source URLs", async () => {
     const requests = transport([
       { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", sources: [

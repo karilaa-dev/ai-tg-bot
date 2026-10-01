@@ -1,5 +1,6 @@
 import { startWebServer } from "./web/server.js";
 import { ConversationRepository } from "./web/repository.js";
+import { CodexLoginManager } from "./web/codex-login.js";
 import type { BotServices } from "./bot/context.js";
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
@@ -18,6 +19,7 @@ const logger = createLogger(config);
 const db = createDatabase(config, logger);
 let web: Awaited<ReturnType<typeof startWebServer>>;
 let pi: PiRuntimeManager | undefined;
+let codexLogin: CodexLoginManager | undefined;
 let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 let turnCoordinator: ThreadTurnCoordinator | undefined;
 logger.info("bot process starting", {
@@ -40,6 +42,11 @@ try {
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime: sandboxRuntime });
   await pi.initialize();
+  const piRuntime = pi;
+  codexLogin = new CodexLoginManager({
+    credentialStatus: () => piRuntime.codexCredentialStatus(),
+    saveCredential: (credential, signal) => piRuntime.saveCodexCredentials(credential, signal),
+  });
   const bot = createBot({
     config,
     db,
@@ -51,7 +58,7 @@ try {
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
   await bot.init();
-  web = await startWebServer({ development: process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger });
+  web = await startWebServer({ development: process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger, codexLogin });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });
@@ -71,6 +78,7 @@ try {
   process.exitCode = 1;
 } finally {
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
+  await codexLogin?.stop().catch(() => logger.warn("Codex login shutdown failed"));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {

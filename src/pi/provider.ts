@@ -15,6 +15,7 @@ import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import { withModelIdentity } from "./modelIdentity.js";
+import { ProviderUsageCapture } from "./providerUsage.js";
 
 const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
 const TELEGRAM_MAIN_MODEL = "main";
@@ -70,6 +71,7 @@ export function registerPiProviderRouter(input: {
       openRouter: openRouterModels[kind],
       context,
       options,
+      source: kind === "helper" ? "helper" : "assistant",
       streamCodex: input.streams?.codex ?? streamCodex,
       streamOpenRouter: input.streams?.openRouter ?? streamOpenRouter,
     });
@@ -112,6 +114,7 @@ async function* routeStream(input: {
   openRouter: Model<"openai-completions">;
   context: TranscriptContext;
   options?: SimpleStreamOptions;
+  source: "assistant" | "helper";
   streamCodex: typeof streamCodex;
   streamOpenRouter: typeof streamOpenRouter;
 }): AsyncGenerator<AssistantMessageEvent> {
@@ -136,6 +139,11 @@ async function* routeStream(input: {
   let status: number | undefined;
   let resetAt: number | undefined;
   let emitted = false;
+  const usage = new ProviderUsageCapture(input.codex.provider, input.codex.id, {
+    fastMode: input.config.CODEX_FAST_MODE,
+    ...(input.config.CODEX_FAST_MODE ? { requestedServiceTier: "priority" } : {}),
+    source: input.source,
+  });
   const buffered: AssistantMessageEvent[] = [];
   try {
     const auth = await input.registry.getApiKeyAndHeaders(input.codex);
@@ -150,6 +158,10 @@ async function* routeStream(input: {
         headers: { ...auth.headers, ...input.options?.headers },
         timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
         maxRetries: 0,
+        onProviderStreamEvent: async (event, model) => {
+          usage.observe(event);
+          await input.options?.onProviderStreamEvent?.(event, model);
+        },
         // Pi's simple stream options do not forward the Codex serviceTier option.
         onPayload: input.config.CODEX_FAST_MODE ? async (payload, model) => {
           const replacement = await input.options?.onPayload?.(payload, model);
@@ -166,6 +178,8 @@ async function* routeStream(input: {
       }),
     });
     for await (const event of stream) {
+      if (event.type === "done") usage.record(event.message);
+      else if (event.type === "error") usage.record(event.error);
       if (!emitted && event.type === "error") {
         const message = event.error.errorMessage;
         if (retryableCodexError({ status, message })) {
@@ -221,6 +235,7 @@ async function* routeStream(input: {
     yield { type: "error", reason: "error", error: providerErrorMessage(input.codex, message) };
     return;
   } finally {
+    usage.record();
     attempt.release();
   }
 }
@@ -251,8 +266,10 @@ async function* openRouterEvents(input: {
   openRouter: Model<"openai-completions">;
   context: TranscriptContext;
   options?: SimpleStreamOptions;
+  source: "assistant" | "helper";
   streamOpenRouter: typeof streamOpenRouter;
 }): AsyncGenerator<AssistantMessageEvent> {
+  const usage = new ProviderUsageCapture(input.openRouter.provider, input.openRouter.id, { fastMode: false, source: input.source });
   const stream = requestEvents({
     timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
     signal: input.options?.signal,
@@ -262,9 +279,21 @@ async function* openRouterEvents(input: {
       apiKey: input.config.OPENROUTER_API_KEY,
       timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
       maxRetries: 2,
+      onProviderStreamEvent: async (event, model) => {
+        usage.observe(event);
+        await input.options?.onProviderStreamEvent?.(event, model);
+      },
     }),
   });
-  for await (const event of stream) yield event;
+  try {
+    for await (const event of stream) {
+      if (event.type === "done") usage.record(event.message);
+      else if (event.type === "error") usage.record(event.error);
+      yield event;
+    }
+  } finally {
+    usage.record();
+  }
 }
 
 // Provider SDK timeouts may cover only connection setup. Bound the complete

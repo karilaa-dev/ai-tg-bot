@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface TokenTotals {
   input: number;
@@ -20,7 +21,18 @@ export interface InferenceUsageDelta {
   calls?: InferenceUsageCall[];
 }
 
-export interface InferenceUsageCall {
+export interface InferenceUsageMetadata {
+  /** Whether this request used the bot's Codex fast-mode setting. Absent in older records. */
+  fastMode?: boolean;
+  requestedServiceTier?: string;
+  /** The tier returned by the provider, which can differ from the requested tier. */
+  serviceTier?: string;
+  cacheReadReported?: boolean;
+  cacheWriteReported?: boolean;
+  source?: string;
+}
+
+export interface InferenceUsageCall extends InferenceUsageMetadata {
   provider: string;
   model: string;
   inputTokens: number;
@@ -35,7 +47,37 @@ export interface InferenceUsageCall {
   aggregate?: boolean;
 }
 
-type UsageSource = Pick<AssistantMessage, "provider" | "model" | "responseModel" | "usage"> & { aggregate?: boolean };
+export type UsageSource = Pick<AssistantMessage, "provider" | "model" | "responseModel" | "usage">
+  & InferenceUsageMetadata & { aggregate?: boolean };
+
+const activeUsage = new AsyncLocalStorage<InferenceUsageCollector>();
+
+/** Captures provider calls even if a failed attempt or summary never becomes a session entry. */
+export class InferenceUsageCollector {
+  private readonly calls: InferenceUsageCall[] = [];
+  private closed = false;
+
+  run<T>(work: () => Promise<T>): Promise<T> {
+    return activeUsage.run(this, async () => {
+      try { return await work(); }
+      finally { this.closed = true; }
+    });
+  }
+
+  record(source: UsageSource): void {
+    if (!this.closed) this.calls.push(usageCall(source));
+  }
+
+  usage(): InferenceUsageDelta {
+    return inferenceUsageFromCalls(this.calls.map(call => ({ ...call, cost: call.cost && { ...call.cost } })));
+  }
+}
+
+/** Call once per provider request, before forwarding its terminal message to the session. */
+export function recordInferenceUsage(source: UsageSource, metadata: InferenceUsageMetadata = {}): void {
+  Object.assign(source, metadata);
+  activeUsage.getStore()?.record(source);
+}
 
 export function inferenceUsageFromEntries(entries: SessionEntry[]): InferenceUsageDelta {
   const sources = entries.flatMap<UsageSource>(entry => {
@@ -48,17 +90,31 @@ export function inferenceUsageFromEntries(entries: SessionEntry[]): InferenceUsa
 }
 
 export function inferenceUsageFromMessages(messages: UsageSource[]): InferenceUsageDelta {
-  const calls: InferenceUsageCall[] = messages.map(({ provider, model, responseModel, usage, aggregate }) => ({
+  return inferenceUsageFromCalls(messages.map(usageCall));
+}
+
+function usageCall({ provider, model, responseModel, usage, aggregate,
+  fastMode, requestedServiceTier, serviceTier, cacheReadReported, cacheWriteReported, source }: UsageSource): InferenceUsageCall {
+  return {
     provider, model: responseModel ?? model,
     inputTokens: usage.input, outputTokens: usage.output,
     cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite,
     cacheWrite1hTokens: usage.cacheWrite1h, reasoningTokens: usage.reasoning,
-    cost: usage.cost,
+    cost: { ...usage.cost },
+    ...(fastMode !== undefined ? { fastMode } : {}),
+    ...(requestedServiceTier !== undefined ? { requestedServiceTier } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
+    ...(cacheReadReported !== undefined ? { cacheReadReported } : {}),
+    ...(cacheWriteReported !== undefined ? { cacheWriteReported } : {}),
+    ...(source !== undefined ? { source } : {}),
     ...(aggregate ? { aggregate: true } : {}),
-  }));
-  const total = messages.reduce((sum, { usage }) => ({
-    input: sum.input + usage.input, output: sum.output + usage.output,
-    cacheRead: sum.cacheRead + usage.cacheRead, cacheWrite: sum.cacheWrite + usage.cacheWrite, total: 0,
+  };
+}
+
+function inferenceUsageFromCalls(calls: InferenceUsageCall[]): InferenceUsageDelta {
+  const total = calls.reduce((sum, call) => ({
+    input: sum.input + call.inputTokens, output: sum.output + call.outputTokens,
+    cacheRead: sum.cacheRead + call.cacheReadTokens, cacheWrite: sum.cacheWrite + call.cacheWriteTokens, total: 0,
   }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
   return { ...inferenceUsageDelta({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, total), calls };
 }
