@@ -38,6 +38,7 @@ import {
 import { createTurnBudgetExtension } from "./turnBudget.js";
 import { createBotToolSearchExtension } from "./toolPolicy.js";
 import { createContextPruningExtension } from "./contextPruning.js";
+import { createCodexCompactionExtension } from "./codexCompaction.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 const INITIAL_ACTIVE_TOOL_NAMES = ["read", "bash", "finish_response", "codemode", "tool_search"];
@@ -177,6 +178,7 @@ export class PiRuntimeManager implements PiRuntimeService {
       agentDir: this.agentDir,
       settingsManager,
       extensionFactories: [
+        createCodexCompactionExtension(bridge),
         createFinishResponseGuard(),
         createTurnBudgetExtension(bridge),
         createTurnPromptContextExtension(bridge),

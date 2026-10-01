@@ -22,7 +22,10 @@ try {
   const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Pi tools smoke" });
   pi = new PiRuntimeManager({ config, db, repos, logger: createLogger(config) });
   await pi.initialize();
-  if (process.env.PI_SMOKE_FORCE_OPENROUTER === "1") pi.providerRouter.circuit.recordFailure();
+  if (process.env.PI_SMOKE_FORCE_OPENROUTER === "1") {
+    const attempt = pi.providerRouter.circuit.acquire();
+    if (attempt.allowed) attempt.recordFailure();
+  }
   const runtime = await pi.runtime(thread, user);
   await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("No attachments in this check."); } });
   const initialTools = runtime.session.getActiveToolNames();

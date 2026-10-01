@@ -268,10 +268,31 @@ describe("Pi automatic provider", () => {
     expect(partial.router.circuit.state().open).toBe(true);
   });
 
+  it.each([false, true])("does not overwrite a newer search outcome when older inference fails=%s", async fails => {
+    const circuit = new CodexCircuitBreaker();
+    const codex = vi.fn((model: Model<"openai-codex-responses">) => {
+      const search = circuit.acquire();
+      if (!search.allowed) throw new Error("Expected an allowed search attempt");
+      if (fails) search.recordSuccess();
+      else search.recordFailure();
+      return fails ? errorStream(model, "quota exhausted") : eventStream(model, "codex answer");
+    });
+    const openRouter = vi.fn((model: Model<"openai-completions">) => eventStream(model, "fallback"));
+    const harness = providerHarness({ circuit, streams: { codex, openRouter } });
+    await harness.run();
+    expect(circuit.state().open).toBe(!fails);
+    if (!fails) {
+      expect(textDeltas(await harness.run())).toBe("fallback");
+      expect(codex).toHaveBeenCalledOnce();
+    }
+  });
+
   it("closes a half-open circuit after a definitive non-retryable response", async () => {
     let now = 10_000;
     const circuit = new CodexCircuitBreaker(() => now);
-    circuit.recordFailure();
+    const failure = circuit.acquire();
+    if (!failure.allowed) throw new Error("Expected an allowed attempt");
+    failure.recordFailure();
     now += 30 * 60_000;
     const harness = providerHarness({
       codexError: "invalid request",

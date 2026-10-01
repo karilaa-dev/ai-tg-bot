@@ -12,6 +12,8 @@ import type { BrowserUseToolRuntime } from "../../browserUse/runtime.js";
 import type { OutgoingFiles } from "../../files/outgoingFiles.js";
 import type { ThreadScope } from "../../memory/retrieval.js";
 import type { OfficeValidation } from "../../office/validation.js";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { searchCodexWeb } from "../../pi/codexWebSearch.js";
 
 export interface ToolBuildInput {
   config: AppConfig;
@@ -25,6 +27,7 @@ export interface ToolBuildInput {
   officeValidation?: OfficeValidation;
   responseDraft?: { text: string };
   logger?: Logger;
+  codexWebSearch?: (query: string, maxResults: number, signal?: AbortSignal) => ReturnType<typeof searchCodexWeb>;
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
@@ -44,6 +47,7 @@ interface BotToolDefinition<Input = unknown, Output = unknown> {
   execute: (input: Input, signal?: AbortSignal) => Promise<Output>;
   toModelOutput?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
   toToolDetails?: (input: { toolCallId: string; input: Input; output: Output }) => unknown | Promise<unknown>;
+  usage?: (output: Output) => Usage | undefined;
 }
 
 export type BotToolRegistry = Record<string, BotToolDefinition<any, any>>;

@@ -90,8 +90,10 @@ try {
         let peakBufferedBytes: number | undefined;
         try {
           await pi.initialize();
-          if (requestedProvider === "openrouter") pi.providerRouter.circuit.recordFailure(Date.now() + 30 * 60_000);
-          else if (!pi.providerRouter.codexConfigured()) throw new Error("Codex credentials are unavailable.");
+          if (requestedProvider === "openrouter") {
+            const attempt = pi.providerRouter.circuit.acquire();
+            if (attempt.allowed) attempt.recordFailure(Date.now() + 30 * 60_000);
+          } else if (!pi.providerRouter.codexConfigured()) throw new Error("Codex credentials are unavailable.");
           const runtime = await pi.runtime({ ...thread, pi_session_file: null, pi_session_id: null }, user);
           const unsubscribe = runtime.session.subscribe((event: AgentSessionEvent) => {
             if (event.type === "turn_start") modelStarted = Date.now();

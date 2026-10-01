@@ -26,6 +26,7 @@ import { type TurnPromptContextSource } from "./turnContext.js";
 import { TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
 import { OutgoingFiles } from "../files/outgoingFiles.js";
 import { OfficeValidation } from "../office/validation.js";
+import { searchCodexWeb } from "./codexWebSearch.js";
 
 interface PiTurnTransport {
   api: Api;
@@ -188,6 +189,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       responseDraft: this.responseDraft,
       logger: this.logger,
       commandRuntime: this.commandRuntime,
+      codexWebSearch: this.providerRouter.codexConfigured("helper")
+        ? (query, maxResults, signal) => searchCodexWeb(this, query, maxResults, signal) : undefined,
       browserRuntime: this.browserRuntime?.forThread(this.user.tg_id, this.thread.id),
       resolveFile: (file, signal) => this.resolveFile(file, signal),
       selectContextFiles: (fileIds) => this.selectContextFiles(fileIds),

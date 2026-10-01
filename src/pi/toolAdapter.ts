@@ -116,7 +116,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
           }
         }
         return {
-          content, details,
+          content, details, usage: liveDefinition.usage?.(output),
           ...(outputSchema ? { structuredContent: JSON.parse(safeJson(output)) } : {}),
           ...(toolResultFailed(output) ? { isError: true } : {}),
           ...(name === "finish_response" && asRecord(output)?.completed === true ? { terminate: true } : {}),

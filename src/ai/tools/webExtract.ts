@@ -34,6 +34,7 @@ export function createWebExtractTool(input: ToolBuildInput) {
       max_chars_per_url,
     }, signal) => {
       try {
+        if (!input.config.TAVILY_API_KEY) throw new Error("web_extract requires TAVILY_API_KEY. Use browser tools or Bash with curl to read a URL.");
         const trimmedQuery = query?.trim();
         const requestBody: Record<string, unknown> = {
           urls,

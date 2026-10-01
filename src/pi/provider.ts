@@ -136,17 +136,6 @@ async function* routeStream(input: {
   let status: number | undefined;
   let resetAt: number | undefined;
   let emitted = false;
-  let circuitSettled = false;
-  const recordSuccess = () => {
-    if (circuitSettled) return;
-    circuitSettled = true;
-    input.circuit.recordSuccess();
-  };
-  const recordFailure = () => {
-    if (circuitSettled) return;
-    circuitSettled = true;
-    input.circuit.recordFailure(resetAt);
-  };
   const buffered: AssistantMessageEvent[] = [];
   try {
     const auth = await input.registry.getApiKeyAndHeaders(input.codex);
@@ -180,7 +169,7 @@ async function* routeStream(input: {
       if (!emitted && event.type === "error") {
         const message = event.error.errorMessage;
         if (retryableCodexError({ status, message })) {
-          recordFailure();
+          attempt.recordFailure(resetAt);
           input.logger?.warn("Codex provider failed before output; falling back to OpenRouter", {
             status,
             error: message,
@@ -189,7 +178,7 @@ async function* routeStream(input: {
           yield* openRouterEvents(input);
           return;
         }
-        recordSuccess();
+        attempt.recordSuccess();
         emitted = true;
         for (const pending of buffered) yield pending;
         yield event;
@@ -197,8 +186,8 @@ async function* routeStream(input: {
       }
       if (emitted && event.type === "error") {
         const message = event.error.errorMessage;
-        if (retryableCodexError({ status, message })) recordFailure();
-        else recordSuccess();
+        if (retryableCodexError({ status, message })) attempt.recordFailure(resetAt);
+        else attempt.recordSuccess();
       }
       if (!emitted && !isMeaningful(event)) {
         buffered.push(event);
@@ -209,17 +198,17 @@ async function* routeStream(input: {
         for (const pending of buffered) yield pending;
       }
       yield event;
-      if (event.type === "done") recordSuccess();
+      if (event.type === "done") attempt.recordSuccess();
     }
     if (!emitted) {
       for (const pending of buffered) yield pending;
     }
-    recordSuccess();
+    attempt.recordSuccess();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const retryable = retryableCodexError({ status, message });
-    if (retryable) recordFailure();
-    else recordSuccess();
+    if (retryable) attempt.recordFailure(resetAt);
+    else attempt.recordSuccess();
     if (!emitted && retryable) {
       input.logger?.warn("Codex provider setup failed; falling back to OpenRouter", {
         status,
@@ -232,7 +221,7 @@ async function* routeStream(input: {
     yield { type: "error", reason: "error", error: providerErrorMessage(input.codex, message) };
     return;
   } finally {
-    if (attempt.probe && input.circuit.state().probeActive) input.circuit.releaseProbe();
+    attempt.release();
   }
 }
 
