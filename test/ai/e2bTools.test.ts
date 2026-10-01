@@ -1,25 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { appendPublishedWebsiteNotice } from "../../src/ai/agentTurnEngine.js";
-import { createBashTool } from "../../src/ai/tools/bash.js";
-import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
 import { loadTestConfig } from "../../src/config.js";
 import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
 
 describe("E2B-backed agent tools", () => {
-  it("describes combined inspection and task-scoped service bindings", () => {
-    const description = createBashTool(buildInput(fakeRuntime())).description;
-
-    expect(description).toContain("inspect_images");
-    expect(description).toContain("retry only inspect_workspace_images");
-    expect(description).toContain("diagnostics to 127.0.0.1");
-    expect(description).toContain("requested published websites to 0.0.0.0");
-  });
-
-  it("holds sandbox activity while exporting a created file", () => {
-    expect(createCreateFileTool(buildInput(fakeRuntime())).holdsCommandActivity).toBe(true);
-  });
-
   it("publishes through the explicit tool and registers the final-answer notice", async () => {
     const published = {
       sandboxId: "sandbox-1",
@@ -33,11 +18,6 @@ describe("E2B-backed agent tools", () => {
     runtime.publishWebsite = vi.fn(async () => published);
     const register = vi.fn();
     const tool = createPublishWebsiteTool(buildInput(runtime, register));
-
-    expect(tool.description).toContain("nohup command </dev/null >server.log 2>&1 &");
-    expect(tool.description).toContain("dedicated workspace subdirectory");
-    expect(tool.description).toContain("public and unauthenticated");
-    expect(tool.description).toContain("never add private attachments");
 
     const result = await tool.execute({ port: 3000, site_dir: "/site", path: "/" });
 

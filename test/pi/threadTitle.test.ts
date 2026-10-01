@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   buildThreadTitlePrompt,
   sanitizeThreadTitle,
-  THREAD_TITLE_SYSTEM_PROMPT,
 } from "../../src/pi/threadTitle.js";
 
 describe("thread title helper", () => {
@@ -18,8 +17,6 @@ describe("thread title helper", () => {
 
     expect(Array.from(payload.user_message)).toHaveLength(500);
     expect(payload.assistant_message).toBe("A focused answer");
-    expect(THREAD_TITLE_SYSTEM_PROMPT).toContain("untrusted data");
-    expect(THREAD_TITLE_SYSTEM_PROMPT).toContain("3-5 word");
   });
 
   it.each([

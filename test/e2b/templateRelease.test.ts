@@ -14,14 +14,15 @@ import {
   E2B_TOOLBOX_RELEASE_TAG,
   parseManagedE2BTemplateRef,
 } from "../../src/e2b/templateIdentity.js";
-import { APP_VERSION } from "../../src/version.js";
+import { e2bToolboxBuildRef } from "../../e2b-template/template.js";
 import { deferred } from "../helpers/async.js";
 
 describe("versioned E2B template identity", () => {
-  it("derives the release tag from package.json", () => {
-    expect(APP_VERSION).toBe("2.0.16");
-    expect(E2B_TOOLBOX_RELEASE_TAG).toBe("v2.0.16");
-    expect(E2B_TOOLBOX_RELEASE_REF).toBe("ai-tg-bot-tools:v2.0.16");
+  it("keeps build tags separate from the reserved production tag", () => {
+    expect(e2bToolboxBuildRef("build-20260803-020000"))
+      .toBe("ai-tg-bot-tools:build-20260803-020000");
+    expect(() => e2bToolboxBuildRef("production:unexpected")).toThrow("contain no colon");
+    expect(() => e2bToolboxBuildRef("production")).toThrow("reserved production tag");
   });
 
   it("accepts only tagged references owned by this bot", () => {
@@ -140,7 +141,7 @@ function buildInfo(): BuildInfo {
   return {
     alias: "ai-tg-bot-tools",
     name: "ai-tg-bot-tools",
-    tags: ["v2.0.16"],
+    tags: [E2B_TOOLBOX_RELEASE_TAG],
     templateId: "template-id",
     buildId: "build-id",
   };

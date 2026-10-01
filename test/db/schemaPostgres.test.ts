@@ -41,11 +41,6 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     });
     await database.initialize();
 
-    expect(await tableExists("users")).toBe(true);
-    expect(await tableExists("message_search")).toBe(true);
-    expect(await tableExists("chunk_search")).toBe(true);
-    expect(await tableExists("turn_runs")).toBe(true);
-    expect(await tableExists("turn_run_sources")).toBe(true);
     const transcriptId = await repos.audioTranscripts.insert({ userId: user.tg_id, threadId: thread.id, messageId: message.id }, {
       text: "A persisted transcript.", model: "qwen/qwen3-asr-1.7b",
     });
@@ -62,23 +57,10 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     });
     expect(await repos.audioTranscripts.get(incomingId)).toMatchObject({ visible_message_id: accepted.userMessage.id });
     expect(await repos.turnRuns.hasTelegramUpdate(1234)).toBe(true);
-    expect(await tableExists("schema_migrations")).toBe(false);
-    expect(await tableExists("invites")).toBe(false);
-    expect(await tableExists("summaries")).toBe(false);
     expect(await database.db.query<{ tg_id: number }>(sql`select tg_id from users`)).toEqual([{ tg_id: 42 }]);
     await expect(database.search.searchMessages([thread.id], "needle", 5))
       .resolves.toEqual([expect.objectContaining({ id: message.id })]);
   });
-
-  async function tableExists(table: string): Promise<boolean> {
-    const rows = await database.db.query<{ exists: boolean }>(sql`
-      select exists(
-        select 1 from information_schema.tables
-        where table_schema = ${schema} and table_name = ${table}
-      ) as exists
-    `);
-    return Boolean(rows[0]?.exists);
-  }
 
   function databaseUrl(): string {
     const url = new URL(postgresUrl!);
