@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type JsonObject, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type JsonObject, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
@@ -28,10 +28,13 @@ describe("Pi tool discovery and codemode", () => {
     await runtime.session.prompt("Find the browser navigation tool", { expandPromptTemplates: false });
 
     expect(getCurrentTools(contexts[0]!.messages)).toHaveLength(5);
-    const initialChars = JSON.stringify(getCurrentTools(contexts[0]!.messages)).length;
+    const initialToolChars = JSON.stringify(getCurrentTools(contexts[0]!.messages)).length;
+    const initialPromptChars = getCurrentSystemPrompt(contexts[0]!.messages).length;
+    // Bound the actual initial prompt and tool schemas independently of the full tool catalog.
+    expect(initialPromptChars + initialToolChars).toBeLessThanOrEqual(16_000);
     const previousChars = JSON.stringify(runtime.session.getAllTools().filter((tool) => !["codemode", "tool_search"].includes(tool.name))
       .map(({ name, description, parameters }) => ({ name, description, parameters }))).length;
-    expect(initialChars).toBeLessThan(previousChars * 0.65);
+    expect(initialToolChars).toBeLessThan(previousChars * 0.65);
     expect(getCurrentTools(contexts[1]!.messages).map((tool) => tool.name)).toContain("browser_navigate");
     expect(runtime.session.getCallableToolNames()).not.toContain("browser_navigate");
     expect(result(runtime.session.messages, "tool_search").details).toMatchObject({ loaded: ["browser_navigate"] });
