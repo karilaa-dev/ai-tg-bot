@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.15",
+  "version": "2.0.16",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.web.json --noEmit",
     "test": "bun node_modules/vitest/vitest.mjs run",
     "live:pi-check": "bun scripts/live-pi-check.ts",
+    "live:codex-tools-check": "bun scripts/live-codex-tools-check.ts",
     "live:pi-tools-check": "bun scripts/live-pi-tools-check.ts",
     "live:pi-image-check": "bun scripts/live-pi-image-check.ts",
     "live:pi-image-intent-check": "bun scripts/live-pi-image-intent-check.ts",

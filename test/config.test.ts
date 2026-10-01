@@ -8,6 +8,20 @@ const required = {
   E2B_API_KEY: "test-e2b",
 };
 
+describe("Codex server tools configuration", () => {
+  it("enables server compaction and automatic search without a Tavily key", () => {
+    const config = loadConfig({ ...required, TAVILY_API_KEY: " " });
+    expect(config.TAVILY_API_KEY).toBeUndefined();
+    expect(config.WEB_SEARCH_PROVIDER).toBe("auto");
+    expect(config.CODEX_SERVER_COMPACTION).toBe(true);
+    expect(loadConfig({ ...required, CODEX_SERVER_COMPACTION: "false" }).CODEX_SERVER_COMPACTION).toBe(false);
+  });
+  it("rejects unsupported providers and invalid compaction switches", () => {
+    expect(() => loadConfig({ ...required, WEB_SEARCH_PROVIDER: "unknown" })).toThrow();
+    expect(() => loadConfig({ ...required, CODEX_SERVER_COMPACTION: "1" })).toThrow();
+  });
+});
+
 describe("Codex fast mode configuration", () => {
   it("defaults to disabled and accepts explicit true or false", () => {
     expect(loadConfig(required).CODEX_FAST_MODE).toBe(false);
@@ -28,7 +42,7 @@ describe("Browser Use configuration", () => {
 
   it("leaves Browser Use disabled and defaults to a five-minute session", () => {
     const config = loadConfig(required);
-    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.15");
+    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.16");
     expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(config.BASH_TIMEOUT_MS).toBe(120_000);
     expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);

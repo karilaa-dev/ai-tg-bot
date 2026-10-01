@@ -11,7 +11,7 @@
 | Database | Uses SQLite by default. Set `DB_URL` for PostgreSQL. |
 | E2B | Gives each thread one isolated toolbox sandbox with a persistent filesystem and memory. |
 | Browser Use Cloud | Adds optional interactive browsing, screenshots, and downloads. |
-| Tavily | Handles `web_search` and the stateless `web_extract` tool. |
+| Web search | Codex hosted search through the existing Codex login. Optional Tavily fallback, image discovery, and stateless `web_extract`. |
 
 Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
 
@@ -45,7 +45,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 - Bun 1.4.2
 - A Telegram BotFather token
-- E2B, OpenRouter, and Tavily API keys
+- E2B and OpenRouter API keys. Web search needs Codex login or an optional Tavily key.
 - Optional Codex CLI OAuth credentials for primary inference
 - Optional Browser Use Cloud API key
 - An E2B API key that can build the versioned toolbox template
@@ -58,7 +58,7 @@ Bun loads `.env` automatically; environment variables supplied by your deploymen
 
 ```bash
 cp .env.example .env
-# Set BOT_TOKEN, E2B_API_KEY, OPENROUTER_API_KEY, and TAVILY_API_KEY.
+# Set BOT_TOKEN, E2B_API_KEY, and OPENROUTER_API_KEY.
 bun install --frozen-lockfile
 bun run dev
 ```
@@ -85,7 +85,7 @@ Dokploy can deploy this repository with Railpack auto-detection. The `packageMan
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
-Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser Use remains optional. For Codex primary inference, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
+Set the required Telegram, E2B, and OpenRouter keys in Dokploy. Tavily and Browser Use remain optional. For Codex primary inference and search, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
 ## E2B sandbox behavior
 
@@ -96,7 +96,7 @@ Set the required Telegram, E2B, OpenRouter, and Tavily keys in Dokploy. Browser 
 - `validate_office_file` returns named package, format, rendering, and formula checks plus visual review coverage. `render_office_preview` converts actual saved DOCX/PPTX/XLSX files through LibreOffice and Poppler, returning up to four model-only page images without Browser Use. Record per-page `visual_reviews` with the returned `source_sha256`; rendering alone does not approve delivery.
 - Office delivery requires every applicable check and every page review to pass for the exact exported bytes. Edits invalidate approval. Unvalidated browser downloads are staged in the workspace for review. Failed or incomplete checks withhold the file; successful delivery preserves the requested caption and keeps validation metadata internal. These checks do not certify Microsoft Office rendering, animations, or external workbook connections.
 - `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
-- `web_search` accepts `include_images: true` for image URLs and descriptions. The presentation skill uses this to find relevant photographs and illustrations, inspect downloaded originals, and retain source credits. It also supports generated artwork where the subject benefits from it.
+- `web_search` defaults to Codex hosted search when Codex is configured, including during OpenRouter inference. It returns a sourced answer and URLs from search metadata. `WEB_SEARCH_PROVIDER=auto` falls back to Tavily when Codex is unavailable; `codex` or `tavily` forces a provider. Tavily requires `TAVILY_API_KEY` and also supplies image candidates for `include_images: true` in auto mode. Codex search reports that image discovery is unavailable instead of inventing image URLs. `web_extract` still requires Tavily; without it, use browser tools or Bash with curl for known URLs.
 - The database stores sandbox IDs. Recovery can also use deployment and thread metadata after a restart.
 - A normal shell-backed turn arms a three-minute idle pause. A successful `publish_website` call uses 15 minutes for that turn.
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
@@ -108,7 +108,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.15` uses `ai-tg-bot-tools:v2.0.15`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.16` uses `ai-tg-bot-tools:v2.0.16`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -122,8 +122,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.15 is ai-tg-bot-tools:v2.0.15.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.15
+# Optional override. The default for version 2.0.16 is ai-tg-bot-tools:v2.0.16.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.16
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -196,6 +196,10 @@ The bot rejects the workspace root and Telegram-file directory. It also verifies
 ## Prompt and provider behavior
 
 Normal turns keep the core system prompt and Office skill index stable. The bot creates one bounded `<session_context>` snapshot per turn for current time, timezone, user metadata, thread title, and inherited files. This untrusted block is not written to Pi history or compaction summaries.
+
+Manual `/compact` and automatic compaction request a Codex server checkpoint alongside Pi's readable summary. The app stores the encrypted checkpoint in the session JSONL and replays it for the same Codex model after resume or fork. Recent messages and current-turn context remain in the request. OpenRouter uses the readable summary, and a failed server compaction keeps the normal Pi summary. Set `CODEX_SERVER_COMPACTION=false` to use only Pi summaries. The implementation uses Pi's Codex transport directly and does not install the [example extension](https://github.com/algal/pi-openai-server-compaction).
+
+Run `bun run live:codex-tools-check` with Codex credentials to verify hosted search, server compaction, and recall after reopening a temporary session. This check sends no Telegram messages and starts no sandbox.
 
 Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, and `tool_search`. Specialist tools are registered but loaded only when searched for; Pi records changes to the active tool set in its transcript. Codemode can batch chat searches, file reads, and web research with structured results. Workspace mutations, browser actions, image generation, publishing, and delivery cannot run inside scripts. Nested research calls share the turn's tool-call and failure limits. Only a direct `finish_response` completes delivery.
 

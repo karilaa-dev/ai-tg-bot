@@ -19,6 +19,9 @@ const schemas: Record<string, TSchema> = {
     Type.Object({ outline: Type.Array(Type.Object({ chunk_index: Type.Number(), heading_path: nullableString })) }),
   ]),
   web_search: Type.Object({
+    provider: Type.Optional(Type.String()),
+    answer: Type.Optional(Type.String()),
+    warning: Type.Optional(Type.String()),
     results: Type.Array(Type.Object({ title: Type.String(), url: Type.String(), snippet: Type.String(), published_date: Type.Optional(Type.String()) })),
     images: Type.Optional(Type.Array(Type.Object({ url: Type.String(), description: nullableString }))),
   }),
