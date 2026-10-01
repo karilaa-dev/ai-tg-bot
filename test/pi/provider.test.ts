@@ -399,6 +399,8 @@ function providerHarness(input: {
           compat: input.discoveredOpenRouterCompat,
         }
       : undefined,
+    getProvider: () => undefined,
+    registerVirtualModel: vi.fn(),
     registerProvider: (_name: string, provider: typeof registered) => { registered = provider; },
     hasConfiguredAuth: () => input.codexConfigured ?? true,
     getApiKeyAndHeaders: async () => input.authError

@@ -15,6 +15,7 @@ import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
 import { CodexCircuitBreaker, resetAtFromHeaders, retryableCodexError } from "./circuit.js";
 import { withModelIdentity } from "./modelIdentity.js";
+import { projectCodexCheckpoint } from "./codexCheckpoint.js";
 import { ProviderUsageCapture } from "./providerUsage.js";
 
 const TELEGRAM_AUTO_PROVIDER = "telegram-auto";
@@ -61,7 +62,7 @@ export function registerPiProviderRouter(input: {
     context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream => lazyStream(selected, async () => {
-    const kind = selected.id === TELEGRAM_HELPER_MODEL ? "helper" : "main";
+    const kind = selected.id === TELEGRAM_HELPER_MODEL || selected.id === "routed-helper" ? "helper" : "main";
     return routeStream({
       config: input.config,
       registry: input.modelRegistry,
@@ -77,6 +78,19 @@ export function registerPiProviderRouter(input: {
     });
   });
 
+  // Pi's automatic compaction uses the physical response model's limits. Keep
+  // those catalog entries aligned with the models actually sent by this router.
+  for (const models of [codexModels, openRouterModels]) {
+    const provider = input.modelRegistry.getProvider(models.main.provider);
+    if (!provider) continue;
+    const configured = new Map([models.main, models.helper].map(model => [model.id, model]));
+    input.modelRegistry.registerProvider({ ...provider, getModels: () => {
+      const all = new Map(provider.getModels().map(model => [model.id, model]));
+      for (const [id, model] of configured) all.set(id, model);
+      return [...all.values()];
+    } });
+  }
+
   input.modelRegistry.registerProvider(TELEGRAM_AUTO_PROVIDER, {
     name: "Telegram automatic Codex/OpenRouter",
     api: "telegram-auto",
@@ -84,16 +98,28 @@ export function registerPiProviderRouter(input: {
     apiKey: input.config.OPENROUTER_API_KEY,
     streamSimple,
     models: [mainModel, helperModel].map((model) => ({
-      id: model.id,
+      id: `routed-${model.id}`,
       name: model.name,
       api: model.api,
       reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
       input: [...model.input],
       cost: model.cost,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
     })),
   });
+
+  // Keep the existing selection ids in saved sessions. A virtual selection lets
+  // Pi recognize Codex/OpenRouter errors and run its normal overflow recovery.
+  for (const model of [mainModel, helperModel]) {
+    input.modelRegistry.registerVirtualModel({
+      provider: TELEGRAM_AUTO_PROVIDER, id: model.id, name: model.name,
+      contextWindow: model.contextWindow, maxTokens: model.maxTokens,
+      thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+      route: request => ({ model: input.modelRegistry.find(TELEGRAM_AUTO_PROVIDER, `routed-${model.id}`)!, thinkingLevel: request.thinkingLevel }),
+    });
+  }
 
   return {
     circuit,
@@ -148,10 +174,11 @@ async function* routeStream(input: {
   try {
     const auth = await input.registry.getApiKeyAndHeaders(input.codex);
     if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? "Missing openai-codex OAuth token" : auth.error);
+    const projected = projectCodexCheckpoint(input.context, input.codex.id);
     const stream = requestEvents({
       timeoutMs: input.config.PI_REQUEST_TIMEOUT_MS,
       signal: input.options?.signal,
-      start: (signal) => input.streamCodex(input.codex, withModelIdentity(input.context, input.codex), {
+      start: (signal) => input.streamCodex(input.codex, withModelIdentity(projected.context, input.codex), {
         ...input.options,
         signal,
         apiKey: auth.apiKey,
@@ -163,13 +190,12 @@ async function* routeStream(input: {
           await input.options?.onProviderStreamEvent?.(event, model);
         },
         // Pi's simple stream options do not forward the Codex serviceTier option.
-        onPayload: input.config.CODEX_FAST_MODE ? async (payload, model) => {
+        onPayload: async (payload, model) => {
           const replacement = await input.options?.onPayload?.(payload, model);
-          const body = replacement === undefined ? payload : replacement;
-          return body !== null && typeof body === "object"
-            ? { ...body, service_tier: "priority" }
-            : body;
-        } : input.options?.onPayload,
+          const body = projected.replay(replacement === undefined ? payload : replacement);
+          return input.config.CODEX_FAST_MODE && body !== null && typeof body === "object"
+            ? { ...body, service_tier: "priority" } : body;
+        },
         onResponse: async (response, model) => {
           status = response.status;
           resetAt = resetAtFromHeaders(response.headers);
@@ -355,6 +381,7 @@ function autoModel(id: string, name: string, contextWindow: number): Model<Api> 
     name,
     api: "telegram-auto",
     provider: TELEGRAM_AUTO_PROVIDER,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     baseUrl: "internal://telegram-auto",
     reasoning: true,
     input: ["text", "image"],
