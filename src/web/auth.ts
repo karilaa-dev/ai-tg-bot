@@ -4,6 +4,7 @@ const COOKIE_NAME = "ai_tg_bot_admin";
 const SESSION_MS = 12 * 60 * 60 * 1_000;
 const LOGIN_WINDOW_MS = 60_000;
 const MAX_LOGIN_ATTEMPTS = 10;
+const MAX_LOGIN_CLIENTS = 1_024;
 const MAX_BODY_BYTES = 4_096;
 const MAX_SESSIONS = 64;
 
@@ -35,7 +36,7 @@ const digest = (value: string) => createHash("sha256").update(value).digest();
 export class WebAdminAuth {
   private readonly tokenHash: Buffer;
   private readonly sessions = new Map<string, number>();
-  private attempts: number[] = [];
+  private readonly attempts = new Map<string, number[]>();
 
   constructor(token: string | undefined) {
     if (!token?.trim()) throw new Error("WEB_ADMIN_TOKEN must be set when the website is enabled.");
@@ -64,19 +65,31 @@ export class WebAdminAuth {
     if (!this.authenticated(request)) throw new WebHttpError(401, "Sign in with the admin token to continue.");
   }
 
-  async login(request: Request) {
-    const now = Date.now();
-    this.attempts = this.attempts.filter(time => time > now - LOGIN_WINDOW_MS);
-    if (this.attempts.length >= MAX_LOGIN_ATTEMPTS) {
-      const retry = Math.max(1, Math.ceil((this.attempts[0]! + LOGIN_WINDOW_MS - now) / 1_000));
-      throw new WebHttpError(429, "Too many sign-in attempts. Try again in a minute.", { "Retry-After": String(retry) });
-    }
-    this.attempts.push(now);
+  async login(request: Request, clientAddress = "unknown") {
     const body = await readLoginBody(request);
+    const now = Date.now();
     if (typeof body !== "object" || body === null || !("token" in body) || typeof body.token !== "string") {
       throw new WebHttpError(400, "Enter an admin token.");
     }
-    if (!timingSafeEqual(digest(body.token), this.tokenHash)) throw new WebHttpError(401, "The admin token is incorrect.");
+    // Check valid credentials before throttling failures so a shared proxy cannot lock out admins.
+    if (!timingSafeEqual(digest(body.token), this.tokenHash)) {
+      for (const [client, times] of this.attempts) {
+        const recent = times.filter(time => time > now - LOGIN_WINDOW_MS);
+        if (recent.length) this.attempts.set(client, recent);
+        else this.attempts.delete(client);
+      }
+      const attempts = this.attempts.get(clientAddress) ?? [];
+      if (attempts.length >= MAX_LOGIN_ATTEMPTS) {
+        const retry = Math.max(1, Math.ceil((attempts[0]! + LOGIN_WINDOW_MS - now) / 1_000));
+        throw new WebHttpError(429, "Too many sign-in attempts. Try again in a minute.", { "Retry-After": String(retry) });
+      }
+      if (!this.attempts.has(clientAddress) && this.attempts.size >= MAX_LOGIN_CLIENTS) {
+        this.attempts.delete(this.attempts.keys().next().value!);
+      }
+      attempts.push(now);
+      this.attempts.set(clientAddress, attempts);
+      throw new WebHttpError(401, "The admin token is incorrect.");
+    }
     // Replace this browser's previous session; other signed-in browsers remain valid.
     const previous = this.sessionKey(request);
     if (previous) this.sessions.delete(previous);
@@ -93,7 +106,7 @@ export class WebAdminAuth {
     return this.cookie(request, "", 0);
   }
 
-  clear() { this.sessions.clear(); this.attempts = []; }
+  clear() { this.sessions.clear(); this.attempts.clear(); }
 
   private cookie(request: Request, value: string, maxAge: number) {
     return `${COOKIE_NAME}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isHttps(request) ? "; Secure" : ""}`;

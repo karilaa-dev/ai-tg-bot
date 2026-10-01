@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { ArrowLeft, ArrowUpRight, ChevronDown, RefreshCw } from "lucide-react";
 import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } from "../types.js";
+import { userLabel } from "../types.js";
 import { Button } from "./components/ui/button.js";
 import { apiJson } from "./api.js";
 import type { InferenceUsageCall } from "../../pi/usage.js";
@@ -157,8 +158,9 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
 }) {
   const [days, setDays] = useState(30);
   const { report, error, busy, retry } = useUsageReport(userId, null, days);
+  const displayTitle = userId && report?.user?.id === userId ? userLabel(report.user) : title;
   return <>
-    <header className="pane-header usage-header"><Button variant="ghost" size="icon-sm" onClick={back} aria-label="Back to conversations"><ArrowLeft /></Button><div><h2>Usage & estimated cost</h2><p>{title}</p></div>
+    <header className="pane-header usage-header"><Button variant="ghost" size="icon-sm" onClick={back} aria-label="Back to conversations"><ArrowLeft /></Button><div><h2>Usage & estimated cost</h2><p>{displayTitle}</p></div>
       <Button variant="ghost" size="icon-sm" onClick={retry} disabled={busy} aria-label="Refresh usage"><RefreshCw /></Button>
     </header>
     <div className="usage-scroll"><div className="usage-dashboard">

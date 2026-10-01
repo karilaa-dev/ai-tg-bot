@@ -24,6 +24,7 @@ describe("Pi generate_image extension", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     await db?.destroy();
     db = undefined;
@@ -71,6 +72,87 @@ describe("Pi generate_image extension", () => {
     const result = await capture.run(() => createGenerateImagePiTool(bridge).execute("usage-fallback", { prompt: "blue circle" }, undefined, undefined, {} as never));
     expect(result.usage).toMatchObject({ input: 40, cacheRead: 50, cacheWrite: 10, output: 20 });
     expect(capture.usage().calls).toMatchObject([{ source: "image_generation", provider: "openrouter", cacheReadTokens: 50, cacheWriteTokens: 10, fastMode: false, cacheWriteReported: true }]);
+  });
+
+  async function stalledCodexStream(completed: boolean, timeout = 0) {
+    const { bridge } = await reusableBridge();
+    bridge.config.IMAGE_TIMEOUT_MS = timeout;
+    bridge.modelRegistry = { hasConfiguredAuth: () => true, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("test-account"), headers: {} }) } as unknown as ModelRegistry;
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let reads = 0;
+    let ready!: () => void;
+    const waiting = new Promise<void>(resolve => { ready = resolve; });
+    const cancel = vi.fn();
+    const event = completed
+      ? { type: "response.output_item.done", item: { type: "image_generation_call", status: "completed", result: TEST_PNG.toString("base64") } }
+      : { type: "response.image_generation_call.partial_image", partial_image_b64: TEST_PNG.toString("base64") };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { stream = controller; },
+      pull(controller) {
+        if (reads++ === 0) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        else ready();
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(body, { headers: { "content-type": "text/event-stream" } }))
+      .mockImplementation(async () => Response.json({ data: [{ b64_json: TEST_PNG.toString("base64"), media_type: "image/png" }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    return { bridge, stream, waiting, cancel, fetchMock };
+  }
+
+  it("returns a completed image after a bounded usage grace period without paying for fallback", async () => {
+    const { bridge, waiting, cancel, fetchMock } = await stalledCodexStream(true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const capture = new InferenceUsageCollector();
+    const resultPromise = capture.run(() => createGenerateImagePiTool(bridge).execute("grace", { prompt: "draw" }, undefined, undefined, {} as never));
+    await waiting;
+    await vi.advanceTimersByTimeAsync(5_001);
+    const result = await resultPromise;
+    expect(result.details).toMatchObject({ provider: "codex" });
+    expect(result.usage).toBeUndefined();
+    expect(capture.usage().calls).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(bridge.providerRouter.circuit.state().open).toBe(false);
+  });
+
+  it("collects terminal usage arriving after the completed image", async () => {
+    const { bridge, stream, waiting, fetchMock } = await stalledCodexStream(true);
+    const resultPromise = createGenerateImagePiTool(bridge).execute("late-usage", { prompt: "draw" }, undefined, undefined, {} as never);
+    await waiting;
+    stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 1_000, input_tokens_details: { cached_tokens: 900 }, output_tokens: 20 } } })}\n\n`));
+    expect((await resultPromise).usage).toMatchObject({ input: 100, cacheRead: 900, output: 20 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["timeout", "disconnect"])("keeps a completed image when its usage stream ends with %s", async (failure) => {
+    const { bridge, stream, waiting, fetchMock } = await stalledCodexStream(true, failure === "timeout" ? 30 : 0);
+    const resultPromise = createGenerateImagePiTool(bridge).execute("finished", { prompt: "draw" }, undefined, undefined, {} as never);
+    await waiting;
+    if (failure === "disconnect") stream.error(new Error("network connection lost"));
+    expect((await resultPromise).details).toMatchObject({ provider: "codex" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bridge.providerRouter.circuit.state().open).toBe(false);
+  });
+
+  it("honors explicit cancellation after an image completes", async () => {
+    const { bridge, waiting, fetchMock } = await stalledCodexStream(true);
+    const cancellation = new AbortController();
+    const resultPromise = createGenerateImagePiTool(bridge).execute("cancel-finished", { prompt: "draw" }, cancellation.signal, undefined, {} as never);
+    const rejected = expect(resultPromise).rejects.toThrow("user cancelled");
+    await waiting;
+    cancellation.abort(new Error("user cancelled"));
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bridge.providerRouter.circuit.state().open).toBe(false);
+  });
+
+  it("still falls back when a stalled stream has only an incomplete partial image", async () => {
+    const { bridge, fetchMock } = await stalledCodexStream(false, 30);
+    const result = await createGenerateImagePiTool(bridge).execute("partial-timeout", { prompt: "draw" }, undefined, undefined, {} as never);
+    expect(result.details).toMatchObject({ provider: "openrouter" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("generates several assets, edits a saved asset, and queues only the selected result",async()=>{

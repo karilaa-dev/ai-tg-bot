@@ -327,6 +327,7 @@ async function generateWithFallback(
     attempt.recordSuccess();
     return result;
   } catch (error) {
+    request.signal?.throwIfAborted();
     const status = httpStatus(error);
     const message = error instanceof Error ? error.message : String(error);
     if (!retryableCodexError({ status, message })) {
@@ -417,7 +418,7 @@ async function requestCodexImage(
     source: "image_generation",
   });
   try {
-    const parsed = await parseCodexImageSse(response, mimeFor(request.outputFormat), event => usage.observe(event), signal);
+    const parsed = await parseCodexImageSse(response, mimeFor(request.outputFormat), event => usage.observe(event), signal, request.signal);
     return {
       bytes: Buffer.from(parsed.data, "base64"),
       mimeType: parsed.mimeType,
@@ -496,6 +497,7 @@ async function parseCodexImageSse(
   fallbackMimeType: string,
   onEvent: (event: unknown) => void,
   signal?: AbortSignal,
+  cancellationSignal?: AbortSignal,
 ): Promise<{ data: string; mimeType: string; revisedPrompt?: string }> {
   if (!response.body) throw new Error("Codex image response had no body.");
   const reader = response.body.getReader();
@@ -507,6 +509,9 @@ async function parseCodexImageSse(
   let imageCompleted = false;
   let responseCompleted = false;
   let completedImage: { data: string; mimeType: string; revisedPrompt?: string } | undefined;
+  let readSignal = signal;
+  let usageGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  const finalImage = () => completedImage ?? (imageCompleted ? latestPartial : undefined);
   let partialImages = 0;
   const observedEvents = new Set<string>();
   const observedImageStatuses = new Set<string>();
@@ -593,7 +598,18 @@ async function parseCodexImageSse(
   };
   try {
     while (true) {
-      const { done, value } = await raceWithAbort(reader.read(), signal);
+      let next: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        next = await raceWithAbort(reader.read(), readSignal);
+      } catch (error) {
+        cancellationSignal?.throwIfAborted();
+        // A completed image remains usable if the terminal usage event never arrives.
+        const image = finalImage();
+        if (image) return image;
+        throw error;
+      }
+      cancellationSignal?.throwIfAborted();
+      const { done, value } = next;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const chunks = buffer.split(/\r?\n\r?\n/);
@@ -603,11 +619,19 @@ async function parseCodexImageSse(
         // Usage arrives on the terminal response after output_item.done.
         if (responseCompleted && (completedImage || latestPartial)) return completedImage ?? latestPartial!;
       }
+      if (finalImage() && usageGraceTimer === undefined) {
+        // Allow terminal usage to arrive, without waiting the full generation timeout.
+        const grace = new AbortController();
+        usageGraceTimer = setTimeout(() => grace.abort(new Error("Image usage stream timed out.")), 5_000);
+        readSignal = combineSignals(signal, grace.signal);
+      }
     }
     completedImage = consume(buffer) ?? completedImage;
     if (completedImage) return completedImage;
   } finally {
-    await reader.cancel().catch(() => undefined);
+    clearTimeout(usageGraceTimer);
+    // A provider's stalled cancellation must not prevent returning the completed image.
+    void reader.cancel().catch(() => undefined);
   }
   // The hosted Codex endpoint can omit the base64 result from output_item.done
   // after streaming a usable final partial image. Keep only the newest partial

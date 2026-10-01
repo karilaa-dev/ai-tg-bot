@@ -143,6 +143,18 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
   });
 
+  it("includes the selected user's identity without requiring the users list", async () => {
+    await thread(42);
+    const response = await request("/api/usage?user=42&days=30");
+    expect(response.status).toBe(200);
+    const report = await response.json() as WebUsageReport;
+    expect(report.user).toEqual({ id: 42, name: "Person 42", username: null });
+    expect(report.totals.recordedTurns).toBe(0);
+    expect((await repository.usageReport({ days: 30 })).user).toBeNull();
+    expect((await request("/api/usage?user=99")).status).toBe(404);
+    expect((await request("/api/usage?user=404")).status).toBe(404);
+  });
+
   it("includes every saved cache read across calls, models, turns and message details", async () => {
     const first = await thread();
     const primary = { provider: "openai-codex", model: "gpt-test", inputTokens: 250, outputTokens: 50, cacheReadTokens: 8_000, cacheWriteTokens: 0,

@@ -40,14 +40,14 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   shutdownSignal.addEventListener("abort", () => auth.clear(), { once: true });
   let downloads = 0;
   const tasks = new Set<Promise<Response>>();
-  function guard<Path extends string>(handler: (request: BunRequest<Path>) => Response | Promise<Response>, publicRoute = false) {
-    return (request: BunRequest<Path>): Promise<Response> => {
+  function guard<Path extends string>(handler: (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">) => Response | Promise<Response>, publicRoute = false) {
+    return (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">): Promise<Response> => {
       const task = (async () => {
         try {
           if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
           if (!publicRoute) auth.requireSession(request);
           if (request.method !== "GET" && request.method !== "HEAD") requireAdminMutation(request);
-          const response = await handler(request);
+          const response = await handler(request, server);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
         } catch (error) {
           if (request.signal.aborted) return new Response(null, { status: 499, headers });
@@ -126,7 +126,10 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         DELETE: guard(request => Response.json({ authenticated: false }, { headers: { ...headers, "Set-Cookie": auth.logout(request) } }), true),
       },
       "/api/auth/login": {
-        POST: guard(async request => Response.json({ authenticated: true }, { headers: { ...headers, "Set-Cookie": await auth.login(request) } }), true),
+        POST: guard(async (request, server) => Response.json({ authenticated: true }, { headers: { ...headers,
+          // Only the socket peer is trusted; forwarded IP headers are caller-controlled.
+          "Set-Cookie": await auth.login(request, server?.requestIP(request)?.address),
+        } }), true),
       },
       "/api/admin/codex": read(async () => Response.json(await codexLogin().status(), { headers })),
       "/api/admin/codex/login": {

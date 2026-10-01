@@ -107,11 +107,24 @@ it("limits guessing even when callers spoof client IP headers", async () => {
   for (let attempt = 0; attempt < 10; attempt++) {
     expect((await login("incorrect", { "X-Forwarded-For": `192.0.2.${attempt}` })).status).toBe(401);
   }
-  const blocked = await login();
+  const blocked = await login("wrong-token", { "X-Forwarded-For": "203.0.113.99" });
   expect(blocked.status).toBe(429);
   expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThan(0);
-  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
   expect((await login()).status).toBe(200);
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+  expect((await login("wrong-token")).status).toBe(401);
+});
+
+it("isolates failed sign-ins by socket peer while accepting valid tokens behind a shared proxy", async () => {
+  const auth = new WebAdminAuth(token);
+  const attempt = (candidate: string, peer: string) => auth.login(new Request("http://localhost/api/auth/login", {
+    method: "POST", headers: mutationHeaders, body: JSON.stringify({ token: candidate }),
+  }), peer);
+  for (let i = 0; i < 10; i++) await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 401 });
+  await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 429 });
+  await expect(attempt("wrong", "192.0.2.2")).rejects.toMatchObject({ status: 401 });
+  await expect(attempt(token, "192.0.2.1")).resolves.toContain("HttpOnly");
+  await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 429 });
 });
 
 it("bounds login JSON before comparing credentials", async () => {

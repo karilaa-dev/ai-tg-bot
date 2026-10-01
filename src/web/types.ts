@@ -81,6 +81,7 @@ export interface WebMessageUsage extends WebUsageTotals {
   calls?: InferenceUsageCall[];
 }
 export interface WebUsageReport {
+  user?: Pick<WebUser, "id" | "name" | "username"> | null;
   totals: WebUsageTotals;
   dailyTruncated: boolean;
   daily: (WebUsageTotals & { date: string })[];
