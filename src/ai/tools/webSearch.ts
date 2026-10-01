@@ -7,7 +7,7 @@ import { raceWithAbort } from "../../files/cancel.js";
 export function createWebSearchTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Find current sources and reference pages using Codex hosted web search or Tavily. Codex returns a sourced answer and source URLs; Tavily returns source snippets. Set include_images for image discovery when Tavily is configured. Download chosen originals with Bash and inspect them before use; search descriptions are not visual verification or license evidence. Cite only sources returned by current-turn tools. For a known raw URL or API endpoint, use Bash with curl -fsSL.",
+      "Find current sources and reference pages using Codex hosted web search or Tavily. Codex returns a sourced answer and source URLs; its citations list preserves every cited URL regardless of max_results. Tavily returns source snippets. Set include_images for image discovery when Tavily is configured. Download chosen originals with Bash and inspect them before use; search descriptions are not visual verification or license evidence. Cite only sources returned by current-turn tools. For a known raw URL or API endpoint, use Bash with curl -fsSL.",
     inputSchema: z.object({
       query: z.string(),
       max_results: z.number().int().min(1).max(10).default(5),

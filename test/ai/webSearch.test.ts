@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createWebSearchTool } from "../../src/ai/tools/webSearch.js";
+import { searchCodexWeb } from "../../src/pi/codexWebSearch.js";
+import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 const search = vi.hoisted(() => vi.fn());
 vi.mock("@tavily/core", () => ({ tavily: () => ({ search }) }));
@@ -8,6 +10,25 @@ beforeEach(() => search.mockReset());
 
 describe("web_search providers", () => {
   const codexResult = { provider: "codex", results: [{ title: "Source", url: "https://example.com", snippet: "" }], answer: "Sourced answer" };
+  it.each([
+    { provider: "auto" as const, tavily: true, fallback: true },
+    { provider: "auto" as const, tavily: false, fallback: false },
+    { provider: "codex" as const, tavily: true, fallback: false },
+  ])("respects a newly opened circuit in $provider mode with Tavily=$tavily", async ({ provider, tavily, fallback }) => {
+    search.mockResolvedValue({ results: [] });
+    const config = loadTestConfig({ WEB_SEARCH_PROVIDER: provider, TAVILY_API_KEY: tavily ? "test" : undefined });
+    const circuit = new CodexCircuitBreaker();
+    const codexModel = vi.fn(() => { throw new Error("Must not prepare a Codex request while blocked"); });
+    const runtime = { config, providerRouter: { circuit, codexModel } };
+    const tool = createWebSearchTool({ config, codexWebSearch: (query: string, maxResults: number, signal?: AbortSignal) =>
+      searchCodexWeb(runtime as never, query, maxResults, signal) } as never);
+    // The breaker can open after tools were built, including during an earlier nested call.
+    circuit.recordFailure();
+    const result = await tool.execute({ query: "facts", max_results: 3 });
+    expect(codexModel).not.toHaveBeenCalled();
+    expect(search).toHaveBeenCalledTimes(fallback ? 1 : 0);
+    expect(result).toEqual(fallback ? { results: [] } : { error: expect.stringContaining("temporarily unavailable") });
+  });
   it("prefers Codex without requiring a Tavily key", async () => {
     const codexWebSearch = vi.fn().mockResolvedValue(codexResult);
     const tool = createWebSearchTool({ config: loadTestConfig({ TAVILY_API_KEY: undefined }), codexWebSearch } as never);

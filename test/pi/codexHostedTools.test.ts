@@ -7,6 +7,7 @@ import { loadTestConfig } from "../../src/config.js";
 import { searchCodexWeb } from "../../src/pi/codexWebSearch.js";
 import { requestCodex, type CodexRequestRuntime } from "../../src/pi/codexRequest.js";
 import { replayCodexCheckpoint } from "../../src/pi/codexCompaction.js";
+import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 
 afterEach(() => vi.unstubAllGlobals());
 const model: Model<"openai-codex-responses"> = {
@@ -19,7 +20,7 @@ function runtime(timeoutMs = 1000): CodexRequestRuntime {
   return {
     config: loadTestConfig({ PI_REQUEST_TIMEOUT_MS: timeoutMs }),
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token, headers: {} }) } as never,
-    providerRouter: { codexModel: () => model } as never,
+    providerRouter: { codexModel: () => model, circuit: new CodexCircuitBreaker() } as never,
   };
 }
 function transport(output: Record<string, unknown>[], completed = true) {
@@ -62,6 +63,77 @@ describe("Codex hosted search transport", () => {
     ]);
     expect(result.answer).toContain("Answer");
     expect(result.usage).toMatchObject({ input: 20, cacheRead: 10, output: 7 });
+  });
+
+  it("preserves every cited URL when max_results is smaller than the citation count", async () => {
+    const cited = ["first", "second", "third"].map(title => ({ title, url: `https://example.com/${title}` }));
+    transport([
+      { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", sources: [
+        { type: "url", url: "https://example.com/uncited", title: "Extra" },
+      ] } },
+      { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text",
+        text: "An answer citing three sources.", annotations: [...cited, cited[0], { title: "Invalid", url: "javascript:bad" }]
+          .map(source => ({ type: "url_citation", ...source, start_index: 0, end_index: 6 })),
+      }] },
+    ]);
+    const result = await searchCodexWeb(runtime(), "facts", 1);
+    expect(result.results).toHaveLength(1);
+    expect(result.citations).toEqual(cited);
+    expect(result.answer).toBe("An answer citing three sources.");
+  });
+
+  it("allows cache-only search when explicitly configured", async () => {
+    const requests = transport([{ type: "web_search_call", id: "ws_1", status: "completed" }]);
+    const input = runtime();
+    input.config.CODEX_WEB_SEARCH_MODE = "cached";
+    await searchCodexWeb(input, "facts", 1);
+    expect(requests[0]!.body.tools).toEqual([{ type: "web_search", external_web_access: false }]);
+  });
+
+  it("allows a recovery probe after cooldown and closes the shared circuit on success", async () => {
+    let now = Date.now();
+    const input = runtime();
+    const circuit = new CodexCircuitBreaker(() => now);
+    input.providerRouter.circuit = circuit;
+    circuit.recordFailure();
+    const requests = transport([{ type: "web_search_call", id: "ws_1", status: "completed" }]);
+    await expect(searchCodexWeb(input, "facts", 1)).rejects.toThrow("temporarily unavailable");
+    expect(requests).toHaveLength(0);
+    now = circuit.state().nextProbeAt;
+    await searchCodexWeb(input, "facts", 1);
+    expect(requests).toHaveLength(1);
+    expect(circuit.state()).toMatchObject({ open: false, probeActive: false });
+  });
+
+  it("records HTTP quota failures and honors the server retry delay", async () => {
+    const input = runtime();
+    const before = Date.now();
+    const fetch = vi.fn(async () => Response.json({ error: { message: "Capacity exceeded" } }, {
+      status: 429, headers: { "retry-after": "120" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(searchCodexWeb(input, "facts", 1)).rejects.toThrow();
+    expect(input.providerRouter.circuit.state().open).toBe(true);
+    expect(input.providerRouter.circuit.state().blockedUntil).toBeGreaterThanOrEqual(before + 120_000);
+    expect(input.providerRouter.circuit.state().blockedUntil).toBeLessThanOrEqual(Date.now() + 120_000);
+    await expect(searchCodexWeb(input, "facts", 1)).rejects.toThrow("temporarily unavailable");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("releases a cancelled recovery probe without extending the cooldown", async () => {
+    let now = Date.now();
+    const input = runtime();
+    input.providerRouter.circuit = new CodexCircuitBreaker(() => now);
+    input.providerRouter.circuit.recordFailure();
+    now = input.providerRouter.circuit.state().nextProbeAt;
+    const before = input.providerRouter.circuit.state();
+    const controller = new AbortController();
+    input.modelRegistry.getApiKeyAndHeaders = async () => {
+      controller.abort(new Error("cancelled"));
+      throw controller.signal.reason;
+    };
+    await expect(searchCodexWeb(input, "facts", 1, controller.signal)).rejects.toThrow("cancelled");
+    expect(input.providerRouter.circuit.state()).toEqual(before);
   });
 
   it("rejects an unfinished stream or a response that never searched", async () => {

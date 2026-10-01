@@ -22,6 +22,7 @@ export async function requestCodex(
     sessionId?: string;
     headers?: Record<string, string>;
     reasoning?: SimpleStreamOptions["reasoning"];
+    onResponse?: SimpleStreamOptions["onResponse"];
     patch: (body: Record<string, unknown>) => Record<string, unknown>;
   },
 ) {
@@ -31,7 +32,7 @@ export async function requestCodex(
   ]);
   signal.throwIfAborted();
   const model = runtime.providerRouter.codexModel(request.kind);
-  const auth = await raceWithAbort(runtime.modelRegistry.getApiKeyAndHeaders(model), signal);
+  const auth = await raceWithAbort(Promise.resolve().then(() => runtime.modelRegistry.getApiKeyAndHeaders(model)), signal);
   if (!auth.ok || !auth.apiKey) throw new Error("Codex OAuth is unavailable.");
   const items = new Map<string | number, Record<string, unknown>>();
   let completed = false;
@@ -44,6 +45,7 @@ export async function requestCodex(
     timeoutMs: runtime.config.PI_REQUEST_TIMEOUT_MS,
     maxRetries: 0,
     reasoning: request.reasoning ?? "low",
+    onResponse: request.onResponse,
     onPayload: payload => request.patch({
       ...asRecord(payload),
       ...(runtime.config.CODEX_FAST_MODE ? { service_tier: "priority" } : {}),

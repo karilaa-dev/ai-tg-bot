@@ -13,11 +13,14 @@ describe("Codex server tools configuration", () => {
     const config = loadConfig({ ...required, TAVILY_API_KEY: " " });
     expect(config.TAVILY_API_KEY).toBeUndefined();
     expect(config.WEB_SEARCH_PROVIDER).toBe("auto");
+    expect(config.CODEX_WEB_SEARCH_MODE).toBe("live");
+    expect(loadConfig({ ...required, CODEX_WEB_SEARCH_MODE: "cached" }).CODEX_WEB_SEARCH_MODE).toBe("cached");
     expect(config.CODEX_SERVER_COMPACTION).toBe(true);
     expect(loadConfig({ ...required, CODEX_SERVER_COMPACTION: "false" }).CODEX_SERVER_COMPACTION).toBe(false);
   });
   it("rejects unsupported providers and invalid compaction switches", () => {
     expect(() => loadConfig({ ...required, WEB_SEARCH_PROVIDER: "unknown" })).toThrow();
+    expect(() => loadConfig({ ...required, CODEX_WEB_SEARCH_MODE: "unknown" })).toThrow();
     expect(() => loadConfig({ ...required, CODEX_SERVER_COMPACTION: "1" })).toThrow();
   });
 });
