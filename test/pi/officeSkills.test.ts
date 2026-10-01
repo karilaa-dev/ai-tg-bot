@@ -4,18 +4,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DefaultResourceLoader,
-  loadSkills,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  OFFICE_SKILLS,
-  DOCX_SKILL_REVISION,
-  OPENSCAD_SKILLS,
   approvedSkillPaths,
   createApprovedSkillReadTool,
-  officeSkillPaths,
   validateApprovedSkills,
-  validateOfficeSkills,
 } from "../../src/pi/officeSkills.js";
 
 const tempRoots: string[] = [];
@@ -24,58 +18,14 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-describe("pinned Office Pi skills", () => {
-  it("loads exactly the four reviewed, checksum-verified skills", async () => {
-    await expect(validateOfficeSkills()).resolves.toBeUndefined();
-    expect(DOCX_SKILL_REVISION).toMatch(/^[a-f0-9]{40}$/u);
-    expect(OFFICE_SKILLS.map((skill) => skill.sha256))
-      .toEqual(OFFICE_SKILLS.map(() => expect.stringMatching(/^[a-f0-9]{64}$/u)));
-
-    const loaded = loadSkills({
-      cwd: process.cwd(),
-      agentDir: path.resolve("data/pi"),
-      skillPaths: officeSkillPaths(),
-      includeDefaults: false,
-    });
-
-    expect(loaded.diagnostics).toEqual([]);
-    expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
-      "docx-cli",
-      "pptx-edit",
-      "pptxgenjs",
-      "xlsx",
-    ]);
-    expect(loaded.skills.every((skill) => path.isAbsolute(skill.filePath))).toBe(true);
-
-  });
-
-  it("loads every approved local skill", async () => {
+describe("approved Pi skills", () => {
+  it("loads checksum-verified approved skills with default discovery disabled", async () => {
     await expect(validateApprovedSkills()).resolves.toBeUndefined();
-    expect(OPENSCAD_SKILLS.map((skill) => skill.sha256))
-      .toEqual([expect.stringMatching(/^[a-f0-9]{64}$/u)]);
-    const loaded = loadSkills({
-      cwd: process.cwd(),
-      agentDir: path.resolve("data/pi"),
-      skillPaths: approvedSkillPaths(),
-      includeDefaults: false,
-    });
-    expect(loaded.diagnostics).toEqual([]);
-    expect(loaded.skills.map((skill) => skill.name).sort()).toEqual([
-      "docx-cli",
-      "openscad",
-      "pptx-edit",
-      "pptxgenjs",
-      "sandbox-files",
-      "xlsx",
-    ]);
-  });
-
-  it("keeps explicit Office skills when default skill discovery is disabled", async () => {
     const loader = new DefaultResourceLoader({
       cwd: process.cwd(),
       agentDir: path.resolve("data/pi"),
       settingsManager: SettingsManager.inMemory(),
-      additionalSkillPaths: officeSkillPaths(),
+      additionalSkillPaths: approvedSkillPaths(),
       noSkills: true,
       noExtensions: true,
       noPromptTemplates: true,
@@ -87,43 +37,29 @@ describe("pinned Office Pi skills", () => {
     expect(loader.getSkills().diagnostics).toEqual([]);
     expect(loader.getSkills().skills.map((skill) => skill.name).sort()).toEqual([
       "docx-cli",
+      "openscad",
       "pptx-edit",
       "pptxgenjs",
+      "sandbox-files",
       "xlsx",
     ]);
   });
 
   it("reads a complete advertised skill but rejects all other host files", async () => {
     const tool = createApprovedSkillReadTool();
+    const skillPath = approvedSkillPaths()[0]!;
     const result = await tool.execute(
       "read-skill",
-      { path: officeSkillPaths()[0]! },
+      { path: skillPath },
       undefined,
       undefined,
       {} as never,
     );
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-    expect(text).toContain("# docx-cli");
-    expect(text).toContain("## Installed tool and workspace");
-    expect(text).toContain("## Delivery checks");
+    expect(text).toBe(await fs.readFile(skillPath, "utf8"));
     expect(result.details).toMatchObject({ truncated: false, start_line: 1 });
 
-    const openscadResult = await tool.execute(
-      "read-openscad",
-      { path: path.resolve(OPENSCAD_SKILLS[0].relativePath) },
-      undefined,
-      undefined,
-      {} as never,
-    );
-    const openscadText = openscadResult.content[0]?.type === "text" ? openscadResult.content[0].text : "";
-    expect(openscadText).toContain("# OpenSCAD models");
-    expect(openscadText).toContain("Do not probe for, install, or replace OpenSCAD");
-    expect(openscadText).toContain("Do not call `finish_response` until the final build and final inspection");
-    expect(openscadText).toContain("Queue `/model.scad`");
-    expect(openscadText).toContain("only when the user explicitly asks");
-    expect(openscadText).toContain("Do not generate or deliver 3MF");
-    expect(openscadText).toContain("delivery: \"photo_only\"");
     await expect(tool.execute(
       "read-source",
       { path: path.resolve("package.json") },

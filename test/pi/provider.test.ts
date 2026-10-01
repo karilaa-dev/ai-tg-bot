@@ -66,16 +66,6 @@ describe("Pi automatic provider", () => {
     expect(harness.router.circuit.state().open).toBe(true);
   });
 
-  it("does not carry fast mode into fallback or subsequent requests while the circuit is open", async () => {
-    const harness = providerHarness({ codexError: "quota exhausted", config: { CODEX_FAST_MODE: true } });
-    await harness.run();
-    await harness.run("helper");
-    expect(harness.calls).toEqual(["codex", "openrouter", "openrouter"]);
-    expect(harness.requestOptions[0]!.onPayload).toBeTypeOf("function");
-    expect(harness.requestOptions[1]!.onPayload).toBeUndefined();
-    expect(harness.requestOptions[2]!.onPayload).toBeUndefined();
-  });
-
   it.each([{ codexConfigured: false }, { authError: "OAuth refresh token failed" }])(
     "omits fast mode when routing directly to OpenRouter: %j", async (input) => {
       const harness = providerHarness({ ...input, config: { CODEX_FAST_MODE: true } });

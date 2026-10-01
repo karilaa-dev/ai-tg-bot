@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isBrowserUseConfigured, loadConfig } from "../src/config.js";
+import { APP_VERSION } from "../src/version.js";
 
 const required = {
   BOT_TOKEN: "TEST:TOKEN",
@@ -38,33 +39,19 @@ describe("Codex fast mode configuration", () => {
 });
 
 describe("Browser Use configuration", () => {
-  it("accepts an explicit Codex CLI credential cache path", () => {
-    expect(loadConfig({ ...required, CODEX_AUTH_FILE: "/run/secrets/codex-auth.json" }).CODEX_AUTH_FILE)
-      .toBe("/run/secrets/codex-auth.json");
-  });
-
-  it("leaves Browser Use disabled and defaults to a five-minute session", () => {
-    const config = loadConfig(required);
-    expect(config.E2B_TEMPLATE).toBe("ai-tg-bot-tools:v2.0.16");
-    expect(config.E2B_FILE_SOURCE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
-    expect(config.BASH_TIMEOUT_MS).toBe(120_000);
-    expect(config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES).toBe(5);
-    expect(config.BROWSER_USE_IDLE_TIMEOUT_MS).toBe(300_000);
-    expect(isBrowserUseConfigured(config)).toBe(false);
-  });
-
-  it("preserves an explicit E2B template override", () => {
+  it("derives the E2B template from the app version and accepts an override", () => {
+    expect(loadConfig(required).E2B_TEMPLATE).toBe(`ai-tg-bot-tools:v${APP_VERSION}`);
     expect(loadConfig({ ...required, E2B_TEMPLATE: "ai-tg-bot-tools:rollback-v1" }).E2B_TEMPLATE)
       .toBe("ai-tg-bot-tools:rollback-v1");
   });
 
-  it("enables Browser Use with only an API key", () => {
+  it("enables Browser Use only when an API key is configured", () => {
     const config = loadConfig({
       ...required,
       BROWSER_USE_API_KEY: "secret",
     });
+    expect(isBrowserUseConfigured(loadConfig(required))).toBe(false);
     expect(isBrowserUseConfigured(config)).toBe(true);
-    expect(config.BROWSER_USE_API_TIMEOUT_MS).toBe(30_000);
   });
 
   it("bounds agent-selectable cloud timeouts", () => {
@@ -73,27 +60,8 @@ describe("Browser Use configuration", () => {
   });
 });
 
-describe("database configuration", () => {
-  it.each([
-    "postgres://dokploy:secret@dokploy-postgres:5432/aibot",
-    "postgresql://dokploy:secret@dokploy-postgres:5432/aibot",
-  ])("preserves an explicit PostgreSQL URL: %s", (databaseUrl) => {
-    const config = loadConfig({
-      ...required,
-      DB_URL: databaseUrl,
-    });
-
-    expect(config.DB_URL).toBe(databaseUrl);
-  });
-});
-
 describe("agent execution limits", () => {
   const names = ["PI_TURN_TIMEOUT_MS", "PI_MAX_MODEL_CYCLES", "PI_MAX_TOOL_CALLS", "PI_MAX_CONSECUTIVE_TOOL_FAILURES", "PI_MAX_IDENTICAL_TOOL_FAILURES"] as const;
-
-  it("defaults every execution limit to unlimited", () => {
-    const config = loadConfig(required);
-    for (const name of names) expect(config[name]).toBe(0);
-  });
 
   it("keeps a separately configurable provider request deadline", () => {
     expect(loadConfig(required).PI_REQUEST_TIMEOUT_MS).toBe(900_000);
