@@ -9,18 +9,22 @@ import { isAudioMime, imageMimeTypes } from "./media.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { Logger } from "../logger.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
+import { WebAdminAuth, WebHttpError as HttpError, requireAdminMutation } from "./auth.js";
+import type { CodexStatus } from "./admin-types.js";
 
 export interface WebServerOptions {
-  config: Pick<AppConfig, "WEB_ENABLED" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES">;
+  config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_TOKEN" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES">;
   repository: ConversationRepository;
   fileResolver: FileResolver;
   logger: Logger;
   assetsDirectory?: string;
   development?: boolean;
-}
-
-class HttpError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  codexLogin?: {
+    status(): Promise<CodexStatus>;
+    start(): Promise<CodexStatus>;
+    cancel(): Promise<CodexStatus>;
+    stop(): Promise<void>;
+  };
 }
 
 const headers = {
@@ -32,21 +36,25 @@ const headers = {
 
 // The same wrappers protect every API method and track work that outlives a closed socket.
 export function createWebRoutes(options: WebServerOptions, shutdownSignal: AbortSignal) {
+  const auth = new WebAdminAuth(options.config.WEB_ADMIN_TOKEN);
+  shutdownSignal.addEventListener("abort", () => auth.clear(), { once: true });
   let downloads = 0;
   const tasks = new Set<Promise<Response>>();
-  function guard<Path extends string>(handler: (request: BunRequest<Path>) => Response | Promise<Response>) {
-    return (request: BunRequest<Path>): Promise<Response> => {
+  function guard<Path extends string>(handler: (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">) => Response | Promise<Response>, publicRoute = false) {
+    return (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">): Promise<Response> => {
       const task = (async () => {
         try {
           if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
-          const response = await handler(request);
+          if (!publicRoute) auth.requireSession(request);
+          if (request.method !== "GET" && request.method !== "HEAD") requireAdminMutation(request);
+          const response = await handler(request, server);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
         } catch (error) {
           if (request.signal.aborted) return new Response(null, { status: 499, headers });
           const status = error instanceof HttpError ? error.status : error instanceof WebNotFound ? 404 : 500;
           if (status === 500) options.logger.error("website request failed", { error: error instanceof Error ? error.name : "unknown" });
           return new Response(request.method === "HEAD" ? null : JSON.stringify({ error: error instanceof HttpError ? error.message : status === 404 ? "Not found." : "Could not load conversations. Try again." }), {
-            status, headers: { ...headers, "Content-Type": "application/json" },
+            status, headers: { ...headers, ...(error instanceof HttpError ? error.headers : {}), "Content-Type": "application/json" },
           });
         }
       })();
@@ -55,11 +63,15 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       return task;
     };
   }
-  function read<Path extends string>(handler: (request: BunRequest<Path>) => Response | Promise<Response>) {
-    const handle = guard(handler);
+  function read<Path extends string>(handler: (request: BunRequest<Path>) => Response | Promise<Response>, publicRoute = false) {
+    const handle = guard(handler, publicRoute);
     return { GET: handle, HEAD: handle };
   }
   const methodNotAllowed = () => new Response("Method not allowed", { status: 405, headers: { ...headers, Allow: "GET, HEAD" } });
+  function codexLogin() {
+    if (!options.codexLogin) throw new HttpError(503, "Codex sign-in is unavailable. Restart the application and try again.");
+    return options.codexLogin;
+  }
   const attachment = async (request: BunRequest<"/api/threads/:threadId/files/:fileId">) => {
     const url = new URL(request.url);
     const sandboxConsent = request.method === "POST" && url.searchParams.get("sandbox") === "start" && url.searchParams.get("mode") === "download";
@@ -109,6 +121,21 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   };
   return {
     routes: {
+      "/api/auth/session": {
+        ...read(request => Response.json({ authenticated: auth.authenticated(request) }, { headers }), true),
+        DELETE: guard(request => Response.json({ authenticated: false }, { headers: { ...headers, "Set-Cookie": auth.logout(request) } }), true),
+      },
+      "/api/auth/login": {
+        POST: guard(async (request, server) => Response.json({ authenticated: true }, { headers: { ...headers,
+          // Only the socket peer is trusted; forwarded IP headers are caller-controlled.
+          "Set-Cookie": await auth.login(request, server?.requestIP(request)?.address),
+        } }), true),
+      },
+      "/api/admin/codex": read(async () => Response.json(await codexLogin().status(), { headers })),
+      "/api/admin/codex/login": {
+        POST: guard(async () => Response.json(await codexLogin().start(), { headers })),
+        DELETE: guard(async () => Response.json(await codexLogin().cancel(), { headers })),
+      },
       "/api/usage": read(async request => {
         const query = new URL(request.url).searchParams;
         const days = integer(query.get("days"), 30, true);
@@ -139,10 +166,8 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       }),
       "/api/threads/:threadId/files/:fileId": { ...read(attachment), POST: guard(attachment) },
     },
-    fetch: guard(request => {
-      if (request.method !== "GET" && request.method !== "HEAD") return methodNotAllowed();
-      throw new WebNotFound();
-    }),
+    fetch: (request: BunRequest) => request.method !== "GET" && request.method !== "HEAD"
+      ? Promise.resolve(methodNotAllowed()) : guard(() => { throw new WebNotFound(); }, true)(request),
     async drain() { await Promise.allSettled([...tasks]); },
   };
 }
@@ -171,11 +196,11 @@ async function assetRoutes(directory: string) {
 
 export async function startWebServer(options: WebServerOptions) {
   if (!options.config.WEB_ENABLED) return undefined;
+  const controller = new AbortController();
+  const api = createWebRoutes(options, controller.signal);
   const assets: Record<string, HTMLBundle | { GET: () => Response; HEAD: () => Response }> = options.development
     ? { "/": (await import("./client/index.html")).default }
     : await assetRoutes(path.resolve(options.assetsDirectory ?? "dist/web"));
-  const controller = new AbortController();
-  const api = createWebRoutes(options, controller.signal);
   let server: Server<undefined>;
   try {
     server = serve({
@@ -205,6 +230,7 @@ export async function startWebServer(options: WebServerOptions) {
         await server.stop(true);
         // Closing sockets does not wait for remote download cleanup.
         await api.drain();
+        await options.codexLogin?.stop();
       })();
     },
   };

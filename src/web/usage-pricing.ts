@@ -9,6 +9,8 @@ export type PricingCatalog = Record<string, Record<string, unknown>>;
  * Pi input excludes cache reads/writes; reasoning is already part of output.
  */
 export function estimateCallCost(call: InferenceUsageCall, catalog: PricingCatalog, perCall = true): number | null {
+  const serviceTier = call.serviceTier ?? call.requestedServiceTier;
+  const tierSuffix = serviceTier && !["default", "standard", "auto"].includes(serviceTier) ? `_${serviceTier}` : "";
   const model = call.model.replace(/^openrouter\//, "").replace(/^openai-codex\//, "");
   const provider = call.provider === "openai-codex" ? "openai" : call.provider;
   const bare = model.replace(/^(openai|anthropic|google)\//, "");
@@ -16,20 +18,29 @@ export function estimateCallCost(call: InferenceUsageCall, catalog: PricingCatal
   if (["openai", "openrouter", "anthropic", "google"].includes(provider)) keys.push(bare, bare.replace(/(\d)\.(\d)/g, "$1-$2"));
   const rates = keys.map(key => Object.hasOwn(catalog, key) ? catalog[key] : undefined).find(Boolean);
   if (rates) {
+    // Delivered tier wins when the provider reports it. A requested tier is an
+    // estimate; historical records never inherit today's fast-mode setting.
     const prompt = call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens;
     // Old records are turn aggregates, so their sum is not a context-window size.
     const thresholds = perCall ? Object.keys(rates).flatMap(key => {
-      const match = /^input_cost_per_token_above_(\d+)k_tokens$/.exec(key);
-      return match && prompt > Number(match[1]) * 1000 ? [Number(match[1])] : [];
+      const match = /^input_cost_per_token_above_(\d+)k_tokens(_[a-z][a-z0-9_-]*)?$/.exec(key);
+      return match && (!match[2] || match[2] === tierSuffix) && prompt > Number(match[1]) * 1000 ? [Number(match[1])] : [];
     }) : [];
     const suffix = thresholds.length ? `_above_${Math.max(...thresholds)}k_tokens` : "";
-    const rate = (key: string) => finiteRate(rates[`${key}${suffix}`]) ?? finiteRate(rates[key]);
+    const rate = (key: string) => {
+      const contextual = finiteRate(rates[`${key}${suffix}${tierSuffix}`]);
+      if (contextual !== null) return contextual;
+      // If context changes this category's standard rate, a missing combined
+      // tier price is unknown. Never silently charge the standard tier instead.
+      if (tierSuffix && suffix && finiteRate(rates[`${key}${suffix}`]) !== null) return null;
+      return finiteRate(rates[`${key}${tierSuffix}`]);
+    };
     const longWrite = call.cacheWrite1hTokens ?? 0;
     const anthropic = provider === "anthropic" || model.startsWith("anthropic/") || bare.startsWith("claude-");
     const longWriteKey = "cache_creation_input_token_cost_above_1hr";
-    const longRate = finiteRate(rates[`${longWriteKey}${suffix}`])
+    const longRate = finiteRate(rates[`${longWriteKey}${suffix}${tierSuffix}`])
       // A base one-hour rate must not override the active long-context tier.
-      ?? (anthropic ? multiply(rate("input_cost_per_token"), 2) : finiteRate(rates[longWriteKey]));
+      ?? (anthropic ? multiply(rate("input_cost_per_token"), 2) : finiteRate(rates[`${longWriteKey}${tierSuffix}`]));
     const parts = [
       charge(call.inputTokens, rate("input_cost_per_token")),
       charge(call.outputTokens, rate("output_cost_per_token")),
@@ -40,8 +51,11 @@ export function estimateCallCost(call: InferenceUsageCall, catalog: PricingCatal
     if (parts.every((part): part is number => part !== null)) return parts.reduce((sum, part) => sum + part, 0);
   }
   // Router placeholders use zero rates. Never mistake those for free inference.
+  // The SDK can price a payload-only priority request at its standard rate when
+  // the response omits its tier. That saved cost is not a tier-aware fallback.
+  const trustworthyCost = !tierSuffix || call.serviceTier === "priority" || call.serviceTier === "flex";
   const recorded = call.cost;
-  if (recorded && [recorded.input, recorded.output, recorded.cacheRead, recorded.cacheWrite, recorded.total]
+  if (trustworthyCost && recorded && [recorded.input, recorded.output, recorded.cacheRead, recorded.cacheWrite, recorded.total]
     .every(value => finiteRate(value) !== null) && recorded.total > 0) return recorded.total;
   return call.inputTokens + call.outputTokens + call.cacheReadTokens + call.cacheWriteTokens === 0 ? 0 : null;
 }

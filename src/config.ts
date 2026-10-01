@@ -7,6 +7,7 @@ const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().mi
 
 const ConfigSchema = z.object({
   WEB_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  WEB_ADMIN_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).refine(value => Buffer.byteLength(value) <= 1_024, "WEB_ADMIN_TOKEN must not exceed 1024 bytes.").optional()),
   WEB_HOST: z.string().trim().min(1).default("0.0.0.0"),
   WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   WEB_AUTOLOAD_MAX_BYTES: z.coerce.number().int().min(0).max(20 * 1024 * 1024).default(5 * 1024 * 1024),
@@ -57,6 +58,10 @@ const ConfigSchema = z.object({
   DRAFT_UPDATE_MS: z.coerce.number().int().min(0).default(0),
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+}).superRefine((config, context) => {
+  if (config.WEB_ENABLED && !config.WEB_ADMIN_TOKEN) {
+    context.addIssue({ code: "custom", path: ["WEB_ADMIN_TOKEN"], message: "WEB_ADMIN_TOKEN is required when WEB_ENABLED=true." });
+  }
 });
 
 function normalizeOptionalString(value: unknown): unknown {

@@ -9,6 +9,18 @@ const required = {
   E2B_API_KEY: "test-e2b",
 };
 
+describe("website access configuration", () => {
+  it("requires an admin token only when the website is enabled", () => {
+    expect(loadConfig(required).WEB_ADMIN_TOKEN).toBeUndefined();
+    expect(loadConfig({ ...required, WEB_ENABLED: "false", WEB_ADMIN_TOKEN: " " }).WEB_ADMIN_TOKEN).toBeUndefined();
+    for (const token of [undefined, "", " \n "]) {
+      expect(() => loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: token })).toThrow("WEB_ADMIN_TOKEN");
+    }
+    expect(loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: " test-secret " }).WEB_ADMIN_TOKEN).toBe("test-secret");
+    expect(() => loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: "x".repeat(1025) })).toThrow("WEB_ADMIN_TOKEN");
+  });
+});
+
 describe("Codex server tools configuration", () => {
   it("enables server compaction and automatic search without a Tavily key", () => {
     const config = loadConfig({ ...required, TAVILY_API_KEY: " " });

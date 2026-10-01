@@ -1,3 +1,5 @@
+import type { InferenceUsageCall } from "../pi/usage.js";
+
 export interface WebUser {
   id: number;
   name: string | null;
@@ -61,14 +63,25 @@ export interface WebUsageTotals {
   missingUsageTurns: number;
   unpricedTurns: number;
   estimatedCostUsd: number | null;
+  fastModeCalls: number;
+  standardModeCalls: number;
+  unknownFastModeCalls: number;
+  cacheReadReportedCalls: number;
+  cacheWriteReportedCalls: number;
+  cacheReadUnreportedCalls: number;
+  cacheWriteUnreportedCalls: number;
+  /** Legacy aggregates count as one usage record; their exact call count is unknown. */
+  aggregateUsageEntries: number;
 }
 
 export interface WebModelUsage extends WebUsageTotals { provider: string; model: string }
 export interface WebMessageUsage extends WebUsageTotals {
   models: WebModelUsage[];
   modelCalls: number | null;
+  calls?: InferenceUsageCall[];
 }
 export interface WebUsageReport {
+  user?: Pick<WebUser, "id" | "name" | "username"> | null;
   totals: WebUsageTotals;
   dailyTruncated: boolean;
   daily: (WebUsageTotals & { date: string })[];

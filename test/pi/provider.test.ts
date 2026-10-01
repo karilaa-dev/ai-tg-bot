@@ -20,8 +20,52 @@ import {
   type PiProviderStreamOverrides,
 } from "../../src/pi/provider.js";
 import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
+import { InferenceUsageCollector, inferenceUsageFromMessages } from "../../src/pi/usage.js";
 
 describe("Pi automatic provider", () => {
+  it.each([undefined, 0, 250])("preserves provider-reported cached tokens through the real Codex SDK, writes=%s", async (writes) => {
+    const transport = interceptedSdkTransport({ codexResponse: {
+      usage: { input_tokens: 10_000, output_tokens: 200, input_tokens_details: { cached_tokens: 9_000, ...(writes === undefined ? {} : { cache_write_tokens: writes }) }, output_tokens_details: { reasoning_tokens: 120 }, total_tokens: 10_200 },
+    } });
+    const harness = providerHarness({ config: { CODEX_FAST_MODE: true }, streams: { codex: streamCodex, openRouter: streamOpenRouter }, apiKey: testCodexToken(), options: { transport: "sse", fetch: transport.fetch } });
+    const events = await harness.run();
+    const completed = events.findLast(event => event.type === "done");
+    if (completed?.type !== "done") throw new Error("Expected a completed SDK response.");
+    expect(inferenceUsageFromMessages([completed.message])).toMatchObject({
+      inputTokens: 1_000 - (writes ?? 0), cacheReadTokens: 9_000, cacheWriteTokens: writes ?? 0, outputTokens: 200, totalTokens: 10_200,
+      calls: [{ reasoningTokens: 120, cacheReadReported: true, cacheWriteReported: writes !== undefined }],
+    });
+  });
+
+  it("keeps billed cached tokens from a failed Codex attempt before an OpenRouter fallback", async () => {
+    const transport = interceptedSdkTransport({
+      codexEventType: "response.failed",
+      codexResponse: { status: "failed", service_tier: "priority", error: { code: "rate_limit", message: "quota exhausted" }, usage: { input_tokens: 1_000, output_tokens: 20, input_tokens_details: { cached_tokens: 900, cache_write_tokens: 50 } } },
+      openRouterUsage: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 50, cache_write_tokens: 10 } },
+    });
+    const harness = providerHarness({ config: { CODEX_FAST_MODE: true }, streams: { codex: streamCodex, openRouter: streamOpenRouter }, apiKey: testCodexToken(), options: { transport: "sse", fetch: transport.fetch } });
+    const capture = new InferenceUsageCollector();
+    const events = await capture.run(() => harness.run());
+    expect(textDeltas(events)).toBe("openrouter answer");
+    expect(capture.usage()).toMatchObject({ cacheReadTokens: 950, cacheWriteTokens: 60, inputTokens: 90, outputTokens: 30, totalTokens: 1_130 });
+    expect(capture.usage().calls).toMatchObject([
+      { provider: "openai-codex", fastMode: true, requestedServiceTier: "priority", serviceTier: "priority", cacheReadReported: true, cacheWriteReported: true },
+      { provider: "openrouter", fastMode: false, cacheReadReported: true, cacheWriteReported: true },
+    ]);
+    expect(capture.usage().calls?.[1]).not.toHaveProperty("requestedServiceTier");
+  });
+
+  it("remembers requested fast mode separately from the service tier the provider delivered", async () => {
+    const transport = interceptedSdkTransport({ codexResponse: { service_tier: "default", usage: { input_tokens: 1_000, output_tokens: 20, input_tokens_details: { cached_tokens: 900 } } } });
+    const harness = providerHarness({ config: { CODEX_FAST_MODE: true }, streams: { codex: streamCodex, openRouter: streamOpenRouter }, apiKey: testCodexToken(), options: { transport: "sse", fetch: transport.fetch } });
+    const events = await harness.run();
+    const completed = events.findLast(event => event.type === "done");
+    if (completed?.type !== "done") throw new Error("Expected a completed SDK response.");
+    expect(inferenceUsageFromMessages([completed.message]).calls).toMatchObject([
+      { fastMode: true, requestedServiceTier: "priority", serviceTier: "default" },
+    ]);
+  });
+
   it.each([false, true])("sends the configured fast-mode tier through the real Codex SDK when enabled=%s", async (enabled) => {
     const transport = interceptedSdkTransport();
     const harness = providerHarness({
@@ -355,6 +399,8 @@ function providerHarness(input: {
           compat: input.discoveredOpenRouterCompat,
         }
       : undefined,
+    getProvider: () => undefined,
+    registerVirtualModel: vi.fn(),
     registerProvider: (_name: string, provider: typeof registered) => { registered = provider; },
     hasConfiguredAuth: () => input.codexConfigured ?? true,
     getApiKeyAndHeaders: async () => input.authError
@@ -414,7 +460,7 @@ function testCodexToken(): string {
   return `${encode({ alg: "none" })}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })}.signature`;
 }
 
-function interceptedSdkTransport(input: { codexFailure?: boolean } = {}) {
+function interceptedSdkTransport(input: { codexFailure?: boolean; codexResponse?: Record<string, unknown>; codexEventType?: string; openRouterUsage?: Record<string, unknown> } = {}) {
   const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
   const fetch: NonNullable<SimpleStreamOptions["fetch"]> = Object.assign(async (url: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(url, init);
@@ -424,13 +470,14 @@ function interceptedSdkTransport(input: { codexFailure?: boolean } = {}) {
     if (request.url === "https://chatgpt.com/backend-api/codex/responses") {
       if (input.codexFailure) return Response.json({ error: { message: "quota exhausted" } }, { status: 429 });
       return new Response(`data: ${JSON.stringify({
-        type: "response.completed", response: { id: "test-response", status: "completed", output: [] },
+        type: input.codexEventType ?? "response.completed", response: { id: "test-response", status: "completed", output: [], ...input.codexResponse },
       })}\n\n`, { headers: { "content-type": "text/event-stream" } });
     }
     if (request.url === "https://openrouter.ai/api/v1/chat/completions") {
       return new Response(`data: ${JSON.stringify({
         id: "test-completion", object: "chat.completion.chunk",
         choices: [{ index: 0, delta: { role: "assistant", content: "openrouter answer" }, finish_reason: "stop" }],
+        ...(input.openRouterUsage ? { usage: input.openRouterUsage } : {}),
       })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
     }
     throw new Error(`Unexpected SDK request: ${request.url}`);

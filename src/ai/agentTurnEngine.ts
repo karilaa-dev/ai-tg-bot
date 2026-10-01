@@ -16,6 +16,7 @@ import { escapeHtml } from "../util/text.js";
 import {
   inferenceUsageDelta,
   inferenceUsageFromEntries,
+  InferenceUsageCollector,
   type InferenceUsageDelta,
 } from "../pi/usage.js";
 import { budgetReasonText } from "../pi/turnBudget.js";
@@ -75,9 +76,10 @@ export const runTurn: TurnRunner = async (input) => {
     const stats = createPiStreamLoop(input, shaper, streamer, status);
     const existingEntryIds = new Set(runtime.session.sessionManager.getEntries().map((entry) => entry.id));
     const usageBefore = runtime.session.getSessionStats().tokens;
+    const usageCollector = new InferenceUsageCollector();
     const unsubscribe = runtime.session.subscribe(stats.onEvent);
     try {
-      await runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS, input.signal);
+      await usageCollector.run(() => runPiPromptWithTimeout(runtime.session, input.text, input.config.PI_TURN_TIMEOUT_MS, input.signal));
     } finally {
       unsubscribe();
       const newEntries = runtime.session.sessionManager.getEntries().filter(
@@ -102,6 +104,11 @@ export const runTurn: TurnRunner = async (input) => {
       );
       const entryUsage = inferenceUsageFromEntries(newEntries);
       if (entryUsage.calls?.length) inferenceUsage = entryUsage;
+      // All bot provider transports record into this turn's collector. It also
+      // retains failed attempts and helper calls absent from the session log.
+      // Entries are only a fallback: adding them would count the same calls twice.
+      const capturedUsage = usageCollector.usage();
+      if (capturedUsage.calls?.length) inferenceUsage = capturedUsage;
       const finalAssistant = [...newEntries].reverse().find(
         (entry) => entry.type === "message" && entry.message.role === "assistant",
       );

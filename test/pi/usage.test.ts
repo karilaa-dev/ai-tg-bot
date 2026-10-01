@@ -1,7 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { inferenceUsageDelta, inferenceUsageFromMessages, inferenceUsageFromEntries, type TokenTotals } from "../../src/pi/usage.js";
+import { InferenceUsageCollector, recordInferenceUsage, inferenceUsageDelta, inferenceUsageFromMessages, inferenceUsageFromEntries, type TokenTotals, type UsageSource } from "../../src/pi/usage.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
+it("isolates simultaneous turns and retains usage for failed calls without session entries", async () => {
+  const first = new InferenceUsageCollector(), second = new InferenceUsageCollector();
+  const source = (): UsageSource => ({ provider: "openai-codex", model: "test",
+    usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 40, totalTokens: 1060,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+  await Promise.all([
+    first.run(async () => {
+      const message = source();
+      recordInferenceUsage(message, { fastMode: true, requestedServiceTier: "priority", serviceTier: "default", cacheWriteReported: true });
+      await Promise.resolve();
+      // A later SDK mutation must not overwrite the recorded response.
+      message.usage.cacheRead = 0;
+      message.usage.cost.total = 100;
+      recordInferenceUsage(source(), { fastMode: false });
+      throw new Error("tool failed after model completed");
+    }).catch(() => undefined),
+    second.run(async () => { await Promise.resolve(); recordInferenceUsage(source()); }),
+  ]);
+  expect(first.usage()).toMatchObject({ cacheReadTokens: 1800, cacheWriteTokens: 80, totalTokens: 2120 });
+  expect(first.usage().calls?.[0]).toMatchObject({ fastMode: true, requestedServiceTier: "priority", serviceTier: "default", cacheWriteReported: true, cost: { total: 0 } });
+  expect(second.usage().cacheReadTokens).toBe(900);
+  expect(second.usage().calls?.[0].fastMode).toBeUndefined();
+  first.record(source());
+  expect(first.usage().calls).toHaveLength(2);
+});
 
 it("includes tool and compaction usage without assigning them to the reply's model", () => {
   const usage = { input: 100, output: 30, cacheRead: 200, cacheWrite: 20, totalTokens: 350,

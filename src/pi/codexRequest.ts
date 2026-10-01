@@ -5,6 +5,7 @@ import type { AppConfig } from "../config.js";
 import { raceWithAbort } from "../files/cancel.js";
 import { asRecord } from "../util/records.js";
 import type { PiProviderRouter } from "./provider.js";
+import { ProviderUsageCapture } from "./providerUsage.js";
 
 export interface CodexRequestRuntime {
   config: AppConfig;
@@ -20,6 +21,7 @@ export async function requestCodex(
     context: Context;
     signal?: AbortSignal;
     sessionId?: string;
+    source?: string;
     headers?: Record<string, string>;
     reasoning?: SimpleStreamOptions["reasoning"];
     onResponse?: SimpleStreamOptions["onResponse"];
@@ -36,6 +38,11 @@ export async function requestCodex(
   if (!auth.ok || !auth.apiKey) throw new Error("Codex OAuth is unavailable.");
   const items = new Map<string | number, Record<string, unknown>>();
   let completed = false;
+  const usage = new ProviderUsageCapture(model.provider, model.id, {
+    fastMode: runtime.config.CODEX_FAST_MODE,
+    ...(runtime.config.CODEX_FAST_MODE ? { requestedServiceTier: "priority" } : {}),
+    source: request.source ?? "hosted",
+  });
   const stream = streamSimple(model, normalizeContext(request.context), {
     apiKey: auth.apiKey,
     headers: { ...auth.headers, ...request.headers },
@@ -51,6 +58,7 @@ export async function requestCodex(
       ...(runtime.config.CODEX_FAST_MODE ? { service_tier: "priority" } : {}),
     }),
     onProviderStreamEvent: data => {
+      usage.observe(data);
       const event = asRecord(data);
       if (event?.type === "response.output_item.done") {
         const item = asRecord(event.item);
@@ -66,10 +74,15 @@ export async function requestCodex(
       }
     },
   });
-  const message = await raceWithAbort(stream.result(), signal);
-  signal.throwIfAborted();
-  if (message.stopReason === "error" || message.stopReason === "aborted" || !completed) {
-    throw new Error(message.errorMessage || "Codex response did not complete.");
+  try {
+    const message = await raceWithAbort(stream.result(), signal);
+    usage.record(message);
+    signal.throwIfAborted();
+    if (message.stopReason === "error" || message.stopReason === "aborted" || !completed) {
+      throw new Error(message.errorMessage || "Codex response did not complete.");
+    }
+    return { output: [...items.values()], message };
+  } finally {
+    usage.record();
   }
-  return { output: [...items.values()], message };
 }

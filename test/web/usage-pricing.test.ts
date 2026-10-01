@@ -27,6 +27,76 @@ describe("ccusage token pricing", () => {
     })).toBeCloseTo(5.35);
   });
 
+  it("prices recorded priority calls using cached-token priority rates", () => {
+    const priority = { ...call, cacheWriteTokens: 0, serviceTier: "priority" };
+    const prices = { "gpt-test": { ...rates, input_cost_per_token_priority: 4 / 1e6,
+      output_cost_per_token_priority: 20 / 1e6, cache_read_input_token_cost_priority: 0.4 / 1e6 } };
+    expect(estimateCallCost(priority, prices)).toBeCloseTo(6.2);
+  });
+
+  it("uses delivered tiers before requested tiers and estimates an undelivered requested tier", () => {
+    const prices = { "gpt-test": { ...rates, input_cost_per_token_priority: 4 / 1e6,
+      output_cost_per_token_priority: 20 / 1e6, cache_read_input_token_cost_priority: 0.4 / 1e6,
+      input_cost_per_token_flex: 1 / 1e6, output_cost_per_token_flex: 5 / 1e6, cache_read_input_token_cost_flex: 0.1 / 1e6 } };
+    const requested = { ...call, cacheWriteTokens: 0, fastMode: true, requestedServiceTier: "priority" };
+    expect(estimateCallCost(requested, prices)).toBeCloseTo(6.2);
+    expect(estimateCallCost({ ...requested, serviceTier: "default" }, prices)).toBeCloseTo(3.1);
+    expect(estimateCallCost({ ...requested, serviceTier: "flex" }, prices)).toBeCloseTo(1.55);
+    expect(estimateCallCost({ ...call, cacheWriteTokens: 0 }, prices)).toBeCloseTo(3.1);
+  });
+
+  it("uses combined context and priority rates and leaves missing tier rates unpriced", () => {
+    const priority = { ...call, cacheWriteTokens: 0, serviceTier: "priority" };
+    const base = { ...rates, input_cost_per_token_priority: 4 / 1e6,
+      output_cost_per_token_priority: 20 / 1e6, cache_read_input_token_cost_priority: 0.4 / 1e6,
+      input_cost_per_token_above_272k_tokens: 4 / 1e6, output_cost_per_token_above_272k_tokens: 20 / 1e6,
+      cache_read_input_token_cost_above_272k_tokens: 0.4 / 1e6 };
+    expect(estimateCallCost(priority, { "gpt-test": base })).toBeNull();
+    expect(estimateCallCost(priority, { "gpt-test": { ...base, input_cost_per_token_above_272k_tokens_priority: 8 / 1e6,
+      output_cost_per_token_above_272k_tokens_priority: 40 / 1e6, cache_read_input_token_cost_above_272k_tokens_priority: 0.8 / 1e6 } })).toBeCloseTo(12.4);
+    expect(estimateCallCost(priority, catalog)).toBeNull();
+    expect(estimateCallCost({ ...priority, cost: { input: 4, output: 2, cacheRead: 0.2, cacheWrite: 0, total: 6.2 } }, catalog)).toBeCloseTo(6.2);
+  });
+
+  it("does not trust standard SDK costs when a requested priority tier was never reported", () => {
+    const requested = { ...call, cacheWriteTokens: 0, requestedServiceTier: "priority",
+      cost: { input: 2, output: 1, cacheRead: 0.1, cacheWrite: 0, total: 3.1 } };
+    expect(estimateCallCost(requested, catalog)).toBeNull();
+    expect(estimateCallCost(requested, {})).toBeNull();
+    expect(estimateCallCost({ ...requested, serviceTier: "default" }, {})).toBeCloseTo(3.1);
+    expect(estimateCallCost({ ...requested, serviceTier: "scale" }, {})).toBeNull();
+  });
+
+  it("keeps fast-mode and cache-reporting coverage separate from token quantities", () => {
+    const fast = { ...call, cacheWriteTokens: 0, fastMode: true, requestedServiceTier: "priority", serviceTier: "default", cacheReadReported: true, cacheWriteReported: false, source: "model" };
+    const standard = { ...call, cacheReadTokens: 0, cacheWriteTokens: 0, fastMode: false, cacheReadReported: true, cacheWriteReported: true };
+    const unknown = { ...call, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const summary = summarizeUsage({ usage: JSON.stringify({ inputTokens: call.inputTokens * 3, outputTokens: call.outputTokens * 3,
+      cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: 0, calls: [fast, standard, unknown] }), provider: "unknown", model: "unknown" }, catalog);
+    expect(summary).toMatchObject({ fastModeCalls: 1, standardModeCalls: 1, unknownFastModeCalls: 1,
+      cacheReadReportedCalls: 2, cacheReadUnreportedCalls: 1, cacheWriteReportedCalls: 1, cacheWriteUnreportedCalls: 2,
+      aggregateUsageEntries: 0, cacheReadTokens: 500_000, cacheWriteTokens: 0 });
+    expect(summary.calls?.[0]).toMatchObject({ fastMode: true, requestedServiceTier: "priority", serviceTier: "default", cacheWriteReported: false, source: "model" });
+    const legacy = summarizeUsage({ usage: JSON.stringify({ ...call, cacheWriteTokens: 0 }), provider: call.provider, model: call.model }, catalog);
+    expect(legacy).toMatchObject({ fastModeCalls: 0, standardModeCalls: 0, unknownFastModeCalls: 1, aggregateUsageEntries: 1,
+      cacheReadReportedCalls: 1, cacheWriteReportedCalls: 0, cacheWriteUnreportedCalls: 1, modelCalls: null });
+    expect(legacy.calls).toBeUndefined();
+  });
+
+  it("ignores malformed optional metadata without losing valid calls or exposing unrelated fields", () => {
+    const metadata = { ...call, fastMode: "true", serviceTier: "priority".repeat(100), requestedServiceTier: "bad\ntier",
+      cacheReadReported: false, cacheWriteReported: null, reasoningTokens: -5, cacheWrite1hTokens: 1_000_000,
+      source: "invalid\nsource", privateField: "not-public", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, total: 4, secret: "not-public" } };
+    const summary = summarizeUsage({ usage: JSON.stringify({ ...call, calls: [metadata] }), provider: "unknown", model: "unknown" }, catalog);
+    expect(summary).toMatchObject({ modelCalls: 1, aggregateUsageEntries: 0, cacheReadTokens: 500_000,
+      cacheReadReportedCalls: 1, cacheWriteReportedCalls: 1, unknownFastModeCalls: 1 });
+    expect(summary.models[0]?.model).toBe(call.model);
+    expect(summary.calls?.[0]).not.toHaveProperty("fastMode");
+    expect(summary.calls?.[0]).not.toHaveProperty("serviceTier");
+    expect(summary.calls?.[0]).not.toHaveProperty("reasoningTokens");
+    expect(JSON.stringify(summary)).not.toContain("not-public");
+  });
+
   it("uses the context tier per call and the one-hour write rate, not the sum of a turn's prompts", () => {
     const prices = { "claude-test": { ...rates, input_cost_per_token_above_200k_tokens: 4 / 1e6,
       output_cost_per_token_above_200k_tokens: 20 / 1e6, cache_read_input_token_cost_above_200k_tokens: 0.4 / 1e6,

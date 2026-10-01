@@ -16,11 +16,12 @@ import { startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
+import { createCodexLoginPreview } from "./codex-preview.js";
 
 const preview = process.argv.includes("--preview");
 assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
 const temp = await mkdtemp(path.join(os.tmpdir(), "conversation-browser-"));
-const config = loadTestConfig({ WEB_ENABLED: true, WEB_PORT: preview ? 3005 : 0, WEB_HOST: preview ? "0.0.0.0" : "127.0.0.1" });
+const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: preview ? "preview-admin-token" : "test-admin-token", WEB_PORT: preview ? 3005 : 0, WEB_HOST: preview ? "0.0.0.0" : "127.0.0.1" });
 const postgres = process.argv.includes("--postgres");
 const schema = `web_smoke_${randomUUID().replaceAll("-", "")}`;
 const admin = postgres ? createDatabase({ DB_URL: process.env.TEST_POSTGRES_URL! }) : undefined;
@@ -53,7 +54,11 @@ for (let i = 1; i < savedMessages.length; i += 2) {
   const assistant = savedMessages[i]!;
   const timestamp = Date.now() - Math.floor((savedMessages.length - i) / 8) * 86_400_000;
   const call = { provider: "openai-codex", model: "gpt-6-astra", inputTokens: 1200 + i * 30, outputTokens: 400 + i * 20,
-    cacheReadTokens: i * 1400, cacheWriteTokens: 0, reasoningTokens: i * 10 };
+    cacheReadTokens: i * 22_000, cacheWriteTokens: i % 3 === 1 ? 2_129 : 0, reasoningTokens: i * 10,
+    ...(i > 9 ? { fastMode: i % 3 === 0, requestedServiceTier: i % 3 === 0 ? "priority" : "default",
+      serviceTier: i % 5 === 0 ? "default" : i % 3 === 0 ? "priority" : "default",
+      cacheReadReported: true, cacheWriteReported: i % 3 !== 2, source: "assistant" } : {}),
+  };
   await db.db.execute(sql`
     insert into turn_runs(user_id, thread_id, user_message_id, chat_id, locale, status, result_message_id,
       provider, model, usage_json, accepted_at, started_at, finished_at, updated_at)
@@ -87,7 +92,7 @@ if (preview) {
 const pricing = new UsagePricing(async () => Response.json({ "gpt-6-astra": {
   input_cost_per_token: 10 / 1e6, output_cost_per_token: 50 / 1e6, cache_read_input_token_cost: 1 / 1e6,
 } }));
-const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp };
+const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined };
 const web = (await startWebServer(options))!;
 if (preview) {
   console.log(`Preview: ${web.url}?user=${user.tg_id}&thread=${thread.id}`);
@@ -95,21 +100,30 @@ if (preview) {
   process.once("SIGINT", () => void stop());
   process.once("SIGTERM", () => void stop());
 } else {
+  const login = await fetch(new URL("/api/auth/login", web.url), {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
+    body: JSON.stringify({ token: config.WEB_ADMIN_TOKEN }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get("Set-Cookie")!.split(";")[0]!;
+  const authenticatedFetch = (url: URL, init?: RequestInit) => fetch(url, {
+    ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), Cookie: cookie, "X-Admin-Request": "1" },
+  });
   try {
-    assert.equal((await fetch(web.url)).status, 200);
-    const historyResponse = await fetch(new URL(`/api/threads/${thread.id}/messages`, web.url));
+    assert.equal((await authenticatedFetch(web.url)).status, 200);
+    const historyResponse = await authenticatedFetch(new URL(`/api/threads/${thread.id}/messages`, web.url));
     assert.equal(historyResponse.headers.get("cache-control"), "no-store");
     const history = await historyResponse.json() as WebHistory;
     assert.equal(history.messages.length, 50);
     assert.equal(history.user.username, "alice_m");
     assert.equal(history.messages.find(message => message.id === response.id)?.usage?.modelCalls, 1);
-    const usage = await (await fetch(new URL(`/api/usage?thread=${thread.id}&days=0`, web.url))).json();
+    const usage = await (await authenticatedFetch(new URL(`/api/usage?thread=${thread.id}&days=0`, web.url))).json();
     assert.equal(usage.totals.recordedTurns, 28);
     assert.ok(usage.totals.estimatedCostUsd > 0);
-    assert.equal((await fetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=auto`, web.url))).status, 413);
-    assert.equal((await fetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=download`, web.url))).status, 200);
-    assert.equal((await fetch(new URL("/.env", web.url))).status, 404);
-    assert.equal((await fetch(new URL("/api/users", web.url), { method: "POST" })).status, 405);
+    assert.equal((await authenticatedFetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=auto`, web.url))).status, 413);
+    assert.equal((await authenticatedFetch(new URL(`/api/threads/${thread.id}/files/${large.id}?mode=download`, web.url))).status, 200);
+    assert.equal((await authenticatedFetch(new URL("/.env", web.url))).status, 404);
+    assert.equal((await authenticatedFetch(new URL("/api/users", web.url), { method: "POST" })).status, 405);
     await assert.rejects(startWebServer({ ...options, config: { ...config, WEB_PORT: Number(web.url.port) } }));
     await web.stop();
     const rebound = createServer();

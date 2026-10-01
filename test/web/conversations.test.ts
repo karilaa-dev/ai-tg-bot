@@ -28,7 +28,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   let controller: AbortController;
   let server: Server<undefined>;
   let api: ReturnType<typeof createWebRoutes>;
-  const config = loadTestConfig({ WEB_ENABLED: true });
+  const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: "test-admin-token" });
 
   beforeEach(async () => {
     let dbUrl = "sqlite::memory:";
@@ -51,7 +51,18 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     controller = new AbortController();
     api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: api.routes, fetch: api.fetch });
-    request = (url, init) => fetch(new URL(url, server.url), init);
+    const login = await fetch(new URL("/api/auth/login", server.url), {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
+      body: JSON.stringify({ token: config.WEB_ADMIN_TOKEN }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = login.headers.get("Set-Cookie")!.split(";")[0]!;
+    request = (url, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set("Cookie", cookie);
+      headers.set("X-Admin-Request", "1");
+      return fetch(new URL(url, server.url), { ...init, headers });
+    };
   });
   afterEach(async () => {
     controller.abort();
@@ -130,6 +141,42 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(replies.map(m => m.id)).toEqual([inherited.id, own.id]);
     expect(replies.every(m => m.usage?.totalTokens === 3_200)).toBe(true);
     expect((await repository.usageReport({ days: 0 })).totals.recordedTurns).toBe(3);
+  });
+
+  it("includes the selected user's identity without requiring the users list", async () => {
+    await thread(42);
+    const response = await request("/api/usage?user=42&days=30");
+    expect(response.status).toBe(200);
+    const report = await response.json() as WebUsageReport;
+    expect(report.user).toEqual({ id: 42, name: "Person 42", username: null });
+    expect(report.totals.recordedTurns).toBe(0);
+    expect((await repository.usageReport({ days: 30 })).user).toBeNull();
+    expect((await request("/api/usage?user=99")).status).toBe(404);
+    expect((await request("/api/usage?user=404")).status).toBe(404);
+  });
+
+  it("includes every saved cache read across calls, models, turns and message details", async () => {
+    const first = await thread();
+    const primary = { provider: "openai-codex", model: "gpt-test", inputTokens: 250, outputTokens: 50, cacheReadTokens: 8_000, cacheWriteTokens: 0,
+      fastMode: true, requestedServiceTier: "priority", serviceTier: "default", cacheReadReported: true, cacheWriteReported: false };
+    const fallback = { provider: "openrouter", model: "openai/gpt-test", inputTokens: 100, outputTokens: 25, cacheReadTokens: 3_000, cacheWriteTokens: 0,
+      fastMode: false, cacheReadReported: true, cacheWriteReported: true };
+    const usage = JSON.stringify({ inputTokens: 350, outputTokens: 75, cacheReadTokens: 11_000, cacheWriteTokens: 0, calls: [primary, fallback] });
+    const reply = await usageTurn(first.id, { usage });
+    await usageTurn(first.id, { usage });
+    const report = await repository.usageReport({ threadId: first.id, days: 0 });
+    expect(report.totals.cacheReadTokens).toBe(22_000);
+    expect(report.threads[0]?.cacheReadTokens).toBe(22_000);
+    expect(report.daily.reduce((sum, day) => sum + day.cacheReadTokens, 0)).toBe(22_000);
+    expect(report.models.find(model => model.provider === "openai-codex")?.cacheReadTokens).toBe(16_000);
+    expect(report.models.find(model => model.provider === "openrouter")?.cacheReadTokens).toBe(6_000);
+    expect(report.totals).toMatchObject({ fastModeCalls: 2, standardModeCalls: 2, unknownFastModeCalls: 0,
+      cacheReadReportedCalls: 4, cacheWriteReportedCalls: 2, cacheWriteUnreportedCalls: 2, aggregateUsageEntries: 0 });
+    expect(report.threads[0]?.fastModeCalls).toBe(2);
+    expect(report.daily.reduce((sum, day) => sum + day.fastModeCalls, 0)).toBe(2);
+    const history = await repository.history(first.id);
+    expect(history.messages.find(message => message.id === reply!.id)?.usage?.cacheReadTokens).toBe(11_000);
+    expect(history.messages.find(message => message.id === reply!.id)?.usage?.calls?.[0]).toMatchObject({ fastMode: true, requestedServiceTier: "priority", serviceTier: "default" });
   });
 
   it("reports incomplete coverage without treating missing usage or unknown prices as zero", async () => {
@@ -621,7 +668,7 @@ it("parses the website flag without treating false as truthy and validates limit
   const env = { BOT_TOKEN: "test", OPENROUTER_API_KEY: "test", TAVILY_API_KEY: "test", E2B_API_KEY: "test" };
   expect(loadConfig(env).WEB_ENABLED).toBe(false);
   expect(loadConfig({ ...env, WEB_ENABLED: "false" }).WEB_ENABLED).toBe(false);
-  expect(loadConfig({ ...env, WEB_ENABLED: "true" }).WEB_ENABLED).toBe(true);
+  expect(loadConfig({ ...env, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: "test" }).WEB_ENABLED).toBe(true);
   expect(() => loadConfig({ ...env, WEB_PORT: "65536" })).toThrow();
   expect(() => loadConfig({ ...env, WEB_AUTOLOAD_MAX_BYTES: "-1" })).toThrow();
 });

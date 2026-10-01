@@ -50,7 +50,7 @@ async function requestSearch(runtime: CodexRequestRuntime, query: string, signal
   let resetAt: number | undefined;
   try {
     const result = await requestCodex(runtime, {
-      kind: "helper", signal,
+      kind: "helper", signal, source: "web_search",
       onResponse: response => {
         status = response.status;
         resetAt = resetAtFromHeaders(response.headers);

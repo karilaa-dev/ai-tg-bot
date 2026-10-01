@@ -1,12 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_PROVIDER_ID,
+  CodexCliCredentialStore,
   discoverCodexCliCredentials,
   resolveCodexAuthFile,
 } from "../../src/pi/codexCliCredentials.js";
+import { deferred } from "../helpers/async.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -104,6 +106,66 @@ describe("Codex CLI credentials", () => {
       .toBe("/run/secrets/codex.json");
     expect(resolveCodexAuthFile({ CODEX_AUTH_FILE: "data/codex.json" }, "/users/bot"))
       .toBe(path.resolve("data/codex.json"));
+  });
+
+  it("commits login after an in-flight refresh so the previous account cannot overwrite it", async () => {
+    const authFile = await writeAuthFile({ access: jwt({ exp: 2_000_000_000 }), refresh: "old-refresh" });
+    const store = new CodexCliCredentialStore(authFile);
+    const refreshResult = deferred<void>();
+    const refreshing = vi.fn(async () => {
+      await refreshResult.promise;
+      return { type: "oauth" as const, access: jwt({ exp: 2_000_000_100 }), refresh: "old-refreshed", expires: 2_000_000_100_000 };
+    });
+    const refreshingTask = store.modify(CODEX_PROVIDER_ID, refreshing);
+    await vi.waitFor(() => expect(refreshing).toHaveBeenCalledOnce());
+    const newCredential = { type: "oauth" as const, access: jwt({ exp: 2_100_000_000 }), refresh: "new-account", expires: 2_100_000_000_000, accountId: "new-account-id" };
+    const piAuthFile = path.join(path.dirname(authFile), "pi-auth.json");
+    const savingTask = store.saveLogin(piAuthFile, newCredential);
+    refreshResult.resolve();
+    await Promise.all([refreshingTask, savingTask]);
+    expect(await store.read(CODEX_PROVIDER_ID)).toEqual(newCredential);
+    const saved = JSON.parse(await fs.readFile(piAuthFile, "utf8"));
+    expect(saved[CODEX_PROVIDER_ID].refresh).toBe("new-account");
+    const cli = JSON.parse(await fs.readFile(authFile, "utf8"));
+    expect(cli.tokens.refresh_token).toBe("old-refreshed");
+    expect(cli.tokens.id_token).toBe("id-token-preserved");
+    expect(cli.custom).toBe("preserved");
+  });
+
+  it("preserves other Pi provider credentials while replacing its active Codex login", async () => {
+    const directory = await temporaryDirectory();
+    const authFile = path.join(directory, "pi-auth.json");
+    const otherProvider = { type: "api_key", key: "existing-provider-secret" };
+    await fs.writeFile(authFile, JSON.stringify({ other: otherProvider }));
+    const store = new CodexCliCredentialStore(authFile, undefined, "pi");
+    const newCredential = { type: "oauth" as const, access: jwt({ exp: 2_100_000_000 }), refresh: "new-account", expires: 2_100_000_000_000 };
+    await store.saveLogin(authFile, newCredential);
+    expect(await store.read(CODEX_PROVIDER_ID)).toEqual(newCredential);
+    expect(JSON.parse(await fs.readFile(authFile, "utf8"))).toEqual({ other: otherProvider, [CODEX_PROVIDER_ID]: newCredential });
+    expect((await fs.stat(authFile)).mode & 0o777).toBe(0o600);
+  });
+
+  it("keeps the previous credential when login is cancelled while waiting for a refresh", async () => {
+    const authFile = await writeAuthFile({ access: jwt({ exp: 2_000_000_000 }), refresh: "old-refresh" });
+    const store = new CodexCliCredentialStore(authFile);
+    const started = deferred<void>();
+    const refreshing = deferred<void>();
+    const refreshTask = store.modify(CODEX_PROVIDER_ID, async (current) => { started.resolve(); await refreshing.promise; return current; });
+    await started.promise;
+    const controller = new AbortController();
+    const piAuthFile = path.join(path.dirname(authFile), "pi-auth.json");
+    const saving = store.saveLogin(piAuthFile, { type: "oauth", access: "new", refresh: "new", expires: 1 }, controller.signal);
+    const rejected = expect(saving).rejects.toThrow();
+    controller.abort();
+    await rejected;
+    const next = vi.fn(async (current) => current);
+    const nextTask = store.modify(CODEX_PROVIDER_ID, next);
+    await Promise.resolve();
+    expect(next).not.toHaveBeenCalled();
+    refreshing.resolve();
+    await Promise.all([refreshTask, nextTask]);
+    expect(await store.read(CODEX_PROVIDER_ID)).toMatchObject({ refresh: "old-refresh" });
+    await expect(fs.stat(piAuthFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
