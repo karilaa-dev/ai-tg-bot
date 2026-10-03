@@ -175,6 +175,13 @@ describe("Telegram bot with grammy-emulate", () => {
 
     const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
     expect(expectResponseSurface(stop)).toContain("Pending message cancelled");
+    if (kind === "album") {
+      // Telegram can deliver the rest of an album after the stop command.
+      const photos = env.bot.server.fileState.storePhoto(640, 480, { content: Buffer.from([4, 5, 6]) });
+      const late = env.bot.server.updateFactory.createPhotoMessage(env.user, env.chat, photos);
+      late.message!.media_group_id = "cancelled-album";
+      await env.bot.processUpdatesConcurrently([late]);
+    }
     await wait(1_150);
 
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);

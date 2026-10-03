@@ -43,6 +43,7 @@ async function initializePostgres(db: SqlExecutor): Promise<void> {
       created_at bigint not null
     )
   `);
+  await initializePostgresUserSearch(db);
   await initializeCommonTables(db, "bigserial primary key", "bigint", "bytea");
   await db.execute(sql`
     create table if not exists message_search (
@@ -64,6 +65,27 @@ async function initializePostgres(db: SqlExecutor): Promise<void> {
   `);
   await db.execute(sql`create index if not exists chunk_search_ts_idx on chunk_search using gin(ts)`);
   await db.execute(sql`create index if not exists chunk_search_file_idx on chunk_search(file_id)`);
+}
+
+async function initializePostgresUserSearch(db: SqlExecutor): Promise<void> {
+  await db.execute(sql`alter table users add column if not exists first_name_search text`);
+  await db.execute(sql`alter table users add column if not exists username_search text`);
+  // Normalize existing identities once, in bounded batches, using the same
+  // Unicode mapping as SQLite and new writes rather than the database locale.
+  while (true) {
+    const users = await db.query<{ tg_id: number; first_name: string | null; username: string | null }>(sql`
+      select tg_id, first_name, username from users
+      where first_name_search is null or username_search is null order by tg_id limit 500
+    `);
+    if (!users.length) break;
+    const values = sql.join(users.map(user => sql`(
+      ${user.tg_id}::bigint, ${(user.first_name ?? "").toLowerCase()}::text, ${(user.username ?? "").toLowerCase()}::text
+    )`), sql`, `);
+    await db.execute(sql`
+      update users u set first_name_search = normalized.name, username_search = normalized.username
+      from (values ${values}) as normalized(id, name, username) where u.tg_id = normalized.id
+    `);
+  }
 }
 
 async function initializeCommonTables(

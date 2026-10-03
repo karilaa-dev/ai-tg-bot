@@ -35,22 +35,12 @@ export class ConversationRepository {
     let matches = sql`true`;
     if (search) {
       const normalized = search.toLowerCase();
-      if (this.db.dialect === "postgres") {
-        // Scan identities only for searches so Unicode case mapping is independent
-        // of PostgreSQL's locale; activity ordering and pagination remain in SQL.
-        const identities = await this.db.query<Pick<WebUser, "id" | "name" | "username">>(sql`
-          select u.tg_id as id, u.first_name as name, u.username from users u where ${visibleUser}
-        `);
-        const ids = identities.filter(user => [user.name ?? "", user.username ?? "", String(user.id)]
-          .some(value => value.toLowerCase().includes(normalized))).map(user => user.id);
-        if (!ids.length) return page([], offset, limit);
-        matches = sql`u.tg_id = any(${sql.param(ids)}::bigint[])`;
-      } else {
-        const pattern = `%${normalized.replace(/[\\%_]/g, "\\$&")}%`;
-        matches = sql`unicode_lower(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
-          or unicode_lower(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
-          or cast(u.tg_id as text) like ${pattern} escape ${"\\"}`;
-      }
+      const pattern = `%${normalized.replace(/[\\%_]/g, "\\$&")}%`;
+      const name = this.db.dialect === "postgres" ? sql`u.first_name_search` : sql`unicode_lower(coalesce(u.first_name, ''))`;
+      const username = this.db.dialect === "postgres" ? sql`u.username_search` : sql`unicode_lower(coalesce(u.username, ''))`;
+      matches = sql`${name} like ${pattern} escape ${"\\"}
+        or ${username} like ${pattern} escape ${"\\"}
+        or cast(u.tg_id as text) like ${pattern} escape ${"\\"}`;
     }
     const messageActivity = sql`max((select max(m.created_at) from messages m where m.thread_id = t.id))`;
     const rows = await this.db.query<WebUser>(sql`

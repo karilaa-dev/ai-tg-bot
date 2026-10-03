@@ -35,6 +35,7 @@ export function chunkCsv(raw: string, targetRows = 500): Chunk[] {
   }) as unknown as Array<{ raw: string }>;
   const rows = records.map((record) => record.raw.replace(/(?:\r\n|\r|\n)$/, ""));
   const header = rows[0] ?? "";
+  if (rows.length === 1) return [{ idx: 0, headingPath: "header", content: header }];
   const chunks: Chunk[] = [];
   for (let start = 1; start < rows.length; start += targetRows) {
     const end = Math.min(rows.length, start + targetRows);

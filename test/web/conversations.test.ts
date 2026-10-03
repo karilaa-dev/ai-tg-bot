@@ -486,6 +486,19 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     for (const query of ["İΣΟΣ", "i̇σος"]) {
       expect((await repository.users(query, 0)).items.map(u => u.id)).toEqual([5]);
     }
+    await repos.users.ensure({ tgId: 5, firstName: "Renamed", username: "НОВОЕ" });
+    expect((await repository.users("i̇σος", 0)).items).toEqual([]);
+    expect((await repository.users("новое", 0)).items.map(u => u.id)).toEqual([5]);
+  });
+
+  it.skipIf(dialect !== "postgres")("backfills normalized search names for an existing PostgreSQL database", async () => {
+    await database.db.execute(sql`alter table users drop column first_name_search, drop column username_search`);
+    await database.db.execute(sql`insert into users(tg_id, first_name, username, created_at) values (1, 'İΣΟΣ', 'ДМИТРИЙ', 1)`);
+    await database.initialize();
+    expect((await repository.users("i̇σος", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("дмитрий", 0)).items.map(u => u.id)).toEqual([1]);
+    await database.initialize();
+    expect((await repository.users("İΣΟΣ", 0)).items.map(u => u.id)).toEqual([1]);
   });
 
   it("hides existing bot records from lists, search, and direct history access", async () => {

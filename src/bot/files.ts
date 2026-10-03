@@ -9,7 +9,7 @@ import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
-import { enqueueMediaGroup, holdPendingMediaGroup } from "./batching.js";
+import { cancelMediaGroup, enqueueMediaGroup, holdPendingMediaGroup, isMediaGroupCancelled } from "./batching.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
@@ -51,6 +51,7 @@ export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): 
     return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
+  cancelMediaGroup(ctx, job.mediaGroupId);
   job.controller.abort();
   await job.status.updateKey("file-processing-stopping");
   return true;
@@ -264,6 +265,7 @@ async function ingestTelegramFile(
 
 export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInput): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
+  if (isMediaGroupCancelled(ctx, input.mediaGroupId)) return;
   // Acceptance remains atomic in TurnRunsRepo. This early lookup avoids repeating
   // paid transcription and status messages when Telegram redelivers accepted audio.
   if ((input.mediaKind === "voice" || input.mediaKind === "audio")
@@ -281,7 +283,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   }
   const controller = new AbortController();
   const status = new FileProcessingStatus(ctx, input.name);
-  activeFileJobs.set(jobKey, { controller, status });
+  activeFileJobs.set(jobKey, { controller, status, mediaGroupId: input.mediaGroupId });
   const startedAt = Date.now();
   ctx.services.logger.info("file job starting", ctxLogMeta(ctx, {
     name: input.name,

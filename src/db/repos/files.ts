@@ -185,7 +185,11 @@ export class FilesRepo {
     return files.map(file => {
       // Byte deduplication crosses users; the original uploader's name is private.
       const name = latest.get(file.id) ?? (ownsFile(file) ? file.name : anonymousFileName(file));
-      return { ...file, name, summary: file.summary === `Outbound file ${file.name}` ? `Outbound file ${name}` : file.summary };
+      // Legacy image summaries and generated-image prompts can include private
+      // context. An attachment link only grants access to the image bytes.
+      const summary = file.type === "image" && !ownsFile(file) ? null
+        : file.summary === `Outbound file ${file.name}` ? `Outbound file ${name}` : file.summary;
+      return { ...file, name, summary };
     });
   }
 

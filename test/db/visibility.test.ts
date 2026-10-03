@@ -5,6 +5,8 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { threadVisibilityScope } from "../../src/memory/retrieval.js";
+import { createLoadMessageTool } from "../../src/ai/tools/loadMessage.js";
+import { renderThreadSessionContext } from "../../src/ai/prompt.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dialect} visibility`, () => {
@@ -70,6 +72,27 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect((await threadVisibilityScope(repos, child, 0)).messageIds).toEqual([]);
         expect(await repos.messages.listIdsForScopes([])).toEqual([]);
         expect(await repos.files.listVisibleIds([], false)).toEqual([]);
+
+        // Existing shared images must not expose legacy captions or generation
+        // prompts, even when nobody uploads the image again to repair its cache.
+        const recipient = await repos.users.ensure({ tgId: 778, firstName: "Recipient" });
+        const recipientThread = await repos.threads.create({ userId: recipient.tg_id, topicId: null, title: "Recipient" });
+        const sharedMessage = await message(recipientThread.id, "My image caption");
+        const image = await repos.files.insertFile({
+          userId: user.tg_id, threadId: other.id, messageId: otherMessage.id,
+          type: "image", name: "private-image.png", size: 5, summary: "owner-private-generation-prompt", isInline: true,
+        });
+        await repos.files.rememberSource(image.id, { transport: "test", connectionKey: "default", remoteKey: "shared-image", locator: {} });
+        await repos.files.attachToMessage(sharedMessage.id, image.id, { displayName: "my-image.png" });
+        const recipientScope = await threadVisibilityScope(repos, recipientThread);
+        expect(await repos.files.get(image.id, recipientScope.messageScopes)).toMatchObject({ name: "my-image.png", summary: null });
+        expect(await repos.files.listForMessage(sharedMessage.id)).toMatchObject([{ id: image.id, summary: null }]);
+        const loaded = await createLoadMessageTool({ config: loadTestConfig(), db, repos, user: recipient, thread: recipientThread })
+          .execute({ message_id: sharedMessage.id });
+        expect(loaded).toMatchObject({ files: [{ file_id: image.id, summary: null }], images: [{ file_id: image.id, caption: null }] });
+        expect(await renderThreadSessionContext({ repos, user: recipient, thread: recipientThread }))
+          .not.toContain("owner-private-generation-prompt");
+        expect((await repos.files.get(image.id))?.summary).toBe("owner-private-generation-prompt");
 
         // Forking again inside inherited history also bounds earlier ancestors.
         const branch = await repos.threads.create({ userId: user.tg_id, topicId: 3, title: "Branch", parentThreadId: parent.id, forkPointMessageId: afterFork.id });
