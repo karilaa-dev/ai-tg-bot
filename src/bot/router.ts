@@ -1,5 +1,5 @@
 import { Bot, GrammyError, HttpError } from "grammy";
-import { autoRetry } from "@grammyjs/auto-retry";
+import { telegramRetry } from "../telegram/retry.js";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import { sequentialize } from "@grammyjs/runner";
 import type { AppConfig } from "../config.js";
@@ -137,7 +137,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     routerState: createRouterState(),
   };
 
-  bot.api.config.use(autoRetry());
+  bot.api.config.use(telegramRetry());
   bot.use(async (ctx, next) => {
     ctx.services = services;
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);

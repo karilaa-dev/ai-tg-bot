@@ -23,7 +23,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const user = await repos.users.ensure({ tgId: 777, firstName: "Scope" });
         const parent = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Parent" });
         const message = (threadId: number, text: string) => repos.messages.insert({ threadId, role: "user", content: { text }, textPlain: text });
-        const beforeFork = await message(parent.id, "before fork");
+        const beforeFork = await message(parent.id, "before fork empty __empty__");
         const child = await repos.threads.create({ userId: user.tg_id, topicId: 1, title: "Child", parentThreadId: parent.id, forkPointMessageId: beforeFork.id });
         const afterFork = await message(parent.id, "after fork");
         const accepted = await message(child.id, "accepted");
@@ -34,11 +34,14 @@ for (const dialect of ["sqlite", "postgres"] as const) {
           userId: user.tg_id, threadId, messageId, type: "txt", name: "notes.txt", size: 5, contentMd: "notes", isInline: true,
         });
         const visible = await file(parent.id, beforeFork.id);
+        await repos.files.insertChunk({ fileId: visible.id, idx: 0, content: "empty __empty__" });
         await repos.files.attachToMessage(beforeFork.id, visible.id, {});
-        const hiddenParent = await file(parent.id, afterFork.id);
-        const hiddenQueued = await file(child.id, queued.id);
+        await file(parent.id, afterFork.id);
+        await file(parent.id);
+        await file(child.id, queued.id);
         const reused = await file(other.id, otherMessage.id);
-        await repos.files.attachToMessage(accepted.id, reused.id, {});
+        await repos.files.attachToMessage(accepted.id, reused.id, { displayName: "accepted-name.txt" });
+        await repos.files.attachToMessage(queued.id, reused.id, { displayName: "queued-name.txt" });
         const reusedPending = await file(other.id);
         await repos.files.attachToMessage(accepted.id, reusedPending.id, {});
         const reusedAfterFork = await file(other.id);
@@ -54,12 +57,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const scope = await threadVisibilityScope(repos, child, accepted.id);
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
         expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
-        expect(scope.fileIds).not.toContain(hiddenParent.id);
-        expect(scope.fileIds).not.toContain(hiddenQueued.id);
-        expect(scope.fileIds).not.toContain(reusedAfterFork.id);
-        expect(scope.fileIds).not.toContain(reusedQueued.id);
-        expect(scope.fileIds).not.toContain(localQueued.id);
-        expect(scope.fileIds).not.toContain(inbound.id);
+        expect((await repos.files.get(reused.id, scope.messageScopes))?.name).toBe("accepted-name.txt");
+        expect((await repos.files.get(reusedPending.id, scope.messageScopes))?.name).toBe(`attachment-${reusedPending.id}.txt`);
         expect((await repos.messages.listForThreadChain([parent, child], accepted.id)).map((row) => row.id)).toEqual(scope.messageIds);
         expect((await repos.messages.listForThreadChain([parent, child])).map((row) => row.id)).toEqual([beforeFork.id, accepted.id, queued.id]);
         const currentScope = await threadVisibilityScope(repos, child);
@@ -67,6 +66,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect(currentScope.fileIds).toContain(reusedQueued.id);
         expect(currentScope.fileIds).toContain(localQueued.id);
         expect(currentScope.fileIds).not.toContain(reusedAfterFork.id);
+        expect((await repos.files.get(reused.id, currentScope.messageScopes))?.name).toBe("queued-name.txt");
         expect((await threadVisibilityScope(repos, child, 0)).messageIds).toEqual([]);
         expect(await repos.messages.listIdsForScopes([])).toEqual([]);
         expect(await repos.files.listVisibleIds([], false)).toEqual([]);
@@ -80,6 +80,12 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         expect(nestedScope.fileIds).toEqual([visible.id]);
         expect((await repos.messages.listForThreadChain([parent, branch, nested])).map(row => row.id)).toEqual(nestedScope.messageIds);
         expect(await db.search.searchMessages(nestedScope.threadIds, "after", 10, nestedScope.messageScopes)).toEqual([]);
+        expect((await db.search.searchMessages(nestedScope.threadIds, "before missingterm", 10, nestedScope.messageScopes)).map(hit => hit.id))
+          .toEqual([beforeFork.id]);
+        expect(await db.search.searchMessages(nestedScope.threadIds, " \t\n ", 10, nestedScope.messageScopes)).toEqual([]);
+        expect(await db.search.searchChunks(nestedScope.fileIds, " \t\n ", 10)).toEqual([]);
+        const emptyFork = await repos.threads.create({ userId: user.tg_id, topicId: 5, title: "Empty", parentThreadId: parent.id });
+        expect((await threadVisibilityScope(repos, emptyFork)).messageIds).toEqual([]);
       } finally {
         await db.destroy();
         if (admin) {

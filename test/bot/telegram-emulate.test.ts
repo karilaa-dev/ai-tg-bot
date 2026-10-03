@@ -5,6 +5,9 @@ import { deferred } from "../helpers/async.js";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import type { ThreadRow } from "../../src/db/types.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
+import { renderThreadSessionContext } from "../../src/ai/prompt.js";
+import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
+import { FileProcessingStatus } from "../../src/bot/files.js";
 
 describe("Telegram bot with grammy-emulate", () => {
   let env: GrammyEmulator;
@@ -765,7 +768,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" }) as typeof env.chat;
     await startBot(other, otherChat);
 
-    const firstDoc = env.bot.server.fileState.storeDocument("global.txt", "text/plain", {
+    const firstDoc = env.bot.server.fileState.storeDocument("alice-private-project.txt", "text/plain", {
       content: Buffer.from("global cached document"),
     });
     await env.bot.processUpdatesConcurrently([
@@ -791,6 +794,14 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(ownerFiles).toHaveLength(1);
     expect(otherFiles).toHaveLength(1);
     expect(otherFiles[0]?.id).toBe(ownerFiles[0]?.id);
+    const userMessage = (await env.repos.messages.listThread(otherThread.id)).find(message => message.role === "user")!;
+    expect((await env.repos.files.listForMessage(userMessage.id))[0]?.name).toBe("global-copy.txt");
+    const metadata = await renderThreadSessionContext({
+      repos: env.repos, thread: otherThread, user: (await env.repos.users.get(other.id))!,
+    });
+    expect(metadata).toContain("global-copy.txt");
+    expect(metadata).not.toContain("alice-private-project.txt");
+    expect((await resolveThreadFileDescriptors({ repos: env.repos, thread: otherThread }))[0]?.name).toBe("global-copy.txt");
   });
 
   it("refuses legacy .doc files before download", async () => {
@@ -1027,12 +1038,13 @@ describe("Telegram bot with grammy-emulate", () => {
     await filePromise;
   }, 10_000);
 
-  it.each(["document", "photo-download", "photo-caption"])("cancels active %s processing in the current topic with /stop", async (stage) => {
+  it.each(["document", "document-status", "photo-download", "photo-caption"])("cancels active %s processing in the current topic with /stop", async (stage) => {
     await env.dispose();
     const started = deferred<void>();
     const releaseCaption = deferred<void>();
     env = await createGrammyEmulator({
       downloadFile: async ({ signal }) => {
+        if (stage === "document-status") return { bytes: Buffer.from("ready file") };
         if (stage === "photo-caption") return { bytes: Buffer.from([1, 2, 3]) };
         started.resolve();
         await waitForAbort(signal);
@@ -1045,8 +1057,17 @@ describe("Telegram bot with grammy-emulate", () => {
       } },
     });
     await startBot();
+    const updateStatus = FileProcessingStatus.prototype.updateKey;
+    const status = stage === "document-status"
+      ? vi.spyOn(FileProcessingStatus.prototype, "updateKey").mockImplementation(async function (this: FileProcessingStatus, key, params) {
+        await updateStatus.call(this, key, params);
+        if (key === "file-processed") {
+          started.resolve();
+          await releaseCaption.promise;
+        }
+      }) : undefined;
 
-    const filePromise = stage === "document" ? env.bot.sendDocument(env.user, env.chat, {
+    const filePromise = stage.startsWith("document") ? env.bot.sendDocument(env.user, env.chat, {
       fileName: "cancel-me.txt",
       mimeType: "text/plain",
       content: Buffer.from("unused"),
@@ -1057,10 +1078,11 @@ describe("Telegram bot with grammy-emulate", () => {
     releaseCaption.resolve();
     expect(expectResponseSurface(stop)).toContain("Stopping file processing");
     const fileRes = await filePromise;
+    status?.mockRestore();
     expect(expectResponseSurface(fileRes)).toContain("File processing cancelled");
 
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
+    if (stage !== "document-status") expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);
   }, 10_000);
 

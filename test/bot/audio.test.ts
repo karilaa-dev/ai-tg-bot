@@ -279,15 +279,25 @@ describe("Telegram audio prompts", () => {
     await expectNoAudioRecords();
   });
 
-  it("lets /stop cancel transcription and accepts the next voice message", async () => {
+  it.each(["transcription", "registration"])("lets /stop cancel audio %s and accepts the next voice message", async (stage) => {
     const started = deferred<void>();
-    fetchMock.mockImplementationOnce((_url, options: RequestInit) => new Promise((_resolve, reject) => {
-      options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
-      started.resolve();
-    }));
+    const release = deferred<void>();
+    if (stage === "transcription") {
+      fetchMock.mockImplementationOnce((_url, options: RequestInit) => new Promise((_resolve, reject) => {
+        options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+        started.resolve();
+      }));
+    } else {
+      vi.spyOn(env.repos.files, "findBySource").mockImplementationOnce(async () => {
+        started.resolve();
+        await release.promise;
+        return undefined;
+      });
+    }
     const pending = processUpdate(voiceUpdate());
     await started.promise;
     await env.bot.sendCommand(env.user, env.chat, "/stop");
+    release.resolve();
     await pending;
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.messages.listThread(thread.id)).toHaveLength(0);

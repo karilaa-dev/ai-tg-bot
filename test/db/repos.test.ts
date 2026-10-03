@@ -34,6 +34,32 @@ describe("repository round-trip on sqlite", () => {
     expect((await repos.users.get(1))?.stream_mode).toBe(1);
   });
 
+  it.each([false, true])("freezes a fork without own messages (inherited history: %s)", async (inherited) => {
+    db = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    await repos.users.ensure({ tgId: 1 });
+    const root = await repos.threads.create({ userId: 1, topicId: null, title: "Root" });
+    const original = inherited ? await repos.messages.insert({
+      threadId: root.id, role: "user", content: {}, textPlain: "Inherited message",
+    }) : undefined;
+    const source = inherited ? await repos.threads.create({
+      userId: 1, topicId: 2, title: "Source", parentThreadId: root.id, forkPointMessageId: original!.id,
+    }) : root;
+    if (inherited) await repos.messages.insert({ threadId: root.id, role: "user", content: {}, textPlain: "Beyond source fork" });
+    const barrier = await repos.turnRuns.tryAcquireThreadBarrier({
+      threadId: source.id, ownerId: "fork-owner", operation: "fork", leaseExpiresAt: Date.now() + 60_000,
+    });
+    expect(barrier?.snapshotMessageId).toBe(original?.id ?? 0);
+    const fork = await repos.threads.create({
+      userId: 1, topicId: 3, title: "Fork", parentThreadId: source.id, forkPointMessageId: barrier!.snapshotMessageId,
+    });
+    await repos.turnRuns.releaseThreadBarrier(source.id, "fork-owner");
+    await repos.messages.insert({ threadId: source.id, role: "user", content: {}, textPlain: "After fork" });
+    expect((await repos.messages.listForThreadChain(await repos.threads.chain(fork))).map(message => message.id))
+      .toEqual(original ? [original.id] : []);
+  });
+
   it("persists users, threads, messages, and searchable text", async () => {
     const config = loadTestConfig({ DB_URL: "sqlite::memory:" });
     db = createDatabase(config, createLogger(config));

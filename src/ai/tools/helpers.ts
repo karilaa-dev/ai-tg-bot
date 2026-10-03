@@ -16,11 +16,10 @@ export function toToolError(
 }
 
 export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
-  const file = await input.repos.files.get(fileId);
   const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const isCurrentTurnAttachment = input.outgoingFiles?.items.some((attachment) => attachment.fileId === fileId) ?? false;
-  if (!file || (!scope.fileIds.includes(file.id) && !isCurrentTurnAttachment)) return undefined;
-  return file;
+  if (!scope.fileIds.includes(fileId) && !isCurrentTurnAttachment) return undefined;
+  return input.repos.files.get(fileId, scope.messageScopes);
 }
 
 export function normalizeBashCwd(value: string): string {
@@ -133,8 +132,10 @@ export async function enrichThreadHits(
       }
       if (hit.kind === "chunk") {
         const chunk = chunksById.get(hit.ref_id);
+        if (!chunk) return undefined;
         return {
           kind: "chunk",
+          file_id: chunk.file_id,
           chunk_id: hit.ref_id,
           chunk_index: chunk?.idx,
           heading_path: chunk?.heading_path,

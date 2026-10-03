@@ -122,7 +122,7 @@ export interface PublishedWebsite {
 }
 
 export interface SandboxActivityLease {
-  release(): void;
+  release(): void | Promise<void>;
 }
 
 export interface CommandRuntime {

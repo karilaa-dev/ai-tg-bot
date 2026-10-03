@@ -125,8 +125,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         state.leases = Math.max(0, state.leases - 1);
         if (state.leases !== 0) return;
         this.clearRenewal(state);
-        void this.enqueue(scope, undefined, async () => {
-          if (!state.connection) return;
+        if (this.shuttingDown) return;
+        return this.enqueue(scope, undefined, async () => {
+          if (this.shuttingDown || state.leases !== 0 || !state.connection) return;
           const sandboxId = state.sandboxId;
           const idle = this.idleTimeout(state, sandboxId, true);
           await state.connection.setTimeout(idle.timeoutMs);
@@ -312,23 +313,9 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const states = [...this.states.values()];
     for (const state of states) this.clearRenewal(state);
     await Promise.allSettled(states.map((state) => state.tail));
-    await Promise.allSettled(states.map(async (state) => {
-      const sandbox = state.connection;
-      if (!sandbox) return;
-      try {
-        await sandbox.pause();
-        this.input.logger?.info("paused E2B sandbox during shutdown", {
-          sandboxId: sandbox.id,
-        });
-      } catch (error) {
-        // Shutdown must continue even if E2B is temporarily unavailable. The
-        // provider-side timeout remains the final fallback for this sandbox.
-        this.input.logger?.warn("failed to pause E2B sandbox during shutdown", {
-          sandboxId: sandbox.id,
-          error: String(error),
-        });
-      }
-    }));
+    // Mapped sandboxes can already belong to a successor worker. Local lease
+    // counts cannot prove exclusive ownership, so leave the provider timeout
+    // in place instead of pausing or shortening another worker's active work.
     this.states.clear();
   }
 
@@ -925,7 +912,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
       state.renewTimer = undefined;
       if (state.leases === 0 || this.shuttingDown) return;
       void this.enqueue(scope, undefined, async () => {
-        if (!state.connection) return;
+        if (this.shuttingDown || state.leases === 0 || !state.connection) return;
         const requestedRenewalMs = Math.max(
           E2B_IDLE_PAUSE_MS,
           this.idleTimeout(state, state.connection.id, false).timeoutMs,

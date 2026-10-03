@@ -198,7 +198,7 @@ export class ConversationRepository {
       and ${messageScopePredicate(sql`m.thread_id`, sql`m.id`, chain.map(t => t.id), scopes)} limit 1
     `);
     if (!rows.length) throw new WebNotFound();
-    const file = await this.repos.files.get(fileId);
+    const file = await this.repos.files.get(fileId, scopes);
     if (!file) throw new WebNotFound();
     return file;
   }

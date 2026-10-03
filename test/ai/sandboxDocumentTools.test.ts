@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMaterializeChatFilesTool } from "../../src/ai/tools/materializeChatFiles.js";
 import { createRenderPdfPagesTool } from "../../src/ai/tools/renderPdfPages.js";
 import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
+import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
@@ -56,6 +57,23 @@ describe("sandbox document tools", () => {
 
   afterEach(async () => {
     await db.destroy();
+  });
+
+  it("returns file and chunk IDs that let research continue from a thread search into the matched document", async () => {
+    const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: {}, textPlain: "Attached notes" });
+    const file = await repos.files.insertFile({
+      userId: user.tg_id, threadId: thread.id, messageId: message.id,
+      type: "txt", name: "notes.txt", size: 100, isInline: false,
+    });
+    const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 3, content: "Obsidian launch code is ZULU-817." });
+    const tools = createPiToolAdapters({ buildInput: () => buildInput(fakeRuntime(pdf.id)) });
+    const search = tools.find(tool => tool.name === "search_thread")!;
+    const matched = await search.execute("search", { query: "Obsidian" }, undefined, undefined, {} as never);
+    const result = matched.structuredContent as { results: Array<{ file_id: number; chunk_index: number }> };
+    expect(result.results).toEqual([expect.objectContaining({ kind: "chunk", file_id: file.id, chunk_id: chunk.id, chunk_index: 3 })]);
+    const read = tools.find(tool => tool.name === "read_file_section")!;
+    const section = await read.execute("read", result.results[0]!, undefined, undefined, {} as never);
+    expect(section.structuredContent).toMatchObject({ content: expect.stringContaining("ZULU-817") });
   });
 
   it("materializes only requested scoped IDs and returns exact read-only paths", async () => {

@@ -98,8 +98,8 @@ class SqliteTextSearch implements TextSearch {
     limit: number,
     scopes?: MessageSearchScope[],
   ): Promise<SearchHit[]> {
-    if (!scopeIds.length || scopes?.length === 0) return Promise.resolve([]);
-    const query = sqliteQuery(q);
+    if (!scopeIds.length || scopes?.length === 0 || !q.trim()) return Promise.resolve([]);
+    const query = literalSearchQuery(q);
     const table = sql.raw(target.sqliteTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
@@ -174,18 +174,19 @@ class PgTextSearch implements TextSearch {
     limit: number,
     scopes?: MessageSearchScope[],
   ): Promise<SearchHit[]> {
-    if (!scopeIds.length || scopes?.length === 0) return Promise.resolve([]);
+    if (!scopeIds.length || scopes?.length === 0 || !q.trim()) return Promise.resolve([]);
     const table = sql.raw(target.pgTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
     const maxWords = sql.raw(`'MaxWords=${SNIPPET_MAX_WORDS}'`);
+    const query = literalSearchQuery(q);
     return this.db.query<SearchHit>(sql`
       select ${idColumn} as id,
-             ts_headline('simple', text, websearch_to_tsquery('simple', ${q}), ${maxWords}) as snippet,
-             ts_rank(ts, websearch_to_tsquery('simple', ${q})) as rank
+             ts_headline('simple', text, websearch_to_tsquery('simple', ${query}), ${maxWords}) as snippet,
+             ts_rank(ts, websearch_to_tsquery('simple', ${query})) as rank
       from ${table}
       where ${messageScopePredicate(scopeColumn, idColumn, scopeIds, scopes)}
-        and ts @@ websearch_to_tsquery('simple', ${q})
+        and ts @@ websearch_to_tsquery('simple', ${query})
       order by rank desc
       limit ${limit}
     `);
@@ -207,11 +208,12 @@ export function messageScopePredicate(
     : sql`(${scopeColumn} = ${scope.threadId} and ${idColumn} <= ${scope.maxMessageId})`), sql` or `)})`;
 }
 
-function sqliteQuery(q: string): string {
+// Both engines search literal whitespace-separated terms with OR semantics.
+function literalSearchQuery(q: string): string {
   const terms = q
     .split(/\s+/)
     .map((term) => term.trim().replace(/"/g, '""'))
     .filter(Boolean)
     .map((term) => `"${term}"`);
-  return terms.length ? terms.join(" OR ") : '""';
+  return terms.join(" OR ");
 }

@@ -562,6 +562,8 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     const visible = await repository.history(grandchild.id);
     expect(visible.messages.map(m => m.id)).toEqual([first.id, grandOwn.id]);
     expect((await repository.history(child.id)).messages.at(-1)?.attachments[0]).toMatchObject({ id: file.id, name: "shared.txt", caption: "Shared caption" });
+    expect((await repository.file(child.id, file.id)).name).toBe("shared.txt");
+    expect((await repository.file(grandchild.id, file.id)).name).toBe("notes.txt");
     expect((await request(`/api/threads/${grandchild.id}/files/${hiddenFile.id}`)).status).toBe(404);
     const stranger = await thread(2);
     expect((await request(`/api/threads/${stranger.id}/files/${file.id}`)).status).toBe(404);

@@ -51,8 +51,8 @@ export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): 
     return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
-  await job.status.updateKey("file-processing-stopping");
   job.controller.abort();
+  await job.status.updateKey("file-processing-stopping");
   return true;
 }
 
@@ -319,8 +319,6 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       await status.clear();
       throwIfAborted(controller.signal);
       transcript = transcribed;
-      // Transcription is complete; hand off to file registration and turn acceptance.
-      clearJob();
     }
     failureKey = "error-generic";
     const result = await ingestTelegramFile(ctx, input, {
@@ -331,8 +329,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     throwIfAborted(controller.signal);
     if (result === "too-big" || result === undefined) return;
     if (input.type === "image") {
-      clearJob();
-      await handlePreparedTelegramFile(ctx, input, result.prepared);
+      await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
       return;
     }
     if (transcript !== undefined) {
@@ -344,24 +341,23 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
         ? `[Audio transcript preview; full transcript saved (${bounded.total_chars} characters). Read more with transcribe_audio(${JSON.stringify({ transcript_id: bounded.transcript_id, offset: bounded.next_offset })}).]`
         : "[Audio message transcribed above]";
       result.prepared.card = `${bounded.text}\n\n${chatFileMarker(result.prepared.fileId)} ${note}`;
-      await handlePreparedTelegramFile(ctx, input, result.prepared);
+      throwIfAborted(controller.signal);
+      await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
       return;
     }
     if (result.outcome !== "ingested") {
       await status.updateKey("file-reused");
-      clearJob();
       ctx.services.logger.info(result.outcome === "reused-cached" ? "file job reused cached file" : "file job reused content hash", ctxLogMeta(ctx, {
         fileId: result.prepared.fileId,
         name: input.name,
         ms: Date.now() - startedAt,
       }));
-      await handlePreparedTelegramFile(ctx, input, result.prepared);
+      await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
       return;
     }
     await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio"
       ? "file-source-registered"
       : "file-processed");
-    clearJob();
     ctx.services.logger.info("file job complete", ctxLogMeta(ctx, {
       fileId: result.prepared.fileId,
       name: input.name,
@@ -369,7 +365,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       inline: result.prepared.inline,
       ms: Date.now() - startedAt,
     }));
-    await handlePreparedTelegramFile(ctx, input, result.prepared);
+    await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
   } catch (err) {
     if (isAbortError(err) || controller.signal.aborted) {
       ctx.services.logger.info("file job cancelled", ctxLogMeta(ctx, { name: input.name, type: input.type }));
@@ -490,7 +486,9 @@ async function handlePreparedTelegramFile(
   ctx: BotContext,
   input: TelegramFileInput,
   prepared: PreparedTelegramFile,
+  signal: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   if (input.mediaGroupId) {
     ctx.services.logger.debug("prepared file queued for media group", ctxLogMeta(ctx, {
       groupId: input.mediaGroupId,
@@ -513,6 +511,7 @@ async function handlePreparedTelegramFile(
     textChars: text.length,
   }));
   await handleUserText(ctx, text, {
+    signal,
     userMessageKind: kind,
     userMessageContent: {
       text,

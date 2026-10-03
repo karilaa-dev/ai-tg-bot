@@ -3,6 +3,7 @@ import type { ThreadRow, UserRow } from "../db/types.js";
 import { formatUtcOffset } from "../bot/timezone.js";
 import type { Repos } from "../db/repos/index.js";
 import { threadChainScope } from "../memory/retrieval.js";
+import type { MessageSearchScope } from "../db/search.js";
 import { isBrowserUseConfigured, type AppConfig } from "../config.js";
 
 export const MAX_SYSTEM_PROMPT_FILES = 25;
@@ -28,10 +29,13 @@ export async function renderThreadSessionContext(input: {
   thread: ThreadRow;
   maxMessageId?: number;
   fileIds?: number[];
+  messageScopes?: MessageSearchScope[];
   now?: Date;
 }): Promise<string> {
-  const fileIds = input.fileIds ?? (await threadChainScope(input.repos, input.thread, input.maxMessageId)).fileIds;
-  const files = await input.repos.files.listByIds(fileIds);
+  const scope = input.fileIds && input.messageScopes
+    ? { fileIds: input.fileIds, messageScopes: input.messageScopes }
+    : await threadChainScope(input.repos, input.thread, input.maxMessageId);
+  const files = await input.repos.files.listByIds(input.fileIds ?? scope.fileIds, scope.messageScopes);
   const promptFiles: PromptFileContext[] = files.map((file) => ({
     id: file.id,
     name: file.name,

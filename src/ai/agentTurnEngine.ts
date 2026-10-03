@@ -27,7 +27,20 @@ const TYPING_ACTION_INTERVAL_MS = 5000;
 
 export const runTurn: TurnRunner = async (input) => {
   const startedAt = Date.now();
-  input = { ...input, deliveryTiming: { startedAt } };
+  let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
+  const afterCommandRelease = <T>(callback: ((result: T) => Promise<void>) | undefined) => async (result: T) => {
+    // A terminal write lets another worker claim this thread. Finish sandbox
+    // cleanup and its provider timeout update before handing ownership over.
+    await activeBridge?.releaseCommandActivity();
+    await callback?.(result);
+  };
+  input = {
+    ...input,
+    deliveryTiming: { startedAt },
+    onDeliveryConfirmed: afterCommandRelease(input.onDeliveryConfirmed),
+    onDeliveryUnknown: afterCommandRelease(input.onDeliveryUnknown),
+    onDeliveryFailed: afterCommandRelease(input.onDeliveryFailed),
+  };
   input.logger.info("turn starting", {
     turnRunId: input.turnRunId,
     threadId: input.thread.id,
@@ -38,7 +51,6 @@ export const runTurn: TurnRunner = async (input) => {
   });
   const shaper = new StreamShaper();
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
-  let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
   let inferenceUsage: InferenceUsageDelta | undefined;
   let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
   let currentTurnMessages: AgentMessage[] = [];

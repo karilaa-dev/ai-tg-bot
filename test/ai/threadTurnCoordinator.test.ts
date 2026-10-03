@@ -228,6 +228,67 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it.each(["indexing", "handoff", "duplicate"])("honors intake cancellation during %s without cancelling an older turn", async stage => {
+    const duplicate = stage === "duplicate";
+    const { userId, threadId } = await ownership(repos, 835);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const indexing = deferred<void>();
+    const releaseIndexing = deferred<void>();
+    const executed: string[] = [];
+    const coordinator = createCoordinator(db, repos, async input => {
+      executed.push(input.text);
+      started.resolve();
+      await release.promise;
+      await confirmDelivery(input);
+    });
+    try {
+      await coordinator.accept(request(userId, threadId, 35_001, "earlier turn"));
+      await started.promise;
+      if (stage === "handoff") {
+        const accept = repos.turnRuns.accept.bind(repos.turnRuns);
+        vi.spyOn(repos.turnRuns, "accept").mockImplementationOnce(async input => {
+          const accepted = await accept(input);
+          indexing.resolve();
+          await releaseIndexing.promise;
+          return accepted;
+        });
+      } else {
+        const index = repos.turnRuns.indexMessageForRun.bind(repos.turnRuns);
+        vi.spyOn(repos.turnRuns, "indexMessageForRun").mockImplementationOnce(async run => {
+          indexing.resolve();
+          await releaseIndexing.promise;
+          return index(run);
+        });
+      }
+      const controller = new AbortController();
+      const accepting = coordinator.accept({
+        ...request(userId, threadId, duplicate ? 35_001 : 35_002, "cancelled upload"),
+        signal: controller.signal,
+      });
+      const rejected = expect(accepting).rejects.toThrow("Intake stopped");
+      await indexing.promise;
+      controller.abort(new Error("Intake stopped"));
+      if (stage === "indexing") {
+        await vi.waitFor(async () => {
+          expect((await repos.turnRuns.listForThread(threadId)).map(run => run.status))
+            .toEqual(["running", "cancelled"]);
+        });
+      }
+      releaseIndexing.resolve();
+      await rejected;
+      release.resolve();
+      await coordinator.waitForIdle();
+      expect(executed).toEqual(["earlier turn"]);
+      expect((await repos.turnRuns.listForThread(threadId)).map(run => run.status))
+        .toEqual(duplicate ? ["succeeded"] : ["succeeded", "cancelled"]);
+    } finally {
+      releaseIndexing.resolve();
+      release.resolve();
+      await coordinator.shutdown();
+    }
+  });
+
   it("marks stale running work interrupted and resumes only queued work", async () => {
     const { userId, threadId } = await ownership(repos, 803);
     const stale = await repos.turnRuns.accept(request(userId, threadId, 3001, "stale"));
@@ -610,7 +671,7 @@ describe("ThreadTurnCoordinator", () => {
     ]);
   });
 
-  it("does not accept a turn after shutdown starts while recovery is pending", async () => {
+  it.each(["shutdown", "cancel"])("does not accept a turn after %s while recovery is pending", async reason => {
     const { userId, threadId } = await ownership(repos, 810);
     const recoveryStarted = deferred<void>();
     const releaseRecovery = deferred<void>();
@@ -621,13 +682,16 @@ describe("ThreadTurnCoordinator", () => {
     });
     const coordinator = createCoordinator(db, repos, async () => undefined);
     await recoveryStarted.promise;
-    const accepting = coordinator.accept(request(userId, threadId, 10_001, "too late"));
-    const shuttingDown = coordinator.shutdown();
+    const controller = new AbortController();
+    const accepting = coordinator.accept({ ...request(userId, threadId, 10_001, "too late"), signal: controller.signal });
+    const shuttingDown = reason === "shutdown" ? coordinator.shutdown() : undefined;
+    if (reason === "cancel") controller.abort(new Error("Intake stopped"));
     releaseRecovery.resolve();
 
-    await expect(accepting).rejects.toThrow("shutting down");
+    await expect(accepting).rejects.toThrow(reason === "shutdown" ? "shutting down" : "Intake stopped");
     await shuttingDown;
     expect(await repos.turnRuns.listForThread(threadId)).toEqual([]);
+    await coordinator.shutdown();
   });
 
   it("retries transient startup recovery failures", async () => {

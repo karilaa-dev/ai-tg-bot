@@ -17,7 +17,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
     description:
       "Load one previous chat message and its attachment metadata. Pass file_ids only for image bytes or legacy extracted document context. For source-only PDF/DOCX files, this selects their metadata without downloading bytes; call materialize_chat_files next.",
     inputSchema: z.object({
-      message_id: z.number(),
+      message_id: z.number().int().positive(),
       file_ids: z.array(z.number().int().positive()).max(MAX_RELOADED_FILES).optional(),
     }),
     execute: async ({ message_id, file_ids = [] }, signal): Promise<LoadMessageResult> => {

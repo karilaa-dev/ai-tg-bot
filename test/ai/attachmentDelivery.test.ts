@@ -214,17 +214,32 @@ describe("buffered Telegram attachment delivery", () => {
     expect(attachment.telegramDelivery).toBeUndefined();
   });
 
-  it("persists the assistant result before delivery and does not retry an ambiguous final send", async () => {
+  it("persists before sending and drains prefetch before finalizing an ambiguous send", async () => {
     const api = fakeApi();
-    api.raw.sendRichMessage.mockRejectedValueOnce(new Error("connection reset after write"));
     const input = turnInput(api);
-    input.onDeliveryUnknown = vi.fn(async () => undefined);
+    const started = deferred<void>();
+    let drained = false;
+    const attachment = imageAttachment(1, "pending.jpg", 100);
+    attachment.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    input.resolveFile = vi.fn(async (_file, signal) => {
+      started.resolve();
+      try {
+        return await new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+      } finally { drained = true; }
+    });
+    api.raw.sendRichMessage.mockImplementationOnce(async () => {
+      await started.promise;
+      throw new Error("connection reset after write");
+    });
+    input.onDeliveryUnknown = vi.fn(async () => { expect(drained).toBe(true); });
 
-    await expect(sendFinal(input, "", "Persist me first"))
+    await expect(sendFinal(input, "", "Persist me first", 0, [attachment]))
       .rejects.toThrow("connection reset after write");
 
     expect(input.repos.messages.insert).toHaveBeenCalledOnce();
     expect(api.raw.sendRichMessage).toHaveBeenCalledOnce();
+    expect(api.sendPhoto).not.toHaveBeenCalled();
     expect(vi.mocked(input.repos.messages.insert).mock.invocationCallOrder[0])
       .toBeLessThan(api.raw.sendRichMessage.mock.invocationCallOrder[0]!);
     expect(input.onDeliveryUnknown).toHaveBeenCalledWith(expect.objectContaining({

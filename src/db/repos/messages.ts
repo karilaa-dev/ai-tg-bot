@@ -119,8 +119,9 @@ export function messageSearchScopesForChain(
   for (let i = threads.length - 1; i >= 0; i--) {
     const thread = threads[i]!;
     const child = threads[i + 1];
-    if (child?.parent_thread_id === thread.id && child.fork_point_message_id !== null) {
-      ceiling = Math.min(ceiling ?? child.fork_point_message_id, child.fork_point_message_id);
+    if (child?.parent_thread_id === thread.id) {
+      const forkPoint = child.fork_point_message_id ?? 0;
+      ceiling = Math.min(ceiling ?? forkPoint, forkPoint);
     }
     scopes.push({ threadId: thread.id, ...(ceiling === undefined ? {} : { maxMessageId: ceiling }) });
   }

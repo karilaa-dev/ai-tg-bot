@@ -169,11 +169,31 @@ export class PiRuntimeManager implements PiRuntimeService {
   async runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime> {
     await this.initialize();
     const cached = this.runtimes.get(thread.id);
-    if (cached) {
-      cached.bridge.user = user;
-      cached.bridge.thread = thread;
+    // Active sessions own their in-flight state. Durable thread ownership
+    // serializes ordinary turns and barrier operations before this idle path.
+    if (cached && !cached.session.isIdle) {
       cached.lastUsedAt = Date.now();
       return cached;
+    }
+    // A barrier caller may have captured its row before another worker created
+    // the transcript. Always use the current persisted session pointer.
+    thread = await this.input.repos.threads.get(thread.id) ?? thread;
+    let persistedSession: SessionManager | undefined;
+    if (cached) {
+      persistedSession = await this.openSessionManager(thread);
+      if (persistedSession.getSessionFile() === cached.session.sessionFile
+        && persistedSession.getSessionId() === cached.session.sessionId
+        && persistedSession.getLeafId() === cached.session.sessionManager.getLeafId()) {
+        cached.bridge.user = user;
+        cached.bridge.thread = thread;
+        cached.lastUsedAt = Date.now();
+        return cached;
+      }
+      // Another owner appended or compacted this session while our cache was
+      // idle. Rebuild Pi's agent state and active tools from that transcript.
+      await cached.bridge.endTurn();
+      cached.session.dispose();
+      this.runtimes.delete(thread.id);
     }
     const systemPrompt = await renderSystemPrompt({
       user,
@@ -224,7 +244,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     if (JSON.stringify(loadedSkillNames) !== JSON.stringify(expectedSkillNames)) {
       throw new Error(`Unexpected Pi skills: expected ${expectedSkillNames.join(", ")}; loaded ${loadedSkillNames.join(", ") || "none"}.`);
     }
-    const sessionManager = await this.openSessionManager(thread);
+    const sessionManager = persistedSession ?? await this.openSessionManager(thread);
     const customTools = [
       createApprovedSkillReadTool(),
       ...createPiToolAdapters(bridge),
@@ -294,9 +314,19 @@ export class PiRuntimeManager implements PiRuntimeService {
     signal?.throwIfAborted();
     const runtime = await this.runtime(source, user);
     signal?.throwIfAborted();
-    const branchPoint = entryId ?? runtime.session.sessionManager.getLeafId();
+    const sourceManager = runtime.session.sessionManager;
+    const branchPoint = entryId ?? sourceManager.getLeafId();
     if (!branchPoint) return;
-    const sessionFile = runtime.session.sessionManager.createBranchedSession(branchPoint);
+    const entries = sourceManager.getBranch(branchPoint);
+    if (!entries.length) throw new Error(`Pi fork entry ${branchPoint} was not found.`);
+    // Pi does not write a session file until its first conversation message.
+    if (!entries.some(entry => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"))) return;
+    const sourceFile = sourceManager.getSessionFile();
+    if (!sourceFile) throw new Error("Pi source session has no persistent file.");
+    // createBranchedSession switches its manager to the new branch. Use a
+    // detached manager so continuing the original chat keeps its own history.
+    const detached = SessionManager.open(sourceFile, path.dirname(sourceFile), process.cwd());
+    const sessionFile = detached.createBranchedSession(branchPoint);
     if (!sessionFile) throw new Error("Pi could not create a persistent branched session.");
     signal?.throwIfAborted();
     const branch = SessionManager.open(sessionFile, path.dirname(sessionFile), process.cwd());

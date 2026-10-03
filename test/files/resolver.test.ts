@@ -61,17 +61,17 @@ describe("transport-neutral file resolver", () => {
     resolver.registry.register({
       transport: "e2b",
       connectionKey: "deployment",
-      fetch: async () => Buffer.from("remote content"),
+      fetch: async () => { throw new Error("E2B unavailable"); },
     });
     resolver.registry.register({
       transport: "telegram",
       connectionKey: "default",
-      fetch: async () => { throw new Error("Telegram unavailable"); },
+      fetch: async () => Buffer.from("remote content"),
     });
 
     await expect(resolver.resolveFile(file)).resolves.toMatchObject({
       bytes: Buffer.from("remote content"),
-      source: { transport: "e2b" },
+      source: { transport: "telegram" },
     });
   });
 

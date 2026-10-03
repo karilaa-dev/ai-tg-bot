@@ -1,5 +1,5 @@
-import { Bot } from "grammy";
-import { afterEach, describe, expect, it } from "vitest";
+import { Api, Bot, GrammyError, HttpError } from "grammy";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BotContext } from "../../src/bot/context.js";
 import { installBot } from "../../src/bot/router.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -10,6 +10,42 @@ import type { ChatFileSourceAdapter } from "../../src/files/source.js";
 import { TELEGRAM_CONNECTION_KEY } from "../../src/files/telegramSource.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
+import { telegramRetry } from "../../src/telegram/retry.js";
+
+describe("Telegram retry safety", () => {
+  it.each(["transport", "server"])("does not repeat sends or topic creation after an ambiguous %s failure", async (failure) => {
+    for (const method of ["sendDocument", "copyMessage", "forwardMessages", "createForumTopic"] as const) {
+      const transport = vi.fn(async () => {
+        if (transport.mock.calls.length > 1) return Response.json({ ok: true, result: true });
+        if (failure === "transport") throw new Error("Upload accepted but acknowledgment lost");
+        return Response.json({ ok: false, error_code: 502, description: "Gateway failed after upload" });
+      });
+      const api = new Api(loadTestConfig().BOT_TOKEN, { fetch: transport as unknown as typeof fetch });
+      api.config.use(telegramRetry());
+      await expect(api.raw[method]({} as never)).rejects.toBeInstanceOf(failure === "transport" ? HttpError : GrammyError);
+      expect(transport).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("retries flood-rejected sends and transient failures for reads, edits, and drafts", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const method of ["sendDocument", "getFile", "editMessageText", "sendRichMessageDraft"] as const) {
+        const transport = vi.fn(async () => Response.json(transport.mock.calls.length > 1
+          ? { ok: true, result: true }
+          : method === "sendDocument"
+            ? { ok: false, error_code: 429, description: "Flood limit", parameters: { retry_after: 1 } }
+            : { ok: false, error_code: 502, description: "Temporary failure" }));
+        const api = new Api(loadTestConfig().BOT_TOKEN, { fetch: transport as unknown as typeof fetch });
+        api.config.use(telegramRetry());
+        const response = api.raw[method]({} as never);
+        await vi.advanceTimersByTimeAsync(3_000);
+        await expect(response).resolves.toBe(true);
+        expect(transport).toHaveBeenCalledTimes(2);
+      }
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 describe("bot router file adapters", () => {
   let db: AppDatabase | undefined;

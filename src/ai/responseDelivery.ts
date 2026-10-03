@@ -98,6 +98,8 @@ export async function sendFinalVisible(
   input = { ...input, outgoingBuffers: input.outgoingBuffers ?? new OutgoingBuffers() };
   const preparation = createAttachmentPreparation(input, outboundAttachments);
   preparation.start();
+  let deliveryFailed = false;
+  let deliveryError: unknown;
   try {
     for (const rich of thinkingMessages) {
       const sent = await sendRichWithFallback(input, rich);
@@ -110,7 +112,16 @@ export async function sendFinalVisible(
     }
     await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments, preparation);
   } catch (error) {
-    if (isDefinitiveTelegramRejection(error)) {
+    deliveryFailed = true;
+    deliveryError = error;
+  } finally {
+    // Drain source reads before the terminal callback releases durable thread
+    // ownership; the next worker may immediately start using this sandbox.
+    await preparation.close();
+    if (ownsBuffers) await input.outgoingBuffers?.dispose();
+  }
+  if (deliveryFailed) {
+    if (isDefinitiveTelegramRejection(deliveryError)) {
       await input.onDeliveryFailed?.({
         assistantMessageId: assistantMessage.id,
         failureCode: "telegram_delivery_rejected",
@@ -121,10 +132,7 @@ export async function sendFinalVisible(
         failureCode: "telegram_delivery_unknown",
       });
     }
-    throw error;
-  } finally {
-    await preparation.close();
-    if (ownsBuffers) await input.outgoingBuffers?.dispose();
+    throw deliveryError;
   }
   const generatedAttachments = outboundAttachments.filter((attachment) =>
     attachment.origin === "generated_image");
@@ -588,10 +596,9 @@ function releaseAttachmentData(input: TurnInput, attachment: CreatedFileAttachme
 }
 
 function isDefinitiveTelegramRejection(error: unknown): boolean {
-  // The bot-level grammY autoRetry transformer handles flood waits, HTTP
-  // failures, and 5xx responses before they can reach this delivery layer.
-  // If one still escapes, its acceptance state is ambiguous and must not be
-  // retried here because Telegram has no idempotency key for media sends.
+  // The bot transformer retries explicit flood-wait rejections. Transport and
+  // 5xx failures reach this layer because acceptance is ambiguous: Telegram
+  // has no idempotency key for media sends, so retrying could duplicate them.
   return error instanceof GrammyError
     && error.error_code >= 400
     && error.error_code < 500
