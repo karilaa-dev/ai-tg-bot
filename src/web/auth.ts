@@ -71,18 +71,19 @@ export class WebAdminAuth {
     if (typeof body !== "object" || body === null || !("token" in body) || typeof body.token !== "string") {
       throw new WebHttpError(400, "Enter an admin token.");
     }
-    // Check valid credentials before throttling failures so a shared proxy cannot lock out admins.
+    for (const [client, times] of this.attempts) {
+      const recent = times.filter(time => time > now - LOGIN_WINDOW_MS);
+      if (recent.length) this.attempts.set(client, recent);
+      else this.attempts.delete(client);
+    }
+    const attempts = this.attempts.get(clientAddress) ?? [];
+    // Throttle before checking the token: checking first still permits unlimited
+    // guesses, even if incorrect guesses receive 429. Existing sessions stay valid.
+    if (attempts.length >= MAX_LOGIN_ATTEMPTS) {
+      const retry = Math.max(1, Math.ceil((attempts[0]! + LOGIN_WINDOW_MS - now) / 1_000));
+      throw new WebHttpError(429, "Too many sign-in attempts. Try again in a minute.", { "Retry-After": String(retry) });
+    }
     if (!timingSafeEqual(digest(body.token), this.tokenHash)) {
-      for (const [client, times] of this.attempts) {
-        const recent = times.filter(time => time > now - LOGIN_WINDOW_MS);
-        if (recent.length) this.attempts.set(client, recent);
-        else this.attempts.delete(client);
-      }
-      const attempts = this.attempts.get(clientAddress) ?? [];
-      if (attempts.length >= MAX_LOGIN_ATTEMPTS) {
-        const retry = Math.max(1, Math.ceil((attempts[0]! + LOGIN_WINDOW_MS - now) / 1_000));
-        throw new WebHttpError(429, "Too many sign-in attempts. Try again in a minute.", { "Retry-After": String(retry) });
-      }
       if (!this.attempts.has(clientAddress) && this.attempts.size >= MAX_LOGIN_CLIENTS) {
         this.attempts.delete(this.attempts.keys().next().value!);
       }

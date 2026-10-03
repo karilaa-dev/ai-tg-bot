@@ -59,6 +59,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   private readonly contextFileIds = new Set<number>();
   private readonly durableContextFileIds = new Set<number>();
   private commandActivityLease?: SandboxActivityLease;
+  private commandActivityRelease?: Promise<void>;
   private turnActive = false;
   private turnSystemPrompt?: string;
   private turnSessionContext?: string;
@@ -103,6 +104,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
     if (this.turnActive) await this.endTurn();
+    this.commandActivityRelease = undefined;
     this.officeValidation.clear();
     this.visibilityScope = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);
     this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
@@ -115,6 +117,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
         thread: this.thread,
         maxMessageId: input.userMessageId,
         fileIds,
+        messageScopes: this.visibilityScope.messageScopes,
       }),
     ]);
     await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
@@ -143,13 +146,20 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
   }
 
+  async releaseCommandActivity(): Promise<void> {
+    this.commandActivityRelease ??= (async () => {
+      await this.officeValidation.dispose().catch(error => {
+        this.logger?.warn("Office preview cleanup failed", {threadId: this.thread.id, error: String(error)});
+      });
+      const lease = this.commandActivityLease;
+      this.commandActivityLease = undefined;
+      await lease?.release();
+    })();
+    await this.commandActivityRelease;
+  }
+
   async endTurn(): Promise<void> {
-    await this.officeValidation.dispose().catch(error => {
-      this.logger?.warn("Office preview cleanup failed", {threadId: this.thread.id, error: String(error)});
-    });
-    const lease = this.commandActivityLease;
-    this.commandActivityLease = undefined;
-    lease?.release();
+    await this.releaseCommandActivity();
     const wasActive = this.turnActive;
     this.turnActive = false;
     this.turnSystemPrompt = undefined;
@@ -294,7 +304,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               && bridge.selectedContextFileIds().has(id)
               && !injectedIds.has(id));
           if (!fileIds.length) continue;
-          const rows = await bridge.repos.files.listByIds(fileIds);
+          const rows = await bridge.repos.files.listByIds(fileIds, scope.messageScopes);
           const byId = new Map(rows.map((file) => [file.id, file]));
           const additions: Array<TextContent | ImageContent> = [];
           for (const fileId of fileIds) {

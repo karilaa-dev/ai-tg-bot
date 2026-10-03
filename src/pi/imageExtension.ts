@@ -270,14 +270,12 @@ async function loadReferences(
   signal?: AbortSignal,
 ): Promise<ImageContent[]> {
   if (!referenceIds.length) return [];
+  const scope = await (bridge.currentScope?.() ?? threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId));
   const allowedFiles = new Set([
-    ...(
-      await (bridge.currentScope?.() ??
-        threadChainScope(bridge.repos, bridge.thread, bridge.activeMessageId))
-    ).fileIds,
+    ...scope.fileIds,
     ...bridge.outgoingFiles.items.map((attachment) => attachment.fileId),
   ]);
-  const rows = await bridge.repos.files.listByIds(referenceIds);
+  const rows = await bridge.repos.files.listByIds(referenceIds, scope.messageScopes);
   const byId = new Map(rows.map((row) => [row.id, row]));
   const images: ImageContent[] = [];
   for (const id of referenceIds) {
@@ -313,7 +311,13 @@ async function generateWithFallback(
   const attempt = bridge.providerRouter.circuit.acquire();
   if (!attempt.allowed) return requestOpenRouterImage(bridge, request);
   try {
-    const auth = await bridge.modelRegistry.getApiKeyAndHeaders(codexModel);
+    const auth = await raceWithAbort(
+      Promise.resolve().then(() => bridge.modelRegistry.getApiKeyAndHeaders(codexModel)),
+      AbortSignal.any([
+        AbortSignal.timeout(bridge.config.PI_REQUEST_TIMEOUT_MS),
+        ...(request.signal ? [request.signal] : []),
+      ]),
+    );
     if (!auth.ok || !auth.apiKey)
       throw new Error(
         auth.ok ? "Missing openai-codex OAuth token" : auth.error,

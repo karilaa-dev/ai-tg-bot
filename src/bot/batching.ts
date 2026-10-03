@@ -5,6 +5,28 @@ import { handleUserText, telegramTurnSource } from "./turns.js";
 const mediaGroupFlushMs = 250;
 const textBurstFlushMs = 1_000;
 const splitTextChunkMinChars = 3_000;
+const maxCancelledMediaGroups = 1_024;
+
+function mediaGroupKey(ctx: BotContext, groupId?: string): string | undefined {
+  return groupId && ctx.chat && ctx.thread ? `${ctx.chat.id}:${ctx.thread.id}:${groupId}` : undefined;
+}
+
+export function isMediaGroupCancelled(ctx: BotContext, groupId?: string): boolean {
+  const key = mediaGroupKey(ctx, groupId);
+  return key !== undefined && ctx.services.routerState.cancelledMediaGroups.has(key);
+}
+
+export function cancelMediaGroup(ctx: BotContext, groupId?: string): void {
+  const key = mediaGroupKey(ctx, groupId);
+  if (!key) return;
+  rememberCancelledMediaGroup(ctx, key);
+}
+
+function rememberCancelledMediaGroup(ctx: BotContext, key: string): void {
+  const cancelled = ctx.services.routerState.cancelledMediaGroups;
+  cancelled.add(key);
+  if (cancelled.size > maxCancelledMediaGroups) cancelled.delete(cancelled.values().next().value!);
+}
 
 export async function enqueueUserText(ctx: BotContext, text: string): Promise<void> {
   const key = textBurstKey(ctx);
@@ -72,6 +94,19 @@ export function cancelPendingTextBurstForContext(ctx: BotContext): boolean {
   return true;
 }
 
+export function cancelPendingMediaGroupsForContext(ctx: BotContext): boolean {
+  if (!ctx.chat || !ctx.thread) return false;
+  let cancelled = false;
+  for (const [key, pending] of ctx.services.routerState.pendingMediaGroups) {
+    if (pending.ctx.chat?.id !== ctx.chat.id || pending.ctx.thread?.id !== ctx.thread.id) continue;
+    clearTimeout(pending.timer);
+    rememberCancelledMediaGroup(ctx, key);
+    ctx.services.routerState.pendingMediaGroups.delete(key);
+    cancelled = true;
+  }
+  return cancelled;
+}
+
 async function flushPendingTextBurst(ctx: BotContext, key: string): Promise<void> {
   const pendingTextBursts = ctx.services.routerState.pendingTextBursts;
   const pending = pendingTextBursts.get(key);
@@ -100,6 +135,7 @@ export function isPlainUserText(ctx: BotContext): boolean {
 
 export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<PendingMediaGroupItem, "source">): void {
   if (!ctx.chat || !ctx.thread) return;
+  if (isMediaGroupCancelled(ctx, groupId)) return;
   const pendingMediaGroups = ctx.services.routerState.pendingMediaGroups;
   const key = `${ctx.chat.id}:${ctx.thread.id}:${groupId}`;
   const existing = pendingMediaGroups.get(key);

@@ -34,7 +34,7 @@ export async function downloadPublicBrowserFile(
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     throwIfAborted(operationSignal);
-    const addresses = await resolvePublicAddresses(url);
+    const addresses = await raceWithAbort(resolvePublicAddresses(url), operationSignal);
     const dispatcher = pinnedDispatcher(addresses, timeoutMs);
     try {
       const response = await raceWithAbort(request(url, {
@@ -86,7 +86,7 @@ function parseDownloadUrl(value: string): URL {
 }
 
 async function resolvePublicAddresses(url: URL): Promise<Array<{ address: string; family: 4 | 6 }>> {
-  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
     throw new Error("Browser downloads from local or private hosts are blocked.");
   }

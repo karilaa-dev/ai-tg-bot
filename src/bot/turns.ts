@@ -4,6 +4,7 @@ import { ctxLogMeta } from "./logging.js";
 import { replyWithThreadFallback, threadExtra } from "./replies.js";
 import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
 import type { DurableTurnAttachment } from "../db/repos/turnRuns.js";
+import { throwIfAborted } from "../files/cancel.js";
 
 export async function handleUserText(
   ctx: BotContext,
@@ -13,6 +14,7 @@ export async function handleUserText(
     userMessageContent?: unknown;
     attachments?: DurableTurnAttachment[];
     sources?: TelegramTurnSource[];
+    signal?: AbortSignal;
   } = {},
 ): Promise<void> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return;
@@ -23,7 +25,9 @@ export async function handleUserText(
     kind: options.userMessageKind ?? "text",
     textChars: text.length,
   }));
+  throwIfAborted(options.signal);
   const accepted = await ctx.services.turnCoordinator.accept({
+    signal: options.signal,
     userId: ctx.user.tg_id,
     threadId: ctx.thread.id,
     chatId: ctx.chat.id,

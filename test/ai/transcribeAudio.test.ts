@@ -119,6 +119,8 @@ describe("transcribe_audio", () => {
       expect(await createTranscribeAudioTool(restricted).execute(args)).toEqual({ error: "Transcript not found in this thread." });
     }
     expect(await createTranscribeAudioTool({ ...input, thread: afterFork }).execute(args)).toMatchObject({ text: expect.any(String) });
+    await input.repos.files.deleteSourcesByIds((await input.repos.files.listSources(fileId)).map(source => source.id));
+    expect(await createTranscribeAudioTool({ ...input, thread: afterFork }).execute(args)).toMatchObject({ text: expect.any(String) });
     expect(fetchMock).toHaveBeenCalledOnce();
     await input.repos.files.deleteFile(fileId);
     expect(await input.repos.audioTranscripts.get(page.transcript_id)).toBeUndefined();

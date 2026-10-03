@@ -16,14 +16,19 @@ export class UsersRepo {
     lang?: Locale;
   }): Promise<UserRow> {
     const now = Date.now();
+    const searchColumns = this.db.dialect === "postgres" ? sql`, first_name_search, username_search` : sql``;
+    const searchValues = this.db.dialect === "postgres"
+      ? sql`, ${(input.firstName ?? "").toLowerCase()}, ${(input.username ?? "").toLowerCase()}` : sql``;
+    const searchUpdates = this.db.dialect === "postgres"
+      ? sql`, first_name_search = excluded.first_name_search, username_search = excluded.username_search` : sql``;
     return insertReturning<UserRow>(
       this.db,
       sql`
-        insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, created_at)
-        values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${now})
+        insert into users(tg_id, first_name, username, lang, tz_offset_min, stream_mode, created_at${searchColumns})
+        values (${input.tgId}, ${input.firstName ?? null}, ${input.username ?? null}, ${input.lang ?? "en"}, null, 1, ${now}${searchValues})
         on conflict (tg_id) do update set
           first_name = excluded.first_name,
-          username = excluded.username
+          username = excluded.username${searchUpdates}
         returning *
       `,
     );
@@ -38,9 +43,11 @@ export class UsersRepo {
   }
 
   async toggleStream(tgId: number): Promise<UserRow> {
-    const user = await this.get(tgId);
-    const next = user?.stream_mode ? 0 : 1;
-    await this.db.execute(sql`update users set stream_mode = ${next} where tg_id = ${tgId}`);
-    return (await this.get(tgId))!;
+    const user = await queryOne<UserRow>(this.db, sql`
+      update users set stream_mode = case when stream_mode = 0 then 1 else 0 end
+      where tg_id = ${tgId} returning *
+    `);
+    if (!user) throw new Error(`User #${tgId} no longer exists.`);
+    return user;
   }
 }

@@ -4,6 +4,7 @@ const nullableString = Type.Union([Type.String(), Type.Null()]);
 const error = Type.Object({ error: Type.String(), file_id: Type.Optional(Type.Number()), message: Type.Optional(Type.String()) });
 const snippet = { snippet: Type.String(), score: Type.Number() };
 const chunk = {
+  file_id: Type.Number(),
   chunk_id: Type.Number(), chunk_index: Type.Optional(Type.Number()),
   heading_path: Type.Optional(nullableString), ...snippet,
 };

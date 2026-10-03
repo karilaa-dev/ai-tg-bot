@@ -1,5 +1,5 @@
 import { Bot, GrammyError, HttpError } from "grammy";
-import { autoRetry } from "@grammyjs/auto-retry";
+import { telegramRetry } from "../telegram/retry.js";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import { sequentialize } from "@grammyjs/runner";
 import type { AppConfig } from "../config.js";
@@ -28,6 +28,7 @@ import {
 } from "./replies.js";
 import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.js";
 import {
+  cancelPendingMediaGroupsForContext,
   cancelPendingTextBurstForContext,
   enqueueUserText,
   flushPendingTextBurstForContext,
@@ -136,7 +137,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     routerState: createRouterState(),
   };
 
-  bot.api.config.use(autoRetry());
+  bot.api.config.use(telegramRetry());
   bot.use(async (ctx, next) => {
     ctx.services = services;
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);
@@ -165,13 +166,14 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
     const textStopped = cancelPendingTextBurstForContext(ctx);
+    const mediaStopped = cancelPendingMediaGroupsForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
     const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
-    if (!textStopped && !fileStopped && !turnStopped) {
+    if (!textStopped && !mediaStopped && !fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-stopping"), threadExtra(ctx.thread));
-    } else if (textStopped) {
+    } else if (textStopped || mediaStopped) {
       await replyWithThreadFallback(ctx, ctx.t("turn-pending-cancelled"), threadExtra(ctx.thread));
     }
   });

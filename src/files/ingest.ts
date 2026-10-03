@@ -157,7 +157,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     const content = await contentFor(type, input.name, bytes, input.logger, input.signal);
     throwIfAborted(input.signal);
     const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
-    const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
+    const chunks = inline ? [] : type === "csv" ? chunkCsv(bytes.toString("utf8").replace(/^\uFEFF/, "")) : chunkMarkdown(content);
     input.logger?.debug("file content extracted", {
       name: input.name,
       type,
@@ -244,7 +244,7 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
   const content = await contentFor(type, input.file.name, bytes, input.logger, input.signal);
   throwIfAborted(input.signal);
   const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
-  const chunks = inline ? [] : type === "csv" ? chunkCsv(content) : chunkMarkdown(content);
+  const chunks = inline ? [] : type === "csv" ? chunkCsv(bytes.toString("utf8").replace(/^\uFEFF/, "")) : chunkMarkdown(content);
   for (let index = 0; index < chunks.length; index += 1) {
     await reportStage(input.onStage, {
       stage: "indexing",

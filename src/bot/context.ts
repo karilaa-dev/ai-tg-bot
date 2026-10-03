@@ -18,6 +18,7 @@ import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
 interface ActiveFileJob {
   controller: AbortController;
   status: FileProcessingStatus;
+  mediaGroupId?: string;
 }
 
 export interface PendingMediaGroupItem {
@@ -48,6 +49,7 @@ interface PendingTextBurst {
 interface RouterState {
   activeFileJobs: Map<string, ActiveFileJob>;
   pendingMediaGroups: Map<string, PendingMediaGroup>;
+  cancelledMediaGroups: Set<string>;
   pendingTextBursts: Map<string, PendingTextBurst>;
 }
 
@@ -55,6 +57,7 @@ export function createRouterState(): RouterState {
   return {
     activeFileJobs: new Map<string, ActiveFileJob>(),
     pendingMediaGroups: new Map<string, PendingMediaGroup>(),
+    cancelledMediaGroups: new Set<string>(),
     pendingTextBursts: new Map<string, PendingTextBurst>(),
   };
 }

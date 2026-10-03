@@ -2,7 +2,7 @@ import { z } from "zod";
 import { audioFormat, AudioFormatSchema, transcribeAudio } from "../../audio/transcription.js";
 import { boundTranscript, transcriptPage } from "../../audio/transcripts.js";
 import { MAX_FILE_BYTES } from "../../files/limits.js";
-import { threadChainScope } from "../../memory/retrieval.js";
+import { threadVisibilityScope } from "../../memory/retrieval.js";
 import { getScopedFile, normalizeBashCwd, toToolError } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
 
@@ -29,11 +29,17 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
         signal?.throwIfAborted();
         if (transcript_id !== undefined) {
           const transcript = await input.repos.audioTranscripts.get(transcript_id);
-          const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
+          const scope = await (input.currentScope?.() ?? threadVisibilityScope(input.repos, input.thread, input.maxMessageId));
           if (!transcript || transcript.user_id !== input.user.tg_id
             || !scope.threadIds.includes(transcript.thread_id)
-            || transcript.visible_message_id === null || !scope.messageIds.includes(transcript.visible_message_id)
-            || (transcript.source_file_id !== null && !await getScopedFile(input, transcript.source_file_id))) {
+            || transcript.visible_message_id === null || !scope.messageIds.includes(transcript.visible_message_id)) {
+            return { error: "Transcript not found in this thread." };
+          }
+          // Saved text survives source expiry. Keep the file's message visibility
+          // boundary without requiring its original audio bytes to be recoverable.
+          if (transcript.source_file_id !== null && !scope.fileIds.includes(transcript.source_file_id)
+            && !(await input.repos.files.listVisibleIds(scope.messageScopes, input.maxMessageId === undefined))
+              .includes(transcript.source_file_id)) {
             return { error: "Transcript not found in this thread." };
           }
           signal?.throwIfAborted();
@@ -68,7 +74,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
         if (!detected) return { error: "Unsupported audio format." };
         const transcript = await transcribeAudio(input.config, { bytes, format: detected, language, signal });
         signal?.throwIfAborted();
-        const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
+        const scope = await (input.currentScope?.() ?? threadVisibilityScope(input.repos, input.thread, input.maxMessageId));
         signal?.throwIfAborted();
         return await boundTranscript(input.config, input.repos.audioTranscripts, {
           userId: input.user.tg_id, threadId: input.thread.id, fileId: file_id,

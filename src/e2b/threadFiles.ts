@@ -12,7 +12,7 @@ export async function resolveThreadFileDescriptors(
     ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
     : scope.fileIds;
   const [files, refs] = await Promise.all([
-    input.repos.files.listByIds(selected),
+    input.repos.files.listByIds(selected, scope.messageScopes),
     input.repos.files.listTelegramFileRefs(selected),
   ]);
   const refsByFile = new Map<number, typeof refs>();

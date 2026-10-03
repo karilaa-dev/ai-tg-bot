@@ -726,11 +726,8 @@ describe("thread E2B runtime manager", () => {
       siteDirectory: "/site",
       path: "/demo",
     });
-    lease.release();
-
-    await vi.waitFor(() => {
-      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
-    });
+    await lease.release();
+    expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
     expect(published).toMatchObject({
       url: "https://3000-sandbox-1.e2b.test/demo",
       siteDirectory: `${E2B_WORKSPACE}/site`,
@@ -752,18 +749,14 @@ describe("thread E2B runtime manager", () => {
     const followUpLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
     expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
-    followUpLease.release();
-    await vi.waitFor(() => {
-      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
-    });
+    await followUpLease.release();
+    expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(10 * 60_000);
 
     now += 8 * 60_000;
     const lateFollowUpLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
-    lateFollowUpLease.release();
-    await vi.waitFor(() => {
-      expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_IDLE_PAUSE_MS);
-    });
+    await lateFollowUpLease.release();
+    expect(client.onlySandbox().timeoutCalls.at(-1)).toBe(E2B_IDLE_PAUSE_MS);
   });
 
   it("starts the website idle window only after E2B accepts the timeout", async () => {
@@ -782,15 +775,13 @@ describe("thread E2B runtime manager", () => {
     const sandbox = client.onlySandbox();
     const attemptsBeforeRelease = sandbox.timeoutAttempts;
     sandbox.nextSetTimeoutError = new Error("timeout arm failed");
-    lease.release();
-    await vi.waitFor(() => expect(sandbox.timeoutAttempts).toBeGreaterThan(attemptsBeforeRelease));
+    await expect(lease.release()).resolves.toBeUndefined();
+    expect(sandbox.timeoutAttempts).toBeGreaterThan(attemptsBeforeRelease);
 
     now += 5 * 60_000;
     const retryLease = runtime.acquireActivityLease(userId, threadId);
-    retryLease.release();
-    await vi.waitFor(() => {
-      expect(sandbox.timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
-    });
+    await retryLease.release();
+    expect(sandbox.timeoutCalls.at(-1)).toBe(E2B_WEBSITE_IDLE_PAUSE_MS);
   });
 
   it("preserves immutable versions when the same workspace path is overwritten", async () => {
@@ -1306,6 +1297,7 @@ describe("thread E2B runtime manager", () => {
     const sandbox = client.onlySandbox();
     const canonicalPath = `${E2B_WORKSPACE}/saved.txt`;
     sandbox.files.set(canonicalPath, Buffer.from("saved"));
+    await sandbox.pause();
     await runtime.dispose();
     runtime = createRuntime();
     const request = { sandboxId: sandbox.id, userId, threadId, canonicalPath, maxBytes: 100,
@@ -1322,6 +1314,7 @@ describe("thread E2B runtime manager", () => {
   it("pauses a sandbox resumed for a browser even when reading fails or is cancelled", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
+    await sandbox.pause();
     await runtime.dispose();
     runtime = createRuntime();
     const controller = new AbortController();
@@ -1373,7 +1366,8 @@ describe("thread E2B runtime manager", () => {
     expect(client.connectCalls).toBe(1);
   });
 
-  it("waits for active work and pauses the live sandbox during shutdown", async () => {
+  it("waits for local work without arming a queued idle timeout during shutdown", async () => {
+    const lease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
     const started = deferred<void>();
@@ -1381,26 +1375,67 @@ describe("thread E2B runtime manager", () => {
     sandbox.nextCommandGate = { started, release };
     const active = runtime.execute(commandRequest(userId, threadId));
     await started.promise;
-
-    const disposing = runtime.dispose();
+    const timeouts = [...sandbox.timeoutCalls];
+    lease.release();
+    let disposed = false;
+    const disposing = runtime.dispose().then(() => { disposed = true; });
     await Promise.resolve();
+    expect(disposed).toBe(false);
     expect(sandbox.pauseCalls).toBe(0);
 
     release.resolve();
     await active;
     await disposing;
 
-    expect(sandbox.pauseCalls).toBe(1);
-    expect(sandbox.running).toBe(false);
+    expect(sandbox.pauseCalls).toBe(0);
+    expect(sandbox.running).toBe(true);
+    expect(sandbox.timeoutCalls).toEqual(timeouts);
   });
 
-  it("continues shutdown when pausing a sandbox fails", async () => {
+  it("settles idle cleanup before handoff and leaves the successor's active sandbox running", async () => {
+    const oldLease = runtime.acquireActivityLease(userId, threadId);
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
-    sandbox.nextPauseError = new Error("E2B unavailable");
-
-    await expect(runtime.dispose()).resolves.toBeUndefined();
-    expect(sandbox.pauseCalls).toBe(1);
+    const timeoutStarted = deferred<void>();
+    const timeoutRelease = deferred<void>();
+    const setTimeout = sandbox.setTimeout.bind(sandbox);
+    vi.spyOn(sandbox, "setTimeout").mockImplementationOnce(async (timeoutMs) => {
+      timeoutStarted.resolve();
+      await timeoutRelease.promise;
+      await setTimeout(timeoutMs);
+    });
+    let released = false;
+    const releasing = Promise.resolve(oldLease.release()).then(() => { released = true; });
+    await timeoutStarted.promise;
+    try {
+      expect(released).toBe(false);
+    } finally {
+      timeoutRelease.resolve();
+      await releasing;
+    }
+    expect(sandbox.timeoutCalls.at(-1)).toBe(E2B_IDLE_PAUSE_MS);
+    const successor = createRuntime();
+    const lease = successor.acquireActivityLease(userId, threadId);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    sandbox.nextCommandGate = { started, release };
+    const active = successor.execute({ ...commandRequest(userId, threadId), timeoutMs: 10 * 60_000 });
+    try {
+      await started.promise;
+      const timeouts = [...sandbox.timeoutCalls];
+      expect(timeouts.at(-1)).toBeGreaterThan(10 * 60_000);
+      await runtime.dispose();
+      expect(sandbox.pauseCalls).toBe(0);
+      expect(sandbox.running).toBe(true);
+      expect(sandbox.timeoutCalls).toEqual(timeouts);
+      release.resolve();
+      await expect(active).resolves.toMatchObject({ exitCode: 0 });
+    } finally {
+      release.resolve();
+      await active.catch(() => undefined);
+      await lease.release();
+      await successor.dispose();
+    }
   });
 
   it("refuses to run an agent command when the Telegram directory cannot be sealed", async () => {

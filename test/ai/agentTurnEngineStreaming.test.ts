@@ -8,6 +8,9 @@ import { deferred } from "../helpers/async.js";
 describe("turn streaming", () => {
   it("keeps working after provisional text and subsequent tool calls", async () => {
     const prompt = deferred<void>();
+    const releaseStarted = deferred<void>();
+    const releaseCommandActivity = deferred<void>();
+    const onDeliveryConfirmed = vi.fn(async () => undefined);
     let emit: ((event: AgentSessionEvent) => void) | undefined;
     const drafts: string[] = [];
     const sent: string[] = [];
@@ -38,6 +41,7 @@ describe("turn streaming", () => {
       user: { tg_id: 1, stream_mode: true, lang: "en" },
       thread: { id: 2, title: "Adapter" },
       text: "Create an adapter",
+      onDeliveryConfirmed,
       t: (key: string, params?: Record<string, string | number>) => {
         if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
         if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
@@ -47,6 +51,7 @@ describe("turn streaming", () => {
         bridge: {
           beginTurn: async () => undefined,
           endTurn: async () => undefined,
+          releaseCommandActivity: async () => { releaseStarted.resolve(); await releaseCommandActivity.promise; },
           attachments: [], publishedWebsites: [],
           outgoingFiles: { verifyOfficeAttachments: async () => undefined, unresolved: [] },
           currentTurnBudget: () => undefined,
@@ -92,8 +97,12 @@ describe("turn streaming", () => {
       expect(drafts.at(-1)).toContain("Created and validated the STL.");
     } finally {
       prompt.resolve();
+      await releaseStarted.promise;
+      expect(onDeliveryConfirmed).not.toHaveBeenCalled();
+      releaseCommandActivity.resolve();
       await execution;
     }
+    expect(onDeliveryConfirmed).toHaveBeenCalledOnce();
     expect(logger.error).not.toHaveBeenCalled();
     expect(sent[0]).toContain("Thought for");
     expect(sent.at(-1)).toBe("Created and validated the STL.");

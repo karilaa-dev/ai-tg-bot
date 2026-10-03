@@ -1,9 +1,6 @@
 import { workspaceRuntime, TEST_PNG } from "../helpers/workspaceRuntime.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { loadTestConfig } from "../../src/config.js";
@@ -14,33 +11,36 @@ import { CodexCircuitBreaker } from "../../src/pi/circuit.js";
 import type { PiProviderRouter } from "../../src/pi/provider.js";
 import { InferenceUsageCollector } from "../../src/pi/usage.js";
 
-let tempRoot: string;
-
 describe("Pi generate_image extension", () => {
   let db: AppDatabase | undefined;
-
-  beforeEach(async () => {
-    tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ai-tg-bot-image-extension-"));
-  });
 
   afterEach(async () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     await db?.destroy();
     db = undefined;
-    await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  async function reusableBridge() {
-    const config=testConfig({DB_URL:"sqlite::memory:"});
-    db=createDatabase(config);await db.initialize();
-    const repos=createRepos(db.db,db.search);
-    const user=await repos.users.ensure({tgId:8299,firstName:"Reusable images"});
-    const thread=await repos.threads.create({userId:user.tg_id,topicId:null,title:"Images"});
-    const commandRuntime=workspaceRuntime();
-    const bridge:ChatImageBridge={config,repos,user,thread,commandRuntime,outgoingFiles:testOutgoingFiles({config,repos,user,thread,commandRuntime}),modelRegistry:{hasConfiguredAuth:()=>false} as unknown as ModelRegistry,providerRouter:providerRouter(backendModel()),resolveImage:async()=>({bytes:TEST_PNG,mimeType:"image/png"})};
-    vi.stubGlobal("fetch",vi.fn(async()=>Response.json({data:[{b64_json:TEST_PNG.toString("base64"),media_type:"image/png"}]})));
-    return {bridge,commandRuntime};
+  async function reusableBridge(overrides: Parameters<typeof loadTestConfig>[0] = {}, codex = false) {
+    const config = loadTestConfig(overrides);
+    db = createDatabase(config);
+    await db.initialize();
+    const repos = createRepos(db.db, db.search);
+    const user = await repos.users.ensure({ tgId: 8299, firstName: "Images" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Images" });
+    const commandRuntime = workspaceRuntime();
+    const bridge: ChatImageBridge = {
+      config, repos, user, thread, commandRuntime,
+      outgoingFiles: testOutgoingFiles({ config, repos, user, thread, commandRuntime }),
+      modelRegistry: {
+        hasConfiguredAuth: () => codex,
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("test-account"), headers: {} }),
+      } as unknown as ModelRegistry,
+      providerRouter: providerRouter(backendModel()),
+      resolveImage: async () => ({ bytes: TEST_PNG, mimeType: "image/png" }),
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{ b64_json: TEST_PNG.toString("base64"), media_type: "image/png" }] })));
+    return { bridge, commandRuntime };
   }
 
   it.each([false, true])("retains cached-token usage from the image response, separate item=%s", async (separateItem) => {
@@ -155,6 +155,25 @@ describe("Pi generate_image extension", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["timeout", "cancel"])("releases a stalled image OAuth refresh on %s", async (reason) => {
+    const { bridge } = await reusableBridge({ PI_REQUEST_TIMEOUT_MS: reason === "timeout" ? 10 : 1000 }, true);
+    const auth = vi.fn(() => new Promise<never>(() => {}));
+    bridge.modelRegistry.getApiKeyAndHeaders = auth;
+    const cancellation = new AbortController();
+    const result = createGenerateImagePiTool(bridge).execute("auth", { prompt: "draw" }, cancellation.signal, undefined, {} as never);
+    if (reason === "cancel") {
+      const rejected = expect(result).rejects.toThrow("user cancelled");
+      await vi.waitFor(() => expect(auth).toHaveBeenCalledOnce());
+      cancellation.abort(new Error("user cancelled"));
+      await rejected;
+      expect(fetch).not.toHaveBeenCalled();
+    } else {
+      expect((await result).details).toMatchObject({ provider: "openrouter" });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(bridge.providerRouter.circuit.state().open).toBe(true);
+    }
+  });
+
   it("generates several assets, edits a saved asset, and queues only the selected result",async()=>{
     const {bridge,commandRuntime}=await reusableBridge();
     const tool=createGenerateImagePiTool(bridge);
@@ -194,7 +213,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("uses Telegram references, saves the original, returns vision, and leaves delivery to the model", async () => {
-    const config = testConfig({ OPENROUTER_IMAGE_MODEL: "test/image-model" });
+    const config = loadTestConfig({ OPENROUTER_IMAGE_MODEL: "test/image-model" });
     db = createDatabase(config);
     await db.initialize();
     const repos = createRepos(db.db, db.search);
@@ -283,7 +302,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it.each([false, true])("uses Pi Codex OAuth headers and the hosted image_generation payload with fast mode=%s", async (fastMode) => {
-    const config = testConfig({ CODEX_FAST_MODE: fastMode });
+    const config = loadTestConfig({ CODEX_FAST_MODE: fastMode });
     db = createDatabase(config);
     await db.initialize();
     const repos = createRepos(db.db, db.search);
@@ -354,13 +373,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("accepts the hosted Codex partial image when the completed item omits its result", async () => {
-    const config = testConfig();
-    db = createDatabase(config);
-    await db.initialize();
-    const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 819, firstName: "CodexStream" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex stream" });
-    const accessToken = jwtWithAccount("account-stream");
+    const { bridge } = await reusableBridge({}, true);
     const partial = TEST_PNG.toString("base64");
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       `data: ${JSON.stringify({
@@ -374,21 +387,6 @@ describe("Pi generate_image extension", () => {
         item: { type: "image_generation_call", id: "ig_stream", status: "completed", result: null },
       })}`,
     ].join(""), { headers: { "content-type": "text/event-stream" } })));
-    const model = backendModel();
-    const bridge: ChatImageBridge = {
-      config,
-      repos,
-      user,
-      thread,
-      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
-      commandRuntime: workspaceRuntime(),
-      modelRegistry: {
-        hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: accessToken }),
-      } as unknown as ModelRegistry,
-      providerRouter: providerRouter(model),
-      resolveImage: async () => { throw new Error("no reference expected"); },
-    };
 
     await createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "stream a codex image",
@@ -400,12 +398,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("accepts the latest partial when the hosted stream completes without a completed image item", async () => {
-    const config = testConfig();
-    db = createDatabase(config);
-    await db.initialize();
-    const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 821, firstName: "CodexCompletedStream" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex completed stream" });
+    const { bridge } = await reusableBridge({}, true);
     const partial = TEST_PNG.toString("base64");
     vi.stubGlobal("fetch", vi.fn(async () => new Response([
       `data: ${JSON.stringify({
@@ -424,21 +417,6 @@ describe("Pi generate_image extension", () => {
       })}\n\n`,
       `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}`,
     ].join(""), { headers: { "content-type": "text/event-stream" } })));
-    const model = backendModel();
-    const bridge: ChatImageBridge = {
-      config,
-      repos,
-      user,
-      thread,
-      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
-      commandRuntime: workspaceRuntime(),
-      modelRegistry: {
-        hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-completed-stream") }),
-      } as unknown as ModelRegistry,
-      providerRouter: providerRouter(model),
-      resolveImage: async () => { throw new Error("no reference expected"); },
-    };
 
     await createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "stream a hosted codex image",
@@ -450,12 +428,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("falls back when a Codex image stream ends after a partial without completion", async () => {
-    const config = testConfig();
-    db = createDatabase(config);
-    await db.initialize();
-    const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 820, firstName: "CodexDisconnect" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Codex disconnect" });
+    const { bridge } = await reusableBridge({}, true);
     const partial = TEST_PNG.toString("base64");
     const fallback = TEST_PNG;
     const fetchMock = vi.fn()
@@ -469,22 +442,7 @@ describe("Pi generate_image extension", () => {
         data: [{ b64_json: fallback.toString("base64"), media_type: "image/png" }],
       }));
     vi.stubGlobal("fetch", fetchMock);
-    const model = backendModel();
-    const router = providerRouter(model);
-    const bridge: ChatImageBridge = {
-      config,
-      repos,
-      user,
-      thread,
-      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
-      commandRuntime: workspaceRuntime(),
-      modelRegistry: {
-        hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-disconnect") }),
-      } as unknown as ModelRegistry,
-      providerRouter: router,
-      resolveImage: async () => { throw new Error("no reference expected"); },
-    };
+    const router = bridge.providerRouter;
 
     const result = await createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "recover from an incomplete stream",
@@ -498,12 +456,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("falls back from retryable Codex image failures through the shared circuit", async () => {
-    const config = testConfig({ CODEX_FAST_MODE: true });
-    db = createDatabase(config);
-    await db.initialize();
-    const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 817, firstName: "FallbackImage" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Fallback Images" });
+    const { bridge } = await reusableBridge({ CODEX_FAST_MODE: true }, true);
     const urls: string[] = [];
     const bodies: Record<string, unknown>[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -512,22 +465,7 @@ describe("Pi generate_image extension", () => {
       if (urls.length === 1) return new Response("quota", { status: 429, headers: { "retry-after": "30" } });
       return Response.json({ data: [{ b64_json: TEST_PNG.toString("base64") }] });
     }));
-    const model = backendModel();
-    const router = providerRouter(model);
-    const bridge: ChatImageBridge = {
-      config,
-      repos,
-      user,
-      thread,
-      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
-      commandRuntime: workspaceRuntime(),
-      modelRegistry: {
-        hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-fallback") }),
-      } as unknown as ModelRegistry,
-      providerRouter: router,
-      resolveImage: async () => { throw new Error("no reference expected"); },
-    };
+    const router = bridge.providerRouter;
 
     const result = await createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "fallback image",
@@ -545,12 +483,7 @@ describe("Pi generate_image extension", () => {
   });
 
   it("closes a half-open circuit after a definitive Codex image rejection", async () => {
-    const config = testConfig();
-    db = createDatabase(config);
-    await db.initialize();
-    const repos = createRepos(db.db, db.search);
-    const user = await repos.users.ensure({ tgId: 818, firstName: "RejectedImage" });
-    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Rejected Images" });
+    const { bridge } = await reusableBridge({}, true);
     let now = 10_000;
     const circuit = new CodexCircuitBreaker(() => now);
     const failure = circuit.acquire();
@@ -563,22 +496,7 @@ describe("Pi generate_image extension", () => {
         metadata: { provider_name: "OpenAI", ignored: "do not expose this object" },
       },
     }, { status: 400 })));
-    const model = backendModel();
-    const router = { ...providerRouter(model), circuit };
-    const bridge: ChatImageBridge = {
-      config,
-      repos,
-      user,
-      thread,
-      outgoingFiles: testOutgoingFiles({ config, repos, user, thread }),
-      commandRuntime: workspaceRuntime(),
-      modelRegistry: {
-        hasConfiguredAuth: () => true,
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwtWithAccount("account-rejected") }),
-      } as unknown as ModelRegistry,
-      providerRouter: router,
-      resolveImage: async () => { throw new Error("no reference expected"); },
-    };
+    bridge.providerRouter.circuit = circuit;
 
     await expect(createGenerateImagePiTool(bridge).execute("tool-call", {
       prompt: "policy-rejected image",
@@ -590,10 +508,6 @@ describe("Pi generate_image extension", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
-
-function testConfig(overrides: Parameters<typeof loadTestConfig>[0] = {}) {
-  return loadTestConfig(overrides);
-}
 
 function backendModel(): Model<Api> {
   return {

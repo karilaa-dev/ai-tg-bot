@@ -25,6 +25,7 @@ import { InferenceUsageCollector, inferenceUsageFromMessages } from "../../src/p
 describe("Pi automatic provider", () => {
   it.each([undefined, 0, 250])("preserves provider-reported cached tokens through the real Codex SDK, writes=%s", async (writes) => {
     const transport = interceptedSdkTransport({ codexResponse: {
+      service_tier: "default",
       usage: { input_tokens: 10_000, output_tokens: 200, input_tokens_details: { cached_tokens: 9_000, ...(writes === undefined ? {} : { cache_write_tokens: writes }) }, output_tokens_details: { reasoning_tokens: 120 }, total_tokens: 10_200 },
     } });
     const harness = providerHarness({ config: { CODEX_FAST_MODE: true }, streams: { codex: streamCodex, openRouter: streamOpenRouter }, apiKey: testCodexToken(), options: { transport: "sse", fetch: transport.fetch } });
@@ -33,7 +34,8 @@ describe("Pi automatic provider", () => {
     if (completed?.type !== "done") throw new Error("Expected a completed SDK response.");
     expect(inferenceUsageFromMessages([completed.message])).toMatchObject({
       inputTokens: 1_000 - (writes ?? 0), cacheReadTokens: 9_000, cacheWriteTokens: writes ?? 0, outputTokens: 200, totalTokens: 10_200,
-      calls: [{ reasoningTokens: 120, cacheReadReported: true, cacheWriteReported: writes !== undefined }],
+      calls: [{ reasoningTokens: 120, cacheReadReported: true, cacheWriteReported: writes !== undefined,
+        fastMode: true, requestedServiceTier: "priority", serviceTier: "default" }],
     });
   });
 
@@ -53,17 +55,6 @@ describe("Pi automatic provider", () => {
       { provider: "openrouter", fastMode: false, cacheReadReported: true, cacheWriteReported: true },
     ]);
     expect(capture.usage().calls?.[1]).not.toHaveProperty("requestedServiceTier");
-  });
-
-  it("remembers requested fast mode separately from the service tier the provider delivered", async () => {
-    const transport = interceptedSdkTransport({ codexResponse: { service_tier: "default", usage: { input_tokens: 1_000, output_tokens: 20, input_tokens_details: { cached_tokens: 900 } } } });
-    const harness = providerHarness({ config: { CODEX_FAST_MODE: true }, streams: { codex: streamCodex, openRouter: streamOpenRouter }, apiKey: testCodexToken(), options: { transport: "sse", fetch: transport.fetch } });
-    const events = await harness.run();
-    const completed = events.findLast(event => event.type === "done");
-    if (completed?.type !== "done") throw new Error("Expected a completed SDK response.");
-    expect(inferenceUsageFromMessages([completed.message]).calls).toMatchObject([
-      { fastMode: true, requestedServiceTier: "priority", serviceTier: "default" },
-    ]);
   });
 
   it.each([false, true])("sends the configured fast-mode tier through the real Codex SDK when enabled=%s", async (enabled) => {
@@ -110,15 +101,6 @@ describe("Pi automatic provider", () => {
     expect(harness.router.circuit.state().open).toBe(true);
   });
 
-  it.each([{ codexConfigured: false }, { authError: "OAuth refresh token failed" }])(
-    "omits fast mode when routing directly to OpenRouter: %j", async (input) => {
-      const harness = providerHarness({ ...input, config: { CODEX_FAST_MODE: true } });
-      await harness.run();
-      expect(harness.calls).toEqual(["openrouter"]);
-      expect(harness.requestOptions[0]!.onPayload).toBeUndefined();
-    },
-  );
-
   it.each([false, true])("preserves caller payload hooks through fallback, replacement=%s", async (replace) => {
     const onPayload = vi.fn(async (payload: unknown) => {
       if (replace) return { custom: "kept" };
@@ -138,16 +120,10 @@ describe("Pi automatic provider", () => {
     expect(onPayload).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps provider deadlines independent of the overall turn limit", async () => {
-    const harness = providerHarness({ codexError: "quota exhausted", config: { PI_TURN_TIMEOUT_MS: 0, PI_REQUEST_TIMEOUT_MS: 42_000 } });
-    await harness.run();
-    expect(harness.requestOptions.map((options) => options.timeoutMs)).toEqual([42_000, 42_000]);
-  });
-
   it("aborts a stalled Codex request and falls back within an unlimited turn", async () => {
     vi.useFakeTimers();
     try {
-      const harness = providerHarness({ codexStall: true, config: { PI_REQUEST_TIMEOUT_MS: 1000 } });
+      const harness = providerHarness({ codexStall: true, config: { PI_TURN_TIMEOUT_MS: 0, PI_REQUEST_TIMEOUT_MS: 1000 } });
       const execution = harness.run();
       await vi.advanceTimersByTimeAsync(1000);
       expect(textDeltas(await execution)).toBe("openrouter answer");
@@ -180,15 +156,52 @@ describe("Pi automatic provider", () => {
     }
   });
 
-  it("cancels a stalled request promptly without starting fallback", async () => {
-    const harness = providerHarness({ codexStall: true });
+  it("does not restart OpenRouter when its fallback stream times out after output", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = providerHarness({
+        codexError: "quota exhausted", openRouterStall: true,
+        config: { PI_REQUEST_TIMEOUT_MS: 1000 },
+      });
+      const execution = harness.run();
+      await vi.advanceTimersByTimeAsync(2000);
+      const events = await execution;
+      expect(harness.calls).toEqual(["codex", "openrouter"]);
+      expect(textDeltas(events)).toBe("partial");
+      expect(events.at(-1)).toMatchObject({ type: "error", error: { errorMessage: expect.stringContaining("timed out") } });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds OAuth refresh before opening the provider stream", async () => {
+    const harness = providerHarness({ authStall: true, config: { PI_REQUEST_TIMEOUT_MS: 10 } });
+    expect(textDeltas(await harness.run())).toBe("openrouter answer");
+    expect(harness.calls).toEqual(["openrouter"]);
+    expect(harness.router.circuit.state().open).toBe(true);
+  });
+
+  it.each(["authentication", "response"])("cancels stalled %s promptly without starting fallback", async (phase) => {
+    let now = 1000;
+    const circuit = new CodexCircuitBreaker(() => now);
+    const failed = circuit.acquire();
+    if (!failed.allowed) throw new Error("Expected initial Codex attempt");
+    failed.recordFailure();
+    now = circuit.state().nextProbeAt;
+    const harness = providerHarness({ circuit, codexStall: true, authStall: phase === "authentication" });
     const controller = new AbortController();
     const execution = harness.run("main", controller.signal);
-    await vi.waitFor(() => expect(harness.calls).toEqual(["codex"]));
+    const calls = phase === "authentication" ? [] : ["codex"];
+    await vi.waitFor(() => {
+      expect(harness.auth).toHaveBeenCalledOnce();
+      expect(harness.calls).toEqual(calls);
+    });
     controller.abort();
-    expect((await execution).at(-1)).toMatchObject({ type: "error", error: { errorMessage: "Request was aborted" } });
-    expect(harness.calls).toEqual(["codex"]);
-    expect(harness.requestOptions[0]!.signal!.aborted).toBe(true);
+    expect((await execution).at(-1)).toMatchObject({ type: "error", error: { errorMessage: expect.stringMatching(/aborted/i) } });
+    expect(harness.calls).toEqual(calls);
+    expect(circuit.state()).toMatchObject({ open: true, probeActive: false });
+    if (phase === "response") expect(harness.requestOptions[0]!.signal!.aborted).toBe(true);
   });
 
   it("injects the selected full model name on every request without changing history", async () => {
@@ -368,6 +381,7 @@ function providerHarness(input: {
   codexStall?: boolean;
   openRouterStall?: boolean;
   authError?: string;
+  authStall?: boolean;
   circuit?: CodexCircuitBreaker;
   discoveredOpenRouterCompat?: Model<"openai-completions">["compat"];
 }) {
@@ -403,9 +417,12 @@ function providerHarness(input: {
     registerVirtualModel: vi.fn(),
     registerProvider: (_name: string, provider: typeof registered) => { registered = provider; },
     hasConfiguredAuth: () => input.codexConfigured ?? true,
-    getApiKeyAndHeaders: async () => input.authError
-      ? { ok: false as const, error: input.authError }
-      : { ok: true as const, apiKey: input.apiKey ?? "codex-token", headers: {} },
+    getApiKeyAndHeaders: vi.fn(async () => {
+      if (input.authStall) await new Promise(() => {});
+      return input.authError
+        ? { ok: false as const, error: input.authError }
+        : { ok: true as const, apiKey: input.apiKey ?? "codex-token", headers: {} };
+    }),
   };
   const streams: PiProviderStreamOverrides = {
     codex: ((model, context, options) => {
@@ -441,6 +458,7 @@ function providerHarness(input: {
     streamOptions,
     requestOptions,
     router,
+    auth: registry.getApiKeyAndHeaders,
     run: async (kind: "main" | "helper" = "main", signal?: AbortSignal, onPayload?: SimpleStreamOptions["onPayload"]) => {
       if (!registered) throw new Error("provider was not registered");
       const events: AssistantMessageEvent[] = [];

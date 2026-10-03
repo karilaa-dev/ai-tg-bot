@@ -8,9 +8,9 @@ export function createSearchInFileTool(input: ToolBuildInput) {
     description:
       "Lexically search chunks of a large TXT or CSV attachment by file_id. PDF and DOCX files are source-only and must be inspected with materialize_chat_files plus sandbox tools.",
     inputSchema: z.object({
-      file_id: z.number(),
+      file_id: z.number().int().positive(),
       query: z.string(),
-      limit: z.number().max(20).default(8),
+      limit: z.number().int().min(1).max(20).default(8),
     }),
     execute: async ({ file_id, query, limit }, signal) => {
       input.logger?.debug("tool search_in_file starting", {
@@ -51,6 +51,7 @@ export function createSearchInFileTool(input: ToolBuildInput) {
       const results = hits
           .filter((hit) => hit.kind === "chunk")
           .map((hit) => ({
+            file_id,
             chunk_id: hit.ref_id,
             chunk_index: indexById.get(hit.ref_id),
             heading_path: headingById.get(hit.ref_id),

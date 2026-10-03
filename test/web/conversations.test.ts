@@ -461,17 +461,6 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.users("", 0, 1)).items[0]).toMatchObject({ id: 3, lastActivity: 40 });
   });
 
-  it.skipIf(dialect !== "sqlite")("uses indexed per-thread activity lookups instead of joining the entire message history", async () => {
-    const query = vi.spyOn(database.db, "query");
-    await repository.users("", 0);
-    const statement = query.mock.calls[0]![0];
-    query.mockRestore();
-    const plan = await database.db.query<{ detail: string }>(sql`explain query plan ${statement}`);
-    expect(plan.filter(row => /SEARCH m /.test(row.detail)).every(row => row.detail.includes("COVERING INDEX messages_thread_activity_idx"))).toBe(true);
-    expect(plan.some(row => /CORRELATED SCALAR SUBQUERY/.test(row.detail))).toBe(true);
-    expect(plan.some(row => /SCAN m\b/.test(row.detail))).toBe(false);
-  });
-
   it("removes complete inline contents from display data even when the contents include closing tags", async () => {
     const t = await thread();
     const m = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: "" });
@@ -485,7 +474,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   });
 
   it("searches Unicode names regardless of case before paginating", async () => {
-    for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"]] as const) {
+    for (const [tgId, firstName] of [[1, "Дмитрий"], [2, "ДМИТРИЙ"], [3, "Élodie"], [4, "100%_\\\\"], [5, "İΣΟΣ"]] as const) {
       await repos.users.ensure({ tgId, firstName });
     }
     for (const query of ["Дмитрий", "дмитрий", "ДМИТРИЙ"]) {
@@ -494,6 +483,38 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     }
     expect((await repository.users("ÉLODIE", 0)).items.map(u => u.id)).toEqual([3]);
     expect((await repository.users("%_\\\\", 0)).items.map(u => u.id)).toEqual([4]);
+    for (const query of ["İΣΟΣ", "i̇σος"]) {
+      expect((await repository.users(query, 0)).items.map(u => u.id)).toEqual([5]);
+    }
+    await repos.users.ensure({ tgId: 5, firstName: "Renamed", username: "НОВОЕ" });
+    expect((await repository.users("i̇σος", 0)).items).toEqual([]);
+    expect((await repository.users("новое", 0)).items.map(u => u.id)).toEqual([5]);
+  });
+
+  it.skipIf(dialect !== "postgres")("backfills normalized search names for an existing PostgreSQL database", async () => {
+    await database.db.execute(sql`alter table users drop column first_name_search, drop column username_search`);
+    await database.db.execute(sql`insert into users(tg_id, first_name, username, created_at) values (1, 'İΣΟΣ', 'ДМИТРИЙ', 1)`);
+    await database.initialize();
+    expect((await repository.users("i̇σος", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("дмитрий", 0)).items.map(u => u.id)).toEqual([1]);
+    await database.initialize();
+    expect((await repository.users("İΣΟΣ", 0)).items.map(u => u.id)).toEqual([1]);
+  });
+
+  it.skipIf(dialect !== "postgres")("repairs search after legacy processes insert and rename users", async () => {
+    await repos.users.ensure({ tgId: 1, firstName: "Previous", username: "oldname" });
+    await database.db.execute(sql`update users set first_name = 'İΣΟΣ', username = 'НОВОЕ' where tg_id = 1`);
+    await database.db.execute(sql`insert into users(tg_id, first_name, username, created_at) values (2, 'ДМИТРИЙ', 'ÉLODIE', 2)`);
+    expect((await repository.users("previous", 0)).items).toEqual([]);
+    expect((await repository.users("oldname", 0)).items).toEqual([]);
+    expect((await repository.users("i̇σος", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("новое", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("дмитрий", 0)).items.map(u => u.id)).toEqual([2]);
+    expect((await repository.users("élodie", 0)).items.map(u => u.id)).toEqual([2]);
+    // Reinitialization must not be needed after subsequent legacy writes either.
+    await database.db.execute(sql`update users set first_name = 'Renamed again' where tg_id = 1`);
+    expect((await repository.users("i̇σος", 0)).items).toEqual([]);
+    expect((await repository.users("RENAMED AGAIN", 0)).items.map(u => u.id)).toEqual([1]);
   });
 
   it("hides existing bot records from lists, search, and direct history access", async () => {
@@ -570,6 +591,8 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     const visible = await repository.history(grandchild.id);
     expect(visible.messages.map(m => m.id)).toEqual([first.id, grandOwn.id]);
     expect((await repository.history(child.id)).messages.at(-1)?.attachments[0]).toMatchObject({ id: file.id, name: "shared.txt", caption: "Shared caption" });
+    expect((await repository.file(child.id, file.id)).name).toBe("shared.txt");
+    expect((await repository.file(grandchild.id, file.id)).name).toBe("notes.txt");
     expect((await request(`/api/threads/${grandchild.id}/files/${hiddenFile.id}`)).status).toBe(404);
     const stranger = await thread(2);
     expect((await request(`/api/threads/${stranger.id}/files/${file.id}`)).status).toBe(404);

@@ -112,15 +112,18 @@ export function messageSearchScopesForChain(
   threads: ThreadRow[],
   maxMessageId?: number,
 ): MessageSearchScope[] {
-  return threads.map((thread, index) => {
-    const child = threads[index + 1];
-    const bounds = [
-      maxMessageId,
-      child?.parent_thread_id === thread.id ? child.fork_point_message_id ?? undefined : undefined,
-    ].filter((value): value is number => value !== undefined);
-    return {
-      threadId: thread.id,
-      ...(bounds.length ? { maxMessageId: Math.min(...bounds) } : {}),
-    };
-  });
+  // A fork can point into inherited history, so its bound also applies to
+  // every earlier ancestor, not just its immediate parent.
+  const scopes: MessageSearchScope[] = [];
+  let ceiling = maxMessageId;
+  for (let i = threads.length - 1; i >= 0; i--) {
+    const thread = threads[i]!;
+    const child = threads[i + 1];
+    if (child?.parent_thread_id === thread.id) {
+      const forkPoint = child.fork_point_message_id ?? 0;
+      ceiling = Math.min(ceiling ?? forkPoint, forkPoint);
+    }
+    scopes.push({ threadId: thread.id, ...(ceiling === undefined ? {} : { maxMessageId: ceiling }) });
+  }
+  return scopes.reverse();
 }

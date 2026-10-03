@@ -587,7 +587,7 @@ try {
     }
     publishedUrl = published.url;
   } finally {
-    lease.release();
+    await lease.release();
   }
 
   process.stdout.write(

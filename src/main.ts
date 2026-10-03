@@ -94,7 +94,7 @@ async function checkConfiguredBrowserUse(
   logger: Logger,
 ): Promise<void> {
   if (!isBrowserUseConfigured(config)) {
-    logger.info("Browser Use Cloud disabled; interactive browser and Office visual previews are unavailable");
+    logger.info("Browser Use Cloud disabled; interactive browser tools are unavailable");
     return;
   }
   logger.debug("checking Browser Use Cloud authentication");

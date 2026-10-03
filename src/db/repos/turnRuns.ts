@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
-import type { TextSearch } from "../search.js";
+import { messageScopePredicate, type TextSearch } from "../search.js";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
+import { messageSearchScopesForChain } from "./messages.js";
+import { ThreadsRepo } from "./threads.js";
 import type {
   Locale,
   MessageKind,
@@ -45,6 +47,7 @@ interface TurnAcceptanceInput {
   textPlain: string;
   sources: TelegramTurnSource[];
   attachments?: DurableTurnAttachment[];
+  signal?: AbortSignal;
 }
 
 export class TurnRunsRepo {
@@ -68,6 +71,7 @@ export class TurnRunsRepo {
   }
 
   async accept(input: TurnAcceptanceInput): Promise<AcceptedTurnRun> {
+    input.signal?.throwIfAborted();
     const sources = uniqueSources(input.sources);
     const attachments = uniqueAttachments(input.attachments ?? []);
     if (!sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
@@ -76,6 +80,7 @@ export class TurnRunsRepo {
     try {
       accepted = await this.db.transaction(async (tx) => {
         await lockThreadTransaction(tx, input.threadId);
+        input.signal?.throwIfAborted();
         const mappings = await existingSourceMappings(tx, sources.map((source) => source.updateId));
         for (const mapping of mappings) observedOwnedUpdateIds.add(mapping.telegram_update_id);
         const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
@@ -92,6 +97,7 @@ export class TurnRunsRepo {
             userMessage.id,
             attachmentsForSources(attachments, duplicateSources),
           );
+          input.signal?.throwIfAborted();
           return { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
         }
 
@@ -133,9 +139,11 @@ export class TurnRunsRepo {
             and status in ('queued', 'running', 'awaiting_delivery')
           limit 1
         `);
+        input.signal?.throwIfAborted();
         return { turnRun, userMessage, created: true, queuedBehind: Boolean(earlier) };
       });
     } catch (error) {
+      input.signal?.throwIfAborted();
       // A concurrent PostgreSQL transaction can win the unique update-id race
       // after our initial read. Resolve that durable winner instead of surfacing
       // an error that would invite Telegram to retry the update.
@@ -163,7 +171,24 @@ export class TurnRunsRepo {
       }
       accepted = { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
     }
-    await this.indexMessageForRun(accepted.turnRun).catch(() => undefined);
+    // Cancellation can arrive after the transaction commits, including while
+    // indexing awaits I/O. Persist it for this turn only, never an older run or
+    // the original owner of a duplicate update.
+    let cancelling: Promise<unknown> | undefined;
+    const onAbort = () => {
+      if (!accepted.created || cancelling) return;
+      cancelling = this.requestCancellation(input.threadId, accepted.turnRun.id);
+      // Observe errors immediately; the awaited cleanup below still surfaces them.
+      void cancelling.catch(() => undefined);
+    };
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    if (input.signal?.aborted) onAbort();
+    try {
+      await this.indexMessageForRun(accepted.turnRun).catch(() => undefined);
+    } finally {
+      input.signal?.removeEventListener("abort", onAbort);
+      await cancelling;
+    }
     return accepted;
   }
 
@@ -291,6 +316,7 @@ export class TurnRunsRepo {
 
   async requestCancellation(
     threadId: number,
+    turnRunId?: number,
   ): Promise<Pick<TurnRunRow, "id" | "owner_id" | "status"> | undefined> {
     const now = Date.now();
     return this.db.transaction(async (tx) => {
@@ -299,6 +325,7 @@ export class TurnRunsRepo {
         update turn_runs
         set cancel_requested_at = coalesce(cancel_requested_at, ${now}), updated_at = ${now}
         where thread_id = ${threadId}
+          and (${turnRunId === undefined ? 0 : 1} = 0 or id = ${turnRunId ?? 0})
           and status = 'running'
         returning id, owner_id, status
       `);
@@ -306,6 +333,7 @@ export class TurnRunsRepo {
       const delivery = await queryOne<{ present: number }>(tx, sql`
         select 1 as present from turn_runs
         where thread_id = ${threadId} and status = 'awaiting_delivery'
+          and (${turnRunId === undefined ? 0 : 1} = 0 or id = ${turnRunId ?? 0})
         limit 1
       `);
       if (delivery) return undefined;
@@ -316,6 +344,7 @@ export class TurnRunsRepo {
         where id = (
           select id from turn_runs
           where thread_id = ${threadId} and status = 'queued'
+            and (${turnRunId === undefined ? 0 : 1} = 0 or id = ${turnRunId ?? 0})
           order by id asc limit 1
         )
         returning id, owner_id, status
@@ -353,15 +382,22 @@ export class TurnRunsRepo {
           and status in ('queued', 'running', 'awaiting_delivery')
         limit 1
       `)) return undefined;
-      const snapshot = await queryOne<{ id: number }>(tx, sql`
-        select id from messages where thread_id = ${input.threadId} order by id desc limit 1
+      const threads = new ThreadsRepo(tx);
+      const thread = await threads.get(input.threadId);
+      if (!thread) throw new Error(`Thread #${input.threadId} no longer exists.`);
+      const scopes = messageSearchScopesForChain(await threads.chain(thread));
+      // An empty branch can still inherit messages. Freeze all visible history;
+      // zero represents an empty snapshot and cannot include future messages.
+      const snapshot = await queryOne<{ id: number | null }>(tx, sql`
+        select max(id) as id from messages
+        where ${messageScopePredicate(sql`thread_id`, sql`id`, scopes.map(scope => scope.threadId), scopes)}
       `);
       const inserted = await queryOne<{ snapshot_message_id: number | null }>(tx, sql`
         insert into thread_operation_barriers(
           thread_id, owner_id, operation, snapshot_message_id,
           lease_expires_at, created_at, updated_at
         ) values (
-          ${input.threadId}, ${input.ownerId}, ${input.operation}, ${snapshot?.id ?? null},
+          ${input.threadId}, ${input.ownerId}, ${input.operation}, ${snapshot?.id ?? 0},
           ${input.leaseExpiresAt}, ${now}, ${now}
         )
         on conflict(thread_id) do nothing

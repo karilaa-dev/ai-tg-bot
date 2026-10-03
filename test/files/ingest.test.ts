@@ -7,6 +7,8 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes } from "../../src/files/ingest.js";
+import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
+import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
 
 let tempRoot: string;
 
@@ -109,6 +111,53 @@ describe("file ingestion", () => {
     const [file] = await repos.files.listForThreads([thread.id]);
     const outline = JSON.parse(file?.outline_json as string) as Array<{ chunk_index: number }>;
     expect(outline[0]?.chunk_index).toBe(chunks[0]?.idx);
+  });
+
+  it("indexes CSV headers and record ranges consistently when creating and refreshing files", async () => {
+    const config = testConfig({ FILE_INLINE_TOKENS: 1 });
+    const user = await repos.users.ensure({ tgId: 229, firstName: "Csv", lang: "en" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const initial = await ingestFileBytes({
+      config, repo: repos.files, userId: user.tg_id, threadId: thread.id,
+      name: "records.csv", bytes: Buffer.from('id,note\n1,"two\nlines"\n2,last\n\n'),
+    });
+    expect(await repos.files.chunks(initial.fileId)).toMatchObject([{
+      heading_path: "rows 1-2", content: 'id,note\n1,"two\nlines"\n2,last',
+    }]);
+    await refreshExtractedFileBytes({
+      config, repo: repos.files, file: (await repos.files.get(initial.fileId))!,
+      bytes: Buffer.from("id,note\n3,changed\n"),
+    });
+    expect(await repos.files.chunks(initial.fileId)).toMatchObject([{
+      heading_path: "rows 1-1", content: "id,note\n3,changed",
+    }]);
+  });
+
+  it.each(["ingest", "refresh"])("keeps a wide header-only CSV searchable and readable after %s", async (operation) => {
+    const config = testConfig();
+    const user = await repos.users.ensure({ tgId: 230, firstName: "Csv" });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const header = [...Array.from({ length: 1800 }, (_, i) => `column_${i}`), "needlecolumn"].join(",");
+    const result = await ingestFileBytes({
+      config, repo: repos.files, userId: user.tg_id, threadId: thread.id,
+      name: "headers.csv", bytes: Buffer.from(header + (operation === "refresh" ? "\nobsolete" : "\n\n")),
+    });
+    if (operation === "refresh") {
+      await refreshExtractedFileBytes({
+        config, repo: repos.files, file: (await repos.files.get(result.fileId))!, bytes: Buffer.from(header + "\n\n"),
+      });
+    }
+    const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: {}, textPlain: "CSV" });
+    await repos.files.setMessageId(result.fileId, message.id);
+    const stored = (await repos.files.get(result.fileId))!;
+    expect(stored).toMatchObject({ is_inline: 0, content_md: null });
+    expect(stored.summary).not.toContain("needlecolumn");
+    const input = { config, db, repos, user, thread };
+    expect(await createSearchInFileTool(input).execute({ file_id: result.fileId, query: "needlecolumn", limit: 8 }))
+      .toMatchObject({ results: [{ file_id: result.fileId, chunk_index: 0 }] });
+    expect(await createReadFileSectionTool(input).execute({ file_id: result.fileId, chunk_index: 0, count: 1 }))
+      .toMatchObject({ content: `# chunk 0 - header\n${header}` });
+    expect(await db.search.searchChunks([result.fileId], "obsolete", 8)).toEqual([]);
   });
 
   it("rebuilds durable lexical chunks when remote bytes change", async () => {

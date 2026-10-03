@@ -48,7 +48,9 @@ it("fails closed when routes or a server are created without the environment tok
   for (const WEB_ADMIN_TOKEN of [undefined, "", " \n "]) {
     const invalid = { ...options, config: { ...config, WEB_ADMIN_TOKEN }, assetsDirectory: "/missing" };
     expect(() => createWebRoutes(invalid, controller.signal)).toThrow("WEB_ADMIN_TOKEN");
-    await expect(startWebServer(invalid)).rejects.toThrow("WEB_ADMIN_TOKEN");
+    for (const development of [false, true]) {
+      await expect(startWebServer({ ...invalid, development })).rejects.toThrow("WEB_ADMIN_TOKEN");
+    }
   }
 });
 
@@ -110,20 +112,24 @@ it("limits guessing even when callers spoof client IP headers", async () => {
   const blocked = await login("wrong-token", { "X-Forwarded-For": "203.0.113.99" });
   expect(blocked.status).toBe(429);
   expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThan(0);
-  expect((await login()).status).toBe(200);
+  expect((await login()).status).toBe(429);
   vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+  expect((await login()).status).toBe(200);
   expect((await login("wrong-token")).status).toBe(401);
 });
 
-it("isolates failed sign-ins by socket peer while accepting valid tokens behind a shared proxy", async () => {
+it("isolates sign-in limits by socket peer while preserving existing sessions", async () => {
   const auth = new WebAdminAuth(token);
   const attempt = (candidate: string, peer: string) => auth.login(new Request("http://localhost/api/auth/login", {
     method: "POST", headers: mutationHeaders, body: JSON.stringify({ token: candidate }),
   }), peer);
+  const cookie = (await attempt(token, "192.0.2.1")).split(";")[0]!;
   for (let i = 0; i < 10; i++) await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 401 });
   await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 429 });
   await expect(attempt("wrong", "192.0.2.2")).rejects.toMatchObject({ status: 401 });
-  await expect(attempt(token, "192.0.2.1")).resolves.toContain("HttpOnly");
+  await expect(attempt(token, "192.0.2.1")).rejects.toMatchObject({ status: 429 });
+  expect(auth.authenticated(new Request("http://localhost/api/users", { headers: { Cookie: cookie } }))).toBe(true);
+  await expect(attempt(token, "192.0.2.2")).resolves.toContain("HttpOnly");
   await expect(attempt("wrong", "192.0.2.1")).rejects.toMatchObject({ status: 429 });
 });
 

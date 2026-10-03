@@ -147,6 +147,12 @@ describe("BrowserUseRuntimeManager", () => {
     expect(String(error)).not.toContain("test-key");
     expect(String(error)).not.toContain("private.cdp");
     expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(6);
+    // A failed provider stop must retain the session so it can be retried,
+    // rather than quietly creating another billable browser.
+    await expect(browser.open("https://example.net")).rejects.toThrow();
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(2);
+    fixture.api.stopBrowser.mockImplementation(async (id) => stoppedBrowser(id));
+    await expect(browser.closeSession()).resolves.toMatchObject({ closed: true });
   });
 
   it("does not poison later no-proxy sessions when the provider reports proxy usage", async () => {

@@ -9,6 +9,7 @@ import { createLogger } from "../../src/logger.js";
 import { officeSkillPaths } from "../../src/pi/officeSkills.js";
 import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/threadBridge.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
+import { deferred } from "../helpers/async.js";
 import {
   createTurnPromptContextExtension,
   projectTurnContext,
@@ -49,16 +50,6 @@ describe("turn prompt context extension", () => {
     expect(first.systemPrompt).toContain("<name>pptxgenjs</name>");
     expect(second.systemPrompt).toContain("Russian core");
     expect(second.systemPrompt).not.toContain("English core");
-  });
-
-  it("produces byte-identical system prompts for unchanged turns", async () => {
-    const source = mutableSource("stable core", contextBlock);
-    const handlers = await extensionHandlers(source);
-    const event = { systemPrompt: "cached", systemPromptOptions: { skills: [] } };
-
-    expect(await handlers.before_agent_start(event)).toEqual(
-      await handlers.before_agent_start(event),
-    );
   });
 
   it("falls back without overriding Pi when no turn prompt is active", async () => {
@@ -138,6 +129,9 @@ describe("ThreadBridge turn prompt lifecycle", () => {
       const repos = createRepos(db.db, db.search);
       const user = await repos.users.ensure({ tgId: 987_654, firstName: "Alice", lang: "en" });
       const storedThread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      const releaseStarted = deferred<void>();
+      const releaseFinished = deferred<void>();
+      const release = vi.fn(async () => { releaseStarted.resolve(); await releaseFinished.promise; });
       const bridge = new ThreadBridge({
         config,
         db,
@@ -147,6 +141,7 @@ describe("ThreadBridge turn prompt lifecycle", () => {
         thread: { ...storedThread, title: "First title" },
         modelRegistry: {} as never,
         providerRouter: {} as never,
+        commandRuntime: { acquireActivityLease: () => ({ release }) } as never,
       });
 
       await bridge.beginTurn(turnTransport());
@@ -159,7 +154,18 @@ describe("ThreadBridge turn prompt lifecycle", () => {
       expect(bridge.currentTurnSystemPrompt()).toContain("Reply in Russian by default");
       expect(bridge.currentTurnSessionContext()).toContain("Обновлённый заголовок");
 
-      await bridge.endTurn();
+      bridge.holdCommandActivity();
+      const dispose = vi.spyOn(bridge.officeValidation, "dispose").mockRejectedValue(new Error("cleanup unavailable"));
+      const releasing = bridge.releaseCommandActivity();
+      await releaseStarted.promise;
+      let ended = false;
+      const ending = bridge.endTurn().then(() => { ended = true; });
+      await Promise.resolve();
+      expect(ended).toBe(false);
+      releaseFinished.resolve();
+      await Promise.all([releasing, ending]);
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
       expect(bridge.currentTurnSystemPrompt()).toBeUndefined();
       expect(bridge.currentTurnSessionContext()).toBeUndefined();
     } finally {

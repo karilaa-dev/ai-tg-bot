@@ -542,7 +542,7 @@ export class BrowserUseRuntimeManager {
     if (state.session?.browser.isConnected() && state.session.timeoutAt > Date.now() + DEADLINE_MARGIN_MS) {
       return state.session;
     }
-    if (state.session) await this.closeSessionLocked(state, "expired").catch(() => undefined);
+    if (state.session) await this.closeSessionLocked(state, "expired");
     if (state.sessionPromise) return state.sessionPromise;
     const timeoutMinutes = clampTimeout(
       requestedTimeout ?? this.input.config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES,
@@ -730,7 +730,6 @@ export class BrowserUseRuntimeManager {
     clearTimer(state, "idleTimer");
     clearTimer(state, "deadlineTimer");
     const session = state.session;
-    state.session = undefined;
     if (!session) return;
     const finalStorageSignature = await browserStorageSignature(session.context);
     // An unavailable initial or final snapshot means the storage state is unknown,
@@ -770,6 +769,9 @@ export class BrowserUseRuntimeManager {
       await session.browser.close().catch(() => undefined);
     }
     if (stopError) throw stopError;
+    // Keep the provider ID until stop is acknowledged. Disconnecting CDP alone
+    // does not stop billing, and a failed stop must remain retryable.
+    state.session = undefined;
     this.input.logger?.info("Browser Use session stopped", { userId: state.userId, reason });
   }
 

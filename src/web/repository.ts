@@ -10,6 +10,7 @@ import type { WebPage, WebThread, WebThreadActivity, WebUser } from "./types.js"
 import { messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
 import { UsageRepository, type UsageScope } from "./usage.js";
 import type { UsagePricing } from "./usage-pricing.js";
+import { refreshPostgresUserSearch } from "../db/userSearch.js";
 
 export class WebNotFound extends Error {}
 
@@ -31,8 +32,18 @@ export class ConversationRepository {
   }
 
   async users(search: string, offset: number, limit = 50): Promise<WebPage<WebUser>> {
-    const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
-    const lower = this.db.dialect === "sqlite" ? sql`unicode_lower` : sql`lower`;
+    const visibleUser = this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`;
+    let matches = sql`true`;
+    if (search) {
+      if (this.db.dialect === "postgres") await refreshPostgresUserSearch(this.db);
+      const normalized = search.toLowerCase();
+      const pattern = `%${normalized.replace(/[\\%_]/g, "\\$&")}%`;
+      const name = this.db.dialect === "postgres" ? sql`u.first_name_search` : sql`unicode_lower(coalesce(u.first_name, ''))`;
+      const username = this.db.dialect === "postgres" ? sql`u.username_search` : sql`unicode_lower(coalesce(u.username, ''))`;
+      matches = sql`${name} like ${pattern} escape ${"\\"}
+        or ${username} like ${pattern} escape ${"\\"}
+        or cast(u.tg_id as text) like ${pattern} escape ${"\\"}`;
+    }
     const messageActivity = sql`max((select max(m.created_at) from messages m where m.thread_id = t.id))`;
     const rows = await this.db.query<WebUser>(sql`
       select u.tg_id as id, u.first_name as name, u.username,
@@ -40,10 +51,7 @@ export class ConversationRepository {
           else coalesce(max(t.created_at), u.created_at) end as "lastActivity",
         count(distinct t.id) as "threadCount"
       from users u left join threads t on t.user_id = u.tg_id
-      where ${this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`}
-        and (${lower}(coalesce(u.first_name, '')) like ${pattern} escape ${"\\"}
-        or ${lower}(coalesce(u.username, '')) like ${pattern} escape ${"\\"}
-        or cast(u.tg_id as text) like ${pattern} escape ${"\\"})
+      where ${visibleUser} and (${matches})
       group by u.tg_id, u.first_name, u.username, u.created_at
       order by "lastActivity" desc, u.tg_id desc limit ${limit + 1} offset ${offset}
     `);
@@ -84,13 +92,6 @@ export class ConversationRepository {
     }
     chain.reverse();
     const scopes = messageSearchScopesForChain(chain);
-    // A later fork can point into inherited history: apply its bound to all earlier ancestors.
-    let ceiling: number | undefined;
-    for (let i = scopes.length - 1; i >= 0; i--) {
-      const own = scopes[i]!.maxMessageId;
-      if (own !== undefined) ceiling = Math.min(ceiling ?? own, own);
-      if (ceiling !== undefined) scopes[i]!.maxMessageId = ceiling;
-    }
     return { thread, chain, scopes };
   }
 
@@ -189,7 +190,7 @@ export class ConversationRepository {
       and ${messageScopePredicate(sql`m.thread_id`, sql`m.id`, chain.map(t => t.id), scopes)} limit 1
     `);
     if (!rows.length) throw new WebNotFound();
-    const file = await this.repos.files.get(fileId);
+    const file = await this.repos.files.get(fileId, scopes);
     if (!file) throw new WebNotFound();
     return file;
   }

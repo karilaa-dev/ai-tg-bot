@@ -75,12 +75,19 @@ export class ThreadTurnCoordinator {
     textPlain: string;
     sources: TelegramTurnSource[];
     attachments?: DurableTurnAttachment[];
+    signal?: AbortSignal;
   }): Promise<AcceptedTurnRun> {
+    input.signal?.throwIfAborted();
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     await this.recovery;
+    input.signal?.throwIfAborted();
     if (!this.accepting) throw new Error("Turn coordinator is shutting down.");
     const accepted = await this.input.repos.turnRuns.accept(input);
     if (accepted.created) this.activity.schedule(accepted.turnRun.id, accepted.turnRun.thread_id);
+    if (input.signal?.aborted && accepted.created) {
+      await this.input.repos.turnRuns.requestCancellation(input.threadId, accepted.turnRun.id);
+    }
+    input.signal?.throwIfAborted();
     if (accepted.created) {
       this.input.logger.info("turn accepted", {
         turnRunId: accepted.turnRun.id,

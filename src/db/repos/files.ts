@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import { createTextSearch, messageScopePredicate, type MessageSearchScope, type TextSearch } from "../search.js";
 import type {
@@ -69,8 +69,9 @@ export class FilesRepo {
     return inserted;
   }
 
-  get(fileId: number): Promise<FileRow | undefined> {
-    return queryOne<FileRow>(this.db, sql`select * from files where id = ${fileId}`);
+  async get(fileId: number, scopes?: MessageSearchScope[]): Promise<FileRow | undefined> {
+    const file = await queryOne<FileRow>(this.db, sql`select * from files where id = ${fileId}`);
+    return file && scopes ? (await this.scopedNames([file], scopes))[0] : file;
   }
 
   findBySource(source: Pick<ChatFileSource, "transport" | "connectionKey" | "remoteKey">): Promise<FileRow | undefined> {
@@ -112,9 +113,9 @@ export class FilesRepo {
     return this.listForMessages([messageId]);
   }
 
-  listForMessages(messageIds: number[]): Promise<FileRow[]> {
-    if (!messageIds.length) return Promise.resolve([]);
-    return this.db.query<FileRow>(sql`
+  async listForMessages(messageIds: number[]): Promise<FileRow[]> {
+    if (!messageIds.length) return [];
+    const files = await this.db.query<FileRow>(sql`
       select distinct f.*
       from files f
       left join message_files mf on mf.file_id = f.id
@@ -122,6 +123,8 @@ export class FilesRepo {
          or f.message_id in (${valueList(messageIds)})
       order by f.id asc
     `);
+    return this.projectNames(files, sql`m.id in (${valueList(messageIds)})`, file =>
+      file.message_id !== null && messageIds.includes(file.message_id));
   }
 
   async listVisibleIds(scopes: MessageSearchScope[], includeUnattachedInbound: boolean): Promise<number[]> {
@@ -140,7 +143,7 @@ export class FilesRepo {
         union all
         select f.id, 0 as attached
         from files f
-        where f.message_id is null and f.thread_id in (${valueList(threadIds)})
+        where f.message_id is null and f.thread_id = ${scopes.at(-1)!.threadId}
           and not exists (select 1 from message_files mf where mf.file_id = f.id)
           and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
             exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')
@@ -152,9 +155,42 @@ export class FilesRepo {
     return rows.map((row) => row.id);
   }
 
-  listByIds(fileIds: number[]): Promise<FileRow[]> {
-    if (!fileIds.length) return Promise.resolve([]);
-    return this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
+  async listByIds(fileIds: number[], scopes?: MessageSearchScope[]): Promise<FileRow[]> {
+    if (!fileIds.length) return [];
+    const files = await this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
+    return scopes ? this.scopedNames(files, scopes) : files;
+  }
+
+  private scopedNames(files: FileRow[], scopes: MessageSearchScope[]): Promise<FileRow[]> {
+    const threadIds = scopes.map(scope => scope.threadId);
+    return this.projectNames(files,
+      messageScopePredicate(sql`m.thread_id`, sql`m.id`, threadIds, scopes),
+      file => file.message_id === null
+        ? file.thread_id === scopes.at(-1)?.threadId
+        : scopes.some(scope => scope.threadId === file.thread_id
+          && (scope.maxMessageId === undefined || file.message_id! <= scope.maxMessageId)));
+  }
+
+  private async projectNames(files: FileRow[], visibleMessage: SQL, ownsFile: (file: FileRow) => boolean): Promise<FileRow[]> {
+    if (!files.length) return files;
+    const names = await this.db.query<{ file_id: number; display_name: string }>(sql`
+      select mf.file_id, mf.display_name
+      from message_files mf join messages m on m.id = mf.message_id
+      where mf.file_id in (${valueList(files.map(file => file.id))})
+        and mf.display_name is not null and ${visibleMessage}
+      order by m.id desc
+    `);
+    const latest = new Map<number, string>();
+    for (const row of names) if (!latest.has(row.file_id)) latest.set(row.file_id, row.display_name);
+    return files.map(file => {
+      // Byte deduplication crosses users; the original uploader's name is private.
+      const name = latest.get(file.id) ?? (ownsFile(file) ? file.name : anonymousFileName(file));
+      // Legacy image summaries and generated-image prompts can include private
+      // context. An attachment link only grants access to the image bytes.
+      const summary = file.type === "image" && !ownsFile(file) ? null
+        : file.summary === `Outbound file ${file.name}` ? `Outbound file ${name}` : file.summary;
+      return { ...file, name, summary };
+    });
   }
 
   async listRecoverableIds(fileIds: number[]): Promise<number[]> {
@@ -460,6 +496,11 @@ export class FilesRepo {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileChunkRow>(sql`select * from file_chunks where file_id in (${valueList(fileIds)}) order by file_id asc, idx asc`);
   }
+}
+
+function anonymousFileName(file: FileRow): string {
+  const extension = file.name.match(/\.(txt|csv|pdf|docx|xlsx|pptx|jpe?g|png|webp|wav|mp3|flac|m4a|ogg|oga|opus|webm|aac)$/i)?.[0] ?? "";
+  return `attachment-${file.id}${extension.toLowerCase()}`;
 }
 
 type TelegramFileObservation = {
