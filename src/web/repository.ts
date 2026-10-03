@@ -10,6 +10,7 @@ import type { WebPage, WebThread, WebThreadActivity, WebUser } from "./types.js"
 import { messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
 import { UsageRepository, type UsageScope } from "./usage.js";
 import type { UsagePricing } from "./usage-pricing.js";
+import { refreshPostgresUserSearch } from "../db/userSearch.js";
 
 export class WebNotFound extends Error {}
 
@@ -34,6 +35,7 @@ export class ConversationRepository {
     const visibleUser = this.botUserId === undefined ? sql`true` : sql`u.tg_id <> ${this.botUserId}`;
     let matches = sql`true`;
     if (search) {
+      if (this.db.dialect === "postgres") await refreshPostgresUserSearch(this.db);
       const normalized = search.toLowerCase();
       const pattern = `%${normalized.replace(/[\\%_]/g, "\\$&")}%`;
       const name = this.db.dialect === "postgres" ? sql`u.first_name_search` : sql`unicode_lower(coalesce(u.first_name, ''))`;

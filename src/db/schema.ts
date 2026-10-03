@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
+import { refreshPostgresUserSearch } from "./userSearch.js";
 
 export async function initializeSchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
   if (dialect === "sqlite") {
@@ -70,22 +71,32 @@ async function initializePostgres(db: SqlExecutor): Promise<void> {
 async function initializePostgresUserSearch(db: SqlExecutor): Promise<void> {
   await db.execute(sql`alter table users add column if not exists first_name_search text`);
   await db.execute(sql`alter table users add column if not exists username_search text`);
-  // Normalize existing identities once, in bounded batches, using the same
-  // Unicode mapping as SQLite and new writes rather than the database locale.
-  while (true) {
-    const users = await db.query<{ tg_id: number; first_name: string | null; username: string | null }>(sql`
-      select tg_id, first_name, username from users
-      where first_name_search is null or username_search is null order by tg_id limit 500
-    `);
-    if (!users.length) break;
-    const values = sql.join(users.map(user => sql`(
-      ${user.tg_id}::bigint, ${(user.first_name ?? "").toLowerCase()}::text, ${(user.username ?? "").toLowerCase()}::text
-    )`), sql`, `);
-    await db.execute(sql`
-      update users u set first_name_search = normalized.name, username_search = normalized.username
-      from (values ${values}) as normalized(id, name, username) where u.tg_id = normalized.id
-    `);
-  }
+  await db.execute(sql`
+    create index if not exists users_search_pending_idx on users(tg_id)
+    where first_name_search is null or username_search is null
+  `);
+  // Older app versions update identities without updating their normalized
+  // fields. Mark those rows for repair without relying on PostgreSQL's locale.
+  await db.execute(sql`
+    create or replace function invalidate_user_search() returns trigger language plpgsql as $$
+    begin
+      if new.first_name is distinct from old.first_name
+        and new.first_name_search is not distinct from old.first_name_search then
+        new.first_name_search := null;
+      end if;
+      if new.username is distinct from old.username
+        and new.username_search is not distinct from old.username_search then
+        new.username_search := null;
+      end if;
+      return new;
+    end;
+    $$
+  `);
+  await db.execute(sql`
+    create or replace trigger users_invalidate_search before update of first_name, username on users
+    for each row execute function invalidate_user_search()
+  `);
+  await refreshPostgresUserSearch(db);
 }
 
 async function initializeCommonTables(

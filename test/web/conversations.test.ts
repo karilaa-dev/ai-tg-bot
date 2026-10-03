@@ -501,6 +501,22 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.users("İΣΟΣ", 0)).items.map(u => u.id)).toEqual([1]);
   });
 
+  it.skipIf(dialect !== "postgres")("repairs search after legacy processes insert and rename users", async () => {
+    await repos.users.ensure({ tgId: 1, firstName: "Previous", username: "oldname" });
+    await database.db.execute(sql`update users set first_name = 'İΣΟΣ', username = 'НОВОЕ' where tg_id = 1`);
+    await database.db.execute(sql`insert into users(tg_id, first_name, username, created_at) values (2, 'ДМИТРИЙ', 'ÉLODIE', 2)`);
+    expect((await repository.users("previous", 0)).items).toEqual([]);
+    expect((await repository.users("oldname", 0)).items).toEqual([]);
+    expect((await repository.users("i̇σος", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("новое", 0)).items.map(u => u.id)).toEqual([1]);
+    expect((await repository.users("дмитрий", 0)).items.map(u => u.id)).toEqual([2]);
+    expect((await repository.users("élodie", 0)).items.map(u => u.id)).toEqual([2]);
+    // Reinitialization must not be needed after subsequent legacy writes either.
+    await database.db.execute(sql`update users set first_name = 'Renamed again' where tg_id = 1`);
+    expect((await repository.users("i̇σος", 0)).items).toEqual([]);
+    expect((await repository.users("RENAMED AGAIN", 0)).items.map(u => u.id)).toEqual([1]);
+  });
+
   it("hides existing bot records from lists, search, and direct history access", async () => {
     const botThread = await thread(99);
     await thread(1);
