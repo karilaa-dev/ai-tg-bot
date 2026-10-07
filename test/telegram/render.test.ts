@@ -194,7 +194,7 @@ describe("renderFinal", () => {
 
   it("uses a generated-image elapsed title while image generation is active", () => {
     const payload = renderDraft({
-      thinkingMd: "🖼️ Generating image <code>blue square</code>",
+      thinkingMd: "🎨 Generating image <code>blue square</code>",
       answerMd: "",
       elapsedMs: 19_000,
       t,
@@ -202,13 +202,13 @@ describe("renderFinal", () => {
     const markdown = payload.markdown ?? "";
 
     expect(markdown).toContain("<details>\n<summary>Generating image for 19s</summary>");
-    expect(markdown).toContain("🖼️ Generating image <code>blue square</code>");
+    expect(markdown).toContain("🎨 Generating image <code>blue square</code>");
     expect(markdown).not.toContain("Thinking for 19s");
   });
 
   it("uses the generated-image title when reasoning appears before the image tool", () => {
     const payload = renderDraft({
-      thinkingMd: "Determining final text\n\n🖼️ Generating image <code>blue square</code>",
+      thinkingMd: "Determining final text\n\n🎨 Generating image <code>blue square</code>",
       answerMd: "",
       elapsedMs: 31_000,
       t,
@@ -217,7 +217,7 @@ describe("renderFinal", () => {
 
     expect(markdown).toContain("<details>\n<summary>Generating image for 31s</summary>");
     expect(markdown).toContain("Determining final text");
-    expect(markdown).toContain("🖼️ Generating image <code>blue square</code>");
+    expect(markdown).toContain("🎨 Generating image <code>blue square</code>");
     expect(markdown).not.toContain("Thinking for 31s");
   });
 
