@@ -162,14 +162,16 @@ function toolLabel(name: string): string {
       return "🌐 Reading page";
     case "browser_open":
     case "browser_navigate":
-      return "🌍 Browsing web";
+      return "🌐 Browsing web";
     case "browser_snapshot":
-      return "🧭 Reading browser";
+      return "📄 Reading browser";
     case "browser_click":
+      return "🖱️ Using browser";
     case "browser_type":
     case "browser_press":
+      return "⌨️ Using browser";
     case "browser_scroll":
-      return "🖱️ Using browser";
+      return "↕️ Using browser";
     case "browser_screenshot":
       return "📸 Capturing page";
     case "browser_list_downloads":
@@ -179,36 +181,44 @@ function toolLabel(name: string): string {
     case "browser_list_tabs":
       return "🗂️ Listing browser tabs";
     case "browser_close_tab":
-      return "🧹 Closing browser tab";
+      return "❎ Closing browser tab";
     case "browser_extend_session":
       return "⏱️ Extending browser session";
     case "browser_close_session":
-      return "🧹 Closing browser session";
+      return "❎ Closing browser session";
     case "render_office_preview":
       return "🖼️ Previewing Office file";
     case "validate_office_file":
-      return "🔍 Validating Office file";
+      return "📋 Validating Office file";
     case "search_thread":
       return "💬 Searching chat";
     case "load_message":
       return "📨 Loading message";
     case "search_in_file":
-      return "📄 Searching file";
+      return "🔎 Searching file";
     case "read_file_section":
     case "read":
       return "📖 Reading file";
     case "materialize_chat_files":
       return "📥 Restoring chat files";
     case "render_pdf_pages":
-      return "👁️ Rendering PDF pages";
+      return "📑 Rendering PDF pages";
     case "inspect_workspace_images":
-      return "👁️ Inspecting images";
+      return "🖼️ Inspecting images";
     case "generate_image":
-      return "🖼️ Generating image";
+      return "🎨 Generating image";
     case "create_file":
       return "📎 Attaching file";
     case "bash":
-      return "🐚 Running bash";
+      return "💻 Running bash";
+    case "memo":
+      return "🧠 Using memory";
+    case "transcribe_audio":
+      return "🎙️ Transcribing audio";
+    case "publish_website":
+      return "🚀 Publishing website";
+    case "finish_response":
+      return "📬 Preparing response";
     default:
       return `🛠️ Using ${name.replaceAll("_", " ")}`;
   }

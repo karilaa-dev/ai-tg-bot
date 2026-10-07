@@ -116,14 +116,14 @@ describe("DraftStreamer", () => {
     expect(markdownOf(payloads.at(-1))).toContain("<summary>🧠 Thinking for 0s</summary>");
 
     await vi.advanceTimersByTimeAsync(4_000);
-    streamer.update({ thinkingMd: "🖼️ Generating image <code>blue square</code>", answerMd: "" });
+    streamer.update({ thinkingMd: "🎨 Generating image <code>blue square</code>", answerMd: "" });
     await flushPromises();
-    expect(markdownOf(payloads.at(-1))).toContain("<summary>🖼️ Generating image for 4s</summary>");
-    expect(markdownOf(payloads.at(-1))).toContain("🖼️ Generating image <code>blue square</code>");
+    expect(markdownOf(payloads.at(-1))).toContain("<summary>🎨 Generating image for 4s</summary>");
+    expect(markdownOf(payloads.at(-1))).toContain("🎨 Generating image <code>blue square</code>");
 
     await vi.advanceTimersByTimeAsync(10_000);
     await flushPromises();
-    expect(markdownOf(payloads.at(-1))).toContain("<summary>🖼️ Generating image for 14s</summary>");
+    expect(markdownOf(payloads.at(-1))).toContain("<summary>🎨 Generating image for 14s</summary>");
 
     streamer.stop();
   });
@@ -275,7 +275,7 @@ function markdownOf(payload: unknown): string {
 function testT(key: string, params?: Record<string, string | number>): string {
   if (key === "thinking-placeholder") return "💭 Thinking...";
   if (key === "thinking-summary-running") return `🧠 Thinking for ${params?.time}`;
-  if (key === "thinking-summary-generating-image") return `🖼️ Generating image for ${params?.time}`;
+  if (key === "thinking-summary-generating-image") return `🎨 Generating image for ${params?.time}`;
   if (key === "thinking-summary-final") return `🧠 Thought for ${params?.time}`;
   return key;
 }

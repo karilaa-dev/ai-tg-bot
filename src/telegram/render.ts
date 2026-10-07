@@ -241,7 +241,7 @@ function draftThinkingTitle(t: RenderT, thinkingMd: string, elapsedMs: number): 
 }
 
 function isGeneratingImageThinking(thinkingMd: string): boolean {
-  return /(?:^|\n)\s*🖼️ Generating image\b/.test(thinkingMd);
+  return /(?:^|\n)\s*🎨 Generating image\b/.test(thinkingMd);
 }
 
 function formatElapsed(ms: number): string {
