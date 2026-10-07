@@ -115,3 +115,19 @@ describe("transcription configuration", () => {
     expect(() => loadConfig({ ...required, TRANSCRIPTION_TIMEOUT_MS: "0" })).toThrow();
   });
 });
+
+describe("global OptMem configuration", () => {
+  it("uses upstream defaults unless the environment overrides them", () => {
+    expect(loadConfig(required)).toMatchObject({ OPTMEM_WAKE_LINES: 96, OPTMEM_ENTRY_CHARS: 280, OPTMEM_PART_CHARS: 20000, OPTMEM_PART_LINES: 500 });
+    expect(loadConfig({ ...required, OPTMEM_WAKE_LINES: "128", OPTMEM_ENTRY_CHARS: "120", OPTMEM_PART_CHARS: "12000", OPTMEM_PART_LINES: "100" }))
+      .toMatchObject({ OPTMEM_WAKE_LINES: 128, OPTMEM_ENTRY_CHARS: 120, OPTMEM_PART_CHARS: 12000, OPTMEM_PART_LINES: 100 });
+  });
+  it("rejects invalid budgets and notes above the original byte limit", () => {
+    for (const key of ["OPTMEM_WAKE_LINES", "OPTMEM_ENTRY_CHARS", "OPTMEM_PART_CHARS", "OPTMEM_PART_LINES"]) {
+      for (const value of ["", "0", "-1", "1.5", "NaN", "9007199254740992"]) {
+        expect(() => loadConfig({ ...required, [key]: value })).toThrow(key);
+      }
+    }
+    expect(() => loadConfig({ ...required, OPTMEM_ENTRY_CHARS: "281" })).toThrow("OPTMEM_ENTRY_CHARS");
+  });
+});

@@ -2,10 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { cover, type Block } from "./blocks.js";
-import { decode, isMissing, MemoError, Store, strip, type Memory } from "./store.js";
+import { decode, MemoError, strip, type Memory } from "./records.js";
 import { memoryInstructions } from "./prompt.js";
 import { compileRecallPattern } from "./regex.js";
 import { decimal } from "./decimal.js";
+import type { MemoryStore } from "./storage.js";
+import { DEFAULT_MEMORY_SIZES, type MemorySizes } from "./settings.js";
 
 export const OPTMEM_UPSTREAM_COMMIT = "1fb164cf39028047781f72ac3bb1e5a691c1dcb0";
 const KNOBS = {
@@ -15,12 +17,15 @@ const KNOBS = {
   PART_LINES: [500, "output paging: largest part, in lines"],
 } satisfies Record<string, readonly [number, string]>;
 type Knob = keyof typeof KNOBS;
-type Sizes = Record<Knob, number>;
+
 const RAW_MAX = 16;
 const COMMANDS = ["init", "wake", "note", "nap", "recall", "zoom", "forget", "config", "import"];
 export interface MemoResult { stdout: string; stderr: string; exit_code: 0 | 1 }
 export interface MemoInput {
-  directory: string;
+  matchRecall?: (lines: string[]) => Promise<boolean[]>;
+  store: MemoryStore;
+  settings?: MemorySizes;
+  location?: string;
   args: readonly string[];
   command?: string;
   now?: Date;
@@ -58,17 +63,6 @@ function blockId(value: string): Block {
   return [lo, hi];
 }
 
-function size(key: Knob, value: string, where = ""): number {
-  const number = decimal(value);
-  if (number === undefined || number < 1) {
-    throw new MemoError(`${where}${key} must be a positive whole number, not '${value}'.`);
-  }
-  if (key === "ENTRY_CHARS" && number > 280) {
-    throw new MemoError(`${where}ENTRY_CHARS is at most 280: a memory has to fit the fixed-width records.`);
-  }
-  return number;
-}
-
 function usage(command: string): string {
   return `OptMem: a permanent, append-only memory for AI agents.
 
@@ -79,21 +73,23 @@ function usage(command: string): string {
   ${command} recall <regex>   search every memory ever recorded.
   ${command} zoom <lo>-<hi>   open a tree node: its two halves.
   ${command} forget <lo>-<hi> drop a bad summary; nap rebuilds it.
-  ${command} config [NAME=N]  show this memory's sizes, or change one.
+  ${command} config          show the global memory settings.
   ${command} import <file>    bulk-load dated memories (bootstrap only).
 
-The memories live in ~/.optmem/memory, or in $MEMORY_DIR if set.
+Memories live in the application database, separately for each Telegram user.
+Settings are configured globally with OPTMEM_* environment variables.
 See github.com/VictorTaelin/OptMem.`;
 }
 
 class Command {
-  readonly store: Store;
+  readonly store: MemoryStore;
   readonly name: string;
   private readonly output: string[] = [];
-  private sizes: Sizes = { WAKE_LINES: 96, ENTRY_CHARS: 280, PART_CHARS: 20000, PART_LINES: 500 };
+  private readonly sizes: MemorySizes;
   constructor(private readonly input: MemoInput) {
     this.name = input.command ?? "memo";
-    this.store = new Store(input.directory, this.name);
+    this.store = input.store;
+    this.sizes = input.settings ?? DEFAULT_MEMORY_SIZES;
   }
   private print(text = ""): void { this.output.push(text + "\n"); }
 
@@ -105,7 +101,6 @@ class Command {
       else if (command === "init") await this.init(args);
       else {
         await this.store.open();
-        this.sizes = { ...this.sizes, ...await this.overrides() };
         switch (command) {
           case "wake": return await this.wake(args);
           case "note": await this.note(args); break;
@@ -129,46 +124,14 @@ class Command {
     return { stdout: this.output.join(""), stderr: stderr ? stderr + "\n" : "", exit_code };
   }
 
-  private async overrides(): Promise<Partial<Sizes>> {
-    const file = path.join(this.input.directory, "config");
-    let text;
-    try { text = decode(await fs.readFile(file)); }
-    catch (error) { if (isMissing(error)) return {}; throw error; }
-    const out: Partial<Sizes> = {};
-    for (const [index, original] of text.split(/\r\n|\r|\n/u).entries()) {
-      const line = strip(original.split("#", 1)[0]);
-      if (!line.includes("=")) continue;
-      const pos = line.indexOf("="), key = strip(line.slice(0, pos)).toUpperCase(), value = strip(line.slice(pos + 1));
-      const where = `${pretty(file)} line ${index + 1}: `;
-      if (!isKnob(key)) throw new MemoError(`${where}${key} is not a size. Delete the line, or name one of: ${knobNames.join(", ")}.`);
-      out[key] = size(key, value, where);
-    }
-    return out;
-  }
-
-  private configText(overrides: Partial<Sizes>): string {
-    const lines = ["# OptMem sizes for this memory. A commented line means: follow the",
-      `# tool's default. Edit with \`${this.name} config NAME=VALUE\`.`, ""];
-    for (const key of knobNames) {
-      const [defaultValue, what] = KNOBS[key];
-      lines.push(`${(key in overrides ? "" : "# ").padEnd(2)}${key.padEnd(12)} = ${String(overrides[key] ?? defaultValue).padEnd(6)} # ${what}`);
-    }
-    return lines.join("\n") + "\n";
-  }
-
   private async init(args: string[]): Promise<void> {
     if (args.length) throw new MemoError(`usage: ${this.name} init`);
     const fresh = await this.store.initialize();
-    try { await fs.writeFile(path.join(this.input.directory, "config"), this.configText({}), { flag: "wx", mode: 0o600 }); }
-    catch (error) { if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error; }
-    this.sizes = { ...this.sizes, ...await this.overrides() };
-    const directory = pretty(this.input.directory);
-    this.print(fresh ? `Created ${directory}: this machine's memory, one identity, forever.` : `Found ${directory}: ${plural(await this.store.length(), "memory")}.`);
-    this.print(`Sizes live in ${directory}/config; the defaults are fine.`);
+    const location = this.input.location ?? "this user's database memory";
+    this.print(fresh ? `Created ${location}.` : `Found ${location}: ${plural(await this.store.length(), "memory")}.`);
+    this.print("Settings come from OPTMEM_* environment variables.");
     this.print();
-    this.print("Paste this at the top of your agent's AGENTS.md (or CLAUDE.md), done:");
-    this.print();
-    this.print(memoryInstructions(this.name, directory, this.sizes.ENTRY_CHARS));
+    this.print(memoryInstructions(this.name, location, this.sizes.ENTRY_CHARS));
   }
 
   private check(value: string): string {
@@ -287,20 +250,11 @@ class Command {
   }
 
   private async configure(args: string[]): Promise<void> {
-    await this.store.locked(async () => {
-      const overrides = await this.overrides();
-      for (const arg of args) {
-        const pos = arg.indexOf("="), key = strip(pos < 0 ? arg : arg.slice(0, pos)).toUpperCase(), value = strip(arg.slice(pos + 1));
-        if (pos < 0 || !isKnob(key)) throw new MemoError(`usage: ${this.name} config [NAME=VALUE ...]   # NAME one of ${knobNames.join(", ")}`);
-        if (value) overrides[key] = size(key, value);
-        else delete overrides[key];
-      }
-      if (args.length) await fs.writeFile(path.join(this.input.directory, "config"), this.configText(overrides));
-      for (const key of knobNames) {
-        const [defaultValue, what] = KNOBS[key];
-        this.print(`${key.padEnd(12)} ${String(overrides[key] ?? defaultValue).padEnd(7)} ${what}${key in overrides ? ` (default ${defaultValue})` : ""}`);
-      }
-    });
+    if (args.length) throw new MemoError("Memory settings are global and read-only. Configure OPTMEM_* in .env and restart the bot.");
+    for (const key of knobNames) {
+      const [defaultValue, what] = KNOBS[key];
+      this.print(`${key.padEnd(12)} ${String(this.sizes[key]).padEnd(7)} ${what}${this.sizes[key] !== defaultValue ? ` (default ${defaultValue})` : ""}`);
+    }
   }
 
   private async forget(args: string[]): Promise<void> {
@@ -313,16 +267,25 @@ class Command {
   private async recall(args: string[]): Promise<void> {
     if (args.length !== 1) throw new MemoError(`usage: ${this.name} recall <regex>`);
     let pattern;
-    try { pattern = compileRecallPattern(args[0]); }
+    try { if (!this.input.matchRecall) pattern = compileRecallPattern(args[0]); }
     catch (error) { throw new MemoError(`bad regex: ${error instanceof Error ? error.message : String(error)}`); }
     let hits = 0, bytes = 0;
     const out: string[] = [];
+    let batch: string[] = [];
+    const consume = async () => {
+      const matches = this.input.matchRecall ? await this.input.matchRecall(batch) : batch.map(line => pattern!.test(line));
+      for (const [i, line] of batch.entries()) {
+        if (!matches[i]) continue;
+        hits++; out.push(line); bytes += Buffer.byteLength(line) + 1;
+        while (bytes > this.sizes.PART_CHARS) bytes -= Buffer.byteLength(out.shift()!) + 1;
+      }
+      batch = [];
+    };
     for await (const entry of this.store.scan()) {
-      const line = formatted(entry);
-      if (!pattern.test(line)) continue;
-      hits++; out.push(line); bytes += Buffer.byteLength(line) + 1;
-      while (bytes > this.sizes.PART_CHARS) bytes -= Buffer.byteLength(out.shift()!) + 1;
+      batch.push(formatted(entry));
+      if (batch.length === 256) await consume();
     }
+    if (batch.length) await consume();
     if (!hits) { this.print("No match."); return; }
     this.print(out.join("\n"));
     this.print(out.length < hits ? `Newest ${out.length} of ${plural(hits, "match")}. Narrow the regex.` : `${plural(hits, "match")}.`);

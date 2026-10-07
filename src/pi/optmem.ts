@@ -20,18 +20,24 @@ export function projectOptMemWake(messages: AgentMessage[], branch: readonly Ses
   return output;
 }
 
-export function createOptMemExtension(): InlineExtension {
+export function createOptMemExtension(memoryEnabled: () => Promise<boolean> = async () => true): InlineExtension {
   return {
     name: "optmem",
     factory: pi => {
       let starting = true;
       pi.on("session_start", () => { starting = true; });
-      pi.on("before_agent_start", () => {
+      pi.on("before_agent_start", async () => {
+        const enabled = await memoryEnabled();
+        const tools = pi.getActiveTools();
+        if (enabled && !tools.includes("memo")) pi.setActiveTools([...tools, "memo"]);
+        if (!enabled && tools.includes("memo")) pi.setActiveTools(tools.filter(name => name !== "memo"));
+        if (!enabled) { starting = true; return; }
         if (!starting) return;
         starting = false;
         return { message: { customType: OPTMEM_WAKE_CONTEXT, content: STARTUP, display: false } };
       });
-      pi.on("context", (event, ctx) => {
+      pi.on("context", async (event, ctx) => {
+        if (!await memoryEnabled()) return;
         const messages = projectOptMemWake(event.messages, ctx.sessionManager.getBranch());
         return messages === event.messages ? undefined : { messages };
       });

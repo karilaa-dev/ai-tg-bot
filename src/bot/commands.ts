@@ -5,6 +5,7 @@ const commands = [
   ["lang", { en: "🌐 Change language", ru: "🌐 Сменить язык" }],
   ["timezone", { en: "🕒 Set timezone", ru: "🕒 Установить часовой пояс" }],
   ["stream", { en: "🌊 Toggle streaming", ru: "🌊 Переключить стриминг" }],
+  ["memory", { en: "🧠 Enable or disable memory", ru: "🧠 Включить или выключить память" }],
   ["stop", { en: "🛑 Stop the active task", ru: "🛑 Остановить активную задачу" }],
   ["fork", { en: "🌱 Fork this topic", ru: "🌱 Создать форк темы" }],
   ["compact", { en: "🗜 Compact memory", ru: "🗜 Сжать память" }],

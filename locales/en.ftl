@@ -88,6 +88,10 @@ file-source-registered = ✅ File <code>{ $name }</code> registered for sandbox 
 file-reused = ♻️ Reused saved file <code>{ $name }</code>.
 fork-created = 🌱 Fork created. Context was carried into the new topic.
 fork-need-topics = 🧵 Topics are not enabled for this bot. Enable Topics in BotFather first.
-help = 🧭 Commands: /lang, /timezone, /stream, /stop, /fork, /compact, /help. Start a new Telegram topic for a clean thread; use /fork to carry Pi context into a new topic. Use /stop to cancel the active agent turn or file processing.
+help = 🧭 Commands: /lang, /timezone, /stream, /memory, /stop, /fork, /compact, /help. Start a new Telegram topic for a clean thread; use /fork to carry Pi context into a new topic. Use /stop to cancel the active agent turn or file processing.
 private-only = 🔒 I only work in private chats.
 unknown-command = ❓ Unknown command. Try /help.
+
+memory-on = 🧠 Memory is on. Use /memory off to disable it for yourself.
+memory-off = 📴 Memory is off. Saved notes are kept; earlier messages remain in your conversations. Use /memory on to enable it again.
+memory-usage = Use /memory on or /memory off. /memory shows your current setting.

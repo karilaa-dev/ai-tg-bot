@@ -104,6 +104,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
     if (this.turnActive) await this.endTurn();
+    const currentUser = await this.repos.users.get(this.user.tg_id);
+    if (currentUser) this.user = { ...this.user, memory_enabled: currentUser.memory_enabled };
     this.commandActivityRelease = undefined;
     this.officeValidation.clear();
     this.visibilityScope = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);

@@ -28,6 +28,7 @@ interface UsersTable {
   lang: Locale;
   tz_offset_min: number | null;
   stream_mode: number;
+  memory_enabled: number;
   created_at: number;
 }
 

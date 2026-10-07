@@ -9,7 +9,7 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import { inferenceUsageFromEntries } from "../../src/pi/usage.js";
-import { userMemoryDirectory } from "../../src/memory/userMemory.js";
+import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import { createMemoTool } from "../../src/ai/tools/memo.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 
@@ -18,7 +18,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 describe("Pi tool discovery and codemode", () => {
   it("runs OptMem through the real session, restores it after restart, and shares only within one user", async () => {
-    const { runtime, contexts, reopen, pi, repos, user, config, thread } = await setup([
+    const { runtime, contexts, reopen, pi, repos, user, thread } = await setup([
       { name: "memo", arguments: { args: ["wake"] } },
       { name: "memo", arguments: { args: ["note", "Prefers metric measurements"] } },
       { name: "memo", arguments: { args: ["note", "Lives in Helsinki"] } },
@@ -32,9 +32,9 @@ describe("Pi tool discovery and codemode", () => {
     expect(JSON.stringify(contexts[0])).toContain("Read your permanent memory before other tools");
     expect(JSON.stringify(contexts[3])).toContain("Compress memories #0-1");
     expect(runtime.session.getCallableToolNames()).not.toContain("memo");
-    const directory = userMemoryDirectory(config, user.tg_id);
-    const original = await fs.readFile(path.join(directory, "LOG.txt"));
-    expect(original.byteLength).toBe(640);
+    const store = new DatabaseMemoryStore(runtime.bridge.buildInput().db.db, user.tg_id);
+    const original = await store.slice(0, 2);
+    expect(original).toHaveLength(2);
 
     const secondThread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Same user" });
     const second = await pi.runtime(secondThread, user);
@@ -57,9 +57,35 @@ describe("Pi tool discovery and codemode", () => {
     await resumed.session.prompt("What do you remember?", { expandPromptTemplates: false });
     expect(JSON.stringify(contexts.at(-1))).toContain("Prefers metric measurements");
     expect(JSON.stringify(contexts.at(-1))).toContain("Lives in Helsinki");
-    expect(await fs.readFile(path.join(directory, "LOG.txt"))).toEqual(original);
+    expect(await store.slice(0, 2)).toEqual(original);
     const invalid = createPiToolAdapters(resumed.bridge).find(tool => tool.name === "memo")!;
     await expect(invalid.execute("bad-import", { args: ["import", "/etc/passwd"] }, new AbortController().signal, undefined, {} as never)).rejects.toThrow("Invalid memo input");
+  });
+
+  it("refreshes the off switch in a cached session and wakes again when re-enabled", async () => {
+    const { runtime, contexts, repos, user } = await setup([
+      { name: "finish_response", arguments: { text: "First" } },
+      { name: "finish_response", arguments: { text: "Disabled" } },
+      { name: "memo", arguments: { args: ["wake"] } },
+      { name: "finish_response", arguments: { text: "Enabled" } },
+    ]);
+    const staleTool = createMemoTool(runtime.bridge.buildInput());
+    await staleTool.execute({ args: ["note", "saved before disabling"] });
+    await runtime.session.prompt("First turn", { expandPromptTemplates: false });
+    await repos.users.setMemoryEnabled(user.tg_id, false);
+    await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file"); } });
+    await runtime.session.prompt("Second turn", { expandPromptTemplates: false });
+    expect(getCurrentTools(contexts[1].messages).map(tool => tool.name)).not.toContain("memo");
+    expect(getCurrentSystemPrompt(contexts[1].messages)).toContain("Permanent memory is disabled");
+    expect(getCurrentSystemPrompt(contexts[1].messages)).not.toContain("Your memory is OptMem");
+    expect(await staleTool.execute({ args: ["note", "must not save"] })).toMatchObject({ exit_code: 1, stderr: expect.stringContaining("disabled") });
+    const wakesBefore = runtime.session.messages.filter(message => message.role === "custom" && message.customType === "optmem-wake-context").length;
+    await repos.users.setMemoryEnabled(user.tg_id, true);
+    await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file"); } });
+    await runtime.session.prompt("Third turn", { expandPromptTemplates: false });
+    expect(getCurrentTools(contexts[2].messages).map(tool => tool.name)).toContain("memo");
+    expect(JSON.stringify(contexts.at(-1))).toContain("saved before disabling");
+    expect(runtime.session.messages.filter(message => message.role === "custom" && message.customType === "optmem-wake-context")).toHaveLength(wakesBefore + 1);
   });
 
   it("starts with six tools and discovers a specialist without exposing mutations to scripts", async () => {

@@ -1,29 +1,31 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runMemo, type MemoResult } from "../../src/memory/optmem/index.js";
+import { Store } from "../helpers/optmemFileStore.js";
+import { DEFAULT_MEMORY_SIZES, type MemorySizes } from "../../src/memory/optmem/settings.js";
 import { cover } from "../../src/memory/optmem/blocks.js";
 import { recallInWorker } from "../../src/memory/optmem/recall.js";
 
 // Port of the upstream invariant scenarios at 1fb164cf39028047781f72ac3bb1e5a691c1dcb0.
 const directories: string[] = [];
 const now = new Date(2026, 9, 7, 12);
-const exec = promisify(execFile);
 afterEach(async () => { for (const directory of directories.splice(0)) await fs.rm(directory, { recursive: true, force: true }); });
 
 async function fixture() {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "optmem-test-"));
   directories.push(parent);
   const directory = path.join(parent, "memory");
-  const run = (...args: string[]) => runMemo({ directory, args, now });
+  const store = new Store(directory, "memo");
+  const settings = { ...DEFAULT_MEMORY_SIZES };
+  const setSettings = (overrides: Partial<MemorySizes>) => Object.assign(settings, overrides);
+  const run = (...args: string[]) => runMemo({ store, settings, args, now });
   expect((await run("init")).exit_code).toBe(0);
-  return { directory, run };
+  return { directory, store, settings, setSettings, run };
 }
 
 function nextBlock(result: MemoResult): string | undefined {
@@ -53,13 +55,13 @@ async function seed(directory: string, run: (...args: string[]) => Promise<MemoR
 
 describe("OptMem native port", () => {
   it("retains all records and summaries when the filesystem returns short reads", async () => {
-    const { run } = await fixture();
+    const { run, setSettings } = await fixture();
     await run("note", "first fact");
     await run("note", "second fact");
     const summary = "long summary ".repeat(18).trim();
     await run("nap", "0-1", summary);
     await run("note", "third fact");
-    await run("config", "WAKE_LINES=2");
+    setSettings({ WAKE_LINES: 2 });
     const open = fs.open.bind(fs);
     const spy = vi.spyOn(fs, "open").mockImplementation(async (...args) => new Proxy(await open(...args), {
       get: (file, key) => key === "read"
@@ -89,15 +91,15 @@ describe("OptMem native port", () => {
   });
 
   it("does not create a missing identity except through init and preserves existing bytes on re-init", async () => {
-    const { directory, run } = await fixture();
+    const { directory, run, setSettings } = await fixture();
     const ghost = path.join(directory, "typo");
-    expect(await runMemo({ directory: ghost, args: ["wake"] })).toMatchObject({ exit_code: 1, stderr: expect.stringContaining("No memory at") });
+    expect(await runMemo({ store: new Store(ghost, "memo"), args: ["wake"] })).toMatchObject({ exit_code: 1, stderr: expect.stringContaining("No memory at") });
     await expect(fs.stat(ghost)).rejects.toMatchObject({ code: "ENOENT" });
     await run("note", "remembered");
     await run("note", "forever");
     await settle(run);
-    await run("config", "WAKE_LINES=12");
-    const names = ["LOG.txt", "config", "TREE/2"];
+    setSettings({ WAKE_LINES: 12 });
+    const names = ["LOG.txt", "TREE/2"];
     const before = await Promise.all(names.map(name => fs.readFile(path.join(directory, name))));
     for (let i = 0; i < 3; i++) expect((await run("init")).stdout).toContain("Found");
     expect(await Promise.all(names.map(name => fs.readFile(path.join(directory, name))))).toEqual(before);
@@ -137,12 +139,12 @@ describe("OptMem native port", () => {
   });
 
   it("ports the large-life, pagination, snapshot and navigation invariants", async () => {
-    const { directory, run } = await fixture();
+    const { directory, run, setSettings } = await fixture();
     await seed(directory, run, 2000);
     expect(await run("wake")).toMatchObject({ exit_code: 1, stdout: expect.stringContaining("Cannot wake:"), stderr: "" });
     expect((await run("wake")).stdout).toContain("then run memo wake again");
     expect(await settle(run)).toBe(1994);
-    await run("config", "PART_LINES=24");
+    setSettings({ PART_LINES: 24 });
     const lines: string[] = [];
     const first = await run("wake", "1", "2000");
     for (let part = 1; part <= 4; part++) {
@@ -208,20 +210,20 @@ describe("OptMem native port", () => {
   });
 
   it("accepts Unicode decimal arguments like upstream", async () => {
-    const { run } = await fixture();
+    const { run, setSettings } = await fixture();
     await run("note", "one"); await run("note", "two");
     expect((await run("wake", "١", "٢")).exit_code).toBe(0);
     expect((await run("nap", "٠-١", "both")).stdout).toContain("0-1 saved.");
-    expect((await run("config", "WAKE_LINES=１")).stdout).toContain("default 96");
+    setSettings({ WAKE_LINES: 1 });
     expect((await run("wake")).stdout).toBe("#0-1 both\nYou are awake.\n");
   });
 
   it("runs recall off the bot event loop and can cancel a costly pattern", async () => {
-    const { directory, run } = await fixture();
+    const { run, store, settings } = await fixture();
     await run("note", "a".repeat(260) + "!");
-    expect(await recallInWorker(directory, "^#0 ")).toEqual(await run("recall", "^#0 "));
+    expect(await recallInWorker({ store, settings }, "^#0 ")).toEqual(await run("recall", "^#0 "));
     const abort = new AbortController();
-    const pending = recallInWorker(directory, "(a+)+$", abort.signal);
+    const pending = recallInWorker({ store, settings }, "(a+)+$", abort.signal);
     const rejection = expect(pending).rejects.toThrow("cancelled search");
     await delay(100);
     abort.abort(new Error("cancelled search"));
@@ -253,32 +255,29 @@ describe("OptMem native port", () => {
     } finally { killed.kill("SIGKILL"); }
   }, 20000);
 
-  it("keeps size overrides local and applies resets immediately without rebuilding", async () => {
-    const { directory, run } = await fixture(), other = await fixture();
-    await seed(directory, run, 32); await settle(run);
-    await run("config", "WAKE_LINES=12", "ENTRY_CHARS=4");
-    expect((await run("wake")).stdout.split("\n").filter(line => line.startsWith("#"))).toHaveLength(12);
+  it("only displays global settings and rejects per-user overrides", async () => {
+    const { run, setSettings } = await fixture();
+    expect((await run("config")).stdout).toContain("WAKE_LINES   96");
+    setSettings({ ENTRY_CHARS: 4 });
+    expect((await run("config")).stdout).toContain("default 280");
     expect((await run("note", "longer")).stderr).toContain("limit 4");
-    expect((await other.run("note", "longer")).exit_code).toBe(0);
-    expect((await run("config", "WAKE_LINES=", "ENTRY_CHARS=")).stdout).not.toContain("default");
-    expect((await run("wake")).stdout.split("\n").filter(line => line.startsWith("#"))).toHaveLength(32);
-    for (const bad of ["WAKE_LINES=0", "WAKE_LINES=x", "ENTRY_CHARS=999", "NOPE=1", "WAKE_LINES"]) expect((await run("config", bad)).exit_code).toBe(1);
-    await fs.appendFile(path.join(directory, "config"), "WAKE_LNES=100\n");
-    for (const command of ["wake", "config"]) expect((await run(command)).stderr).toMatch(/config line \d+: WAKE_LNES is not a size/u);
+    for (const value of ["WAKE_LINES=12", "ENTRY_CHARS=", "WAKE_LINES=１"]) {
+      expect((await run("config", value)).stderr).toContain("global and read-only");
+    }
   });
 
   it("pages by UTF-8 bytes and caps recall by bytes rather than lines", async () => {
-    const { run } = await fixture();
+    const { run, setSettings } = await fixture();
     await run("note", "é".repeat(140)); await run("note", "é".repeat(140)); await settle(run);
-    await run("config", "PART_CHARS=350", "PART_LINES=1");
+    setSettings({ PART_CHARS: 350, PART_LINES: 1 });
     expect((await run("wake")).stdout).toContain("Not awake yet. Run: memo wake 2 2");
     expect((await run("recall", "é")).stdout).toContain("Newest 1 of 2 matches.");
-    await run("config", "PART_CHARS=1");
+    setSettings({ PART_CHARS: 1 });
     expect((await run("recall", "é")).stdout).toBe("\nNewest 0 of 2 matches. Narrow the regex.\n");
   });
 
   it("repairs partial appends and gives actionable errors for blank/corrupt summaries", async () => {
-    const { directory, run } = await fixture();
+    const { directory, run, setSettings } = await fixture();
     await run("note", "before crash");
     await fs.appendFile(path.join(directory, "LOG.txt"), "#99 half written");
     expect((await run("note", "after crash")).stdout).toContain("Saved as #1.");
@@ -286,7 +285,7 @@ describe("OptMem native port", () => {
     await fs.writeFile(path.join(directory, "TREE", "2"), "torn summary");
     expect((await run("nap", "0-1", "recovered")).stdout).toContain("0-1 saved.");
     expect((await fs.stat(path.join(directory, "TREE", "2"))).size).toBe(288);
-    await run("config", "WAKE_LINES=1");
+    setSettings({ WAKE_LINES: 1 });
     await fs.writeFile(path.join(directory, "TREE", "2"), " ".repeat(287) + "\n");
     expect((await run("wake")).stderr).toBe("The summary of #0-1 is blank. Run: memo forget 0-1\n");
     await fs.writeFile(path.join(directory, "TREE", "2"), Buffer.alloc(288, 0xff));
@@ -335,21 +334,11 @@ describe("OptMem native port", () => {
     expect((await run("import", file)).stderr).toContain("precedes the previous memory (2020-03-01)");
   });
 
-  it("reads upstream-format files and runs concurrent native CLI writers without losing IDs", async () => {
+  it("reads upstream-format files", async () => {
     const { directory, run } = await fixture();
     await fs.writeFile(path.join(directory, "LOG.txt"), "#0 2020-01-01 upstream memory".padEnd(319) + "\n");
     expect((await run("wake")).stdout).toBe("#0 2020-01-01 upstream memory\nYou are awake.\n");
-    const cli = path.resolve("src/memory/optmem/cli.ts");
-    const results = await Promise.all(Array.from({ length: 16 }, (_, i) => exec("bun", [cli, "note", `parallel note ${i}`], { env: { ...process.env, MEMORY_DIR: directory } })));
-    const ids = results.map(result => Number(/Saved as #(\d+)/u.exec(result.stdout)?.[1])).sort((a, b) => a - b);
-    expect(ids).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
-    expect((await fs.stat(path.join(directory, "LOG.txt"))).size).toBe(17 * 320);
-    expect((await run("recall", "parallel note")).stdout).toContain("16 matches.");
-    const result = await exec("bun", [cli, "nap"], { env: { ...process.env, MEMORY_DIR: directory } });
-    const order = result.stdout.split("\n").find(line => line.startsWith("Run: "))!;
-    const obeyed = await exec("/bin/sh", ["-c", order.slice(5).replace('"<your line>"', '"both memories"')], { env: { ...process.env, MEMORY_DIR: directory, PATH: "/usr/bin:/bin" } });
-    expect(obeyed.stdout).toContain("0-1 saved.");
-  }, 15000);
+  });
 });
 
 describe("OptMem cover", () => {

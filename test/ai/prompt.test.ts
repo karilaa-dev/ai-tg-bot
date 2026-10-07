@@ -21,6 +21,7 @@ const baseUser: UserRow = {
   lang: "en",
   tz_offset_min: null,
   stream_mode: 1,
+  memory_enabled: 1,
   created_at: 1,
 };
 

@@ -12,6 +12,13 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
     if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
     if (dialect === "sqlite") await initializeSqlite(tx);
     else await initializePostgres(tx);
+    if (dialect === "postgres") await tx.execute(sql`alter table users add column if not exists memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
+    else {
+      const columns = await tx.query<{ name: string }>(sql`pragma table_info(users)`);
+      if (!columns.some(column => column.name === "memory_enabled")) {
+        await tx.execute(sql`alter table users add column memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
+      }
+    }
   });
 }
 
@@ -105,6 +112,30 @@ async function initializeCommonTables(
   intType: string,
   blobType: string,
 ): Promise<void> {
+  await db.execute(sql.raw(`
+    create table if not exists optmem_stores (
+      user_id ${intType} primary key references users(tg_id) on delete cascade,
+      next_id ${intType} not null default 0 check(next_id >= 0)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists optmem_notes (
+      user_id ${intType} not null references optmem_stores(user_id) on delete cascade,
+      id ${intType} not null check(id >= 0),
+      date text not null,
+      content ${blobType} not null,
+      primary key(user_id, id)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists optmem_summaries (
+      user_id ${intType} not null references optmem_stores(user_id) on delete cascade,
+      size ${intType} not null check(size >= 2),
+      block_index ${intType} not null check(block_index >= 0),
+      content ${blobType} not null,
+      primary key(user_id, size, block_index)
+    )
+  `));
   await db.execute(sql.raw(`
     create table if not exists threads (
       id ${idType},

@@ -1,11 +1,12 @@
+// Upstream-format storage reference used only by the OptMem parity tests.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { openLock, Lock } from "@lickle/lock";
-import type { Block } from "./blocks.js";
+import type { Block } from "../../src/memory/optmem/blocks.js";
+import { MemoError } from "../../src/memory/optmem/records.js";
 
 export const LOG_REC = 320;
 export const TREE_REC = 288;
-export class MemoError extends Error {}
 export type Memory = readonly [id: number, date: string, text: string];
 
 // Python str.strip's whitespace set; JS trim also removes BOM and omits NEL.

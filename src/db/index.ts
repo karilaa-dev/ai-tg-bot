@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { type SQL } from "drizzle-orm";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
@@ -34,6 +35,21 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     logger?.debug("opening sqlite database", { path: sqlitePath });
     // Bun's node:sqlite implementation supports the Unicode search function.
     const sqlite = new DatabaseSync(sqlitePath);
+    // Yield while another process/connection holds the writer lock. A blocking
+    // busy timeout would prevent another connection in this process from committing.
+    sqlite.exec("pragma busy_timeout = 0");
+    const retryBusy = async <T>(operation: () => T): Promise<T> => {
+      const deadline = Date.now() + 30_000;
+      while (true) {
+        try { return operation(); }
+        catch (error) {
+          const busy = error instanceof Error && (("errcode" in error && error.errcode === 5)
+            || ("code" in error && error.code === "SQLITE_BUSY"));
+          if (!busy || Date.now() >= deadline) throw error;
+          await delay(10);
+        }
+      }
+    };
     const sqliteDialect = new SQLiteSyncDialect();
     sqlite.function("unicode_lower", { deterministic: true }, (value) => String(value).toLowerCase());
     let operationTail = Promise.resolve();
@@ -50,11 +66,11 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
     };
     const rawQuery = async <T extends object>(statement: SQL): Promise<T[]> => {
       const query = sqliteDialect.sqlToQuery(statement);
-      return normalizeRows(sqlite.prepare(query.sql).all(...query.params as SQLInputValue[]) as T[]);
+      return retryBusy(() => normalizeRows(sqlite.prepare(query.sql).all(...query.params as SQLInputValue[]) as T[]));
     };
     const rawExecute = async (statement: SQL): Promise<void> => {
       const query = sqliteDialect.sqlToQuery(statement);
-      sqlite.prepare(query.sql).run(...query.params as SQLInputValue[]);
+      await retryBusy(() => sqlite.prepare(query.sql).run(...query.params as SQLInputValue[]));
     };
     let transactionExecutor: SqlExecutor;
     transactionExecutor = {
@@ -72,7 +88,7 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
       execute: (statement: SQL) => withLock(() => rawExecute(statement)),
       transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>) => {
         return withLock(async () => {
-          sqlite.exec("begin immediate");
+          await retryBusy(() => sqlite.exec("begin immediate"));
           try {
             const result = await callback(transactionExecutor);
             sqlite.exec("commit");
