@@ -129,6 +129,44 @@ for (const postgres of [false, true]) describe.skipIf(postgres && !process.env.T
     expect(await store.length()).toBe(0);
   });
 
+  it.each([
+    { concurrentDate: "2026-10-08", accepted: false },
+    { concurrentDate: "2026-10-07", accepted: true },
+    { concurrentDate: "2026-10-06", accepted: true },
+    { concurrentDate: "𝟚𝟘𝟚𝟞-10-07", accepted: false },
+  ])("rechecks import dates after a concurrent note dated $concurrentDate", async ({ concurrentDate, accepted }) => {
+    const { directory, db, store } = await fixture(postgres);
+    const file = path.join(directory, "import.txt");
+    await fs.writeFile(file, "2026-10-07 historical note\n2026-10-09 second imported note\n");
+    const ready = deferred<void>(), release = deferred<void>();
+    class PausedImporter extends DatabaseMemoryStore {
+      override async append(...args: Parameters<DatabaseMemoryStore["append"]>): Promise<number> {
+        ready.resolve();
+        await release.promise;
+        return super.append(...args);
+      }
+    }
+    const pending = runMemo({ store: new PausedImporter(db.db, 42), args: ["import", file] });
+    await ready.promise;
+    try {
+      await store.append([[concurrentDate, "concurrent note"]]);
+    } finally { release.resolve(); }
+    const result = await pending;
+    if (accepted) {
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain("Imported 2 memories, #1 to #2.");
+      expect(await store.slice(0, 4)).toEqual([
+        [0, concurrentDate, "concurrent note"],
+        [1, "2026-10-07", "historical note"],
+        [2, "2026-10-09", "second imported note"],
+      ]);
+    } else {
+      expect(result).toMatchObject({ exit_code: 1, stderr: expect.stringContaining(`precedes the previous memory (${concurrentDate})`) });
+      expect(await store.slice(0, 4)).toEqual([[0, concurrentDate, "concurrent note"]]);
+      expect(await store.length()).toBe(1);
+    }
+  });
+
   it("initializes an empty database memory once and preserves existing notes and summaries", async () => {
     const { db } = await fixture(postgres);
     const store = new DatabaseMemoryStore(db.db, 43);

@@ -8,6 +8,12 @@ const SPACE = "\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200
 export const strip = (text: string): string => text.replace(new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "gu"), "");
 export const decode = (bytes: Uint8Array): string => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 
+export function precedes(left: string, right: string): boolean {
+  const a = Array.from(left, char => char.codePointAt(0)!), b = Array.from(right, char => char.codePointAt(0)!);
+  const first = a.findIndex((code, i) => code !== b[i]);
+  return first < 0 ? a.length < b.length : a[first] < (b[first] ?? -1);
+}
+
 export function pad(text: string, width: number): Buffer {
   const bytes = Buffer.from(text);
   if (bytes.length > width - 1) throw new MemoError(`Too long: ${bytes.length} bytes. The record holds ${width - 1}.`);
@@ -16,4 +22,3 @@ export function pad(text: string, width: number): Buffer {
   record[width - 1] = 10;
   return record;
 }
-

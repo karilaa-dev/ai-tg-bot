@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { cover, type Block } from "./blocks.js";
-import { decode, MemoError, strip, type Memory } from "./records.js";
+import { decode, MemoError, precedes, strip, type Memory } from "./records.js";
 import { memoryInstructions } from "./prompt.js";
 import { compileRecallPattern } from "./regex.js";
 import { decimal } from "./decimal.js";
@@ -46,12 +46,6 @@ function plural(n: number, word: string): string {
 function isKnob(name: string): name is Knob { return Object.hasOwn(KNOBS, name); }
 const knobNames = Object.keys(KNOBS).filter(isKnob);
 const formatted = ([id, date, text]: Memory): string => `#${id} ${date} ${text}`;
-
-function precedes(left: string, right: string): boolean {
-  const a = Array.from(left, char => char.codePointAt(0)!), b = Array.from(right, char => char.codePointAt(0)!);
-  const first = a.findIndex((code, i) => code !== b[i]);
-  return first < 0 ? a.length < b.length : a[first] < (b[first] ?? -1);
-}
 
 function blockId(value: string): Block {
   const match = /^([^\-]+)-([^\-]+)$/u.exec(value);
@@ -333,7 +327,7 @@ class Command {
       out.push([date, text]); last = date;
     }
     if (!out.length) throw new MemoError(`${args[0]} has no memories.`);
-    const base = await this.store.append(out);
+    const base = await this.store.append(out, { chronological: true });
     this.print(`Imported ${plural(out.length, "memory")}, #${base} to #${base + out.length - 1}.`);
     const n = await this.store.pendingCount(await this.store.length());
     if (n) this.print(`${plural(n, "compression")} pending. Run: ${this.name} nap`);

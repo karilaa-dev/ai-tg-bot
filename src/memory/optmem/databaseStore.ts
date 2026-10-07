@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { queryOne, type SqlExecutor } from "../../db/sql.js";
 import type { Block } from "./blocks.js";
-import { decode, MemoError, pad, LOG_REC, TREE_REC, type Memory } from "./records.js";
+import { decode, MemoError, pad, precedes, LOG_REC, TREE_REC, type Memory } from "./records.js";
 import type { MemoryStore } from "./storage.js";
 
 export class DatabaseMemoryStore implements MemoryStore {
@@ -81,9 +81,16 @@ export class DatabaseMemoryStore implements MemoryStore {
     return row ? decode(row.content) : undefined;
   }
 
-  async append(items: ReadonlyArray<readonly [date: string, text: string]>): Promise<number> {
+  async append(items: ReadonlyArray<readonly [date: string, text: string]>, options?: Parameters<MemoryStore["append"]>[1]): Promise<number> {
     return this.locked(async store => {
       const base = await store.length();
+      const [first] = items;
+      if (options?.chronological && first && base) {
+        const [, previousDate] = await store.get(base - 1);
+        if (precedes(first[0], previousDate)) {
+          throw new MemoError(`Import date ${first[0]} precedes the previous memory (${previousDate}).`);
+        }
+      }
       for (const [i, [date, text]] of items.entries()) {
         pad(`#${base + i} ${date} ${text}`, LOG_REC);
         await store.db.execute(sql`insert into optmem_notes(user_id, id, date, content)
