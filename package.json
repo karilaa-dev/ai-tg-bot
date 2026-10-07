@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.19",
+  "version": "2.0.20",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,7 +21,8 @@
     "e2b:template:promote": "bun e2b-template/promote.ts",
     "e2b:template:check": "bun e2b-template/check.ts",
     "e2b:release": "bun e2b-template/release.ts",
-    "build:web": "bun scripts/build-web.ts"
+    "build:web": "bun scripts/build-web.ts",
+    "memo": "bun src/memory/optmem/cli.ts"
   },
   "engines": {
     "bun": "1.4.2"
@@ -34,7 +35,9 @@
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",
     "@grammyjs/runner": "^2.0.3",
+    "@lickle/lock": "0.0.1",
     "@tavily/core": "^0.7.13",
+    "@unicode/unicode-16.0.0": "2.0.7",
     "csv-parse": "^7.0.3",
     "drizzle-orm": "^0.45.3",
     "e2b": "2.51.0",

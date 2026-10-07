@@ -10,6 +10,7 @@ import { researchOutputSchema } from "./researchSchemas.js";
 import { toolResultFailed } from "./toolOutcome.js";
 
 const BASE_BOT_TOOL_NAMES = [
+  "memo",
   "search_thread",
   "load_message",
   "search_in_file",
@@ -68,7 +69,7 @@ export function createPiToolAdapters(bridge: PiToolBridge): ToolDefinition[] {
       label: toolLabel(name),
       description: definition.description,
       parameters: z.toJSONSchema(definition.inputSchema, { io: "input" }) as TSchema,
-      executionMode: name === "bash"
+      executionMode: name === "memo" || name === "bash"
         || name === "materialize_chat_files"
         || name === "render_pdf_pages"
         || name === "inspect_workspace_images"

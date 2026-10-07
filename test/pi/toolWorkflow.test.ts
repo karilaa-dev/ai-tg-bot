@@ -9,17 +9,65 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import { inferenceUsageFromEntries } from "../../src/pi/usage.js";
+import { userMemoryDirectory } from "../../src/memory/userMemory.js";
+import { createMemoTool } from "../../src/ai/tools/memo.js";
+import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 describe("Pi tool discovery and codemode", () => {
-  it("starts with five tools and discovers a specialist without exposing mutations to scripts", async () => {
+  it("runs OptMem through the real session, restores it after restart, and shares only within one user", async () => {
+    const { runtime, contexts, reopen, pi, repos, user, config, thread } = await setup([
+      { name: "memo", arguments: { args: ["wake"] } },
+      { name: "memo", arguments: { args: ["note", "Prefers metric measurements"] } },
+      { name: "memo", arguments: { args: ["note", "Lives in Helsinki"] } },
+      { name: "memo", arguments: { args: ["nap", "0-1", "Lives in Helsinki and prefers metric measurements"] } },
+      { name: "finish_response", arguments: { text: "Remembered" } },
+      { name: "memo", arguments: { args: ["wake"] } },
+      { name: "finish_response", arguments: { text: "Recalled" } },
+    ]);
+    await runtime.session.prompt("Remember my preferences", { expandPromptTemplates: false });
+    expect(getCurrentSystemPrompt(contexts[0].messages)).toContain("Your memory is OptMem");
+    expect(JSON.stringify(contexts[0])).toContain("Read your permanent memory before other tools");
+    expect(JSON.stringify(contexts[3])).toContain("Compress memories #0-1");
+    expect(runtime.session.getCallableToolNames()).not.toContain("memo");
+    const directory = userMemoryDirectory(config, user.tg_id);
+    const original = await fs.readFile(path.join(directory, "LOG.txt"));
+    expect(original.byteLength).toBe(640);
+
+    const secondThread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Same user" });
+    const second = await pi.runtime(secondThread, user);
+    const sameUser = createMemoTool(second.bridge.buildInput());
+    expect((await sameUser.execute({ args: ["recall", "HELSINKI"] })).stdout).toContain("Lives in Helsinki");
+    const anotherUser = await repos.users.ensure({ tgId: 99882, firstName: "Other", lang: "en" });
+    const otherThread = await repos.threads.create({ userId: anotherUser.tg_id, topicId: null, title: "Different user" });
+    const other = await pi.runtime(otherThread, anotherUser);
+    const isolated = createMemoTool(other.bridge.buildInput());
+    expect((await isolated.execute({ args: ["recall", "HELSINKI"] })).stdout).toBe("No match.\n");
+    expect(sameUser.inputSchema.safeParse({ args: ["import", "/etc/passwd"] }).success).toBe(false);
+    expect(sameUser.inputSchema.safeParse({ args: ["init"] }).success).toBe(false);
+
+    const last = await repos.threads.get(thread.id);
+    if (!last) throw new Error("Missing thread");
+    // Emulate an existing transcript written before memo became a core tool.
+    runtime.session.setActiveToolsByName(["read", "bash", "finish_response", "codemode", "tool_search"]);
+    const resumed = await reopen();
+    expect(resumed.session.getActiveToolNames()).toContain("memo");
+    await resumed.session.prompt("What do you remember?", { expandPromptTemplates: false });
+    expect(JSON.stringify(contexts.at(-1))).toContain("Prefers metric measurements");
+    expect(JSON.stringify(contexts.at(-1))).toContain("Lives in Helsinki");
+    expect(await fs.readFile(path.join(directory, "LOG.txt"))).toEqual(original);
+    const invalid = createPiToolAdapters(resumed.bridge).find(tool => tool.name === "memo")!;
+    await expect(invalid.execute("bad-import", { args: ["import", "/etc/passwd"] }, new AbortController().signal, undefined, {} as never)).rejects.toThrow("Invalid memo input");
+  });
+
+  it("starts with six tools and discovers a specialist without exposing mutations to scripts", async () => {
     const { runtime, contexts } = await setup([
       { name: "tool_search", arguments: { query: "browser_navigate", limit: 1 } },
       { name: "finish_response", arguments: { text: "Done" } },
     ], true);
-    expect(runtime.session.getActiveToolNames().sort()).toEqual(["bash", "codemode", "finish_response", "read", "tool_search"]);
+    expect(runtime.session.getActiveToolNames().sort()).toEqual(["bash", "codemode", "finish_response", "memo", "read", "tool_search"]);
     expect(runtime.session.getCallableToolNames()).toEqual(expect.arrayContaining(["web_search", "web_extract", "read_file_section"]));
     for (const name of ["bash", "finish_response", "create_file", "generate_image", "browser_navigate", "materialize_chat_files"]) {
       expect(runtime.session.getCallableToolNames()).not.toContain(name);
@@ -27,11 +75,11 @@ describe("Pi tool discovery and codemode", () => {
 
     await runtime.session.prompt("Find the browser navigation tool", { expandPromptTemplates: false });
 
-    expect(getCurrentTools(contexts[0]!.messages)).toHaveLength(5);
+    expect(getCurrentTools(contexts[0]!.messages)).toHaveLength(6);
     const initialToolChars = JSON.stringify(getCurrentTools(contexts[0]!.messages)).length;
     const initialPromptChars = getCurrentSystemPrompt(contexts[0]!.messages).length;
     // Bound the actual initial prompt and tool schemas independently of the full tool catalog.
-    expect(initialPromptChars + initialToolChars).toBeLessThanOrEqual(16_000);
+    expect(initialPromptChars + initialToolChars).toBeLessThanOrEqual(18_500);
     const previousChars = JSON.stringify(runtime.session.getAllTools().filter((tool) => !["codemode", "tool_search"].includes(tool.name))
       .map(({ name, description, parameters }) => ({ name, description, parameters }))).length;
     expect(initialToolChars).toBeLessThan(previousChars * 0.65);
@@ -189,7 +237,7 @@ async function setup(calls: Array<{ name: string; arguments: JsonObject }>, brow
   cleanups.push(() => pi.dispose());
   const runtime = await pi.runtime(thread, user);
   await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file reload"); } });
-  return { runtime, contexts, reopen: async () => {
+  return { runtime, contexts, pi, repos, user, config, thread, reopen: async () => {
     await pi.dispose();
     const savedThread = await repos.threads.get(thread.id);
     if (!savedThread) throw new Error("Missing persistent thread");

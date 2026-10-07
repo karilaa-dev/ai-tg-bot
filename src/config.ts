@@ -14,6 +14,7 @@ const ConfigSchema = z.object({
   BOT_TOKEN: z.string().min(1),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),
+  OPTMEM_DIR: OptionalStringSchema,
   CODEX_AUTH_FILE: OptionalStringSchema,
   CODEX_FAST_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   CODEX_SERVER_COMPACTION: z.enum(["true", "false"]).default("true").transform(value => value === "true"),

@@ -10,11 +10,25 @@ import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import { createCodexCompactionExtension } from "../../src/pi/codexCompaction.js";
 import { asRecord } from "../../src/util/records.js";
 import { createTurnPromptContextExtension } from "../../src/pi/turnContext.js";
+import { createOptMemExtension } from "../../src/pi/optmem.js";
 
 const cleanups: Array<() => unknown> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.unstubAllGlobals(); });
 
 describe("persistent Pi server compaction", () => {
+  it.each(["threshold", "overflow"] as const)("keeps OptMem startup in actual Codex and fallback requests after %s compaction", async (automatic) => {
+    const { session, requests, runtime } = await setup({ optmem: true, automatic });
+    await session.prompt("Continue the task", { expandPromptTemplates: false });
+    if (automatic === "threshold") await session.prompt("Continue after automatic compaction", { expandPromptTemplates: false });
+    const latest = JSON.stringify(requests.at(-1)!.input);
+    expect(latest).toContain("opaque-1");
+    expect(latest).toContain("Context was compacted. Read your permanent memory before other tools");
+    const attempt = runtime.providerRouter.circuit.acquire();
+    if (!attempt.allowed) throw new Error("Expected a closed circuit");
+    attempt.recordFailure(Date.now() + 60000);
+    await session.prompt("Continue through fallback", { expandPromptTemplates: false });
+    expect(JSON.stringify(requests.at(-1)!.messages)).toContain("Read your permanent memory before other tools");
+  });
   it("preserves the previous request prefix when turn metadata changes, including after restart", async () => {
     const { session, manager, requests, open, context } = await setup({ turnContext: true });
     await session.prompt("First question", { expandPromptTemplates: false });
@@ -195,7 +209,7 @@ describe("persistent Pi server compaction", () => {
   });
 });
 
-async function setup(options: { rejectNative?: boolean; disabled?: boolean; stallNative?: boolean; turnContext?: boolean; automatic?: "threshold" | "overflow"; invalid?: "missing" | "multiple" | "incomplete" } = {}) {
+async function setup(options: { rejectNative?: boolean; disabled?: boolean; stallNative?: boolean; turnContext?: boolean; optmem?: boolean; automatic?: "threshold" | "overflow"; invalid?: "missing" | "multiple" | "incomplete" } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-compact-test-"));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
   const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "missing.json"),
@@ -247,6 +261,7 @@ async function setup(options: { rejectNative?: boolean; disabled?: boolean; stal
     const loader = new DefaultResourceLoader({ cwd: process.cwd(), agentDir: directory, settingsManager, noExtensions: true,
       noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, systemPrompt: "Preserve facts.",
       extensionFactories: [createCodexCompactionExtension({ config, logger: createLogger(config), modelRegistry: runtime.modelRegistry, providerRouter: runtime.providerRouter }),
+        ...(options.optmem ? [createOptMemExtension()] : []),
         ...(options.turnContext ? [createTurnPromptContextExtension({ currentTurnSystemPrompt: () => "Preserve facts.", currentTurnSessionContext: () => context.value })] : [])] });
     await loader.reload();
     const { session } = await createAgentSession({ cwd: process.cwd(), agentDir: directory, modelRuntime: runtime.modelRuntime,
