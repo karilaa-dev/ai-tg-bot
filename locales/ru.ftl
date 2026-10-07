@@ -88,6 +88,10 @@ file-source-registered = ✅ Файл <code>{ $name }</code> зарегистр�
 file-reused = ♻️ Использую сохраненный файл <code>{ $name }</code>.
 fork-created = 🌱 Форк создан. Контекст перенесен в новую тему.
 fork-need-topics = 🧵 Темы не включены для этого бота. Сначала включите Topics в BotFather.
-help = 🧭 Команды: /lang, /timezone, /stream, /stop, /fork, /compact, /help. Для чистого треда начните новую тему Telegram; /fork переносит контекст Pi в новую тему. /stop отменяет активный ход агента или обработку файла.
+help = 🧭 Команды: /lang, /timezone, /stream, /memory, /stop, /fork, /compact, /help. Для чистого треда начните новую тему Telegram; /fork переносит контекст Pi в новую тему. /stop отменяет активный ход агента или обработку файла.
 private-only = 🔒 Я работаю только в личных чатах.
 unknown-command = ❓ Неизвестная команда. Попробуйте /help.
+
+memory-on = 🧠 Память включена. Команда /memory off выключит её для вас.
+memory-off = 📴 Память выключена. Сохранённые записи и предыдущие сообщения в диалогах остаются. Включить снова: /memory on.
+memory-usage = Используйте /memory on или /memory off. Команда /memory показывает текущее состояние.

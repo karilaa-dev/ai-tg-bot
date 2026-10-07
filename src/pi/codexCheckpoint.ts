@@ -3,6 +3,7 @@ import { getCurrentSystemMessage, type TranscriptContext } from "@earendil-works
 import { convertToLlm, type CompactionEntry, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { asRecord } from "../util/records.js";
 import { CONTEXT_BASELINE_TYPE } from "./turnContext.js";
+import { OPTMEM_COMPACTION_CONTEXT } from "./optmem.js";
 
 export interface CodexCheckpoint {
   version: 1 | 2;
@@ -35,7 +36,8 @@ export function annotateCodexCheckpoint(messages: AgentMessage[], manager: Pick<
     .filter(item => after.has(item.sourceEntry.id))
     .reduce((count, item) => count + convertToLlm(item.messages).filter(message => message.role !== "system").length, 0);
   const marker: MarkedMessage = { ...convertToLlm([messages[index]!])[0]!, [CHECKPOINT]: { entry, suffixLength,
-    baseline: messages.filter(message => message.role === "custom" && message.customType === CONTEXT_BASELINE_TYPE) } };
+    baseline: messages.filter(message => message.role === "custom" && (message.customType === CONTEXT_BASELINE_TYPE
+      || message.customType === OPTMEM_COMPACTION_CONTEXT)) } };
   return messages.map((message, i) => i === index ? marker : message);
 }
 

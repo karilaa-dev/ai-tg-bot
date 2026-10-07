@@ -6,7 +6,7 @@ import { asRecord } from "../util/records.js";
 const KEEP_RECENT_RESULTS = 6;
 const LARGE_RESULT_CHARS = 6000;
 const PRUNED_PREFIX = "[Earlier tool result shortened.";
-const PROTECTED_TOOLS = new Set(["finish_response", "validate_office_file"]);
+const PROTECTED_TOOLS = new Set(["finish_response", "validate_office_file", "memo"]);
 
 export function createContextPruningExtension(): InlineExtension {
   return {

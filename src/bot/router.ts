@@ -205,6 +205,17 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     ctx.services.logger.info("stream mode toggled", ctxLogMeta(ctx, { enabled: updated.stream_mode }));
     await replyWithThreadFallback(ctx, ctx.t(updated.stream_mode ? "stream-on" : "stream-off"), threadExtra(ctx.thread));
   });
+  bot.command("memory", async (ctx) => {
+    logCommand(ctx, "memory");
+    if (!ctx.user) return;
+    const choice = ctx.match.trim().toLowerCase();
+    if (choice && choice !== "on" && choice !== "off") {
+      await replyWithThreadFallback(ctx, ctx.t("memory-usage"), threadExtra(ctx.thread));
+      return;
+    }
+    if (choice) ctx.user = await ctx.services.repos.users.setMemoryEnabled(ctx.user.tg_id, choice === "on");
+    await replyWithThreadFallback(ctx, ctx.t(ctx.user.memory_enabled ? "memory-on" : "memory-off"), threadExtra(ctx.thread));
+  });
   bot.command("timezone", async (ctx) => {
     logCommand(ctx, "timezone");
     if (!ctx.from) return;

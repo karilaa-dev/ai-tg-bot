@@ -50,4 +50,14 @@ export class UsersRepo {
     if (!user) throw new Error(`User #${tgId} no longer exists.`);
     return user;
   }
+
+  async setMemoryEnabled(tgId: number, enabled: boolean): Promise<UserRow> {
+    return this.db.transaction(async tx => {
+      // This row also serializes memory writes against a preference change.
+      const user = await queryOne<UserRow>(tx, sql`update users set memory_enabled = ${enabled ? 1 : 0}
+        where tg_id = ${tgId} returning *`);
+      if (!user) throw new Error(`User #${tgId} no longer exists.`);
+      return user;
+    });
+  }
 }

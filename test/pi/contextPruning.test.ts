@@ -17,6 +17,7 @@ describe("Pi context pruning", () => {
     const failure = appendResult(manager, { isError: true, content: [{ type: "text", text: oldText }] });
     const validation = appendResult(manager, { toolName: "validate_office_file", content: [{ type: "text", text: oldText }], details: { status: "passed", path: "/final.pptx" } });
     const terminal = appendResult(manager, { toolName: "finish_response", content: [{ type: "text", text: oldText }] });
+    const memory = appendResult(manager, { toolName: "memo", content: [{ type: "text", text: oldText }] });
     const small = appendResult(manager, { content: [{ type: "text", text: "Still useful small result" }] });
     const recent = Array.from({ length: 6 }, () => appendResult(manager, { content: [{ type: "image", data: "recent-image", mimeType: "image/png" }] }));
     const originals = structuredClone(manager.getEntries());
@@ -35,7 +36,7 @@ describe("Pi context pruning", () => {
     expect(JSON.stringify(inspected)).toContain("/model.stl");
     if (inspected.role !== "toolResult") throw new Error("Expected tool result");
     expect(inspected.content.every((part) => part.type === "text")).toBe(true);
-    for (const id of [failure, validation, terminal, small, ...recent]) {
+    for (const id of [failure, validation, terminal, memory, small, ...recent]) {
       expect(projected.find((entry) => entry.sourceEntry.id === id)!.messages[0])
         .toEqual(originals.find((entry): entry is SessionMessageEntry => entry.id === id && entry.type === "message")!.message);
     }

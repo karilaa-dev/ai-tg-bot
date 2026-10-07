@@ -68,6 +68,21 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(user?.stream_mode).toBe(0);
   });
 
+  it("lets each user enable or disable memory without changing global settings", async () => {
+    await startBot();
+    await env.repos.users.ensure({ tgId: 7654321 });
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory")).text).toContain("Memory is on");
+    for (let i = 0; i < 2; i++) {
+      expect((await env.bot.sendCommand(env.user, env.chat, "/memory off")).text).toContain("Memory is off");
+    }
+    expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(0);
+    expect((await env.repos.users.get(7654321))?.memory_enabled).toBe(1);
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory WAKE_LINES=1")).text).toContain("Use /memory on or /memory off");
+    expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(0);
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory on")).text).toContain("Memory is on");
+    expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(1);
+  });
+
   it("collects timezone through a conversation", async () => {
     await startBot();
     const prompt = await env.bot.sendCommand(env.user, env.chat, "/timezone");

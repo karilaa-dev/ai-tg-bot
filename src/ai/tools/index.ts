@@ -17,6 +17,7 @@ import { createRenderPdfPagesTool } from "./renderPdfPages.js";
 import { createInspectWorkspaceImagesTool } from "./inspectWorkspaceImages.js";
 import type { BotToolRegistry, ToolBuildInput } from "./types.js";
 import { createTranscribeAudioTool } from "./transcribeAudio.js";
+import { createMemoTool } from "./memo.js";
 
 export type {
   BotToolRegistry,
@@ -25,6 +26,7 @@ export type {
 
 export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
   return {
+    memo: createMemoTool(input),
     search_thread: createSearchThreadTool(input),
     load_message: createLoadMessageTool(input),
     search_in_file: createSearchInFileTool(input),

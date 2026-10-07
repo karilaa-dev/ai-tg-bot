@@ -1,0 +1,73 @@
+import { describe, expect, it } from "vitest";
+import { compileRecallPattern } from "../../src/memory/optmem/regex.js";
+
+describe("OptMem Python re.I search semantics", () => {
+  it.each([
+    ["[a-z]", "İ", true], ["[a-z]", "ı", true], ["[a-z]", "ſ", true], ["[a-z]", "K", true],
+    [String.raw`^\w+$`, "éЖ中文١²_", true], [String.raw`^\w+$`, "a\u0301", false],
+    [String.raw`\bélève\b`, "élève", true], [String.raw`\bélève\b`, "aélève", false],
+    [String.raw`^\d+$`, "١２", true], [String.raw`^\d+$`, "²", false],
+    [String.raw`^\s$`, "\u0085", true], [String.raw`^\s$`, "\ufeff", false],
+    [String.raw`^\D\S\W$`, "a!+", true],
+    [String.raw`(?a)^\w+$`, "é", false], [String.raw`(?a)^\d+$`, "١", false],
+    ["(?a)[a-z]", "İ", false], ["(?a)é", "É", false],
+    ["(?a:é)(?u:é)", "éÉ", true],
+    ["(?-i:Cat)cat", "CatCAT", true], ["(?-i:Cat)", "CAT", false],
+    ["(?x) a # comment\n b [ #]", "AB#", true], [String.raw`(?x)a\ b`, "a b", true],
+    ["(?s)a.b", "a\nb", true], ["a.b", "a\nb", false], ["a.b", "a\rb", true],
+    ["a.b", "a\u2028b", true], ["(?m)^two$", "one\ntwo\nthree", true],
+    ["(?m)^two$", "one\rtwo\rthree", false],
+    [String.raw`\Afirst.*last\Z`, "first to last", true], [String.raw`last\Z`, "last\n", false],
+    ["last$", "last\n", true], ["last$", "last\r", false],
+    [String.raw`(?P<word>\w+) (?P=word)`, "João JOÃO", true],
+    [String.raw`^(a)?b\1$`, "b", false], [String.raw`^(a)?b\1$`, "aba", true],
+    [String.raw`^(ſ)\1$`, "ſS", false], [String.raw`^(ı)\1$`, "ıI", false],
+    [String.raw`^(İ)\1$`, "İi", true], [String.raw`^(ς)\1$`, "ςσ", false],
+    [String.raw`^(a|(b))+\2$`, "abaB", true],
+    [String.raw`^(a)?(?(1)b|c)$`, "ab", true], [String.raw`^(a)?(?(1)b|c)$`, "c", true],
+    [String.raw`^(a)?(?(1)b|c)$`, "ac", false], [String.raw`^(?P<x>a)?(?(x)b|c)$`, "c", true],
+    [String.raw`^(?(1)a|b)(a)$`, "ba", true],
+    [String.raw`(?<=ab)c`, "abc", true], [String.raw`(?<!ab)c`, "abc", false],
+    [String.raw`(?=(a+))\1b`, "aaab", true], [String.raw`(?!(a))\1`, "x", false],
+    ["^(?>a|ab)c$", "abc", false], ["^(?:a|ab)c$", "abc", true],
+    ["^a*+a$", "aaa", false], ["^a*a$", "aaa", true],
+    ["^a{2,3}+a$", "aaa", false], ["^a{2,3}a$", "aaa", true],
+    ["^a{,2}?b$", "aab", true], ["^a{,}b$", "aaab", true],
+    ["[]a]+", "]]a", true], ["[^]a]+", "bb", true], ["[a-]+", "--a", true],
+    [String.raw`[\b]`, "\b", true], [String.raw`\101\x42\u0043\U0001F600`, "ABC😀", true],
+    [String.raw`[\1]`, "\x01", true], [String.raw`\N{LATIN SMALL LETTER E WITH ACUTE}`, "É", true],
+    [String.raw`\N{LF}`, "\n", true], ["a(?#ignored)b", "ab", true],
+    ["^(a?)*b$", "b", true], ["^(a?){2}b$", "ab", true],
+    [String.raw`\B`, "", true],
+    [String.raw`^(?:x(a(?(1)b|c)))+$`, "xacxac", true],
+    [String.raw`^(?:x(a(?(1)b|c)))+$`, "xacxab", false],
+    [String.raw`(a?)*?\1fact`, "#0 2026-10-07 fact", true],
+    [String.raw`^(){20000}#`, "#0 2026-10-07 fact", true],
+    [String.raw`(?<=(?:a*){0})b`, "b", true],
+    [String.raw`\N{HANGUL SYLLABLE GA}`, "가", true],
+    [String.raw`\N{HANGUL SYLLABLE HIH}`, "힣", true],
+    [String.raw`\N{CJK UNIFIED IDEOGRAPH-4E00}`, "一", true],
+    [String.raw`\N{CJK UNIFIED IDEOGRAPH-20000}`, "𠀀", true],
+    [String.raw`\N{TANGUT IDEOGRAPH-17000}`, "𗀀", true],
+    [String.raw`^a(?#comment)*$`, "", true],
+    [String.raw`a(?#escaped \) still comment)b`, "ab", true],
+    [String.raw`(?:\b)+fact`, "#0 2026-10-07 fact", true],
+    [String.raw`\ſ[\K]`, "sK", true],
+    [String.raw`^(?:aa|a){2}+$`, "aa", false],
+    [String.raw`^(?:aa|a){2}$`, "aa", true],
+    [String.raw`^(?:aa|a){2}+$`, "aaa", true],
+    [String.raw`^(a?){20000}+\1#`, "#0 fact", true],
+    [String.raw`\N{CJK UNIFIED IDEOGRAPH-04E00}`, "一", true],
+    [String.raw`\N{CJK UNIFIED IDEOGRAPH-03400}`, "㐀", true],
+  ])("%s searches %j → %s", (pattern, value, expected) => {
+    expect(compileRecallPattern(pattern).test(value)).toBe(expected);
+  });
+
+  it.each(["[", "(", "a)", "(?i:a", "(?<foo>a)", "(?P<x>a)(?P<x>b)", "(?P=x)",
+    "a(?i)b", "(?L)a", "(?au)a", "(?i-i:a)", "a**", "a{3,2}", String.raw`\p{L}`, String.raw`\8`, String.raw`(a\1)`,
+    String.raw`[\d-a]`, String.raw`\777`, String.raw`\xG0`, String.raw`\N{NOT A CHARACTER}`, "(?<=a+)b", "(?<=a|bb)c", "(?(2)a|b)",
+    "(?a)(?u)a", "(?u)(?a)a", "(?P<\u037a>a)", "a*+?", "a*(?#comment)+",
+  ])("rejects invalid Python pattern %s", pattern => {
+    expect(() => compileRecallPattern(pattern)).toThrow(SyntaxError);
+  });
+});

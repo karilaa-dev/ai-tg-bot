@@ -36,13 +36,14 @@ import {
   resolveCodexAuthFile,
 } from "./codexCliCredentials.js";
 import { createTurnBudgetExtension } from "./turnBudget.js";
-import { createBotToolSearchExtension } from "./toolPolicy.js";
+import { createBotToolSearchExtension, INITIAL_ACTIVE_TOOL_NAMES } from "./toolPolicy.js";
+import { createOptMemExtension } from "./optmem.js";
+import { initializeUserMemory } from "../memory/userMemory.js";
 import { createContextPruningExtension } from "./contextPruning.js";
 import { createCodexCompactionExtension } from "./codexCompaction.js";
 import { raceWithAbort } from "../files/cancel.js";
 
 const MAX_CACHED_RUNTIMES = 32;
-const INITIAL_ACTIVE_TOOL_NAMES = ["read", "bash", "finish_response", "codemode", "tool_search"];
 
 interface PiThreadRuntime {
   session: AgentSession;
@@ -195,6 +196,8 @@ export class PiRuntimeManager implements PiRuntimeService {
       cached.session.dispose();
       this.runtimes.delete(thread.id);
     }
+    user = await this.input.repos.users.get(user.tg_id) ?? user;
+    if (user.memory_enabled) await initializeUserMemory(this.input.db.db, user.tg_id);
     const systemPrompt = await renderSystemPrompt({
       user,
       config: this.input.config,
@@ -222,6 +225,12 @@ export class PiRuntimeManager implements PiRuntimeService {
         createFinishResponseGuard(),
         createTurnBudgetExtension(bridge),
         createTurnPromptContextExtension(bridge),
+        createOptMemExtension(async () => {
+          const current = await this.input.repos.users.get(user.tg_id);
+          if (!current?.memory_enabled) return false;
+          await initializeUserMemory(this.input.db.db, user.tg_id);
+          return true;
+        }),
         createChatFileContextExtension(bridge),
         createCodemodeExtension({ mode: "on", inlineBudget: 0, models: false }),
         createBotToolSearchExtension(),
@@ -269,7 +278,8 @@ export class PiRuntimeManager implements PiRuntimeService {
     const activeToolNames = persistedSystem
       ? (persistedSystem.toolsAdded ?? []).map((tool) => tool.name).filter((name) => approvedToolNames.has(name))
       : INITIAL_ACTIVE_TOOL_NAMES;
-    session.setActiveToolsByName(activeToolNames);
+    session.setActiveToolsByName(user.memory_enabled
+      ? [...new Set([...activeToolNames, "memo"])] : activeToolNames.filter(name => name !== "memo"));
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("Pi persistent session did not return a session file.");
     await this.input.repos.threads.setPiSession(thread.id, sessionFile, session.sessionId);

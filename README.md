@@ -106,7 +106,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.19` uses `ai-tg-bot-tools:v2.0.19`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.20` uses `ai-tg-bot-tools:v2.0.20`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -120,8 +120,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.19 is ai-tg-bot-tools:v2.0.19.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.19
+# Optional override. The default for version 2.0.20 is ai-tg-bot-tools:v2.0.20.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.20
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -203,7 +203,15 @@ Pi also produces a readable summary for OpenRouter and model changes. Failed ser
 
 Run `bun run live:codex-tools-check` with Codex credentials to verify hosted search, encrypted-checkpoint recall after reopening a temporary session, metadata updates, and a second compaction followed by forked recall. This check sends no Telegram messages and starts no sandbox.
 
-Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, and `tool_search`. Specialist tools are registered but loaded only when searched for; Pi records changes to the active tool set in its transcript. Codemode can batch chat searches, file reads, and web research with structured results. Workspace mutations, browser actions, image generation, publishing, and delivery cannot run inside scripts. Nested research calls share the turn's tool-call and failure limits. Only a direct `finish_response` completes delivery.
+Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, `tool_search`, and `memo`. Specialist tools are registered but loaded only when searched for; Pi records changes to the active tool set in its transcript. Codemode can batch chat searches, file reads, and web research with structured results. Memory commands, workspace mutations, browser actions, image generation, publishing, and delivery cannot run inside scripts. Nested research calls share the turn's tool-call and failure limits. Only a direct `finish_response` completes delivery.
+
+### Permanent memory
+
+The bot includes a native TypeScript port of [OptMem](https://github.com/VictorTaelin/OptMem/tree/1fb164cf39028047781f72ac3bb1e5a691c1dcb0). Each Telegram user has one permanent memory shared across their threads, forks, model changes, and conversation compactions. Other users have separate stores. The main agent records facts with `memo note`, supplies summaries through `memo nap`, and reads its memory with `wake`, `recall`, and `zoom`. Helpers do not receive the memory tool. Existing thread-history search remains available.
+
+Notes and summaries are stored in the application database selected by `DB_URL`, with support for SQLite and PostgreSQL. One global set of `OPTMEM_*` environment settings applies to everyone, using the original OptMem defaults when unset. Users can only enable or disable their own memory with `/memory on` or `/memory off`. Disabling keeps saved notes. Memory runs on the bot host, independently of E2B, with no Python process or background summarizer.
+
+The port retains OptMem's append-only notes, binary summary tree, UTF-8 byte limits, merge order, snapshot paging, and agent-written compression protocol. `forget` drops summaries for rebuilding and never erases raw notes. See [the memory reference](docs/optmem.md) for commands, compatibility details, and verification.
 
 Agent turns have no tool-call, model-cycle, repeated-failure, or total-duration limit by default. Set `PI_MAX_TOOL_CALLS`, `PI_MAX_MODEL_CYCLES`, `PI_MAX_CONSECUTIVE_TOOL_FAILURES`, `PI_MAX_IDENTICAL_TOOL_FAILURES`, or `PI_TURN_TIMEOUT_MS` to a positive integer to enable that limit; `0` disables it. Counts include nested codemode calls. `/stop` cancels an active turn even when these limits are disabled. Each provider request, including its streamed response, has a separate 15-minute deadline controlled by the positive integer `PI_REQUEST_TIMEOUT_MS` in milliseconds. Individual tool and network request timeouts remain separately configurable.
 

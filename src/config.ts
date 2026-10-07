@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { E2B_TOOLBOX_RELEASE_REF } from "./e2b/templateIdentity.js";
+import { MemoryEnvironmentSchema } from "./memory/optmem/settings.js";
 
 const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
 
 const ConfigSchema = z.object({
+  ...MemoryEnvironmentSchema.shape,
   WEB_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   WEB_ADMIN_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).refine(value => Buffer.byteLength(value) <= 1_024, "WEB_ADMIN_TOKEN must not exceed 1024 bytes.").optional()),
   WEB_HOST: z.string().trim().min(1).default("0.0.0.0"),

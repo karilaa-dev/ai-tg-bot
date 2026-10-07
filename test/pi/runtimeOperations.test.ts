@@ -170,7 +170,14 @@ describe("Pi runtime barrier operations", () => {
       await remote.session.prompt("Worker B");
       const resumed = await first.runtime(staleThread, user);
       await resumed.session.prompt("Worker A again");
-      expect(requests).toEqual([["Worker A"], ["Worker A", "Worker B"], ["Worker A", "Worker B", "Worker A again"]]);
+      await resumed.session.prompt("Same worker continues");
+      const wake = expect.stringContaining('call memo with {"args":["wake"]}');
+      expect(requests).toEqual([
+        ["Worker A", wake],
+        ["Worker A", wake, "Worker B", wake],
+        ["Worker A", wake, "Worker B", wake, "Worker A again", wake],
+        ["Worker A", wake, "Worker B", wake, "Worker A again", wake, "Same worker continues"],
+      ]);
       expect(resumed.session.sessionId).toBe(remote.session.sessionId);
       expect(resumed.session).not.toBe(original.session);
     } finally {
