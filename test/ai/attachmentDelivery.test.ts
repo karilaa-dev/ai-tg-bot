@@ -1,4 +1,4 @@
-import { GrammyError } from "grammy";
+import { GrammyError, InputFile } from "grammy";
 import { describe, expect, it, vi } from "vitest";
 import { buildFinalThinkingSummary } from "../../src/ai/agentTurnEngine.js";
 import { normalizeTelegramAttachmentDeliveries, refreshFinalThinkingVisible, sendCreatedFileAttachments, sendFinal } from "../../src/ai/responseDelivery.js";
@@ -26,6 +26,9 @@ describe("buffered Telegram attachment delivery", () => {
     } finally { textGate.resolve(); }
     await sending;
     expect(input.resolveFile).toHaveBeenCalledOnce();
+    expect(api.sendPhoto).toHaveBeenCalledWith(123, new InputFile(Buffer.from("prefetched"), "a.jpg"), expect.any(Object));
+    expect(file.telegramDelivery).toMatchObject({ fileId: "photo-file" });
+    expect(file.data).toBeUndefined();
     expect(api.raw.sendRichMessage.mock.invocationCallOrder[0]).toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
   });
 
@@ -114,21 +117,6 @@ describe("buffered Telegram attachment delivery", () => {
     expect(files.every((file) => file.telegramDeliveryUnknown && !file.data)).toBe(true);
   });
 
-  it("keeps the original requested count when only delivered files are summarized", () => {
-    const delivered = Array.from({ length: 25 }, (_, index) =>
-      imageAttachment(index + 1, `${index + 1}.jpg`, 100));
-    const summary = buildFinalThinkingSummary({
-      t: (key, params) => `${key}:${JSON.stringify(params)}`,
-      shaper: new StreamShaper(),
-      attachments: delivered,
-      requestedAttachmentCount: 30,
-    });
-
-    expect(summary).toContain('thinking-final-files-capped:{"sent":25,"requested":30,"limit":25}');
-    expect(summary).toContain("<code>1.jpg</code>");
-    expect(summary).toContain("<code>25.jpg</code>");
-  });
-
   it("reports the confirmed count when a capped delivery is only partially successful", () => {
     const delivered = Array.from({ length: 20 }, (_, index) =>
       imageAttachment(index + 1, `${index + 1}.jpg`, 100));
@@ -140,7 +128,8 @@ describe("buffered Telegram attachment delivery", () => {
     });
 
     expect(summary).toContain('thinking-final-files-capped:{"sent":20,"requested":30,"limit":25}');
-    expect(summary).not.toContain('thinking-final-files-capped:{"sent":25');
+    expect(summary).toContain("<code>1.jpg</code>");
+    expect(summary).toContain("<code>20.jpg</code>");
   });
 
   it("keeps confirmed file names when verbose reasoning is capped", () => {
@@ -519,21 +508,6 @@ describe("buffered Telegram attachment delivery", () => {
 
     expect(api.sendMediaGroup).toHaveBeenCalledTimes(2);
     expect(api.sendMediaGroup.mock.calls.map((call) => call[1].length)).toEqual([2, 2]);
-  });
-
-  it("loads a sandbox attachment only for its send and releases the buffer afterward", async () => {
-    const api = fakeApi();
-    const input = turnInput(api);
-    const attachment = imageAttachment(1, "picture.jpg", 100);
-    attachment.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: attachment.fileId } as never);
-    input.resolveFile = vi.fn(async () => ({ bytes: Buffer.from("restored image") } as never));
-
-    await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
-
-    expect(input.resolveFile).toHaveBeenCalledTimes(1);
-    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
-    expect(attachment.data).toBeUndefined();
   });
 
   it("continues with readable files when one media-group source cannot be loaded", async () => {

@@ -50,11 +50,8 @@ describe("turn prompt context extension", () => {
     expect(first.systemPrompt).toContain("<name>pptxgenjs</name>");
     expect(second.systemPrompt).toContain("Russian core");
     expect(second.systemPrompt).not.toContain("English core");
-  });
-
-  it("falls back without overriding Pi when no turn prompt is active", async () => {
-    const handlers = await extensionHandlers(mutableSource(undefined, undefined));
-
+    source.systemPrompt = undefined;
+    source.sessionContext = undefined;
     expect(await handlers.before_agent_start({
       systemPrompt: "cached",
       systemPromptOptions: { skills: [] },
@@ -275,7 +272,6 @@ describe("ThreadBridge turn prompt lifecycle", () => {
       const withFile = await fileHandlers.context({ messages: [...messages, { ...metadata, role: "custom", timestamp: 1 }] });
       const latest = withFile.messages[0] as AgentMessage;
       if (latest.role !== "user" || typeof latest.content === "string") throw new Error("unexpected content");
-      expect(latest.content[0]).toMatchObject({ type: "text" });
       expect(latest.content[0]).toEqual({ type: "text", text: `Review this [[chat-file:${file.id}]]` });
       expect(latest.content[1]?.type === "text" ? latest.content[1].text : "").toContain("# Attachment body");
       expect(withFile.messages[1].content).toContain("<session_context");

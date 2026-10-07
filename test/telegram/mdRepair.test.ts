@@ -1,25 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { closeOpenStructures, repairLadder, sanitize } from "../../src/telegram/mdRepair.js";
+import { closeOpenStructures, sanitize } from "../../src/telegram/mdRepair.js";
 
 describe("mdRepair", () => {
   it("closes open code fences", () => {
-    expect(closeOpenStructures("```ts\nconst x = 1;")).toContain("\n```");
+    expect(closeOpenStructures("```ts\nconst x = 1;")).toBe("```ts\nconst x = 1;\n```");
   });
 
   it("escapes unknown tags without dropping content", () => {
-    expect(sanitize("<script>alert(1)</script><details><summary>x</summary>ok</details>")).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(sanitize("<script>alert(1)</script><details><summary>x</summary>ok</details>"))
+      .toBe("&lt;script&gt;alert(1)&lt;/script&gt;<details><summary>x</summary>ok</details>");
   });
 
-  it("normalizes ragged tables and returns a repair ladder", () => {
+  it("pads ragged table rows to match their headers", () => {
     const md = "| a | b |\n| --- | --- |\n| 1 |";
-    expect(sanitize(md)).toContain("| 1 |  |");
-    expect(repairLadder(md)).toHaveLength(4);
+    expect(sanitize(md)).toBe("| a | b |\n| --- | --- |\n| 1 |  |");
   });
 
   it("escapes orphan footnote refs while preserving defined footnotes", () => {
-    expect(sanitize("Missing ref [^lost].")).toContain("\\[\\^lost\\]");
+    expect(sanitize("Missing ref [^lost].")).toBe("Missing ref \\[\\^lost\\].");
     const defined = "Defined ref [^ok].\n\n[^ok]: source";
-    expect(sanitize(defined)).toContain("[^ok]");
-    expect(sanitize(defined)).toContain("[^ok]: source");
+    expect(sanitize(defined)).toBe("Defined ref [^ok].\n\n[^ok]: source");
   });
 });

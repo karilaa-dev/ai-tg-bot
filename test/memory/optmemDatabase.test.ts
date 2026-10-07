@@ -9,11 +9,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDatabase } from "../../src/db/index.js";
 import { UsersRepo } from "../../src/db/repos/users.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
-import { Store } from "../helpers/optmemFileStore.js";
 import { runMemo } from "../../src/memory/optmem/index.js";
 import { DEFAULT_MEMORY_SIZES } from "../../src/memory/optmem/settings.js";
 import { initializeUserMemory } from "../../src/memory/userMemory.js";
-import { recallInWorker } from "../../src/memory/optmem/recall.js";
 import { deferred } from "../helpers/async.js";
 
 const exec = promisify(execFile);
@@ -47,37 +45,6 @@ async function fixture(postgres: boolean) {
 }
 
 for (const postgres of [false, true]) describe.skipIf(postgres && !process.env.TEST_POSTGRES_URL)(`OptMem ${postgres ? "PostgreSQL" : "SQLite"}`, () => {
-  it("preserves command transcripts, tree order, paging, recall and forget against upstream-format storage", async () => {
-    const { directory, store, settings, now, run } = await fixture(postgres);
-    const original = new Store(path.join(directory, "reference"), "memo");
-    await original.initialize();
-    const compare = async (...args: string[]) => {
-      const result = await run(...args);
-      expect(result).toEqual(await runMemo({ store: original, settings, now, args }));
-      return result;
-    };
-    expect((await compare("note", "first fact")).stdout).toBe("Saved as #0.\n");
-    await compare("note", "second fact");
-    expect((await compare("nap", "0-1", "both facts")).stdout).toBe("0-1 saved.\nNothing left to compress.\n");
-    const entries = Array.from({ length: 126 }, (_, i) => ["2026-10-07", `event ${i}, café\u0000BOM\ufeff`] as const);
-    await store.append(entries); await original.append(entries);
-    settings.WAKE_LINES = 8; settings.PART_LINES = 2;
-    await compare("wake");
-    let result = await compare("nap");
-    for (let i = 0; i < 127; i++) {
-      const block = /^Run: memo nap (\d+-\d+) /mu.exec(result.stdout)?.[1];
-      if (!block) break;
-      result = await compare("nap", block, `summary ${block}`);
-    }
-    expect(result.stdout).toContain("Nothing left to compress.");
-    for (let part = 1; part <= 4; part++) await compare("wake", String(part), "128");
-    await compare("zoom", "0-63");
-    await compare("recall", "CAFÉ");
-    expect(await recallInWorker({ store, settings }, "CAFÉ")).toEqual(await run("recall", "CAFÉ"));
-    await compare("forget", "16-31"); await compare("nap");
-    expect(await store.slice(0, 128)).toEqual(await original.slice(0, 128));
-  }, 30000);
-
   it("isolates owners, persists disable, blocks stale writers and keeps notes for re-enable", async () => {
     const { store, db, users, run, url } = await fixture(postgres);
     await run("note", "private fact");

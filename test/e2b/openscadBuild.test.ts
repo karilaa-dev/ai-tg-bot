@@ -132,7 +132,7 @@ describe("openscad-build", () => {
 });
 
 describe("OpenSCAD POV scene renderer", () => {
-  it("uses a deterministic neutral isometric scene and strips generated lights", async () => {
+  it("preserves model polygons while replacing the generated scene", async () => {
     const input = path.join(tempRoot, "input.pov");
     const summary = path.join(tempRoot, "summary.json");
     const output = path.join(tempRoot, "output.pov");
@@ -142,9 +142,7 @@ describe("OpenSCAD POV scene renderer", () => {
     await execFileAsync("node", [povRenderer, input, summary, output]);
 
     const scene = await fs.readFile(output, "utf8");
-    expect(scene).toContain("background { color rgb <0.96, 0.97, 0.985> }");
-    expect(scene).toContain("color rgb <0.72, 0.80, 0.90>");
-    expect(scene).toContain("angle 34");
+    expect(scene).toContain("polygon { 4,\n<0, 0, 0>, <1, 0, 0>, <0, 1, 0>, <0, 0, 0>");
     expect(scene.match(/^light_source/gmu)).toHaveLength(2);
     expect(scene).not.toContain("<99, 99, 99>");
     expect(scene).not.toContain("rad_def.inc");

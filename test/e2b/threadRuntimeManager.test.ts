@@ -48,26 +48,29 @@ describe("thread E2B runtime manager", () => {
     await db.destroy();
   });
 
-  it("throttles ordinary pruning, forces export checks, and renews each prepared operation once", async () => {
-    const lease = runtime.acquireActivityLease(userId, threadId);
-    try {
-      await runtime.execute(commandRequest(userId, threadId));
-      const sandbox = client.onlySandbox();
-      const scans = () => sandbox.controlCommands.filter((command) => command.includes("source_root=sys.argv[1]")).length;
-      expect(scans()).toBe(1);
-      const timeoutCalls = sandbox.timeoutCalls.length;
-      await runtime.execute(commandRequest(userId, threadId));
-      expect(scans()).toBe(1);
-      expect(sandbox.timeoutCalls).toHaveLength(timeoutCalls + 1);
-      sandbox.files.set(`${E2B_WORKSPACE}/export.stl`, Buffer.from("export"));
-      await runtime.readWorkspaceFile({ userId, threadId, virtualPath: "/export.stl", maxBytes: 100, preserveSource: true });
-      expect(scans()).toBe(2);
-      await runtime.execute(commandRequest(userId, threadId));
-      expect(scans()).toBe(2);
-      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
-      await runtime.execute(commandRequest(userId, threadId));
-      expect(scans()).toBe(3);
-    } finally { lease.release(); }
+  it("caches source scans for ordinary commands and refreshes them before exports", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    await expect(runtime.execute(commandRequest(userId, threadId))).resolves.toMatchObject({ stdout: "ok" });
+    const sandbox = client.onlySandbox();
+    const scans = () => sandbox.controlCommands.filter(command => command.includes("source_root=sys.argv[1]"));
+    expect(scans()).toHaveLength(1);
+
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(scans()).toHaveLength(1);
+    sandbox.files.set(`${E2B_WORKSPACE}/export.stl`, Buffer.from("export"));
+    const exported = await runtime.readWorkspaceFile({
+      userId, threadId, virtualPath: "/export.stl", maxBytes: 100, preserveSource: true,
+    });
+    expect(exported.bytes).toEqual(Buffer.from("export"));
+    expect(scans()).toHaveLength(2);
+
+    now += 59_999;
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(scans()).toHaveLength(2);
+    now += 1;
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(scans()).toHaveLength(3);
   });
 
   it("reads captured stdout and stderr concurrently", async () => {
@@ -253,12 +256,15 @@ describe("thread E2B runtime manager", () => {
     sandbox.files.set(`${E2B_WORKSPACE}/keep.txt`,Buffer.from("keep"));
     await runtime.execute(commandRequest(userId,threadId));
     expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
+    const toolboxChecks = () => sandbox.controlCommands.filter(command => command.includes("/tmp/ai-tg-bot-toolbox-upgrade.lock"));
+    expect(toolboxChecks()).toHaveLength(1);
     expect(sandbox.writeFileCalls.some(call => call.path.startsWith(OFFICE_BUNDLE_PATH + "/"))).toBe(false);
     expect(sandbox.files.get("/opt/office/installed-revision")?.toString()).toBe((await officeBundle()).revision);
     await runtime.dispose();
     runtime = createRuntime();
     await runtime.execute(commandRequest(userId, threadId));
     expect(sandbox.controlCommands.filter(command=>command.includes(".staging-") && command.includes("/install.sh'"))).toHaveLength(1);
+    expect(toolboxChecks()).toHaveLength(2);
     expect(sandbox.files.get(`${E2B_WORKSPACE}/keep.txt`)?.toString()).toBe("keep");
     expect(client.createCalls).toBe(1);
     expect(client.killCalls).toBe(0);
@@ -289,16 +295,6 @@ describe("thread E2B runtime manager", () => {
     await runtime.execute(commandRequest(userId, threadId));
     expect(sandbox.files.has(`${OFFICE_BUNDLE_PATH}/obsolete.txt`)).toBe(false);
     expect(sandbox.writeFileCalls.filter(call => call.path.includes(".staging-")).every(call => call.path !== failedPath)).toBe(true);
-  });
-
-  it("validates or upgrades the PDF toolbox once for an existing sandbox connection", async () => {
-    await runtime.execute(commandRequest(userId, threadId));
-    await runtime.execute(commandRequest(userId, threadId));
-
-    const toolboxChecks = client.onlySandbox().controlCommands.filter((command) =>
-      command.includes("@firecrawl/pdf-inspector@1.25.2")
-      && command.includes("command -v pdftoppm"));
-    expect(toolboxChecks).toHaveLength(1);
   });
 
   it("reconnects a mapped sandbox after the configured template version changes", async () => {

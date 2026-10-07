@@ -62,7 +62,7 @@ describe("durable turn activity", () => {
     expect(await repos.turnActivity.pending(Date.now())).toEqual([]);
   });
 
-  it("retains failed cleanup and retries it after restart", async () => {
+  it("retries failed cleanup after restart and remembers its confirmation", async () => {
     await repos.turnRuns.markFailed(runId, "generation_failed");
     const first = activity(vi.fn(async () => { throw new Error("Telegram unavailable"); }));
     first.schedule(runId);
@@ -75,6 +75,11 @@ describe("durable turn activity", () => {
     await restarted.waitForIdle();
     expect(clear).toHaveBeenCalledWith({ chat_id: 1001, message_id: 1, reaction: [] }, expect.any(AbortSignal));
     expect(await repos.turnActivity.pending(Date.now())).toEqual([]);
+    await db.initialize();
+    const recovered = activity(clear);
+    await recovered.recover();
+    await recovered.waitForIdle();
+    expect(clear).toHaveBeenCalledTimes(1);
   });
 
   it("retains cleanup when only the topic update fails", async () => {
@@ -95,16 +100,4 @@ describe("durable turn activity", () => {
     expect(await repos.turnActivity.pending(Date.now() + 6_000)).toEqual([]);
   });
 
-  it("does not repeat confirmed cleanup after recovery", async () => {
-    await repos.turnRuns.markFailed(runId, "generation_failed");
-    const clear = vi.fn(async () => true);
-    const first = activity(clear);
-    first.schedule(runId);
-    await first.waitForIdle();
-    await db.initialize();
-    const restarted = activity(clear);
-    await restarted.recover();
-    await restarted.waitForIdle();
-    expect(clear).toHaveBeenCalledTimes(1);
-  });
 });

@@ -329,7 +329,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await env.repos.messages.listThread(general.id)).map((row) => row.text_plain)).toContain("general-only detail");
   });
 
-  it("ignores Telegram topic service messages before command or text in that topic", async () => {
+  it("ignores bot-owned topics and handles a user's topic service message before its first command", async () => {
     await env.dispose();
     env = await createGrammyEmulator({ privateTopics: true });
     await startBot();
@@ -343,6 +343,16 @@ describe("Telegram bot with grammy-emulate", () => {
     const [serviceResponse] = await env.bot.processUpdatesConcurrently([update]);
     expect(serviceResponse?.texts).toEqual([]);
     expect(serviceResponse?.getLastApiCall("sendMessage")).toBeUndefined();
+
+    const botUpdate = env.bot.server.updateFactory.createForumTopicCreated(
+      env.bot.botInfo,
+      env.chat,
+      { name: "Bot topic", icon_color: 0x6fb9f0 },
+      89,
+    );
+    await env.bot.processUpdatesConcurrently([botUpdate]);
+    expect(await env.repos.users.get(env.bot.botInfo.id)).toBeUndefined();
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tg_id: env.user.id, first_name: "Alice" });
 
     const help = await env.bot.sendCommand(env.user, env.chat, "/help", { messageThreadId: 88 });
     expect(help.text).toContain("Commands:");

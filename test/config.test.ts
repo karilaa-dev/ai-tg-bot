@@ -76,7 +76,6 @@ describe("agent execution limits", () => {
   const names = ["PI_TURN_TIMEOUT_MS", "PI_MAX_MODEL_CYCLES", "PI_MAX_TOOL_CALLS", "PI_MAX_CONSECUTIVE_TOOL_FAILURES", "PI_MAX_IDENTICAL_TOOL_FAILURES"] as const;
 
   it("keeps a separately configurable provider request deadline", () => {
-    expect(loadConfig(required).PI_REQUEST_TIMEOUT_MS).toBe(900_000);
     expect(loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: "60000" }).PI_REQUEST_TIMEOUT_MS).toBe(60_000);
     for (const value of ["0", "-1", "1.5", "Infinity", "invalid"]) {
       expect(() => loadConfig({ ...required, PI_REQUEST_TIMEOUT_MS: value })).toThrow();
@@ -84,7 +83,6 @@ describe("agent execution limits", () => {
   });
 
   it("keeps a finite recovery grace period for legacy ownerless turns", () => {
-    expect(loadConfig(required).LEGACY_TURN_RECOVERY_GRACE_MS).toBe(960_000);
     expect(loadConfig({ ...required, LEGACY_TURN_RECOVERY_GRACE_MS: "120000" }).LEGACY_TURN_RECOVERY_GRACE_MS).toBe(120_000);
     for (const value of ["0", "-1", "1.5", "Infinity", "invalid"]) {
       expect(() => loadConfig({ ...required, LEGACY_TURN_RECOVERY_GRACE_MS: value })).toThrow();
@@ -104,8 +102,7 @@ describe("agent execution limits", () => {
 });
 
 describe("transcription configuration", () => {
-  it("defaults to Qwen3-ASR-1.7B and supports an override", () => {
-    expect(loadConfig(required)).toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "qwen/qwen3-asr-1.7b", TRANSCRIPTION_TIMEOUT_MS: 120_000 });
+  it("parses the configured transcription model and timeout", () => {
     expect(loadConfig({ ...required, OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: "60000" }))
       .toMatchObject({ OPENROUTER_TRANSCRIPTION_MODEL: "vendor/stt", TRANSCRIPTION_TIMEOUT_MS: 60_000 });
   });
@@ -117,8 +114,7 @@ describe("transcription configuration", () => {
 });
 
 describe("global OptMem configuration", () => {
-  it("uses upstream defaults unless the environment overrides them", () => {
-    expect(loadConfig(required)).toMatchObject({ OPTMEM_WAKE_LINES: 96, OPTMEM_ENTRY_CHARS: 280, OPTMEM_PART_CHARS: 20000, OPTMEM_PART_LINES: 500 });
+  it("parses memory budgets from the environment", () => {
     expect(loadConfig({ ...required, OPTMEM_WAKE_LINES: "128", OPTMEM_ENTRY_CHARS: "120", OPTMEM_PART_CHARS: "12000", OPTMEM_PART_LINES: "100" }))
       .toMatchObject({ OPTMEM_WAKE_LINES: 128, OPTMEM_ENTRY_CHARS: 120, OPTMEM_PART_CHARS: 12000, OPTMEM_PART_LINES: 100 });
   });

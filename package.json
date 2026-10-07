@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.20",
+  "version": "2.0.21",
   "private": true,
   "type": "module",
   "scripts": {
@@ -49,7 +49,6 @@
   },
   "devDependencies": {
     "@bonkers-agency/grammy-test": "^0.1.3",
-    "@lickle/lock": "0.0.1",
     "@types/bun": "1.4.2",
     "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1",
