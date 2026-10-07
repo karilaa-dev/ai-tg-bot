@@ -33,6 +33,8 @@ Each authenticated Telegram user owns one memory in the application database sel
 
 Memory spans a user's threads and forks, including facts recorded after an earlier fork point. Model arguments cannot choose another owner. Conversation and attachment searches retain their existing visibility rules. The bot does not automatically import chat history. The main agent chooses facts and writes summaries.
 
+New notes use the user's configured timezone, defaulting to UTC, matching the date in their session context. Historical imports retain the dates supplied in the file.
+
 Users can run `/memory` to see their status, `/memory off` to disable memory, or `/memory on` to enable it. This is their only memory setting. Disabling blocks memory commands, including writes from stale sessions, and removes the tool and activation instructions on the next turn. Saved notes remain in the database. Facts already present in conversation history remain there. Re-enabling requests another wake.
 
 All tuning is global. Set only non-default values in `.env` and restart the bot. `memo config NAME=VALUE` cannot override them.

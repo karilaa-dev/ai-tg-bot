@@ -129,6 +129,33 @@ for (const postgres of [false, true]) describe.skipIf(postgres && !process.env.T
     expect(await store.length()).toBe(0);
   });
 
+  it("does not restore a parent when a child was forgotten while nap waited to write", async () => {
+    const { db, store, run } = await fixture(postgres);
+    await store.append(Array.from({ length: 32 }, (_, i) => ["2026-10-07", `note ${i}`] as const));
+    for (let size = 2; size <= 16; size *= 2) {
+      for (let lo = 0; lo < 32; lo += size) expect(await store.put(lo, lo + size, `original ${lo}-${lo + size - 1}`)).toBe(true);
+    }
+    const ready = deferred<void>(), release = deferred<void>();
+    class PausedCompressor extends DatabaseMemoryStore {
+      override async put(...args: Parameters<DatabaseMemoryStore["put"]>): Promise<boolean> {
+        ready.resolve();
+        await release.promise;
+        return super.put(...args);
+      }
+    }
+    const pending = runMemo({ store: new PausedCompressor(db.db, 42), args: ["nap", "0-31", "parent with forgotten facts"] });
+    await ready.promise;
+    try { expect((await run("forget", "16-31")).exit_code).toBe(0); }
+    finally { release.resolve(); }
+    const result = await pending;
+    expect(result.stdout).not.toContain("0-31 saved.");
+    expect(await store.summary(0, 32)).toBeUndefined();
+    expect(await store.pending(32, 1)).toEqual([[16, 32]]);
+    expect((await run("nap", "16-31", "corrected child")).exit_code).toBe(0);
+    expect((await run("nap", "0-31", "corrected parent")).stdout).toContain("0-31 saved.");
+    expect(await store.summary(0, 32)).toBe("corrected parent");
+  });
+
   it.each([
     { concurrentDate: "2026-10-08", accepted: false },
     { concurrentDate: "2026-10-07", accepted: true },

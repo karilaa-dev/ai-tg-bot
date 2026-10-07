@@ -109,8 +109,11 @@ export class DatabaseMemoryStore implements MemoryStore {
 
   async put(lo: number, hi: number, text: string): Promise<boolean> {
     return this.locked(async store => {
+      // Earlier levels include the children; forgetting one makes it pending
+      // again and prevents an in-flight parent from bypassing the rebuild.
+      const [next] = await store.pending(await store.length(), 1);
+      if (!next || next[0] !== lo || next[1] !== hi) return false;
       const size = hi - lo, index = lo / size;
-      if (await store.levelLength(size) !== index) return false;
       pad(text, TREE_REC);
       await store.db.execute(sql`insert into optmem_summaries(user_id, size, block_index, content)
         values (${this.userId}, ${size}, ${index}, ${Buffer.from(text)})`);

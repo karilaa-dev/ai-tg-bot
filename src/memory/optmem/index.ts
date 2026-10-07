@@ -29,6 +29,7 @@ export interface MemoInput {
   args: readonly string[];
   command?: string;
   now?: Date;
+  utcOffsetMinutes?: number;
 }
 
 function pretty(file: string): string {
@@ -219,7 +220,9 @@ class Command {
   private async note(args: string[]): Promise<void> {
     if (args.length !== 1) throw new MemoError(`usage: ${this.name} note "<one line, at most ${this.sizes.ENTRY_CHARS} bytes>"`);
     const text = this.check(args[0]), now = this.input.now ?? new Date();
-    const date = `${String(now.getFullYear()).padStart(4, "0")}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const date = this.input.utcOffsetMinutes === undefined
+      ? `${String(now.getFullYear()).padStart(4, "0")}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+      : new Date(now.getTime() + this.input.utcOffsetMinutes * 60_000).toISOString().slice(0, 10);
     const id = await this.store.append([[date, text]]);
     this.print(`Saved as #${id}.`);
     const nap = await this.nextNap(id + 1);

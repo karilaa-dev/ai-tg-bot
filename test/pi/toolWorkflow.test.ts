@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type JsonObject, type TranscriptContext } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -17,6 +17,27 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 describe("Pi tool discovery and codemode", () => {
+  it.each([
+    { instant: "2026-01-01T02:00:00Z", offset: -420, date: "2025-12-31" },
+    { instant: "2026-12-31T22:00:00Z", offset: 330, date: "2027-01-01" },
+    { instant: "2026-10-07T23:45:00Z", offset: 345, date: "2026-10-08" },
+    { instant: "2026-01-01T02:00:00Z", offset: null, date: "2026-01-01" },
+  ])("dates notes like the session context at $instant with offset $offset", async ({ instant, offset, date }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(instant));
+    try {
+      const { runtime, repos, user } = await setup([]);
+      if (offset !== null) await repos.users.setTimezone(user.tg_id, offset);
+      runtime.bridge.user = { ...user, tz_offset_min: offset };
+      await runtime.bridge.beginTurn({ api: {} as never, chatId: user.tg_id, resolveFile: async () => { throw new Error("Unexpected file"); } });
+      expect(runtime.bridge.currentTurnSessionContext()).toContain(`"current_time": "${date} `);
+      const tool = createMemoTool(runtime.bridge.buildInput());
+      expect((await tool.execute({ args: ["note", "calendar boundary"] })).exit_code).toBe(0);
+      const store = new DatabaseMemoryStore(runtime.bridge.buildInput().db.db, user.tg_id);
+      expect(await store.get(0)).toEqual([0, date, "calendar boundary"]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("runs OptMem through the real session, restores it after restart, and shares only within one user", async () => {
     const { runtime, contexts, reopen, pi, repos, user, thread } = await setup([
       { name: "memo", arguments: { args: ["wake"] } },

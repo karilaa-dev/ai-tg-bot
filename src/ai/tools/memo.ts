@@ -11,7 +11,8 @@ export function createMemoTool(input: ToolBuildInput) {
     inputSchema: z.object({ args: z.tuple([z.enum(["wake", "note", "nap", "recall", "zoom", "forget", "config"])]).rest(z.string()) }),
     execute: async ({ args }, signal) => {
       signal?.throwIfAborted();
-      const memory = { store: new DatabaseMemoryStore(input.db.db, input.user.tg_id, signal), settings: memorySizes(input.config) };
+      const memory = { store: new DatabaseMemoryStore(input.db.db, input.user.tg_id, signal), settings: memorySizes(input.config),
+        utcOffsetMinutes: input.user.tz_offset_min ?? 0 };
       const result = args[0] === "recall" && args.length === 2
         ? await recallInWorker(memory, args[1], signal)
         : await runMemo({ ...memory, args });
