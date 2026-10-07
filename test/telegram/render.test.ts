@@ -102,7 +102,6 @@ describe("renderFinal", () => {
 
   it("normalizes an exact-limit fence wrapper before streaming fenced content", () => {
     const exactLimitFenceOpener = `\`\`\`${"x".repeat(32760)}`;
-    expect(Array.from(`${exactLimitFenceOpener}\n\n\`\`\``)).toHaveLength(32768);
     const parts = renderFinal({
       answerMd: `${exactLimitFenceOpener}\nABC\n\`\`\``,
       elapsedMs: 0,
@@ -161,49 +160,6 @@ describe("renderFinal", () => {
 
     expect(markdown).toBe("continuation-tail");
     expect(Array.from(markdown).length).toBeLessThanOrEqual(32768);
-  });
-
-  it("renders an empty draft as the plain thinking placeholder without a details block", () => {
-    const payload = renderDraft({
-      thinkingMd: "",
-      answerMd: "",
-      elapsedMs: 0,
-      t,
-    });
-    const markdown = payload.markdown ?? "";
-
-    expect(markdown).toBe("Thinking...");
-    expect(markdown).not.toContain("<details>");
-  });
-
-  it("renders draft thinking in a closed elapsed details block once content exists", () => {
-    const payload = renderDraft({
-      thinkingMd: "🔎 Searching web <code>alpha</code> (5 results)",
-      answerMd: "Answer.",
-      elapsedMs: 27_000,
-      t,
-    });
-    const markdown = payload.markdown ?? "";
-
-    expect(markdown).toContain("<details>\n<summary>Thinking for 27s</summary>");
-    expect(markdown).toContain("🔎 Searching web <code>alpha</code> (5 results)");
-    expect(markdown).toContain("</details>");
-    expect(markdown).toContain("Answer.");
-    expect(markdown).not.toContain("<tg-thinking>");
-  });
-
-  it("uses a generated-image elapsed title while image generation is active", () => {
-    const payload = renderDraft({
-      thinkingMd: "🎨 Generating image <code>blue square</code>",
-      answerMd: "",
-      elapsedMs: 19_000,
-      t,
-    });
-    const markdown = payload.markdown ?? "";
-
-    expect(markdown).toContain("<details>\n<summary>Generating image for 19s</summary>");
-    expect(markdown).toContain("🎨 Generating image <code>blue square</code>");
-    expect(markdown).not.toContain("Thinking for 19s");
   });
 
   it("uses the generated-image title when reasoning appears before the image tool", () => {

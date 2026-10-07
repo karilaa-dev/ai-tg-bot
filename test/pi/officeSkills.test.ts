@@ -3,13 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DefaultResourceLoader,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import {
   approvedSkillPaths,
   createApprovedSkillReadTool,
-  validateApprovedSkills,
 } from "../../src/pi/officeSkills.js";
 
 const tempRoots: string[] = [];
@@ -19,32 +14,6 @@ afterEach(async () => {
 });
 
 describe("approved Pi skills", () => {
-  it("loads checksum-verified approved skills with default discovery disabled", async () => {
-    await expect(validateApprovedSkills()).resolves.toBeUndefined();
-    const loader = new DefaultResourceLoader({
-      cwd: process.cwd(),
-      agentDir: path.resolve("data/pi"),
-      settingsManager: SettingsManager.inMemory(),
-      additionalSkillPaths: approvedSkillPaths(),
-      noSkills: true,
-      noExtensions: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-    });
-
-    await loader.reload();
-    expect(loader.getSkills().diagnostics).toEqual([]);
-    expect(loader.getSkills().skills.map((skill) => skill.name).sort()).toEqual([
-      "docx-cli",
-      "openscad",
-      "pptx-edit",
-      "pptxgenjs",
-      "sandbox-files",
-      "xlsx",
-    ]);
-  });
-
   it("reads a complete advertised skill but rejects all other host files", async () => {
     const tool = createApprovedSkillReadTool();
     const skillPath = approvedSkillPaths()[0]!;

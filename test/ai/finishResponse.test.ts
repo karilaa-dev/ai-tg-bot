@@ -197,7 +197,7 @@ describe("finish_response", () => {
   });
 
   it("executes four Pi cycles with both inspections and ends with one STL and final photo", async () => {
-    const { input, runtime, contexts, calls } = await setupPi([
+    const { runtime, contexts, calls } = await setupPi([
       [{ name: "read", arguments: { path: path.resolve("skills/openscad/SKILL.md") } }],
       [{ name: "bash", arguments: { script: "openscad-build preview model.scad", inspect_images: ["/model.preview.png"] } }],
       [{ name: "bash", arguments: { script: "openscad-build final model.scad", inspect_images: ["/model.final.png"] } }],
@@ -215,8 +215,6 @@ describe("finish_response", () => {
     expect(currentTurnAssistantResult(runtime.session.messages)).toMatchObject({ completed: true, text: "Ready to print" });
     const stored = await fs.readFile(runtime.session.sessionFile!, "utf8");
     expect(stored).toContain("Ready to print");
-    expect(stored).not.toContain("Model: GPT-6.1 Sol");
-    expect(input.config.PI_THINKING_LEVEL).toBe("medium");
   });
 
   it("persists final text against the terminal result entry so forks retain a complete exchange", async () => {

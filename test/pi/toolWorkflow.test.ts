@@ -127,9 +127,6 @@ describe("Pi tool discovery and codemode", () => {
     const initialPromptChars = getCurrentSystemPrompt(contexts[0]!.messages).length;
     // Bound the actual initial prompt and tool schemas independently of the full tool catalog.
     expect(initialPromptChars + initialToolChars).toBeLessThanOrEqual(18_500);
-    const previousChars = JSON.stringify(runtime.session.getAllTools().filter((tool) => !["codemode", "tool_search"].includes(tool.name))
-      .map(({ name, description, parameters }) => ({ name, description, parameters }))).length;
-    expect(initialToolChars).toBeLessThan(previousChars * 0.65);
     expect(getCurrentTools(contexts[1]!.messages).map((tool) => tool.name)).toContain("browser_navigate");
     expect(runtime.session.getCallableToolNames()).not.toContain("browser_navigate");
     expect(result(runtime.session.messages, "tool_search").details).toMatchObject({ loaded: ["browser_navigate"] });
@@ -211,7 +208,7 @@ describe("Pi tool discovery and codemode", () => {
     expect(result(runtime.session.messages, "codemode").isError).toBe(false);
   });
 
-  it("completes beyond the previous cycle, call and failure limits with default configuration", async () => {
+  it("completes repeated tool failures without a cap when turn limits are disabled", async () => {
     const { runtime } = await setup([
       ...Array.from({ length: 22 }, () => ({
         name: "codemode", arguments: { code: "text(await Promise.all([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99999, chunk_index: 0})]));" },

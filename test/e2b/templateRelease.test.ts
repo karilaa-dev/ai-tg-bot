@@ -5,7 +5,6 @@ import {
   type E2BTemplateReleaseDependencies,
 } from "../../src/e2b/templateRelease.js";
 import {
-  E2BTemplateNotFoundError,
   createWithTemplateNotFoundError,
   isE2BNotFoundError,
 } from "../../src/e2b/templateNotFound.js";
@@ -97,16 +96,17 @@ describe("manual E2B template release", () => {
     expect(dependencies.exists).toHaveBeenCalledTimes(2);
     expect(dependencies.validate).not.toHaveBeenCalled();
   });
-
 });
 
 describe("missing sandbox image failure", () => {
   it("fails once with a release instruction when the configured image is missing", async () => {
-    const create = vi.fn().mockRejectedValue(new SandboxError("404: template not found"));
+    const cause = new SandboxError("404: template not found");
+    const create = vi.fn().mockRejectedValue(cause);
 
     await expect(createWithTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, create))
       .rejects.toEqual(expect.objectContaining({
         name: "E2BTemplateNotFoundError",
+        cause,
         templateRef: E2B_TOOLBOX_RELEASE_REF,
         message: expect.stringContaining("bun run e2b:release"),
       }));
@@ -121,11 +121,6 @@ describe("missing sandbox image failure", () => {
     await expect(createWithTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, create)).rejects.toBe(original);
     expect(create).toHaveBeenCalledTimes(1);
     expect(isE2BNotFoundError(new SandboxError("500: unavailable"))).toBe(false);
-  });
-
-  it("retains the SDK failure as the missing-image error cause", () => {
-    const cause = new SandboxError("404: template not found");
-    expect(new E2BTemplateNotFoundError(E2B_TOOLBOX_RELEASE_REF, cause).cause).toBe(cause);
   });
 });
 

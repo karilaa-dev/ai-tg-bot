@@ -41,19 +41,6 @@ describe("Telegram audio prompts", () => {
     expect(await env.db.db.query(sql`select id from audio_transcripts`)).toEqual([]);
   }
 
-  it("skips accepted update redeliveries before downloading or transcribing", async () => {
-    const update = voiceUpdate();
-    const download = vi.spyOn(env.services.fileResolver, "resolveSource");
-    await processUpdate(update);
-    const apiCalls = env.bot.getApiCalls().length;
-    await processUpdate(update);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(download).toHaveBeenCalledOnce();
-    expect(env.bot.getApiCalls()).toHaveLength(apiCalls);
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.turnRuns.listForThread(thread.id)).toHaveLength(1);
-  });
-
   it("allows retrying an update whose transcription failed", async () => {
     fetchMock.mockResolvedValueOnce(Response.json({ text: " " }));
     const update = voiceUpdate();
@@ -62,15 +49,6 @@ describe("Telegram audio prompts", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.turnRuns.listForThread(thread.id)).toHaveLength(1);
-  });
-
-  it("transcribes a new update even when it reuses an accepted audio file", async () => {
-    const update = voiceUpdate();
-    await processUpdate(update);
-    await processUpdate(env.bot.server.updateFactory.createVoiceMessage(env.user, env.chat, update.message!.voice!));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.turnRuns.listForThread(thread.id)).toHaveLength(2);
   });
 
   it("bounds long audio prompts and makes the remaining transcript readable without another request", async () => {
@@ -107,6 +85,9 @@ describe("Telegram audio prompts", () => {
     fetchMock.mockResolvedValueOnce(Response.json({ text: "new transcript ".repeat(1000) }));
     await processUpdate(env.bot.server.updateFactory.createVoiceMessage(env.user, env.chat, update.message!.voice!));
     const messages = await env.repos.messages.listThread(thread.id);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(messages[2]!.text_plain).toContain("new transcript");
     const [saved] = await env.db.db.query<{ id: string }>(sql`select id from audio_transcripts`);
     expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(1);
     expect(await env.repos.audioTranscripts.get(saved!.id)).toMatchObject({ visible_message_id: messages[2]!.id });
@@ -117,8 +98,9 @@ describe("Telegram audio prompts", () => {
     expect(await tool.execute({ transcript_id: saved!.id })).toEqual({ error: "Transcript not found in this thread." });
   });
 
-  it("uses a voice transcript as a prompt, stores its source, and keeps it available to the tool", async () => {
+  it("stores a voice prompt once on redelivery and keeps its source available to the tool", async () => {
     const update = voiceUpdate();
+    const download = vi.spyOn(env.services.fileResolver, "resolveSource");
     const res = await processUpdate(update);
     expect(JSON.stringify(res.getLastApiCall("sendRichMessage")?.payload)).toContain("Echo: Help me plan tomorrow.");
     expect(JSON.stringify(env.bot.getApiCalls())).not.toContain("Downloading");
@@ -132,6 +114,13 @@ describe("Telegram audio prompts", () => {
     expect(await env.repos.files.listTelegramFileRefs([files[0]!.id])).toEqual([
       expect.objectContaining({ media_kind: "voice", telegram_file_id: update.message!.voice!.file_id, telegram_message_id: update.message!.message_id }),
     ]);
+    const apiCalls = env.bot.getApiCalls().length;
+    await processUpdate(update);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(download).toHaveBeenCalledOnce();
+    expect(env.bot.getApiCalls()).toHaveLength(apiCalls);
+    expect(await env.repos.messages.listThread(thread.id)).toEqual(messages);
+    expect(await env.repos.turnRuns.listForThread(thread.id)).toHaveLength(1);
     const user = (await env.repos.users.get(env.user.id))!;
     const result = await createTranscribeAudioTool({
       config: env.config, db: env.db, repos: env.repos, user, thread,

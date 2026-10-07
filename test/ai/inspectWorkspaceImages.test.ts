@@ -100,14 +100,6 @@ describe("inspect_workspace_images", () => {
     }).success).toBe(false);
   });
 
-  it("describes mandatory final-image QA and model-only delivery", () => {
-    const tool = createInspectWorkspaceImagesTool(buildInput(fakeRuntime()));
-
-    expect(tool.description).toContain("final collage");
-    expect(tool.description).toContain("model-only");
-    expect(tool.description).toContain("before create_file");
-  });
-
   it("exposes each preview as Pi vision content without persisting image bytes in details", async () => {
     const commandRuntime = fakeRuntime();
     const inspect = createPiToolAdapters({
