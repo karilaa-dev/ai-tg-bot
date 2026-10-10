@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -48,6 +48,8 @@ beforeEach(async () => {
     writeFile(path.join(assetsDirectory, "index-123abc45.html"), "<!doctype html><title>Uncached</title>"),
     writeFile(path.join(assetsDirectory, "index-123abc45.js.map"), "source code"),
     writeFile(path.join(assetsDirectory, "private.txt"), "not an asset"),
+    copyFile(new URL("../../assets/logo.jpg", import.meta.url), path.join(assetsDirectory, "logo.jpg")),
+    copyFile(new URL("../../assets/logo.jpg", import.meta.url), path.join(assetsDirectory, "logo-123abc45.jpg")),
   ]);
   await symlink(path.join(assetsDirectory, "private.txt"), path.join(assetsDirectory, "symlink.js"));
   repository = new ConversationRepository(database.db, repos);
@@ -70,7 +72,8 @@ afterEach(async () => {
 it("serves packaged assets with browser-compatible types and handles HEAD without downloading", async () => {
   expect((await fetch(web!.url)).status).toBe(200);
   expect((await fetch(new URL("/app.js", web!.url))).status).toBe(200);
-  for (const [asset, mime] of [["/", "text/html"], ["/app.js", "text/javascript"], ["/style.css", "text/css"]]) {
+  expect((await fetch(new URL("/logo.jpg", web!.url))).status).toBe(200);
+  for (const [asset, mime] of [["/", "text/html"], ["/app.js", "text/javascript"], ["/style.css", "text/css"], ["/logo.jpg", "image/jpeg"]]) {
     const url = new URL(asset!, web!.url);
     const response = await request(url);
     expect(response.status).toBe(200);
@@ -102,7 +105,7 @@ it("stops the Codex login worker exactly once when the website stops", async () 
 
 it("caches only hashed bundles and keeps HTML, API responses, downloads, and errors private", async () => {
   resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async () => Buffer.from("hello") });
-  for (const asset of ["/index-123abc45.js", "/index-123abc45.css"]) {
+  for (const asset of ["/index-123abc45.js", "/index-123abc45.css", "/logo-123abc45.jpg"]) {
     for (const method of ["GET", "HEAD"]) {
       const response = await request(new URL(asset, web!.url), { method });
       expect(response.status).toBe(200);

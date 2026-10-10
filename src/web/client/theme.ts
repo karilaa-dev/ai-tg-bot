@@ -2,16 +2,14 @@ const themeKey = "conversation-theme";
 const preferred = matchMedia("(prefers-color-scheme: dark)");
 let saved: string | null = null;
 try { saved = localStorage.getItem(themeKey); } catch { /* Storage can be disabled. */ }
-let explicit = saved === "light" || saved === "dark" ? saved : null;
-function apply(theme: string) {
-  document.documentElement.classList.toggle("dark", theme === "dark");
-  document.documentElement.classList.toggle("light", theme === "light");
-  document.documentElement.dataset.theme = theme;
+let explicit: "light" | "dark" | null = saved === "light" || saved === "dark" ? saved : null;
+function apply(theme: "light" | "dark") {
+  document.documentElement.dataset.mode = theme;
 }
 apply(explicit ?? (preferred.matches ? "dark" : "light"));
 function onPreferenceChange() { if (!explicit) apply(preferred.matches ? "dark" : "light"); }
 function onToggle() {
-  explicit = document.documentElement.classList.contains("dark") ? "light" : "dark";
+  explicit = document.documentElement.dataset.mode === "dark" ? "light" : "dark";
   try { localStorage.setItem(themeKey, explicit); } catch { /* Keep the choice for this page. */ }
   apply(explicit);
 }

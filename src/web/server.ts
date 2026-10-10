@@ -180,12 +180,12 @@ async function assetRoutes(directory: string) {
   const entries = await readdir(directory, { withFileTypes: true });
   if (!entries.some(entry => entry.isFile() && entry.name === "index.html")) throw new Error("Website assets are missing. Run bun run build:web.");
   const routes: Record<string, { GET: () => Response; HEAD: () => Response }> = {};
-  const assetTypes: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
+  const assetTypes: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".jpg": "image/jpeg" };
   for (const entry of entries) {
-    if (!entry.isFile() || !/\.(html|js|css)$/.test(entry.name)) continue;
+    if (!entry.isFile() || !/\.(html|js|css|jpg)$/.test(entry.name)) continue;
     const filename = path.join(directory, entry.name);
     // Only content-addressed bundles are safe to cache across releases.
-    const cache = /-[a-z0-9]{8}\.(js|css)$/.test(entry.name) ? "public, max-age=31536000, immutable" : "no-store";
+    const cache = /-[a-z0-9]{8}\.(js|css|jpg)$/.test(entry.name) ? "public, max-age=31536000, immutable" : "no-store";
     const respond = (head: boolean) => {
       const file = bunFile(filename);
       return new Response(head ? null : file, { headers: {
