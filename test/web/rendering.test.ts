@@ -5,6 +5,7 @@ import { expect, it, vi } from "vitest";
 import { CodeBlock } from "../../src/web/client/components/ui/code-block.js";
 import { FileAttachment } from "../../src/web/client/file-attachment.js";
 import { RichText } from "../../src/web/client/rich-text.js";
+import { ThinkingDetails } from "../../src/web/client/thinking-details.js";
 import { MessageUsage, UsageGraphs, TokenBreakdown, FastModeSummary, UsageCalls } from "../../src/web/client/usage.js";
 import { emptyUsage } from "../../src/web/usage.js";
 import { AdminGate, LoginForm } from "../../src/web/client/auth.js";
@@ -113,6 +114,25 @@ it("preserves unknown historical fast mode and distinguishes requested from deli
 });
 
 const numberForTest = (value: number) => value.toLocaleString();
+
+it.each(["Tool calls: 3 · Reasoning blocks: 1", "Вызовы инструментов: 3 · Блоков рассуждений: 1"])("summarizes saved tool activity with closed, accessible details: %s", header => {
+  const html = renderToStaticMarkup(createElement(ThinkingDetails, { text: `${header}\n\n- Reading file: 2\n- Running bash: 1` }));
+  expect(html).toContain("3 tool calls");
+  expect(html).not.toContain(header);
+  expect(html).toContain("Reading file: 2");
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).toContain('aria-label="Thinking and tool details"');
+  expect(html).toContain('tabindex="0"');
+});
+
+it("preserves legacy thinking and does not offer an empty detail panel", () => {
+  const legacy = renderToStaticMarkup(createElement(ThinkingDetails, { text: "A saved reasoning note." }));
+  expect(legacy).toContain("Thinking");
+  expect(legacy).toContain("A saved reasoning note.");
+  const countOnly = renderToStaticMarkup(createElement(ThinkingDetails, { text: "Tool calls: 1" }));
+  expect(countOnly).toContain("1 tool call");
+  expect(countOnly).not.toContain("<button");
+});
 
 it("renders empty and zero-value graphs with finite coordinates and a keyboard day selector", () => {
   expect(renderToStaticMarkup(createElement(UsageGraphs, { daily: [] }))).toBe("");

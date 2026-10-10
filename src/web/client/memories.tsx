@@ -28,7 +28,6 @@ export function Memories({ userId, back }: { userId: number; back: () => void })
       <Button variant="outline" size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}><RefreshCw /> Refresh</Button>
     </header>
     <div className="pane-scroll memory-content" aria-busy={loading}>
-      <div className="memory-intro"><div className="memory-symbol"><Brain size={20} aria-hidden="true" /></div><div><h1>Saved memories</h1><p className="memory-description">Notes the assistant keeps across this person's conversations.</p></div></div>
       {error && <div className="failure" role="alert">{error}<Button variant="outline" size="sm" onClick={() => setRevision(value => value + 1)}>Retry</Button></div>}
       {loading ? <div className="loading inline-loading" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" /> Loading memories…</div> : !error && data && <>
         <div className="memory-toolbar"><p className="memory-status">{data.total} saved {data.total === 1 ? "note" : "notes"}</p><Badge className="settings-badge" variant={data.enabled ? "success" : "neutral"} appearance="dot">Memory {data.enabled ? "on" : "off"}</Badge><span className="memory-sort">Oldest first</span></div>

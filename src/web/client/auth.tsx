@@ -69,11 +69,9 @@ export function AdminGate({ children }: { children: (logout: () => Promise<void>
       <section className="access-form" aria-labelledby="access-title">
         <div className="access-lock"><LockKeyhole size={20} aria-hidden="true" /></div>
         <h1 id="access-title">Admin access</h1>
-        <p className="access-description">Sign in to review conversations, track usage, and manage your bot.</p>
         {authenticated === null ? <>{checkError ? <div className="failure" role="alert">{checkError}<Button onClick={() => setRevision(v => v + 1)}>Try again</Button></div> : <p className="access-check" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" /> Checking your session…</p>}</> : <LoginForm message={message} onSuccess={() => { generation.current++; setMessage(""); setAuthenticated(true); }} />}
       </section>
     </main>
-    <footer className="access-footer"><LockKeyhole size={14} aria-hidden="true" /> Private access for bot administrators</footer>
   </div>;
 }
 
