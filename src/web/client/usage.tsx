@@ -67,7 +67,7 @@ export function CacheExplanation() {
 export function FastModeSummary({ usage }: { usage: WebUsageTotals }) {
   const on = usage.fastModeCalls ?? 0, off = usage.standardModeCalls ?? 0, unknown = usage.unknownFastModeCalls ?? 0;
   if (!on && !off && !unknown) return usage.recordedTurns ? <p className="fast-mode-summary">Fast mode not recorded</p> : null;
-  return <div className="fast-mode-summary" aria-label="Recorded fast mode"><span>Fast mode · {recordUnit(usage)}</span><div><span data-mode="on">On <strong>{number(on)}</strong></span><span data-mode="off">Off <strong>{number(off)}</strong></span><span data-mode="unknown">Unknown <strong>{number(unknown)}</strong></span></div>{unknown > 0 && <small>Unknown records do not show whether fast mode was enabled.</small>}</div>;
+  return <div className="fast-mode-summary" aria-label="Recorded fast mode"><span>Fast mode · {recordUnit(usage)}</span><div><span data-mode="on">On <strong>{number(on)}</strong></span><span data-mode="off">Off <strong>{number(off)}</strong></span><span data-mode="unknown">Unknown <strong>{number(unknown)}</strong></span></div></div>;
 }
 
 function CallTokens({ call }: { call: InferenceUsageCall }) {
@@ -78,13 +78,15 @@ function CallTokens({ call }: { call: InferenceUsageCall }) {
 export function UsageCalls({ calls }: { calls?: InferenceUsageCall[] }) {
   if (!calls?.length) return <p className="usage-call-unavailable">Individual call details were not saved for this reply.</p>;
   return <Collapsible.Root className="usage-calls">
-    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />Inspect {number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</Collapsible.Trigger>
-    <Collapsible.Panel hiddenUntilFound><ol>{calls.map((call, index) => <li key={index}>
-    <header><div><span className="utility-label">{call.aggregate ? "Usage record" : "Call"} {index + 1}</span><strong>{call.model}</strong><span>{call.provider}{call.source ? ` · ${call.source}` : ""}</span></div><span className="fast-mode-badge" data-mode={call.fastMode === true ? "on" : call.fastMode === false ? "off" : "unknown"}>Fast mode {call.fastMode === true ? "on" : call.fastMode === false ? "off" : "unknown"}</span></header>
-    <dl className="call-service-tier"><div><dt>Requested tier</dt><dd>{call.requestedServiceTier ?? "Not recorded"}</dd></div><div><dt>Delivered tier</dt><dd>{call.serviceTier ?? "Not reported"}</dd></div><div><dt>Recorded total</dt><dd>{number(call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens + call.outputTokens)}</dd></div></dl>
+    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />{number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</Collapsible.Trigger>
+    <Collapsible.Panel hiddenUntilFound><ol>{calls.map((call, index) => <li key={index}><details className="usage-call">
+    <summary><span>{index + 1}. {call.model}</span><span>{number(call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens + call.outputTokens)} tokens</span></summary>
+    <div className="usage-call-details">
+    <p>{call.provider}{call.source ? ` · ${call.source}` : ""} · Fast mode {call.fastMode === true ? "on" : call.fastMode === false ? "off" : "unknown"}</p>
+    <dl className="call-service-tier"><div><dt>Requested tier</dt><dd>{call.requestedServiceTier ?? "Not recorded"}</dd></div><div><dt>Delivered tier</dt><dd>{call.serviceTier ?? "Not reported"}</dd></div></dl>
     <CallTokens call={call} />
     {call.aggregate && <p className="usage-call-unavailable">This record combines usage; its individual calls are unavailable.</p>}
-  </li>)}</ol></Collapsible.Panel></Collapsible.Root>;
+  </div></details></li>)}</ol></Collapsible.Panel></Collapsible.Root>;
 }
 
 function TokenBar({ usage }: { usage: WebUsageTotals }) {
@@ -96,8 +98,8 @@ export function MessageUsage({ usage }: { usage?: WebMessageUsage | null }) {
   return <Collapsible.Root className="message-usage">
     <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" /><span>{compact(usage.totalTokens)} tokens · <Cost usage={usage} /></span></Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound>
-    <div className="message-usage-content"><UsageDetails usage={usage} models={usage.models} modelCalls={usage.modelCalls} /><UsageCalls calls={usage.calls} />
-      <p>Totals include saved usage for this reply. Tools and older calls may not report every field. Reasoning is included in output. Price is an API estimate in USD.</p>
+    <div className="message-usage-content detail-scroll" tabIndex={0} role="region" aria-label="Usage details"><UsageDetails usage={usage} models={usage.models} modelCalls={usage.modelCalls} /><UsageCalls calls={usage.calls} />
+      <p>Reasoning is included in output. Cost is an API estimate in USD.</p>
     </div>
     </Collapsible.Panel>
   </Collapsible.Root>;
@@ -119,20 +121,20 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: num
   const tokensRecorded = report && (report.totals.recordedTurns > 0 || report.totals.missingUsageTurns === 0);
   return <div className="thread-usage"><Collapsible.Root className="message-usage" open={open} onOpenChange={setOpen}>
     <Collapsible.Trigger className="thread-usage-summary">
-      <span className="thread-usage-label">Thread usage · All time</span>
-      <span className="thread-usage-metric"><strong data-unavailable={!tokensRecorded || undefined} title={tokensRecorded ? `${number(report.totals.totalTokens)} tokens` : undefined}>{report ? tokensRecorded ? compact(report.totals.totalTokens) : "Not recorded" : error ? "Unavailable" : "Loading…"}</strong><span>Tokens</span></span>
-      <span className="thread-usage-metric"><strong data-unavailable={!report || report.totals.estimatedCostUsd === null || undefined}>{report ? <Cost usage={report.totals} /> : error ? "Unavailable" : "Loading…"}</strong><span>Estimated USD</span></span>
+      <span className="thread-usage-label">Thread usage</span>
+      <span className="thread-usage-metric"><strong data-unavailable={!tokensRecorded || undefined} title={tokensRecorded ? `${number(report.totals.totalTokens)} tokens` : undefined}>{report ? tokensRecorded ? compact(report.totals.totalTokens) : "Not recorded" : error ? "Unavailable" : "Loading…"}</strong><span>tokens</span></span>
+      <span className="thread-usage-metric"><strong data-unavailable={!report || report.totals.estimatedCostUsd === null || undefined}>{report ? <Cost usage={report.totals} /> : error ? "Unavailable" : "Loading…"}</strong><span>est.</span></span>
       <span className="thread-usage-toggle">{open ? "Less" : "Details"}<ChevronDown size={16} aria-hidden="true" /></span>
     </Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound>
-    <div className="message-usage-content">
+    <div className="message-usage-content detail-scroll" tabIndex={0} role="region" aria-label="Usage details">
       {error && <div className="failure" role="alert">{error}<Button onClick={retry}>Retry</Button></div>}
       {!report && !error && <p role="status">Loading thread usage…</p>}
       {report && <>
         {report.totals.recordedTurns ? <><UsageDetails usage={report.totals} models={report.models} /><p>{number(report.totals.recordedTurns)} recorded turns · All time</p></> : <p>No usage has been recorded for this thread yet.</p>}
         {report.totals.missingUsageTurns > 0 && <p>{number(report.totals.missingUsageTurns)} replies or turns have no saved usage.</p>}
         {report.totals.unpricedTurns > 0 && <p>{number(report.totals.unpricedTurns)} recorded turns have incomplete pricing.</p>}
-        <p>Totals cover this entire thread, including messages not loaded here. Inherited messages count toward their original thread. Reasoning is included in output. Price is an API estimate in USD.</p>
+        <p>Includes this thread’s full history; inherited usage stays with its original thread. Reasoning is included in output. Cost is an API estimate in USD.</p>
       </>}
     </div>
     </Collapsible.Panel>
@@ -204,8 +206,8 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
       {report && <>
         <div className="usage-stats">
           <div><span>Estimated cost · USD</span><strong><Cost usage={report.totals} /></strong><small>API equivalent</small></div>
-          <div><span>Recorded tokens</span><strong title={number(report.totals.totalTokens)}>{compact(report.totals.totalTokens)}</strong><small>{number(report.totals.totalTokens)} tokens exactly</small></div>
-          <div><span>Cache hit rate</span><strong>{percent(report.totals.cacheReadRatio)}</strong><small>Share of prompt tokens read from cache</small></div>
+          <div><span>Recorded tokens</span><strong title={number(report.totals.totalTokens)}>{compact(report.totals.totalTokens)}</strong></div>
+          <div><span>Cache hit rate</span><strong>{percent(report.totals.cacheReadRatio)}</strong></div>
           <div><span>Recorded turns</span><strong>{number(report.totals.recordedTurns)}</strong><small>{report.threads.length} {report.threads.length === 1 ? "thread" : "threads"} in this period</small></div>
         </div>
         <section className="usage-token-summary"><h3>Token breakdown</h3><TokenBar usage={report.totals} /><TokenBreakdown usage={report.totals} /><FastModeSummary usage={report.totals} /><CacheExplanation /></section>
@@ -214,7 +216,7 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
         {!report.totals.recordedTurns ? <div className="notice"><h3>No recorded usage in this period</h3><p>Try a longer period. New bot replies will appear here after the model finishes.</p></div> : <UsageGraphs daily={report.daily} />}
         {report.models.length > 0 && <section className="usage-section"><h3>By model</h3><ModelTable models={report.models} /></section>}
         {report.threads.length > 0 && <section className="usage-section"><h3>By thread</h3><div className="usage-table-scroll"><table className="usage-table"><thead><tr><th>Thread</th><th>Tokens</th><th>Cache hit</th><th>Turns</th><th>Est. USD</th></tr></thead><tbody>{report.threads.map(thread => <tr key={thread.id}>
-          <td><button className="usage-thread-link" onClick={() => openThread(thread.userId, thread.id, true)}>{thread.title}</button><small>#{thread.id}{thread.archived ? " · Archived" : ""} · <button onClick={() => openThread(thread.userId, thread.id, false)}>Messages <ArrowUpRight size={11} /></button></small></td>
+          <td><button className="usage-thread-link" onClick={() => openThread(thread.userId, thread.id, true)}>{thread.title}</button><small>{thread.archived ? "Archived · " : ""}<button onClick={() => openThread(thread.userId, thread.id, false)}>Messages <ArrowUpRight size={11} /></button></small></td>
           <td>{number(thread.totalTokens)}<TokenBar usage={thread} /></td><td>{percent(thread.cacheReadRatio)}</td><td>{number(thread.recordedTurns)}{thread.missingUsageTurns > 0 && <small>{number(thread.missingUsageTurns)} untracked</small>}</td><td><Cost usage={thread} /></td>
         </tr>)}</tbody></table></div></section>}
         <Collapsible.Root className="usage-method"><Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />How usage and estimates work</Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="usage-method-content">

@@ -42,6 +42,36 @@ try {
   await page.getByRole("navigation", { name: "Main navigation" }).waitFor();
   assert.equal(await token.count(), 0);
 
+  const thinking = page.getByRole("button", { name: "3 tool calls", exact: true });
+  await thinking.waitFor();
+  assert.equal(await thinking.getAttribute("aria-expanded"), "false");
+  await thinking.focus();
+  await thinking.press("Enter");
+  const toolDetails = page.getByRole("region", { name: "Thinking and tool details" });
+  await toolDetails.waitFor();
+  const reply = page.locator(".message").filter({ has: thinking });
+  await reply.locator(".message-usage > button").click();
+  const usageDetails = reply.getByRole("region", { name: "Usage details" });
+  await usageDetails.getByRole("button", { name: "1 recorded call", exact: true }).click();
+  const call = usageDetails.locator(".usage-call");
+  assert.equal(await call.getAttribute("open"), null);
+  assert.equal(await call.getByText("Requested tier", { exact: true }).isVisible(), false);
+  await call.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await call.getByText("Requested tier", { exact: true }).waitFor();
+  for (const width of [320, 390, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const region of [toolDetails, usageDetails]) {
+      const bounds = await region.evaluate(node => ({ height: node.getBoundingClientRect().height, scroll: node.scrollHeight, client: node.clientHeight, width: node.scrollWidth, clientWidth: node.clientWidth }));
+      assert(bounds.height <= 320, `Details stay compact at ${width}px`);
+      assert(bounds.scroll > bounds.client, "Long details scroll internally");
+      assert(bounds.width <= bounds.clientWidth, `Details have no horizontal overflow at ${width}px`);
+    }
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `No transcript overflow at ${width}px`);
+  }
+  await thinking.click();
+  await toolDetails.waitFor({ state: "hidden" });
+
   await page.getByRole("button", { name: "Usage", exact: true }).first().click();
   await page.getByRole("img", { name: "Daily stacked token counts", exact: false }).waitFor();
   for (const width of [320, 390, 768, 1440]) {
@@ -68,7 +98,7 @@ try {
   await slider.press("ArrowLeft");
   assert.notEqual(await slider.getAttribute("aria-valuetext"), selectedDay);
   assert.deepEqual(errors, []);
-  console.log("Browser smoke passed: rejected-token retry, mobile input sizing, responsive chart labels, and keyboard day selection");
+  console.log("Browser smoke passed: sign-in retry, compact tool and usage details, keyboard disclosures, responsive charts, and keyboard day selection");
 } finally {
   server.kill("SIGTERM");
   await stopped;

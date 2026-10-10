@@ -2,8 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createRoot, type Root } from "react-dom/client";
 import { Button as BaseButton } from "@base-ui/react/button";
 import { Input } from "@base-ui/react/input";
-import { Collapsible } from "@base-ui/react/collapsible";
-import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, LockKeyhole, ChevronRight, ChevronDown, Brain, Archive, Bot, FolderOpen, LoaderCircle } from "lucide-react";
+import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, LockKeyhole, ChevronRight, Brain, Archive, Bot, FolderOpen, LoaderCircle } from "lucide-react";
 import { AdminGate } from "./auth.js";
 import { BrandMark, logo } from "./brand.js";
 import { apiJson } from "./api.js";
@@ -15,6 +14,7 @@ import { RichText } from "./rich-text.js";
 import { Button } from "./components/ui/button.js";
 import { FileAttachment } from "./file-attachment.js";
 import { cn } from "./lib/utils.js";
+import { ThinkingDetails } from "./thinking-details.js";
 import { ThreadActivity, activityLabel } from "./thread-activity.js";
 import { MessageUsage, ThreadUsage, UsageDashboard } from "./usage.js";
 
@@ -24,8 +24,8 @@ async function get<T>(url: string, signal: AbortSignal): Promise<T> {
 const timestamp = (value: number) => new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 
-function Notice({ title, description }: { title: string; description: string }) {
-  return <div className="notice"><h3>{title}</h3><p>{description}</p></div>;
+function Notice({ title, description }: { title: string; description?: string }) {
+  return <div className="notice"><h3>{title}</h3>{description && <p>{description}</p>}</div>;
 }
 function Loading() { return <div className="loading" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" />Loading…</div>; }
 function Failure({ message, retry }: { message: string; retry?: () => void }) {
@@ -124,7 +124,7 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
     <div className="workspace" data-screen={screen} data-view={view}>
     {view === "conversations" && <>
     <aside className="users-pane pane" aria-label="People">
-      <header className="brand"><div><h1>Conversations</h1><p>Your bot’s conversation archive</p></div></header>
+      <header className="brand"><div><h1>Conversations</h1></div></header>
       <div className="pane-tools"><label className="search-label" htmlFor="user-search"><Search size={16} aria-hidden="true" /><Input id="user-search" type="search" aria-label="Find a person" placeholder="Search people…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
       <div className="list-caption"><Users className="size-3.5" /><span>People</span><span className="list-count">{users.items.length}{users.next !== null ? "+" : ""}</span></div>
       <div className="pane-scroll">
@@ -135,14 +135,13 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
         </BaseButton>)}</div>
         {users.next !== null && <Button className="m-4" variant="outline" onClick={users.more} disabled={users.loading}>Load more people</Button>}
       </div>
-      <footer className="pane-footer"><span className="status-dot" aria-hidden="true" /> Updates automatically</footer>
     </aside>
     <aside className="threads-pane pane" aria-label="Conversations">
-      <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Threads"}</h2><p>{selected.userId ? `Telegram ID ${selected.userId}` : "Select a person"}</p></div></header>
+      <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Threads"}</h2>{selected.userId && <details className="person-details"><summary>Details</summary><p>Telegram ID {selected.userId}</p></details>}</div></header>
       {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.memories}><Brain /> Memories</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
-        {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <div className="conversation-list">{threads.items.map(t => <BaseButton key={t.id} className={cn("thread-row", selected.threadId === t.id && "selected")} aria-current={selected.threadId === t.id ? "true" : undefined} onClick={() => navigate(selected.userId, t.id)}>
+        {!selected.userId ? null : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" /> : <div className="conversation-list">{threads.items.map(t => <BaseButton key={t.id} className={cn("thread-row", selected.threadId === t.id && "selected")} aria-current={selected.threadId === t.id ? "true" : undefined} onClick={() => navigate(selected.userId, t.id)}>
           <span className="thread-icon" aria-hidden="true">{t.archived ? <Archive size={17} /> : <MessageSquare size={17} />}</span>
           <span className="thread-copy"><strong>{t.title}</strong><time dateTime={new Date(t.lastActivity).toISOString()}>{new Date(t.lastActivity).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time>
             {(t.archived || t.parentThreadId) && <span className="thread-labels">{t.archived && <span>Archived</span>}{t.parentThreadId && <span><GitFork size={13} /> Fork</span>}</span>}
@@ -151,12 +150,11 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
         </BaseButton>)}</div>}
         {threads.next !== null && <Button variant="outline" className="mt-4" disabled={threads.loading} onClick={threads.more}>Load more conversations</Button>}
       </div>
-      <footer className="pane-footer"><Archive size={14} aria-hidden="true" /> Archived threads included</footer>
     </aside>
     </>}
     <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.usage ? "Usage statistics" : "Message history"}>
       {logoutError && <div className="failure global-error" role="alert">{logoutError}</div>}
-      {selected.memories && selected.userId ? <Memories key={selected.userId} userId={selected.userId} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Conversation archive</h2><p>Messages, files, and response details</p></div><span className="read-only-label"><LockKeyhole size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><FolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "A closer look at every conversation"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Choose a person, then a conversation. Everything your bot has saved is here."} /><div className="welcome-features"><span><MessageSquare /> Message history</span><span><Brain /> Saved thinking</span><span><ChartNoAxesCombined /> Response usage</span></div></div><footer className="transcript-footer"><LockKeyhole size={14} aria-hidden="true" /> Private admin workspace</footer></>}
+      {selected.memories && selected.userId ? <Memories key={selected.userId} userId={selected.userId} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Messages</h2></div><span className="read-only-label"><LockKeyhole size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><FolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "Select a person"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Then choose a conversation to view its messages."} /></div></>}
     </main>
     </div>
   </div>;
@@ -242,20 +240,20 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
     }
   }, [data, loader]);
   return <>
-    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}</header>
+    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? userLabel(data.user) : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}</header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
     <ThreadUsage threadId={threadId} initiallyOpen={showUsage} />
     {!data ? !error && <Loading /> : <>
-      {data.thread.parentThreadId && <div className="fork-note"><GitFork className="size-3.5" />Forked history · Inherited messages are labeled below</div>}
+      {data.thread.parentThreadId && <div className="fork-note"><GitFork className="size-3.5" />Forked conversation</div>}
       <div className="message-scroller">
         <div ref={viewport} className="message-viewport" tabIndex={0} aria-label="Conversation messages" onScroll={checkScroll}><div className="transcript" aria-live="off">
           {data.olderCursor !== null && <div className="flex justify-center"><Button variant="outline" disabled={busy} onClick={() => void load(true)}>Load older</Button></div>}
-          {!data.messages.length && <Notice title="No messages yet" description="Saved messages will appear here as this conversation continues." />}
+          {!data.messages.length && <Notice title="No messages yet" />}
           {data.messages.map((message, index) => <div key={message.id} data-message-id={message.id}>
             {(message.threadId !== data.messages[index - 1]?.threadId && (message.threadId !== threadId || index > 0)) && <div className="history-boundary">{message.threadId === threadId ? "This conversation" : `Inherited from ${data.chain.find(t => t.id === message.threadId)?.title ?? "parent conversation"}`}</div>}
             <article className="message" data-role={message.role}>
               <header>{message.role === "assistant" && <Bot size={16} aria-hidden="true" />}{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
-              {message.thinking && <Collapsible.Root className="thinking"><Collapsible.Trigger className="disclosure-trigger"><Brain size={15} /> Thinking <ChevronDown size={15} /></Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="thinking-content"><RichText text={message.thinking} /></div></Collapsible.Panel></Collapsible.Root>}
+              {message.thinking && <ThinkingDetails text={message.thinking} />}
               {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
               {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
               <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
@@ -264,7 +262,6 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
           </div>)}
         </div></div>{canJump && <Button className="jump-to-latest" variant="outline" size="icon-sm" aria-label="Jump to latest" onClick={() => { const node = viewport.current; if (node) node.scrollTop = node.scrollHeight; }}><ArrowDown /></Button>}
       </div>
-      <footer className="transcript-footer">{data.messages.length} messages loaded · {data.thread.activity ? "Checking active response every 3 seconds" : "Refreshes every 10 seconds"}</footer>
     </>}
   </>;
 }
