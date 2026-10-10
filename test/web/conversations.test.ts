@@ -16,6 +16,8 @@ import type { WebUsageReport, WebHistory } from "../../src/web/types.js";
 import type { SqlExecutor } from "../../src/db/sql.js";
 import { UsageRepository } from "../../src/web/usage.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
+import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
+import type { WebMemories } from "../../src/web/types.js";
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
   let database: AppDatabase;
@@ -70,6 +72,36 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await api.drain();
     await database.destroy();
     if (admin) { await admin.db.execute(sql.raw(`drop schema ${schema} cascade`)); await admin.destroy(); admin = undefined; }
+  });
+
+  it("serves private, paginated memories without enabling or changing them", async () => {
+    await thread(1);
+    await thread(2);
+    const store = new DatabaseMemoryStore(database.db, 1);
+    expect(await (await request("/api/users/1/memories")).json()).toMatchObject({ items: [], total: 0, nextOffset: null });
+    expect(await store.exists()).toBe(false);
+    await store.initialize();
+    await store.append(Array.from({ length: 51 }, (_, i) => ["2026-10-10", `Fact ${i} <script>literal</script>`] as const));
+    const other = new DatabaseMemoryStore(database.db, 2);
+    await other.initialize();
+    await other.append([["2026-10-10", "Private to user 2"]]);
+    await repos.users.setMemoryEnabled(1, false);
+    expect((await fetch(new URL("/api/users/1/memories", server.url))).status).toBe(401);
+    const response = await request("/api/users/1/memories");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const first: WebMemories = await response.json();
+    expect(first).toMatchObject({ enabled: false, total: 51, nextOffset: 50, user: { id: 1 } });
+    expect(first.items).toHaveLength(50);
+    expect(first.items[0]).toEqual({ id: 0, date: "2026-10-10", text: "Fact 0 <script>literal</script>" });
+    expect(JSON.stringify(first)).not.toContain("Private to user 2");
+    expect(await (await request("/api/users/1/memories?offset=50")).json()).toMatchObject({
+      items: [{ id: 50, date: "2026-10-10", text: "Fact 50 <script>literal</script>" }], nextOffset: null,
+    });
+    for (const offset of ["-1", "1.5", "9007199254740992"]) expect((await request(`/api/users/1/memories?offset=${offset}`)).status).toBe(400);
+    for (const userId of [99, 9999]) expect((await request(`/api/users/${userId}/memories`)).status).toBe(404);
+    expect((await request("/api/users/1/memories", { method: "POST" })).status).toBe(405);
+    expect((await repos.users.get(1))?.memory_enabled).toBe(0);
+    expect(await store.length()).toBe(51);
   });
 
   async function thread(userId = 1, title = "General") {

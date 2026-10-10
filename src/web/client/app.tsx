@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MotionConfig } from "motion/react";
-import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, Send, LockKeyhole, ChevronRight } from "lucide-react";
+import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, Send, LockKeyhole, ChevronRight, Brain } from "lucide-react";
 import { AdminGate } from "./auth.js";
 import { apiJson } from "./api.js";
+import { Memories } from "./memories.js";
 import { CodexConnection } from "./codex-connection.js";
 import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
 import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
@@ -34,7 +35,7 @@ function selection() {
   const parse = (name: string) => { const value = Number(params.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
   const threadId = parse("thread");
   const usage = params.get("view") === "usage";
-  return { userId: parse("user"), threadId, codex: params.get("view") === "codex", usage: !threadId && usage,
+  return { userId: parse("user"), threadId, memories: Boolean(parse("user") && !threadId && params.get("view") === "memories"), codex: params.get("view") === "codex", usage: !threadId && usage,
     threadUsage: Boolean(threadId && (params.get("usage") === "thread" || usage)) };
 }
 
@@ -101,10 +102,11 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
     if (threadId) params.set("thread", String(threadId));
     if (usage) { if (threadId) params.set("usage", "thread"); else params.set("view", "usage"); }
     history.pushState(null, "", `/${params.size ? `?${params}` : ""}`);
-    setSelected({ userId, threadId, codex: false, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
+    setSelected({ userId, threadId, memories: false, codex: false, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
   };
   const openCodex = () => { history.pushState(null, "", "/?view=codex"); setSelected(selection()); };
-  const screen = selected.codex ? "codex" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
+  const openMemories = () => { history.pushState(null, "", `/?user=${selected.userId}&view=memories`); setSelected(selection()); };
+  const screen = selected.memories ? "messages" : selected.codex ? "codex" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
   const view = selected.codex ? "codex" : selected.usage ? "usage" : "conversations";
   return <MotionConfig reducedMotion="user"><div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
@@ -135,7 +137,7 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
     </aside>
     <aside className="threads-pane pane" aria-label="Conversations">
       <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Conversation list"}</h2><p>{selected.userId ? `Telegram ID ${selected.userId}` : "Select a person"}</p></div></header>
-      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage for this person</Button></div>}
+      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.memories}><Brain /> Memories for this person</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage for this person</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
         {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <HookSidebar aria-label="Conversation list" color="var(--primary)" dashed={false} items={threads.items.map(t => ({ label: `${t.title}${t.archived ? " · Archived" : ""}${t.parentThreadId ? " · Fork" : ""}`, description: !threads.error && t.activity ? activityLabel(t.activity) : undefined }))} value={threads.items.findIndex(t => t.id === selected.threadId)} onChange={index => navigate(selected.userId, threads.items[index]!.id)} />}
@@ -144,9 +146,9 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
       <footer className="pane-footer">Newest activity first · Includes archived</footer>
     </aside>
     </>}
-    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.codex ? "Codex connection" : selected.usage ? "Usage statistics" : "Message history"}>
+    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.usage ? "Usage statistics" : "Message history"}>
       {logoutError && <div className="failure global-error" role="alert">{logoutError}</div>}
-      {selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <div className="welcome"><div className="welcome-mark"><MessageSquare size={29} aria-hidden="true" /></div><span className="eyebrow">Conversation archive</span><Notice title="Pick up the thread" description="Choose a conversation to read messages, follow the bot's thinking, and open shared files." /><div className="welcome-footnote"><LockKeyhole size={13} aria-hidden="true" /> Private · Read-only</div></div>}
+      {selected.memories && selected.userId ? <Memories key={selected.userId} userId={selected.userId} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <div className="welcome"><div className="welcome-mark"><MessageSquare size={29} aria-hidden="true" /></div><span className="eyebrow">Conversation archive</span><Notice title="Pick up the thread" description="Choose a conversation to read messages, follow the bot's thinking, and open shared files." /><div className="welcome-footnote"><LockKeyhole size={13} aria-hidden="true" /> Private · Read-only</div></div>}
     </main>
     </div>
   </div></MotionConfig>;

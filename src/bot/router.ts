@@ -44,6 +44,7 @@ import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 import { audioFormat } from "../audio/transcription.js";
+import { showMemories } from "./memory.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -209,12 +210,22 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logCommand(ctx, "memory");
     if (!ctx.user) return;
     const choice = ctx.match.trim().toLowerCase();
+    const view = /^view(?:\s+([1-9]\d*))?$/.exec(choice);
+    if (view) {
+      await showMemories(ctx, Number(view[1] ?? 1));
+      return;
+    }
     if (choice && choice !== "on" && choice !== "off") {
       await replyWithThreadFallback(ctx, ctx.t("memory-usage"), threadExtra(ctx.thread));
       return;
     }
     if (choice) ctx.user = await ctx.services.repos.users.setMemoryEnabled(ctx.user.tg_id, choice === "on");
     await replyWithThreadFallback(ctx, ctx.t(ctx.user.memory_enabled ? "memory-on" : "memory-off"), threadExtra(ctx.thread));
+  });
+  bot.callbackQuery(/^memory:page:([1-9]\d*)$/, async (ctx) => {
+    logCallback(ctx, "memory:view");
+    await ctx.answerCallbackQuery();
+    await showMemories(ctx, Number(ctx.match[1]), true);
   });
   bot.command("timezone", async (ctx) => {
     logCommand(ctx, "timezone");

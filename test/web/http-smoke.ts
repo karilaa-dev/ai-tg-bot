@@ -17,6 +17,7 @@ import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
 import { createCodexLoginPreview } from "./codex-preview.js";
+import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 
 const preview = process.argv.includes("--preview");
 assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
@@ -39,6 +40,12 @@ const resolver = new FileResolver(repos.files);
 const payloads = new Map<string, Buffer>();
 resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async source => { if (preview && source.mimeType === "image/png") await new Promise(resolve => setTimeout(resolve, 2500)); return payloads.get(source.remoteKey)!; } });
 const user = await repos.users.ensure({ tgId: 1001, firstName: "Alice Morgan", username: "alice_m" });
+const memory = new DatabaseMemoryStore(db.db, user.tg_id);
+await memory.initialize();
+await memory.append(Array.from({ length: 51 }, (_, index) => ["2026-10-10", index === 0
+  ? "Prefers quiet mountain trails and vegetarian meals."
+  : `Travel note ${index}: bring a waterproof layer for the autumn trip.`] as const));
+await repos.users.setMemoryEnabled(user.tg_id, false);
 await repos.users.ensure({ tgId: 1002, firstName: "Дмитрий", username: "dmitry" });
 await repos.users.ensure({ tgId: 1003, firstName: "Sam Rivera" });
 const thread = await repos.threads.create({ userId: user.tg_id, title: "Planning the autumn trip", topicId: null });
