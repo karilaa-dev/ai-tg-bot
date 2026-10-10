@@ -440,3 +440,12 @@ h1, h2, p { margin: 0; }
   .usage-exact-total { flex-wrap: wrap; gap: 6px; }
   .token-breakdown > div { min-width: 110px; }
 }
+
+.memory-header > .button:last-child { margin-left: auto; }
+.memory-content { padding: 24px; }
+.memory-description, .memory-status { color: var(--muted-foreground); margin-bottom: 16px; }
+.memory-list { list-style: none; padding: 0; margin: 0; }
+.memory-list li { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.memory-meta { display: flex; gap: 12px; color: var(--muted-foreground); font-size: 12px; margin-bottom: 8px; }
+.memory-list p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.memory-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 24px; font-size: 13px; }

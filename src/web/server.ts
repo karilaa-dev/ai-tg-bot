@@ -150,6 +150,10 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         if (search.length > 200) throw new HttpError(400, "Search is too long.");
         return Response.json(await options.repository.users(search, integer(query.get("offset"), 0, true)), { headers });
       }),
+      "/api/users/:userId/memories": read<"/api/users/:userId/memories">(async request => {
+        const query = new URL(request.url).searchParams;
+        return Response.json(await options.repository.memories(integer(request.params.userId), integer(query.get("offset"), 0, true)), { headers });
+      }),
       "/api/users/:userId/threads": read<"/api/users/:userId/threads">(async request => {
         const query = new URL(request.url).searchParams;
         return Response.json(await options.repository.threads(integer(request.params.userId), integer(query.get("offset"), 0, true)), { headers });

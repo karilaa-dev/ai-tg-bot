@@ -11,6 +11,8 @@ import { messageView, type SavedAttachment, type SavedTranscript } from "./messa
 import { UsageRepository, type UsageScope } from "./usage.js";
 import type { UsagePricing } from "./usage-pricing.js";
 import { refreshPostgresUserSearch } from "../db/userSearch.js";
+import { readUserMemories } from "../memory/view.js";
+import type { WebMemories } from "./types.js";
 
 export class WebNotFound extends Error {}
 
@@ -62,6 +64,12 @@ export class ConversationRepository {
     const user = await this.repos.users.get(id);
     if (!user || id === this.botUserId) throw new WebNotFound();
     return { id: user.tg_id, name: user.first_name, username: user.username, lastActivity: user.created_at, threadCount: 0 };
+  }
+
+  async memories(userId: number, offset: number): Promise<WebMemories> {
+    const user = await this.user(userId);
+    const owner = await this.repos.users.get(userId);
+    return { ...await readUserMemories(this.db, userId, offset, 50), user, enabled: owner?.memory_enabled === 1 };
   }
 
   async threads(userId: number, offset: number, limit = 50): Promise<WebPage<WebThread>> {

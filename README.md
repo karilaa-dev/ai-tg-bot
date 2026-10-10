@@ -106,7 +106,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.21` uses `ai-tg-bot-tools:v2.0.21`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.0.22` uses `ai-tg-bot-tools:v2.0.22`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -120,8 +120,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.21 is ai-tg-bot-tools:v2.0.21.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.21
+# Optional override. The default for version 2.0.22 is ai-tg-bot-tools:v2.0.22.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.22
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -209,7 +209,7 @@ Sessions initially expose `read`, `bash`, `finish_response`, `codemode`, `tool_s
 
 The bot includes a native TypeScript port of [OptMem](https://github.com/VictorTaelin/OptMem/tree/1fb164cf39028047781f72ac3bb1e5a691c1dcb0). Each Telegram user has one permanent memory shared across their threads, forks, model changes, and conversation compactions. Other users have separate stores. The main agent records facts with `memo note`, supplies summaries through `memo nap`, and reads its memory with `wake`, `recall`, and `zoom`. Helpers do not receive the memory tool. Existing thread-history search remains available.
 
-Notes and summaries are stored in the application database selected by `DB_URL`, with support for SQLite and PostgreSQL. One global set of `OPTMEM_*` environment settings applies to everyone, using the original OptMem defaults when unset. Users can only enable or disable their own memory with `/memory on` or `/memory off`. Disabling keeps saved notes. Memory runs on the bot host, independently of E2B, with no Python process or background summarizer.
+Notes and summaries are stored in the application database selected by `DB_URL`, with support for SQLite and PostgreSQL. One global set of `OPTMEM_*` environment settings applies to everyone, using the original OptMem defaults when unset. Users can enable or disable their own memory with `/memory on` or `/memory off`, and browse saved notes with `/memory view`. The admin website also offers **Memories for this person** after selecting a user. Both views show dated notes, oldest first, with pagination and remain available when memory is disabled. Disabling keeps saved notes. Memory runs on the bot host, independently of E2B, with no Python process or background summarizer.
 
 The port retains OptMem's append-only notes, binary summary tree, UTF-8 byte limits, merge order, snapshot paging, and agent-written compression protocol. `forget` drops summaries for rebuilding and never erases raw notes. See [the memory reference](docs/optmem.md) for commands, compatibility details, and verification.
 

@@ -8,6 +8,7 @@ import type { PiRuntimeService } from "../../src/pi/runtime.js";
 import { renderThreadSessionContext } from "../../src/ai/prompt.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
 import { FileProcessingStatus } from "../../src/bot/files.js";
+import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 
 describe("Telegram bot with grammy-emulate", () => {
   let env: GrammyEmulator;
@@ -81,6 +82,39 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(0);
     expect((await env.bot.sendCommand(env.user, env.chat, "/memory on")).text).toContain("Memory is on");
     expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(1);
+  });
+
+  it("browses only the caller's saved memories, including while memory is disabled", async () => {
+    await startBot();
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory view")).text).toContain("No saved memories yet");
+    const store = new DatabaseMemoryStore(env.db.db, env.user.id);
+    expect(await store.exists()).toBe(false);
+    await store.initialize();
+    await store.append(Array.from({ length: 11 }, (_, i) => ["2026-10-10", `Saved fact ${i} <b>literal</b>`] as const));
+    await env.repos.users.ensure({ tgId: 7654321 });
+    const other = new DatabaseMemoryStore(env.db.db, 7654321);
+    await other.initialize();
+    await other.append([["2026-10-10", "Another user's private note"]]);
+    await env.repos.users.setMemoryEnabled(env.user.id, false);
+    const first = await env.bot.sendCommand(env.user, env.chat, "/memory view");
+    expect(first.text).toContain("Saved fact 0 <b>literal</b>");
+    expect(first.text).toContain("2026-10-10");
+    expect(first.text).not.toContain("Saved fact 10");
+    expect(first.text).not.toContain("Another user's");
+    expect(first.getInlineButtonByData("memory:page:2")).toBeDefined();
+    const next = await env.bot.clickButton(env.user, env.chat, "memory:page:2", first.messages.at(-1)!);
+    expect(next.editedText ?? next.text).toContain("Saved fact 10");
+    expect(next.getLastApiCall("editMessageText")?.payload).toMatchObject({
+      reply_markup: { inline_keyboard: [[{ text: "Previous", callback_data: "memory:page:1" }]] },
+    });
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory view 3")).text).toContain("No saved notes on this page");
+    for (const page of ["0", "-1", "1.5", "9007199254740992"]) {
+      expect((await env.bot.sendCommand(env.user, env.chat, `/memory view ${page}`)).text).toContain("Use /memory on or /memory off");
+    }
+    expect((await env.repos.users.get(env.user.id))?.memory_enabled).toBe(0);
+    expect(await store.length()).toBe(11);
+    await env.repos.users.setLang(env.user.id, "ru");
+    expect((await env.bot.sendCommand(env.user, env.chat, "/memory view")).text).toContain("Сохранённые воспоминания");
   });
 
   it("collects timezone through a conversation", async () => {

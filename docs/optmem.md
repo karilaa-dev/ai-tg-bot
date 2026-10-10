@@ -35,7 +35,7 @@ Memory spans a user's threads and forks, including facts recorded after an earli
 
 New notes use the user's configured timezone, defaulting to UTC, matching the date in their session context. Historical imports retain the dates supplied in the file.
 
-Users can run `/memory` to see their status, `/memory off` to disable memory, or `/memory on` to enable it. This is their only memory setting. Disabling blocks memory commands, including writes from stale sessions, and removes the tool and activation instructions on the next turn. Saved notes remain in the database. Facts already present in conversation history remain there. Re-enabling requests another wake.
+Users can run `/memory` to see their status, `/memory off` to disable memory, or `/memory on` to enable it. Use `/memory view [page]` to browse saved notes with Previous/Next buttons. The admin website offers **Memories for this person** in each user's conversation list. Both views show the original dated notes, oldest first, and work even when memory is off. Viewing does not initialize or change the memory store. Disabling blocks the agent's `memo` commands, including writes from stale sessions, and removes the tool and activation instructions on the next turn. Saved notes remain in the database. Facts already present in conversation history remain there. Re-enabling requests another wake.
 
 All tuning is global. Set only non-default values in `.env` and restart the bot. `memo config NAME=VALUE` cannot override them.
 

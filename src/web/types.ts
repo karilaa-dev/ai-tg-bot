@@ -1,4 +1,10 @@
 import type { InferenceUsageCall } from "../pi/usage.js";
+import type { MemoryPage } from "../memory/view.js";
+
+export interface WebMemories extends MemoryPage {
+  user: WebUser;
+  enabled: boolean;
+}
 
 export interface WebUser {
   id: number;
