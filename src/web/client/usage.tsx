@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Select } from "@base-ui/react/select";
 import { ArrowLeft, ArrowUpRight, Check, ChevronDown, RefreshCw } from "lucide-react";
@@ -237,10 +237,20 @@ export function ModelTable({ models }: { models: WebModelUsage[] }) {
 export function UsageGraphs({ daily }: { daily: WebUsageReport["daily"] }) {
   const [selected, setSelected] = useState<number | null>(null);
   const id = useId();
+  const chart = useRef<SVGSVGElement>(null);
+  const [width, setWidth] = useState(640);
+  useEffect(() => {
+    if (!chart.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) if (entry.contentRect.width > 0) setWidth(entry.contentRect.width);
+    });
+    observer.observe(chart.current);
+    return () => observer.disconnect();
+  }, [daily.length]);
   if (!daily.length) return null;
   const index = Math.min(selected ?? daily.length - 1, daily.length - 1);
   const day = daily[index]!;
-  const width = 640, height = 200, left = 56, right = 12, bottom = 26, top = 16;
+  const height = 200, left = 56, right = 12, bottom = 26, top = 16;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const step = plotWidth / daily.length;
   const x = (i: number) => left + step * (i + 0.5);
@@ -258,7 +268,7 @@ export function UsageGraphs({ daily }: { daily: WebUsageReport["daily"] }) {
   const axes = (max: number, cost: boolean) => <>{[0, 0.5, 1].map(fraction => <g key={fraction}><line x1={left} x2={width - right} y1={y(fraction * max, max)} y2={y(fraction * max, max)} className="usage-grid-line" /><text x={left - 8} y={y(fraction * max, max) + 4} textAnchor="end">{cost ? `$${Intl.NumberFormat("en-US", { notation: "compact", maximumSignificantDigits: 2 }).format(fraction * max)}` : compact(fraction * max)}</text></g>)}<text x={left} y={height - 5}>{dateLabel(daily[0]!.date)}</text><text x={width - right} y={height - 5} textAnchor="end">{dateLabel(daily.at(-1)!.date)}</text></>;
   const targets = daily.map((d, i) => <rect key={d.date} x={left + step * i} y={top} width={step} height={plotHeight} fill="transparent" onMouseEnter={() => setSelected(i)} onClick={() => setSelected(i)}><title>{d.date}: {number(d.totalTokens)} tokens; {money(d.estimatedCostUsd)}</title></rect>);
   return <section className="usage-graphs" aria-label="Daily usage graphs">
-    <div className="usage-chart"><h3>Tokens per day</h3><div className="usage-legend">{categories.map(c => <span key={c.key}><i style={{ background: c.color }} />{c.label}</span>)}</div><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Daily stacked token counts. Use the day selector below for exact values.">{axes(maxTokens, false)}{daily.map((d, i) => {
+    <div className="usage-chart"><h3>Tokens per day</h3><div className="usage-legend">{categories.map(c => <span key={c.key}><i style={{ background: c.color }} />{c.label}</span>)}</div><svg ref={chart} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Daily stacked token counts. Use the day selector below for exact values.">{axes(maxTokens, false)}{daily.map((d, i) => {
       let sum = 0;
       return <g key={d.date}>{categories.map(c => { const value = d[c.key]; sum += value; return <rect key={c.key} x={x(i) - Math.max(1, step * 0.7) / 2} y={y(sum, maxTokens)} width={Math.max(1, step * 0.7)} height={value / maxTokens * plotHeight} fill={c.color} />; })}</g>;
     })}<line className="usage-cursor" x1={x(index)} x2={x(index)} y1={top} y2={height - bottom} />{targets}</svg></div>

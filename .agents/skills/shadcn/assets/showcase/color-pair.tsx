@@ -76,7 +76,7 @@ export function ColorPair({
     const observer = new MutationObserver(measure)
     observer.observe(document.documentElement, { attributes: true })
     return () => observer.disconnect()
-  }, [])
+  }, [background, foreground])
 
   const level = !info
     ? ""

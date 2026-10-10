@@ -9,6 +9,7 @@
     "build": "bun --bun tsc -p tsconfig.json && bun dist/scripts/copy-e2b-template-assets.js && bun run build:web",
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.web.json --noEmit",
     "test": "bun node_modules/vitest/vitest.mjs run",
+    "test:web:browser": "bun test/web/browser-smoke.ts",
     "live:pi-check": "bun scripts/live-pi-check.ts",
     "live:codex-tools-check": "bun scripts/live-codex-tools-check.ts",
     "live:pi-tools-check": "bun scripts/live-pi-tools-check.ts",
