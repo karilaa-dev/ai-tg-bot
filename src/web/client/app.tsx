@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MotionConfig } from "motion/react";
-import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, Send, LockKeyhole, ChevronRight, Brain } from "lucide-react";
+import { Button as BaseButton } from "@base-ui/react/button";
+import { Input } from "@base-ui/react/input";
+import { Collapsible } from "@base-ui/react/collapsible";
+import { ArrowDown, ArrowLeft, MessageSquare, Search, Users, GitFork, Sun, Moon, ChartNoAxesCombined, KeyRound, LogOut, LockKeyhole, ChevronRight, ChevronDown, Brain, Archive, Bot, FolderOpen, LoaderCircle } from "lucide-react";
 import { AdminGate } from "./auth.js";
+import { BrandMark, logo } from "./brand.js";
 import { apiJson } from "./api.js";
 import { Memories } from "./memories.js";
 import { CodexConnection } from "./codex-connection.js";
 import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
 import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
-import { HookSidebar } from "./components/ui/hook-sidebar.js";
 import { RichText } from "./rich-text.js";
 import { Button } from "./components/ui/button.js";
 import { FileAttachment } from "./file-attachment.js";
@@ -25,7 +27,7 @@ const timestamp = (value: number) => new Date(value).toLocaleString(undefined, {
 function Notice({ title, description }: { title: string; description: string }) {
   return <div className="notice"><h3>{title}</h3><p>{description}</p></div>;
 }
-function Loading() { return <div className="loading" role="status">Loading…</div>; }
+function Loading() { return <div className="loading" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" />Loading…</div>; }
 function Failure({ message, retry }: { message: string; retry?: () => void }) {
   return <div className="failure" role="alert">{message}{retry && <Button variant="outline" size="sm" onClick={retry}>Retry</Button>}</div>;
 }
@@ -78,13 +80,13 @@ function usePages<T extends { id: number }>(url: string | null) {
 }
 
 function ThemeToggle() {
-  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  const [dark, setDark] = useState(() => document.documentElement.dataset.mode === "dark");
   useEffect(() => {
-    const observer = new MutationObserver(() => setDark(document.documentElement.classList.contains("dark")));
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    const observer = new MutationObserver(() => setDark(document.documentElement.dataset.mode === "dark"));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-mode"] });
     return () => observer.disconnect();
   }, []);
-  return <Button className="theme-toggle" variant="ghost" size="icon-sm" aria-label={`Switch to ${dark ? "light" : "dark"} theme`} title={`Switch to ${dark ? "light" : "dark"} theme`} onClick={() => window.dispatchEvent(new Event("conversation-theme"))}>{dark ? <Sun /> : <Moon />}</Button>;
+  return <Button variant="ghost" size="icon-sm" aria-label={`Switch to ${dark ? "light" : "dark"} theme`} title={`Switch to ${dark ? "light" : "dark"} theme`} onClick={() => window.dispatchEvent(new Event("conversation-theme"))}>{dark ? <Sun /> : <Moon />}</Button>;
 }
 
 function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>; signingOut: boolean; logoutError: string }) {
@@ -108,50 +110,56 @@ function App({ logout, signingOut, logoutError }: { logout: () => Promise<void>;
   const openMemories = () => { history.pushState(null, "", `/?user=${selected.userId}&view=memories`); setSelected(selection()); };
   const screen = selected.memories ? "messages" : selected.codex ? "codex" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
   const view = selected.codex ? "codex" : selected.usage ? "usage" : "conversations";
-  return <MotionConfig reducedMotion="user"><div className="app-shell">
+  return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <nav className="app-navigation" aria-label="Main navigation">
-      <a className="nav-brand" href="/" aria-label="Telegram bot home" onClick={event => { event.preventDefault(); navigate(null, null); }}><Send size={22} aria-hidden="true" /></a>
+      <a className="nav-brand" href="/" aria-label="AI KaRiLaA home" onClick={event => { event.preventDefault(); navigate(null, null); }}><BrandMark /><span>AI KaRiLaA</span><span className="nav-brand-divider" /><span className="nav-workspace-label">Workspace</span></a>
       <div className="nav-destinations">
-        <button className="nav-item" aria-current={view === "conversations" ? "page" : undefined} onClick={() => navigate(null, null)}><MessageSquare /><span>Conversations</span></button>
-        <button className="nav-item" aria-current={view === "usage" ? "page" : undefined} onClick={() => navigate(null, null, true)}><ChartNoAxesCombined /><span>Usage</span></button>
-        <button className="nav-item" aria-current={view === "codex" ? "page" : undefined} onClick={openCodex}><KeyRound /><span>Codex</span></button>
+        <BaseButton className="nav-item" aria-current={view === "conversations" ? "page" : undefined} onClick={() => navigate(null, null)}><MessageSquare /><span>Conversations</span></BaseButton>
+        <BaseButton className="nav-item" aria-current={view === "usage" ? "page" : undefined} onClick={() => navigate(null, null, true)}><ChartNoAxesCombined /><span>Usage</span></BaseButton>
+        <BaseButton className="nav-item" aria-current={view === "codex" ? "page" : undefined} onClick={openCodex}><KeyRound /><span>Codex</span></BaseButton>
       </div>
-      <div className="nav-account"><span className="nav-private" title="Private admin session"><LockKeyhole size={13} /><span>Admin</span></span><ThemeToggle /><button className="nav-item nav-logout" onClick={() => void logout()} disabled={signingOut} aria-label={signingOut ? "Signing out" : "Sign out"}><LogOut /><span>{signingOut ? "Signing out" : "Sign out"}</span></button></div>
+      <div className="nav-account"><span className="nav-private" title="Private admin session"><LockKeyhole size={13} /><span>Admin</span></span><ThemeToggle /><BaseButton className="nav-item nav-logout" onClick={() => void logout()} disabled={signingOut} aria-label={signingOut ? "Signing out" : "Sign out"}><LogOut /><span>{signingOut ? "Signing out" : "Sign out"}</span></BaseButton></div>
     </nav>
     <div className="workspace" data-screen={screen} data-view={view}>
     {view === "conversations" && <>
     <aside className="users-pane pane" aria-label="People">
-      <header className="brand"><div><span className="eyebrow">Telegram bot</span><h1>Conversations</h1></div><span className="read-only-label">Archive</span></header>
-      <div className="pane-tools"><label className="search-label" htmlFor="user-search"><Search size={16} aria-hidden="true" /><input id="user-search" type="search" aria-label="Find a person" placeholder="Find a person…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
+      <header className="brand"><div><h1>Conversations</h1><p>Your bot’s conversation archive</p></div></header>
+      <div className="pane-tools"><label className="search-label" htmlFor="user-search"><Search size={16} aria-hidden="true" /><Input id="user-search" type="search" aria-label="Find a person" placeholder="Search people…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
       <div className="list-caption"><Users className="size-3.5" /><span>People</span><span className="list-count">{users.items.length}{users.next !== null ? "+" : ""}</span></div>
       <div className="pane-scroll">
         {users.error && <Failure message={users.error} retry={users.retry} />}
         {!users.items.length && users.loading ? <Loading /> : !users.items.length && !users.error ? <Notice title={query ? "No matching people" : "Your inbox starts here"} description={query ? "Try a name, username, or Telegram ID." : "People appear here after they message your Telegram bot."} /> : null}
-        <div className="user-list">{users.items.map(u => <button key={u.id} className={cn("user-row", selected.userId === u.id && "selected")} onClick={() => navigate(u.id, null)} aria-current={selected.userId === u.id ? "true" : undefined}>
+        <div className="user-list">{users.items.map(u => <BaseButton key={u.id} className={cn("user-row", selected.userId === u.id && "selected")} onClick={() => navigate(u.id, null)} aria-current={selected.userId === u.id ? "true" : undefined}>
           <span className="initial" aria-hidden="true">{(u.name || u.username || "?").slice(0, 1).toUpperCase()}</span><span className="user-copy"><strong>{userLabel(u)}</strong>{u.username && u.name && <span>{u.name}</span>}<small>{u.threadCount} {u.threadCount === 1 ? "conversation" : "conversations"}</small><time dateTime={new Date(u.lastActivity).toISOString()}>{timestamp(u.lastActivity)}</time></span><ChevronRight size={14} className="user-chevron" aria-hidden="true" />
-        </button>)}</div>
+        </BaseButton>)}</div>
         {users.next !== null && <Button className="m-4" variant="outline" onClick={users.more} disabled={users.loading}>Load more people</Button>}
       </div>
       <footer className="pane-footer"><span className="status-dot" aria-hidden="true" /> Updates automatically</footer>
     </aside>
     <aside className="threads-pane pane" aria-label="Conversations">
-      <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Conversation list"}</h2><p>{selected.userId ? `Telegram ID ${selected.userId}` : "Select a person"}</p></div></header>
-      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.memories}><Brain /> Memories for this person</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage for this person</Button></div>}
+      <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><ArrowLeft /></Button><div><h2>{user ? userLabel(user) : "Threads"}</h2><p>{selected.userId ? `Telegram ID ${selected.userId}` : "Select a person"}</p></div></header>
+      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.memories}><Brain /> Memories</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><ChartNoAxesCombined /> Usage</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
-        {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <HookSidebar aria-label="Conversation list" color="var(--primary)" dashed={false} items={threads.items.map(t => ({ label: `${t.title}${t.archived ? " · Archived" : ""}${t.parentThreadId ? " · Fork" : ""}`, description: !threads.error && t.activity ? activityLabel(t.activity) : undefined }))} value={threads.items.findIndex(t => t.id === selected.threadId)} onChange={index => navigate(selected.userId, threads.items[index]!.id)} />}
+        {!selected.userId ? <Notice title="Choose a person" description="Their conversations will appear here." /> : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" description="This person has no saved conversations." /> : <div className="conversation-list">{threads.items.map(t => <BaseButton key={t.id} className={cn("thread-row", selected.threadId === t.id && "selected")} aria-current={selected.threadId === t.id ? "true" : undefined} onClick={() => navigate(selected.userId, t.id)}>
+          <span className="thread-icon" aria-hidden="true">{t.archived ? <Archive size={17} /> : <MessageSquare size={17} />}</span>
+          <span className="thread-copy"><strong>{t.title}</strong><time dateTime={new Date(t.lastActivity).toISOString()}>{new Date(t.lastActivity).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time>
+            {(t.archived || t.parentThreadId) && <span className="thread-labels">{t.archived && <span>Archived</span>}{t.parentThreadId && <span><GitFork size={13} /> Fork</span>}</span>}
+            {!threads.error && t.activity && <span className="thread-row-activity"><span className="status-dot" />{activityLabel(t.activity)}</span>}
+          </span>
+        </BaseButton>)}</div>}
         {threads.next !== null && <Button variant="outline" className="mt-4" disabled={threads.loading} onClick={threads.more}>Load more conversations</Button>}
       </div>
-      <footer className="pane-footer">Newest activity first · Includes archived</footer>
+      <footer className="pane-footer"><Archive size={14} aria-hidden="true" /> Archived threads included</footer>
     </aside>
     </>}
     <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.usage ? "Usage statistics" : "Message history"}>
       {logoutError && <div className="failure global-error" role="alert">{logoutError}</div>}
-      {selected.memories && selected.userId ? <Memories key={selected.userId} userId={selected.userId} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <div className="welcome"><div className="welcome-mark"><MessageSquare size={29} aria-hidden="true" /></div><span className="eyebrow">Conversation archive</span><Notice title="Pick up the thread" description="Choose a conversation to read messages, follow the bot's thinking, and open shared files." /><div className="welcome-footnote"><LockKeyhole size={13} aria-hidden="true" /> Private · Read-only</div></div>}
+      {selected.memories && selected.userId ? <Memories key={selected.userId} userId={selected.userId} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Conversation archive</h2><p>Messages, files, and response details</p></div><span className="read-only-label"><LockKeyhole size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><FolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "A closer look at every conversation"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Choose a person, then a conversation. Everything your bot has saved is here."} /><div className="welcome-features"><span><MessageSquare /> Message history</span><span><Brain /> Saved thinking</span><span><ChartNoAxesCombined /> Response usage</span></div></div><footer className="transcript-footer"><LockKeyhole size={14} aria-hidden="true" /> Private admin workspace</footer></>}
     </main>
     </div>
-  </div></MotionConfig>;
+  </div>;
 }
 
 function Transcript({ threadId, back, showUsage }: { threadId: number; back: () => void; showUsage: boolean }) {
@@ -234,7 +242,7 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
     }
   }, [data, loader]);
   return <>
-    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}<ThemeToggle /></header>
+    <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><ArrowLeft /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? `${userLabel(data.user)}${data.user.username && data.user.name ? ` · ${data.user.name}` : ""} · Telegram ID ${data.user.id}` : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}</header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
     <ThreadUsage threadId={threadId} initiallyOpen={showUsage} />
     {!data ? !error && <Loading /> : <>
@@ -246,8 +254,8 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
           {data.messages.map((message, index) => <div key={message.id} data-message-id={message.id}>
             {(message.threadId !== data.messages[index - 1]?.threadId && (message.threadId !== threadId || index > 0)) && <div className="history-boundary">{message.threadId === threadId ? "This conversation" : `Inherited from ${data.chain.find(t => t.id === message.threadId)?.title ?? "parent conversation"}`}</div>}
             <article className="message" data-role={message.role}>
-              <header>{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
-              {message.thinking && <details className="thinking"><summary>Thinking</summary><RichText text={message.thinking} /></details>}
+              <header>{message.role === "assistant" && <Bot size={16} aria-hidden="true" />}{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
+              {message.thinking && <Collapsible.Root className="thinking"><Collapsible.Trigger className="disclosure-trigger"><Brain size={15} /> Thinking <ChevronDown size={15} /></Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="thinking-content"><RichText text={message.thinking} /></div></Collapsible.Panel></Collapsible.Root>}
               {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
               {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
               <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
@@ -261,6 +269,8 @@ function Transcript({ threadId, back, showUsage }: { threadId: number; back: () 
   </>;
 }
 
+const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+if (favicon) favicon.href = logo;
 const container = document.getElementById("root")!;
 const root: Root = import.meta.hot
   ? (import.meta.hot.data.root ??= createRoot(container))

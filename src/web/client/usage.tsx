@@ -1,5 +1,7 @@
-import { useEffect, useId, useState } from "react";
-import { ArrowLeft, ArrowUpRight, ChevronDown, RefreshCw } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { Collapsible } from "@base-ui/react/collapsible";
+import { Select } from "@base-ui/react/select";
+import { ArrowLeft, ArrowUpRight, Check, ChevronDown, RefreshCw } from "lucide-react";
 import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } from "../types.js";
 import { userLabel } from "../types.js";
 import { Button } from "./components/ui/button.js";
@@ -16,6 +18,12 @@ const categories = [
   { key: "cacheWriteTokens", label: "Reported cache writes", color: "var(--usage-write)" },
   { key: "outputTokens", label: "Output", color: "var(--usage-output)" },
 ] as const;
+const periods = [
+  { value: 7, label: "Last 7 days" },
+  { value: 30, label: "Last 30 days" },
+  { value: 90, label: "Last 90 days" },
+  { value: 0, label: "All time" },
+];
 
 function Cost({ usage }: { usage: WebUsageTotals }) {
   return <>{money(usage.estimatedCostUsd)}{usage.estimatedCostUsd !== null && (usage.unpricedTurns > 0 || usage.missingUsageTurns > 0) && <small className="partial-cost"> partial</small>}</>;
@@ -47,11 +55,13 @@ export function TokenBreakdown({ usage }: { usage: WebUsageTotals }) {
 }
 
 export function CacheExplanation() {
-  return <details className="cache-explanation"><summary>Why can cache reads be much higher than writes?</summary><div>
+  return <Collapsible.Root className="cache-explanation">
+    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />Why can cache reads be much higher than writes?</Collapsible.Trigger>
+    <Collapsible.Panel hiddenUntilFound><div className="cache-explanation-content">
     <p>A prompt can be written once and reused across many requests. Each reuse adds cache-read tokens, so reads can far exceed writes.</p>
     <p>Write reporting varies by provider, model, and saved response. Missing fields are unknown, not measured zeroes. Reported cache writes include only recorded values; the bot does not estimate missing writes from reads or uncached input.</p>
     <p><a href="https://developers.openai.com/api/docs/guides/prompt-caching" target="_blank" rel="noreferrer">OpenAI prompt caching</a><span aria-hidden="true"> · </span><a href="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" target="_blank" rel="noreferrer">Claude prompt caching</a></p>
-  </div></details>;
+  </div></Collapsible.Panel></Collapsible.Root>;
 }
 
 export function FastModeSummary({ usage }: { usage: WebUsageTotals }) {
@@ -67,12 +77,14 @@ function CallTokens({ call }: { call: InferenceUsageCall }) {
 
 export function UsageCalls({ calls }: { calls?: InferenceUsageCall[] }) {
   if (!calls?.length) return <p className="usage-call-unavailable">Individual call details were not saved for this reply.</p>;
-  return <details className="usage-calls"><summary>Inspect {number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</summary><ol>{calls.map((call, index) => <li key={index}>
+  return <Collapsible.Root className="usage-calls">
+    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />Inspect {number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</Collapsible.Trigger>
+    <Collapsible.Panel hiddenUntilFound><ol>{calls.map((call, index) => <li key={index}>
     <header><div><span className="utility-label">{call.aggregate ? "Usage record" : "Call"} {index + 1}</span><strong>{call.model}</strong><span>{call.provider}{call.source ? ` · ${call.source}` : ""}</span></div><span className="fast-mode-badge" data-mode={call.fastMode === true ? "on" : call.fastMode === false ? "off" : "unknown"}>Fast mode {call.fastMode === true ? "on" : call.fastMode === false ? "off" : "unknown"}</span></header>
     <dl className="call-service-tier"><div><dt>Requested tier</dt><dd>{call.requestedServiceTier ?? "Not recorded"}</dd></div><div><dt>Delivered tier</dt><dd>{call.serviceTier ?? "Not reported"}</dd></div><div><dt>Recorded total</dt><dd>{number(call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens + call.outputTokens)}</dd></div></dl>
     <CallTokens call={call} />
     {call.aggregate && <p className="usage-call-unavailable">This record combines usage; its individual calls are unavailable.</p>}
-  </li>)}</ol></details>;
+  </li>)}</ol></Collapsible.Panel></Collapsible.Root>;
 }
 
 function TokenBar({ usage }: { usage: WebUsageTotals }) {
@@ -81,11 +93,14 @@ function TokenBar({ usage }: { usage: WebUsageTotals }) {
 
 export function MessageUsage({ usage }: { usage?: WebMessageUsage | null }) {
   if (!usage?.recordedTurns) return <span className="usage-unavailable">Usage not recorded</span>;
-  return <details className="message-usage"><summary>{compact(usage.totalTokens)} tokens · <Cost usage={usage} /></summary>
+  return <Collapsible.Root className="message-usage">
+    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" /><span>{compact(usage.totalTokens)} tokens · <Cost usage={usage} /></span></Collapsible.Trigger>
+    <Collapsible.Panel hiddenUntilFound>
     <div className="message-usage-content"><UsageDetails usage={usage} models={usage.models} modelCalls={usage.modelCalls} /><UsageCalls calls={usage.calls} />
       <p>Totals include saved usage for this reply. Tools and older calls may not report every field. Reasoning is included in output. Price is an API estimate in USD.</p>
     </div>
-  </details>;
+    </Collapsible.Panel>
+  </Collapsible.Root>;
 }
 
 function UsageDetails({ usage, models, modelCalls }: {
@@ -102,13 +117,14 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: num
   useEffect(() => setOpen(initiallyOpen), [threadId, initiallyOpen]);
   const { report, error, retry } = useUsageReport(null, threadId, 0);
   const tokensRecorded = report && (report.totals.recordedTurns > 0 || report.totals.missingUsageTurns === 0);
-  return <div className="thread-usage"><details className="message-usage" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary className="thread-usage-summary">
+  return <div className="thread-usage"><Collapsible.Root className="message-usage" open={open} onOpenChange={setOpen}>
+    <Collapsible.Trigger className="thread-usage-summary">
       <span className="thread-usage-label">Thread usage · All time</span>
       <span className="thread-usage-metric"><strong data-unavailable={!tokensRecorded || undefined} title={tokensRecorded ? `${number(report.totals.totalTokens)} tokens` : undefined}>{report ? tokensRecorded ? compact(report.totals.totalTokens) : "Not recorded" : error ? "Unavailable" : "Loading…"}</strong><span>Tokens</span></span>
       <span className="thread-usage-metric"><strong data-unavailable={!report || report.totals.estimatedCostUsd === null || undefined}>{report ? <Cost usage={report.totals} /> : error ? "Unavailable" : "Loading…"}</strong><span>Estimated USD</span></span>
       <span className="thread-usage-toggle">{open ? "Less" : "Details"}<ChevronDown size={16} aria-hidden="true" /></span>
-    </summary>
+    </Collapsible.Trigger>
+    <Collapsible.Panel hiddenUntilFound>
     <div className="message-usage-content">
       {error && <div className="failure" role="alert">{error}<Button onClick={retry}>Retry</Button></div>}
       {!report && !error && <p role="status">Loading thread usage…</p>}
@@ -119,7 +135,8 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: num
         <p>Totals cover this entire thread, including messages not loaded here. Inherited messages count toward their original thread. Reasoning is included in output. Price is an API estimate in USD.</p>
       </>}
     </div>
-  </details></div>;
+    </Collapsible.Panel>
+  </Collapsible.Root></div>;
 }
 
 function useUsageReport(userId: number | null, threadId: number | null, days: number) {
@@ -164,7 +181,24 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
       <Button variant="ghost" size="icon-sm" onClick={retry} disabled={busy} aria-label="Refresh usage"><RefreshCw /></Button>
     </header>
     <div className="usage-scroll"><div className="usage-dashboard">
-      <div className="usage-controls"><div>{userId && <Button variant="outline" onClick={all}>All usage</Button>}<span>Daily totals in UTC</span></div><label>Period <select value={days} onChange={e => setDays(Number(e.target.value))}><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={0}>All time</option></select></label></div>
+      <div className="usage-controls">
+        <div>{userId && <Button variant="outline" onClick={all}>All usage</Button>}<span>Daily totals in UTC</span></div>
+        <div className="usage-period">
+          <Select.Root items={periods} value={days} onValueChange={value => { if (value !== null) setDays(value); }}>
+            <Select.Label>Period</Select.Label>
+            <Select.Trigger className="usage-select-trigger"><Select.Value /><Select.Icon><ChevronDown size={16} /></Select.Icon></Select.Trigger>
+            <Select.Portal>
+              <Select.Positioner className="usage-select-positioner" align="end" sideOffset={6} alignItemWithTrigger={false}>
+                <Select.Popup className="usage-select-popup">
+                  <Select.List>{periods.map(period => <Select.Item key={period.value} value={period.value} className="usage-select-item">
+                    <Select.ItemText>{period.label}</Select.ItemText><Select.ItemIndicator><Check size={16} /></Select.ItemIndicator>
+                  </Select.Item>)}</Select.List>
+                </Select.Popup>
+              </Select.Positioner>
+            </Select.Portal>
+          </Select.Root>
+        </div>
+      </div>
       {error && <div role="alert" className="failure">{error}<Button onClick={retry}>Retry</Button></div>}
       {!report && busy && <p className="loading" role="status">Loading usage…</p>}
       {report && <>
@@ -174,7 +208,7 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
           <div><span>Cache hit rate</span><strong>{percent(report.totals.cacheReadRatio)}</strong><small>Share of prompt tokens read from cache</small></div>
           <div><span>Recorded turns</span><strong>{number(report.totals.recordedTurns)}</strong><small>{report.threads.length} {report.threads.length === 1 ? "thread" : "threads"} in this period</small></div>
         </div>
-        <div className="usage-token-summary"><TokenBar usage={report.totals} /><TokenBreakdown usage={report.totals} /><FastModeSummary usage={report.totals} /><CacheExplanation /></div>
+        <section className="usage-token-summary"><h3>Token breakdown</h3><TokenBar usage={report.totals} /><TokenBreakdown usage={report.totals} /><FastModeSummary usage={report.totals} /><CacheExplanation /></section>
         {(report.totals.missingUsageTurns > 0 || report.totals.unpricedTurns > 0) && <p className="usage-coverage">{report.totals.missingUsageTurns > 0 && `${number(report.totals.missingUsageTurns)} replies or turns have no saved usage. `}{report.totals.unpricedTurns > 0 && `${number(report.totals.unpricedTurns)} recorded turns have incomplete pricing. `}Totals include only available data.</p>}
         {report.dailyTruncated && <p className="usage-coverage">Graphs show the latest 365 days of this period. Totals and tables include the entire period.</p>}
         {!report.totals.recordedTurns ? <div className="notice"><h3>No recorded usage in this period</h3><p>Try a longer period. New bot replies will appear here after the model finishes.</p></div> : <UsageGraphs daily={report.daily} />}
@@ -183,14 +217,14 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
           <td><button className="usage-thread-link" onClick={() => openThread(thread.userId, thread.id, true)}>{thread.title}</button><small>#{thread.id}{thread.archived ? " · Archived" : ""} · <button onClick={() => openThread(thread.userId, thread.id, false)}>Messages <ArrowUpRight size={11} /></button></small></td>
           <td>{number(thread.totalTokens)}<TokenBar usage={thread} /></td><td>{percent(thread.cacheReadRatio)}</td><td>{number(thread.recordedTurns)}{thread.missingUsageTurns > 0 && <small>{number(thread.missingUsageTurns)} untracked</small>}</td><td><Cost usage={thread} /></td>
         </tr>)}</tbody></table></div></section>}
-        <details className="usage-method"><summary>How usage and estimates work</summary><div>
+        <Collapsible.Root className="usage-method"><Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />How usage and estimates work</Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="usage-method-content">
           <p>Estimates use the <a href="https://ccusage.com/guide/cost-modes" target="_blank" rel="noreferrer">ccusage token calculation method</a>: uncached input × input rate + cache reads × cache-read rate + cache writes × cache-write rate + output × output rate.</p>
           <p>Reasoning tokens are part of output and are not counted twice. The cache hit rate is recorded cache reads divided by recorded prompt tokens. Uncached input, cache reads, and cache writes are separate parts of input; a missing cache field does not establish a zero value.</p>
           <p>Fast mode reflects saved request settings. Requested and delivered service tiers can differ; the delivered tier takes precedence when pricing is available. A request without a reported delivery tier uses its requested tier for the estimate. Older records without this metadata show unknown fast mode.</p>
           <p>Prices use the current LiteLLM catalog, with saved model costs as a fallback. These USD estimates are not an invoice or a subscription charge. Calls with unavailable pricing remain unpriced. Tool usage is included only when reported and saved; separate tool fees may be missing. Historical estimates may change when model prices change.</p>
           <p>Forked messages keep their original usage. Thread totals include only work performed in that thread. Recorded context-summary and tool tokens are included even when their model is unknown. Combined historical records count as usage records, not individual calls. Failed or cancelled turns are included when usage was saved; older messages and interrupted work may have no usage.</p>
           <p>{report.pricing.fetchedAt ? `Prices fetched ${new Date(report.pricing.fetchedAt).toLocaleString()}.${report.pricing.stale ? " Refresh unavailable; using the last successful download." : " Refreshed daily."}` : "Pricing catalog unavailable. Saved model costs are used where available."}</p>
-        </div></details>
+        </div></Collapsible.Panel></Collapsible.Root>
       </>}
     </div></div>
   </>;
@@ -203,10 +237,20 @@ export function ModelTable({ models }: { models: WebModelUsage[] }) {
 export function UsageGraphs({ daily }: { daily: WebUsageReport["daily"] }) {
   const [selected, setSelected] = useState<number | null>(null);
   const id = useId();
+  const chart = useRef<SVGSVGElement>(null);
+  const [width, setWidth] = useState(640);
+  useEffect(() => {
+    if (!chart.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) if (entry.contentRect.width > 0) setWidth(entry.contentRect.width);
+    });
+    observer.observe(chart.current);
+    return () => observer.disconnect();
+  }, [daily.length]);
   if (!daily.length) return null;
   const index = Math.min(selected ?? daily.length - 1, daily.length - 1);
   const day = daily[index]!;
-  const width = 640, height = 200, left = 56, right = 12, bottom = 26, top = 16;
+  const height = 200, left = 56, right = 12, bottom = 26, top = 16;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const step = plotWidth / daily.length;
   const x = (i: number) => left + step * (i + 0.5);
@@ -224,7 +268,7 @@ export function UsageGraphs({ daily }: { daily: WebUsageReport["daily"] }) {
   const axes = (max: number, cost: boolean) => <>{[0, 0.5, 1].map(fraction => <g key={fraction}><line x1={left} x2={width - right} y1={y(fraction * max, max)} y2={y(fraction * max, max)} className="usage-grid-line" /><text x={left - 8} y={y(fraction * max, max) + 4} textAnchor="end">{cost ? `$${Intl.NumberFormat("en-US", { notation: "compact", maximumSignificantDigits: 2 }).format(fraction * max)}` : compact(fraction * max)}</text></g>)}<text x={left} y={height - 5}>{dateLabel(daily[0]!.date)}</text><text x={width - right} y={height - 5} textAnchor="end">{dateLabel(daily.at(-1)!.date)}</text></>;
   const targets = daily.map((d, i) => <rect key={d.date} x={left + step * i} y={top} width={step} height={plotHeight} fill="transparent" onMouseEnter={() => setSelected(i)} onClick={() => setSelected(i)}><title>{d.date}: {number(d.totalTokens)} tokens; {money(d.estimatedCostUsd)}</title></rect>);
   return <section className="usage-graphs" aria-label="Daily usage graphs">
-    <div className="usage-chart"><h3>Tokens per day</h3><div className="usage-legend">{categories.map(c => <span key={c.key}><i style={{ background: c.color }} />{c.label}</span>)}</div><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Daily stacked token counts. Use the day selector below for exact values.">{axes(maxTokens, false)}{daily.map((d, i) => {
+    <div className="usage-chart"><h3>Tokens per day</h3><div className="usage-legend">{categories.map(c => <span key={c.key}><i style={{ background: c.color }} />{c.label}</span>)}</div><svg ref={chart} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Daily stacked token counts. Use the day selector below for exact values.">{axes(maxTokens, false)}{daily.map((d, i) => {
       let sum = 0;
       return <g key={d.date}>{categories.map(c => { const value = d[c.key]; sum += value; return <rect key={c.key} x={x(i) - Math.max(1, step * 0.7) / 2} y={y(sum, maxTokens)} width={Math.max(1, step * 0.7)} height={value / maxTokens * plotHeight} fill={c.color} />; })}</g>;
     })}<line className="usage-cursor" x1={x(index)} x2={x(index)} y1={top} y2={height - bottom} />{targets}</svg></div>

@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowRight, LoaderCircle, LockKeyhole, Send, ShieldCheck } from "lucide-react";
+import { Field } from "@base-ui/react/field";
+import { Form } from "@base-ui/react/form";
+import { Input } from "@base-ui/react/input";
+import { ArrowRight, LoaderCircle, LockKeyhole } from "lucide-react";
+import { BrandMark } from "./brand.js";
 import { ApiError, apiJson, SESSION_EXPIRED_EVENT } from "./api.js";
 import { Button } from "./components/ui/button.js";
 
@@ -60,15 +64,16 @@ export function AdminGate({ children }: { children: (logout: () => Promise<void>
 
   if (authenticated) return children(logout, signingOut, logoutError);
   return <div className="access-page">
-    <header className="access-brand"><span className="brand-mark"><Send size={20} aria-hidden="true" /></span><span>Telegram bot<span className="brand-divider">/</span><span className="utility-label">Admin</span></span></header>
+    <header className="access-brand"><BrandMark /><span>AI KaRiLaA<span className="brand-divider">/</span><span className="utility-label">Admin</span></span></header>
     <main className="access-main">
-      <div className="access-intro"><span className="eyebrow"><ShieldCheck size={14} /> Private workspace</span><h1>Your bot,<br />in one place.</h1><p>Read conversations, review usage, and manage the Codex connection.</p></div>
       <section className="access-form" aria-labelledby="access-title">
-        <div className="access-lock"><LockKeyhole size={22} aria-hidden="true" /></div><h2 id="access-title">Admin access</h2>
-        {authenticated === null ? <>{checkError ? <div className="failure" role="alert">{checkError}<Button onClick={() => setRevision(v => v + 1)}>Try again</Button></div> : <p className="access-check" role="status"><LoaderCircle className="activity-spinner" size={16} /> Checking your session…</p>}</> : <LoginForm message={message} onSuccess={() => { generation.current++; setMessage(""); setAuthenticated(true); }} />}
+        <div className="access-lock"><LockKeyhole size={20} aria-hidden="true" /></div>
+        <h1 id="access-title">Admin access</h1>
+        <p className="access-description">Sign in to review conversations, track usage, and manage your bot.</p>
+        {authenticated === null ? <>{checkError ? <div className="failure" role="alert">{checkError}<Button onClick={() => setRevision(v => v + 1)}>Try again</Button></div> : <p className="access-check" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" /> Checking your session…</p>}</> : <LoginForm message={message} onSuccess={() => { generation.current++; setMessage(""); setAuthenticated(true); }} />}
       </section>
     </main>
-    <footer className="access-footer"><LockKeyhole size={13} aria-hidden="true" /> Conversations are visible only after sign-in.</footer>
+    <footer className="access-footer"><LockKeyhole size={14} aria-hidden="true" /> Private access for bot administrators</footer>
   </div>;
 }
 
@@ -90,12 +95,14 @@ export function LoginForm({ onSuccess, message = "" }: { onSuccess: () => void; 
         : "Could not sign in. Check your connection and try again.");
     } finally { setToken(""); setBusy(false); }
   };
-  return <form onSubmit={event => void submit(event)}>
-    <p className="access-description">Enter the admin token configured for this bot.</p>
+  return <Form className="access-token-form" onSubmit={event => void submit(event)}>
     {message && !error && <p className="form-message" role="status">{message}</p>}
-    <label htmlFor="admin-token">Admin token</label><input id="admin-token" name="password" type="password" autoComplete="current-password" autoFocus required value={token} onChange={event => setToken(event.target.value)} placeholder="Enter your admin token" aria-describedby={error ? "login-error" : "token-help"} aria-invalid={Boolean(error)} disabled={busy} />
-    {error && <p className="form-error" id="login-error" role="alert">{error}</p>}
-    <Button type="submit" className="primary-action access-submit" disabled={busy || !token.trim()}>{busy ? <><LoaderCircle className="activity-spinner" /> Signing in…</> : <>Sign in <ArrowRight /></>}</Button>
-    <p id="token-help" className="access-hint">Your token is used to start a private admin session.</p>
-  </form>;
+    <Field.Root name="password" className="access-field" invalid={Boolean(error)} disabled={busy}>
+      <Field.Label>Admin token</Field.Label>
+      <Input id="admin-token" type="password" autoComplete="current-password" autoFocus required value={token} onValueChange={value => { setToken(value); setError(""); }} placeholder="Enter your admin token" />
+      <Field.Description className="access-hint">Use the admin token configured for this bot.</Field.Description>
+      <Field.Error className="form-error" match={error ? true : undefined} role="alert">{error || undefined}</Field.Error>
+    </Field.Root>
+    <Button type="submit" variant="primary" className="access-submit" disabled={busy || !token.trim()}>{busy ? <><LoaderCircle className="activity-spinner" /> Signing in…</> : <>Sign in <ArrowRight /></>}</Button>
+  </Form>;
 }

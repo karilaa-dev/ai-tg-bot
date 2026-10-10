@@ -2,8 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 
-// The real code block is covered by the browser check; isolate Markdown safety here.
-vi.mock("../../src/web/client/components/ui/code-block.js", () => ({ default: ({ code }: { code: string }) => createElement("pre", null, code) }));
+import { CodeBlock } from "../../src/web/client/components/ui/code-block.js";
 import { FileAttachment } from "../../src/web/client/file-attachment.js";
 import { RichText } from "../../src/web/client/rich-text.js";
 import { MessageUsage, UsageGraphs, TokenBreakdown, FastModeSummary, UsageCalls } from "../../src/web/client/usage.js";
@@ -66,7 +65,8 @@ it("renders unavailable usage and partial estimates without fabricating a zero c
   expect(html).toContain("&lt;$0.0001");
   expect(html).toContain("partial");
   expect(html).toContain("Reasoning is included in output");
-  expect(html).not.toMatch(/<details[^>]*open/);
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).toContain('hidden=""');
 });
 
 it("distinguishes missing cache-write reporting from an explicitly reported zero", () => {
@@ -131,7 +131,7 @@ it("renders message formatting without active HTML, unsafe links, or external im
   expect(html).not.toContain("<img");
   expect(html).not.toContain('href="javascript:');
   expect(html).toContain('href="https://example.test"');
-  expect(html).toContain("&lt;script&gt;literal code&lt;/script&gt;");
+  expect(html.replace(/<[^>]*>/g, "")).toContain("&lt;script&gt;literal code&lt;/script&gt;");
 });
 
 
@@ -180,10 +180,9 @@ it.each(["image", "audio"] as const)("shows a %s caption unless it is already in
   }
 });
 
-it("renders unknown fenced-code languages as escaped plain text using the real code block", async () => {
-  const { default: CodeBlock } = await vi.importActual<typeof import("../../src/web/client/components/ui/code-block.js")>("../../src/web/client/components/ui/code-block.js");
+it("renders unknown fenced-code languages as escaped plain text using the real code block", () => {
   for (const language of ["mermaid", "unknown-language", "text"]) {
-    const html = renderToStaticMarkup(createElement(CodeBlock, { code: '<script>example</script>\ngraph TD; A --> B;', language, mode: "light" }));
+    const html = renderToStaticMarkup(createElement(CodeBlock, { code: '<script>example</script>\ngraph TD; A --> B;', language }));
     expect(html).toContain("graph TD; A --&gt; B;");
     expect(html).toContain("&lt;script&gt;example&lt;/script&gt;");
     expect(html).not.toContain("<script>");

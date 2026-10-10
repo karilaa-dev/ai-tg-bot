@@ -14,7 +14,8 @@
   "include": [
     "src/web/client/**/*.ts",
     "src/web/client/**/*.tsx",
-    "src/web/types.ts"
+    "src/web/types.ts",
+    "src/web/assets.d.ts"
   ],
   "exclude": []
 }

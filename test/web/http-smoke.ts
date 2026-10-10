@@ -19,10 +19,11 @@ import { UsagePricing } from "../../src/web/usage-pricing.js";
 import { createCodexLoginPreview } from "./codex-preview.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 
-const preview = process.argv.includes("--preview");
+const browser = process.argv.includes("--browser");
+const preview = browser || process.argv.includes("--preview");
 assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
 const temp = await mkdtemp(path.join(os.tmpdir(), "conversation-browser-"));
-const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: preview ? "preview-admin-token" : "test-admin-token", WEB_PORT: preview ? 3005 : 0, WEB_HOST: preview ? "0.0.0.0" : "127.0.0.1" });
+const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: preview ? "preview-admin-token" : "test-admin-token", WEB_PORT: preview && !browser ? 3005 : 0, WEB_HOST: preview && !browser ? "0.0.0.0" : "127.0.0.1" });
 const postgres = process.argv.includes("--postgres");
 const schema = `web_smoke_${randomUUID().replaceAll("-", "")}`;
 const admin = postgres ? createDatabase({ DB_URL: process.env.TEST_POSTGRES_URL! }) : undefined;

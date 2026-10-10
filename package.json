@@ -1,6 +1,6 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.0.22",
+  "version": "2.0.23",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "build": "bun --bun tsc -p tsconfig.json && bun dist/scripts/copy-e2b-template-assets.js && bun run build:web",
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.web.json --noEmit",
     "test": "bun node_modules/vitest/vitest.mjs run",
+    "test:web:browser": "bun test/web/browser-smoke.ts",
     "live:pi-check": "bun scripts/live-pi-check.ts",
     "live:codex-tools-check": "bun scripts/live-codex-tools-check.ts",
     "live:pi-tools-check": "bun scripts/live-pi-tools-check.ts",
@@ -48,7 +49,10 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@base-ui/react": "^1.9.0",
     "@bonkers-agency/grammy-test": "^0.1.3",
+    "@cloudflare/kumo": "^2.14.0",
+    "@phosphor-icons/react": "^2.1.10",
     "@types/bun": "1.4.2",
     "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1",
@@ -57,7 +61,6 @@
     "bun-plugin-tailwind": "0.1.2",
     "clsx": "^2.1.1",
     "lucide-react": "^1.48.0",
-    "motion": "^13.4.6",
     "prism-react-renderer": "^2.4.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
