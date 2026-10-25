@@ -1,5 +1,5 @@
 import { telegramTurnFrontend } from "../telegram/turnFrontend.js";
-import { AccessControl } from "../access/control.js";
+import type { AccessControl } from "../access/control.js";
 import { createApplication } from "../application/runtime.js";
 import { telegramConversationLink } from "../telegram/conversationLink.js";
 import { LocalFileStore } from "../files/localStore.js";
@@ -36,6 +36,7 @@ import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.
 import {
   cancelPendingMediaGroupsForContext,
   cancelPendingTextBurstForContext,
+  cancelPendingForThread,
   enqueueUserText,
   flushPendingTextBurstForContext,
   isPlainUserText,
@@ -57,7 +58,7 @@ interface InstallOptions {
   db: AppDatabase;
   logger: Logger;
   repos?: Repos;
-  access?: AccessControl;
+  access: AccessControl;
   localizer?: Localizer;
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
@@ -115,8 +116,9 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   const threadTitles = new ThreadTitleCoordinator({ repos, pi, logger: options.logger });
   fileResolver.registry.register(new WebFileSourceAdapter(options.db.db));
   const turnRunner = options.turnRunner ?? runTurn;
+  const routerState = createRouterState();
   const application = createApplication({
-    access: options.access ?? new AccessControl(options.db.db),
+    access: options.access,
     frontend: telegramTurnFrontend({ api: bot.api, repos, logger: options.logger, fileResolver, turnRunner,
       syncThreadActivity: (input) => threadTitles.syncActivity({ api: bot.api, ...input }),
     }),
@@ -133,9 +135,15 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       threadId: input.threadId,
     }),
     awaitProcessingOnAccept: options.awaitTurnProcessingOnAccept,
+    cancelIncoming: threadId => {
+      const pending = cancelPendingForThread(routerState, threadId);
+      const job = routerState.activeFileJobs.get(threadId);
+      job?.cancel();
+      return pending || Boolean(job);
+    },
   });
   const services: BotServices = { ...application, turnRunner, threadTitles,
-    commandRuntime: options.commandRuntime, routerState: createRouterState() };
+    commandRuntime: options.commandRuntime, routerState };
 
   bot.api.config.use(telegramRetry());
   bot.api.config.use(silentSends());

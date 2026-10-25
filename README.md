@@ -79,6 +79,8 @@ The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `p
 
 Threads and files have UUID identifiers, including API paths and attachment markers. Telegram user/chat/topic IDs remain Telegram IDs; message, turn and chunk IDs stay numeric for ordering. Startup migrates existing thread/file IDs and their relationships, search indexes and saved references in a transaction. The migration is recorded and does not repeat. Existing Pi session files are preserved while migrated copies use the new references.
 
+External bookmarks using old numeric thread or file IDs need to be refreshed. Saved sandbox mappings are migrated; orphan remote E2B metadata whose database mapping was already lost cannot be reconciled during the offline migration.
+
 The shared backend in `src/application` owns conversation authorization, turn acceptance, forking, compaction and settings. The durable turn coordinator receives a frontend adapter; Telegram mirroring and reactions live in the Telegram adapter. Both frontends use the same stored messages, model sessions and attachment resolver.
 
 ## Dokploy

@@ -6,6 +6,7 @@ import type { Repos } from "../db/repos/index.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
+import type { ThreadRow } from "../db/types.js";
 
 export interface ApplicationServices {
   config: AppConfig;
@@ -16,4 +17,5 @@ export interface ApplicationServices {
   pi: PiRuntimeService;
   fileResolver: FileResolver;
   turnCoordinator: ThreadTurnCoordinator;
+  cancelIncoming?(threadId: ThreadRow["id"]): boolean;
 }

@@ -75,4 +75,21 @@ describe("durable outgoing attachment bytes", () => {
     expect(await repos.files.get(attachment.fileId)).toBeUndefined();
     expect(await readdir(directory)).toEqual([]);
   });
+
+  it("preserves another user's accepted reference when the original outgoing turn is discarded", async () => {
+    const { files } = await outgoing();
+    const bytes = Buffer.from("shared attachment original bytes");
+    const attachment = await files.bytes(async () => ({ name: "owner.txt", mime: "text/plain", bytes }));
+    const user = await repos.users.ensure({ tgId: 2904 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const message = await repos.messages.insert({ threadId: thread.id, role: "user", kind: "file", content: {}, textPlain: "accepted shared file" });
+    await repos.files.attachToMessage(message.id, attachment.fileId, { displayName: "my-name.txt" });
+    expect((await repos.files.get(attachment.fileId))?.message_id).toBeNull();
+    await files.dispose();
+    const [retained] = await repos.files.listForMessage(message.id);
+    expect(retained).toMatchObject({ id: attachment.fileId, name: "my-name.txt" });
+    expect(await repos.files.chunks(attachment.fileId)).not.toHaveLength(0);
+    if (!retained) throw new Error("Shared accepted file was deleted");
+    expect((await fileResolver.resolveFile(retained)).bytes).toEqual(bytes);
+  });
 });

@@ -74,7 +74,7 @@ it.each(["source read", "source integrity", "backup registration"])("isolates a 
     large.data = Buffer.alloc(large.size);
     const rememberSource = env.repos.files.rememberSource.bind(env.repos.files);
     vi.spyOn(env.repos.files, "rememberSource").mockImplementation((id, source) => {
-      if (id === large.fileId && source.transport === "web") return Promise.reject(new Error("Backup unavailable"));
+      if (id === large.fileId && source.transport === "local") return Promise.reject(new Error("Backup unavailable"));
       return rememberSource(id, source);
     });
   }

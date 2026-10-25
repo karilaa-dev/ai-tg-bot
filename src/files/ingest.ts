@@ -136,12 +136,10 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: false, type };
   }
   let fileId: FileRow["id"] | undefined;
-  const chunkIds: number[] = [];
   let completed = false;
   const cleanup = async () => {
     if (fileId !== undefined) {
-      const existingChunkIds = await input.repo.deleteFile(fileId);
-      if (!chunkIds.length) chunkIds.push(...existingChunkIds);
+      await input.repo.deleteFileIfUnattached(fileId);
     }
   };
   const finish = async (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): Promise<FileIngestResult> => {
@@ -188,7 +186,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     fileId = file.id;
     input.logger?.debug("file row inserted", { fileId: file.id, name: input.name, inline });
     if (!inline) {
-      const outline = await indexDocumentChunks(input, file, chunks, chunkIds);
+      const outline = await indexDocumentChunks(input, file, chunks);
       throwIfAborted(input.signal);
       await input.repo.setOutline(file.id, outline);
       const card = cardForFile(
@@ -307,7 +305,6 @@ async function indexDocumentChunks(
   input: FileIngestInput,
   file: FileRow,
   chunks: Array<{ idx: number; headingPath: string | null; content: string }>,
-  chunkIds: number[],
 ): Promise<Array<{ chunk_index: number; heading_path: string | null }>> {
   const outline: Array<{ chunk_index: number; heading_path: string | null }> = [];
   const totalIndexingSteps = Math.max(1, chunks.length);
@@ -316,7 +313,6 @@ async function indexDocumentChunks(
     const chunk = chunks[index]!;
     throwIfAborted(input.signal);
     const inserted = await input.repo.insertChunk({ fileId: file.id, idx: chunk.idx, headingPath: chunk.headingPath, content: chunk.content });
-    chunkIds.push(inserted.id);
     outline.push({ chunk_index: inserted.idx, heading_path: inserted.heading_path });
     completedIndexingSteps += 1;
     await reportStage(input.onStage, {

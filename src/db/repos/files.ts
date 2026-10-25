@@ -127,8 +127,12 @@ export class FilesRepo {
          or f.message_id in (${valueList(messageIds)})
       order by f.created_at asc, f.id asc
     `);
+    const messages = await this.db.query<{ id: number; thread_id: string }>(sql`
+      select id, thread_id from messages where id in (${valueList(messageIds)})
+    `);
+    const messageThreads = new Map(messages.map(message => [message.id, message.thread_id]));
     return this.projectNames(files, sql`m.id in (${valueList(messageIds)})`, file =>
-      file.message_id !== null && messageIds.includes(file.message_id));
+      file.message_id !== null && messageThreads.get(file.message_id) === file.thread_id);
   }
 
   async listVisibleIds(scopes: MessageSearchScope[], includeUnattachedInbound: boolean): Promise<string[]> {
@@ -232,10 +236,12 @@ export class FilesRepo {
     messageId: number,
     attachment: { displayName?: string | null; caption?: string | null } = {},
   ): Promise<void> {
-    await this.db.execute(sql`update files set message_id = coalesce(message_id, ${messageId}) where id = ${fileId}`);
+    await this.db.execute(sql`update files set message_id = coalesce(message_id, ${messageId})
+      where id = ${fileId} and thread_id = (select thread_id from messages where id = ${messageId})`);
     const file = await this.get(fileId);
+    const message = await queryOne<{ thread_id: string }>(this.db, sql`select thread_id from messages where id = ${messageId}`);
     await this.attachToMessage(messageId, fileId, {
-      displayName: attachment.displayName ?? file?.name ?? null,
+      displayName: attachment.displayName ?? (file ? file.thread_id === message?.thread_id ? file.name : anonymousFileName(file) : null),
       caption: attachment.caption ?? null,
     });
   }

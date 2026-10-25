@@ -831,10 +831,13 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(await response.text()).toBe("hello");
     expect(fetch.mock.calls[0]).toHaveLength(4);
     expect((fetch.mock.calls[0] as unknown[])[2]).toBe(config.WEB_AUTOLOAD_MAX_BYTES);
+    fetch.mockResolvedValue(Buffer.alloc(large.size));
     expect((await request(`/api/threads/${t.id}/files/${large.id}?mode=download`)).status).toBe(200);
+    fetch.mockResolvedValue(Buffer.alloc(0));
     expect((await request(`/api/threads/${t.id}/files/${missingSize.id}?mode=download`)).status).toBe(200);
-    const svg = await attachment(t.id, m.id, 20, "image/svg+xml");
-    fetch.mockResolvedValue(Buffer.from('<svg onload="alert(1)"></svg>'));
+    const svgBytes = Buffer.from('<svg onload="alert(1)"></svg>');
+    const svg = await attachment(t.id, m.id, svgBytes.length, "image/svg+xml");
+    fetch.mockResolvedValue(svgBytes);
     const active = await request(`/api/threads/${t.id}/files/${svg.id}?mode=auto`);
     expect(active.headers.get("content-type")).toBe("application/octet-stream");
     expect(active.headers.get("content-disposition")).toMatch(/^attachment/);

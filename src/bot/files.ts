@@ -51,15 +51,13 @@ export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): 
     return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
-  cancelMediaGroup(ctx, job.mediaGroupId);
-  job.controller.abort();
+  job.cancel();
   await job.status.updateKey("file-processing-stopping");
   return true;
 }
 
 function activeFileJobKey(ctx: BotContext): string | undefined {
-  if (!ctx.chat || !ctx.thread) return undefined;
-  return `${ctx.chat.id}:${ctx.thread.topic_id ?? "general"}`;
+  return ctx.thread?.id;
 }
 
 export class FileProcessingStatus {
@@ -158,7 +156,7 @@ async function ingestTelegramFile(
 
   if ((input.size ?? 0) > TG_DOWNLOAD_MAX_BYTES) throw new FileTooLargeError();
 
-  await status?.updateKey("file-processing-downloading");
+  if (!opts.bytes) await status?.updateKey("file-processing-downloading");
   ctx.services.logger.debug(withType ? "telegram file download starting" : "telegram image download starting", ctxLogMeta(ctx, {
     name: input.name,
     ...(withType ? { type: input.type } : {}),
@@ -263,7 +261,10 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   }
   const controller = new AbortController();
   const status = new FileProcessingStatus(ctx, input.name);
-  activeFileJobs.set(jobKey, { controller, status, mediaGroupId: input.mediaGroupId });
+  activeFileJobs.set(jobKey, { controller, status, cancel: () => {
+    cancelMediaGroup(ctx, input.mediaGroupId);
+    controller.abort();
+  } });
   const startedAt = Date.now();
   ctx.services.logger.info("file job starting", ctxLogMeta(ctx, {
     name: input.name,
@@ -422,7 +423,9 @@ async function claimTelegramSource(
   if (candidate.content_sha256 && canonical.content_sha256 && candidate.content_sha256 !== canonical.content_sha256) {
     throw new Error(`Telegram source already belongs to different bytes for file #${canonical.id}.`);
   }
-  if (createdHere) await ctx.services.repos.files.deleteFile(candidate.id);
+  if (createdHere && await ctx.services.repos.files.deleteFileIfUnattached(candidate.id)) {
+    await ctx.services.fileResolver.removeLocalFile(candidate.id);
+  }
   ctx.services.logger.info("reused canonical Telegram source owner", ctxLogMeta(ctx, {
     duplicateFileId: candidate.id,
     canonicalFileId: canonical.id,

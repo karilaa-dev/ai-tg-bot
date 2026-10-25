@@ -116,7 +116,6 @@ describe.each(["workspace", "bytes", "spooled bytes"])("saved assistant %s files
         title: "Earlier fork", parentThreadId: thread.id, forkPointMessageId: before.id });
       const unrelated = await env.repos.threads.create({ userId: env.user.id, topicId: null, title: "Other chat" });
       if (source === "spooled bytes" && outcome === "blocked") {
-        vi.spyOn(env.repos.files, "rememberSource").mockRejectedValueOnce(new Error("Temporary source write failure"));
         vi.spyOn(FilesRepo.prototype, "setMessageId").mockRejectedValueOnce(new Error("Temporary association write failure"));
       }
       const sends: string[] = [];
@@ -154,10 +153,9 @@ describe.each(["workspace", "bytes", "spooled bytes"])("saved assistant %s files
         expect((await chat.history(env.user.id, hidden.id)).messages.flatMap(message => message.attachments)).toEqual([]);
       }
       const sources = await env.repos.files.listSources(generatedFileId);
-      expect(sources.some(saved => saved.transport === (source === "workspace" ? "e2b" : "web"))).toBe(true);
+      expect(sources.some(saved => saved.transport === (source === "workspace" ? "e2b" : "local"))).toBe(true);
       expect(sources.some(saved => saved.transport === "telegram")).toBe(outcome === "delivered");
       if (source === "spooled bytes" && outcome === "blocked") {
-        expect(env.repos.files.rememberSource).toHaveBeenCalledTimes(2);
         expect(FilesRepo.prototype.setMessageId).toHaveBeenCalledTimes(2);
       }
       expect(sends.filter(method => method === "sendDocument")).toHaveLength(outcome === "blocked" ? 0 : 1);

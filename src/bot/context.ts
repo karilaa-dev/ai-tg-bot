@@ -13,7 +13,7 @@ import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
 interface ActiveFileJob {
   controller: AbortController;
   status: FileProcessingStatus;
-  mediaGroupId?: string;
+  cancel(): void;
 }
 
 export interface PendingMediaGroupItem {

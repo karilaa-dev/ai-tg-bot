@@ -240,7 +240,7 @@ describe("finish_response", () => {
     confirmed!.telegramDelivery = { messageId: 55, fileId: null, fileUniqueId: null };
     unknown!.telegramDeliveryUnknown = true;
     rejected!.telegramDeliveryFailure = "telegram_rejected";
-    const remove = vi.spyOn(input.repos.files, "deleteFile");
+    const remove = vi.spyOn(input.repos.files, "deleteFileIfUnattached");
 
     await runtime.bridge.endTurn();
     await runtime.bridge.endTurn();
@@ -351,7 +351,7 @@ describe("finish_response", () => {
     expect(metadata).toHaveBeenCalledTimes(outcome === "confirmed" ? 2 : 0);
     const retained = await input.repos.files.listForThreads([input.thread.id]);
     expect(retained).toHaveLength(1);
-    expect(await input.repos.files.listSources(retained[0]!.id)).toMatchObject([{ transport: "e2b" }]);
+    expect((await input.repos.files.listSources(retained[0]!.id)).map(source => source.transport)).toEqual(["e2b", "local"]);
     expect(runtime.bridge.attachments).toEqual([]);
   });
 

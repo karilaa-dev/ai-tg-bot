@@ -47,6 +47,27 @@ it("separates each audio transcription from captions in mixed albums", () => {
   expect(view.attachments.map(f => f.transcription)).toEqual(["First part.", undefined, "Second part."]);
 });
 
+it.each([
+  { type: "audio", mime: "audio/ogg", name: "recording.ogg" },
+  { type: "other", mime: "application/octet-stream", name: "model.custom" },
+  { type: "other", mime: "image/gif", name: "animation.gif" },
+] satisfies Array<{ type: FileRow["type"]; mime: string; name: string }>)("hides generated $name source instructions while keeping surrounding text", ({ type, mime, name }) => {
+  const file: FileRow = {
+    id: fixtureUuid(6), user_id: 1001, thread_id: fixtureUuid(1), message_id: 10,
+    type, content_sha256: null, mime_type: mime,
+    extraction_status: "source_only", name,
+    size: 500, content_md: null, summary: null, outline_json: null, is_inline: 0, created_at: 0,
+  };
+  const attachment: WebAttachment = { id: file.id, name: file.name, size: file.size,
+    kind: type === "audio" ? "audio" : "file", mimeType: file.mime_type, caption: null };
+  const card = cardForFile(file);
+  for (const saved of [card, card.replace(`file_id: "${file.id}"`, `file_id: ${file.id}`)]) {
+    const view = messageView(message(`Read this\n\n${saved}\n\nKeep this too.`), [attachment]);
+    expect(view.text).toBe("Read this\n\nKeep this too.");
+    expect(view.attachments).toEqual([attachment]);
+  }
+});
+
 it("replaces a long preview only with the transcript belonging to this message and file", () => {
   const text = `Preview\n\n[[chat-file:${fixtureUuid(2)}]] [Audio transcript preview; full transcript saved (9000 characters). Read more with transcribe_audio({"transcript_id":"saved","offset":8000}).]`;
   const row = message(text);

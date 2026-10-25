@@ -152,4 +152,36 @@ describe("arbitrary Telegram documents", () => {
     if (!message) throw new Error("Image was not accepted");
     expect(await env.repos.files.listForMessage(message.id)).toMatchObject([{ id: original.id, name: "my-image.png", summary: null }]);
   });
+
+  it("keeps a newly created losing candidate once another user accepts it", async () => {
+    const bytes = Buffer.from("concurrently accepted bytes");
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const other = await env.repos.users.ensure({ tgId: 2905 });
+    const otherThread = await env.repos.threads.activeForUserTopic(other.tg_id, null);
+    const accepted = await env.repos.messages.insert({ threadId: otherThread.id, role: "user", kind: "file", content: {}, textPlain: "accepted" });
+    const winner = await env.repos.files.insertFile({
+      userId: env.user.id, threadId: thread.id, type: "txt", name: "winner.txt", size: bytes.length,
+      contentSha256: sha256Hex(bytes), contentMd: bytes.toString(), isInline: true,
+    });
+    const document = env.bot.server.fileState.storeDocument("competing.txt", "text/plain", { content: bytes });
+    await env.repos.files.rememberSource(winner.id, telegramFileSource({ fileId: document.file_id, fileUniqueId: document.file_unique_id }));
+    vi.spyOn(env.repos.files, "findBySource").mockResolvedValueOnce(undefined);
+    vi.spyOn(env.repos.files, "findByContentHash").mockResolvedValueOnce(undefined);
+    const remember = env.repos.files.rememberTelegramObservation.bind(env.repos.files);
+    vi.spyOn(env.repos.files, "rememberTelegramObservation").mockImplementationOnce(async (id, source, input) => {
+      const file = await env.repos.files.get(id);
+      if (!file) throw new Error("Concurrent candidate missing");
+      await env.services.fileResolver.persistFile(file, bytes);
+      await env.repos.files.attachToMessage(accepted.id, id, { displayName: "other-users-name.txt" });
+      return remember(id, source, input);
+    });
+    await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document),
+    ]);
+    const [retained] = await env.repos.files.listForMessage(accepted.id);
+    expect(retained).toMatchObject({ name: "other-users-name.txt" });
+    expect(retained?.id).not.toBe(winner.id);
+    if (!retained) throw new Error("Concurrent attachment was deleted");
+    expect(await new LocalFileStore(directory).read(retained.id)).toEqual(bytes);
+  });
 });

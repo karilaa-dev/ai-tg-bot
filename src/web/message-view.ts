@@ -30,6 +30,12 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
     if (!file) continue;
     const tail = message.text_plain.slice(marker.index + marker[0].length);
     const prefix = message.text_plain.slice(cursor, marker.index);
+    const fileEnd = fileCardEnd(tail, file, attachments.find(saved => saved.id === file.id)?.inlineContent);
+    if (fileEnd !== null) {
+      visible.push(prefix);
+      cursor = marker.index + marker[0].length + fileEnd;
+      continue;
+    }
     if (attachmentKind(file) === "image") {
       const start = tail.startsWith(`[image #${file.id}: `) ? `[image #${file.id}: `
         : tail.startsWith(`[Generated image #${file.id}: `) ? `[Generated image #${file.id}: ` : null;
@@ -41,8 +47,10 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
       visible.push(prefix);
       cursor = marker.index + marker[0].length + end;
     } else if (attachmentKind(file) === "audio") {
-      const sourceCard = `Audio file #${file.id}: ${file.name}. Use transcribe_audio with file_id: ${file.id}.`;
-      if (tail.startsWith(sourceCard)) {
+      const sourceCard = [JSON.stringify(file.id), file.id]
+        .map(id => `Audio file #${file.id}: ${file.name}. Use transcribe_audio with file_id: ${id}.`)
+        .find(card => tail.startsWith(card));
+      if (sourceCard) {
         visible.push(prefix);
         cursor = marker.index + marker[0].length + sourceCard.length;
         continue;
@@ -69,11 +77,6 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
       file.transcription = full?.text ?? spoken;
       file.transcriptionTruncated = Boolean(long && !full);
       cursor = marker.index + marker[0].length + note.length;
-    } else {
-      const end = fileCardEnd(tail, file, attachments.find(saved => saved.id === file.id)?.inlineContent);
-      if (end === null) continue;
-      visible.push(prefix);
-      cursor = marker.index + marker[0].length + end;
     }
   }
   visible.push(message.text_plain.slice(cursor));
@@ -93,6 +96,8 @@ function fileCardEnd(text: string, file: WebAttachment, inlineContent?: string |
   const prefix = `File #${file.id}: ${file.name} (`;
   if (!text.startsWith(prefix)) return null;
   const body = text.slice(prefix.length);
+  const original = `${file.size} bytes, original file). Use materialize_chat_files to access the original bytes in the sandbox.`;
+  if (body.startsWith(original)) return prefix.length + original.length;
   const inline = body.match(/^(?:txt|csv|pdf|docx|other), inline\)\.\n/);
   if (inline) {
     const opening = `${inline[0]}<attachment id="${file.id}" name="${file.name}">\n`;

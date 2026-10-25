@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { throwIfAborted } from "./cancel.js";
 import { sha256Hex } from "./hash.js";
 import { FileTooLargeError, MAX_FILE_BYTES } from "./limits.js";
+import { isUuid } from "../utils/uuid.js";
 
 export interface LocalFileIntegrity {
   size: number;
@@ -16,7 +17,7 @@ export class LocalFileConflictError extends Error {
 }
 
 export function localFileKey(value: string): string {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+  if (!isUuid(value)) {
     throw new Error("Invalid local file UUID.");
   }
   return value.toLowerCase();
@@ -78,7 +79,7 @@ export class LocalFileStore {
         let existing: Buffer;
         try { existing = await this.read(key, signal); }
         catch (error) {
-          if (error instanceof FileTooLargeError) throw new LocalFileConflictError();
+          if (error instanceof FileTooLargeError || hasCode(error, "ELOOP")) throw new LocalFileConflictError();
           throw error;
         }
         if (existing.length !== integrity.size || sha256Hex(existing) !== integrity.contentSha256) {

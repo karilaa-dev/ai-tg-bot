@@ -84,7 +84,9 @@ export class ConversationService {
 
   async stop(userId: number, threadId: ThreadRow["id"]) {
     await this.thread(userId, threadId);
-    return this.services.turnCoordinator.cancelActive(threadId);
+    const incoming = this.services.cancelIncoming?.(threadId) ?? false;
+    const turn = await this.services.turnCoordinator.cancelActive(threadId);
+    return incoming || turn;
   }
 
   async fork(input: { userId: number; threadId: ThreadRow["id"]; origin: ThreadRow["origin"]; messageId?: number; link?: ConversationLink }) {

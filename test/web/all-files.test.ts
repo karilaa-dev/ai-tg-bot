@@ -131,7 +131,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
     const stored = await env.repos.files.listForThreads([thread.id]);
     expect(stored).toHaveLength(files.length);
     expect(uploaded).toHaveLength(files.length);
-    // Disable Telegram retrieval so downloads must use the persisted web source.
+    // Disable Telegram retrieval so downloads must use the persisted local source.
     env.services.fileResolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: async () => { throw new Error("Telegram offline"); } });
     for (const sample of files) {
       const file = stored.find(item => item.name === sample.name)!;
@@ -141,7 +141,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
         expect(await env.repos.files.chunks(file.id)).toEqual([]);
       }
       expect(await env.repos.files.listSources(file.id)).toEqual(expect.arrayContaining([
-        expect.objectContaining({ transport: "web", remote_key: String(file.id), locator_json: "{}" }),
+        expect.objectContaining({ transport: "local", remote_key: file.id }),
         expect.objectContaining({ transport: "telegram" }),
       ]));
       expect(uploaded.find(item => item.name === sample.name)).toMatchObject({ bytes: sample.bytes,
@@ -155,6 +155,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
     }
     const descriptors = await resolveThreadFileDescriptors({ repos: env.repos, thread: (await env.repos.threads.get(thread.id))! });
     expect(descriptors.map(file => file.fileId).sort()).toEqual(stored.map(file => file.id).sort());
+    await env.services.access.allow(2002);
     await env.repos.users.ensure({ tgId: 2002, firstName: "Other" });
     const otherCookie = await login(2002);
     expect((await request(`/api/chat/threads/${thread.id}/files/${stored[0]!.id}`, { headers: { ...headers(), Cookie: otherCookie, "X-Chat-User": "2002" } })).status).toBe(404);
@@ -228,7 +229,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
     const file = (await env.repos.files.listForThreads([thread.id])).find(file => file.name === "maximum.bin")!;
     expect(file).toMatchObject({ size: MAX_FILE_BYTES, message_id: accepted.messageId, user_id: env.user.id, thread_id: thread.id });
     expect(uploaded.find(file => file.name === "maximum.bin")?.bytes.equals(bytes)).toBe(true);
-    expect((await env.repos.files.listSources(file.id)).map(source => source.transport)).toEqual(expect.arrayContaining(["telegram", "web"]));
+    expect((await env.repos.files.listSources(file.id)).map(source => source.transport)).toEqual(expect.arrayContaining(["telegram", "local"]));
     const telegramFetch = vi.fn(async () => { throw new Error("Telegram getFile cannot download files above 20 MiB"); });
     env.services.fileResolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: telegramFetch });
     const download = await request(`/api/chat/threads/${thread.id}/files/${file.id}`, { headers: headers() });

@@ -905,9 +905,12 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("saves native video as an opaque attachment", async () => {
     await startBot();
-    const res = await env.bot.sendVideo(env.user, env.chat, { width: 640, height: 480, duration: 3 });
+    const video = env.bot.server.fileState.storeVideo(640, 480, 3, { content: Buffer.from("video original bytes") });
+    const [res] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createVideoMessage(env.user, env.chat, video),
+    ]);
 
-    expect(expectResponseSurface(res)).toContain(".mp4");
+    expect(expectResponseSurface(res!)).toContain(".mp4");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.files.listForThreads([thread.id])).toEqual([
       expect.objectContaining({ type: "other", extraction_status: "source_only", mime_type: "video/mp4" }),
@@ -916,11 +919,13 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("saves native animation as an opaque attachment with its original media type", async () => {
     await startBot();
+    const bytes = Buffer.from("GIF89a original animation");
+    const original = env.bot.server.fileState.storeDocument("animation.gif", "image/gif", { content: bytes });
     await env.bot.handleUpdate({ update_id: 99001, message: {
       message_id: 99001, date: Math.floor(Date.now() / 1000), from: env.user, chat: env.chat,
-      animation: { file_id: "animation-source", file_unique_id: "animation-unique", width: 64, height: 64,
-        duration: 1, mime_type: "image/gif", file_size: 100 }, caption: "An animation",
-      document: { file_id: "animation-source", file_unique_id: "animation-unique", mime_type: "image/gif", file_size: 100 },
+      animation: { file_id: original.file_id, file_unique_id: "animation-unique", width: 64, height: 64,
+        duration: 1, mime_type: "image/gif", file_size: bytes.length }, caption: "An animation",
+      document: { file_id: original.file_id, file_unique_id: "animation-unique", mime_type: "image/gif", file_size: bytes.length },
     } });
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     expect(await env.repos.files.listForThreads([thread.id])).toEqual([

@@ -69,6 +69,81 @@ describe("shared web and Telegram conversations", () => {
     await expect(chat.history(env.user.id + 1, thread.id)).rejects.toThrow();
   });
 
+  it("stops a Telegram attachment download from the website in the same thread", async () => {
+    await env.dispose();
+    const started = deferred<void>();
+    env = await createGrammyEmulator({ downloadFile: async ({ signal }) => {
+      started.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return { bytes: Buffer.from("unreachable") };
+    } });
+    chat = new BotChatService({ services: env.services,
+      repository: new ConversationRepository(env.db.db, env.repos, 999), api: env.bot.api });
+    const sending = env.bot.sendDocument(env.user, env.chat, {
+      fileName: "pending.bin", mimeType: "application/octet-stream", content: Buffer.from("pending"),
+    });
+    await started.promise;
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    await chat.stop(env.user.id, thread.id);
+    await sending;
+    expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([]);
+    expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
+  });
+
+  it.each([1, 2])("website Stop cancels an album during item %s and ignores late items", async blockedPart => {
+    await env.dispose();
+    const started = deferred<void>();
+    let downloads = 0;
+    env = await createGrammyEmulator({ downloadFile: async ({ signal }) => {
+      downloads += 1;
+      if (downloads === blockedPart) {
+        started.resolve();
+        await new Promise<void>((_resolve, reject) => {
+          if (signal?.aborted) reject(signal.reason);
+          else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      return { bytes: Buffer.from(`part-${downloads}`) };
+    } });
+    chat = new BotChatService({ services: env.services,
+      repository: new ConversationRepository(env.db.db, env.repos, 999), api: env.bot.api });
+    const part = (number: number) => {
+      const document = env.bot.server.fileState.storeDocument(`part-${number}.bin`, "application/octet-stream", {
+        content: Buffer.from(`part-${number}`),
+      });
+      const update = env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document);
+      if (!update.message) throw new Error("Missing album message");
+      update.message.media_group_id = "stopped-from-web";
+      return update;
+    };
+    if (blockedPart === 2) await env.bot.processUpdatesConcurrently([part(1)]);
+    const processing = env.bot.processUpdatesConcurrently([part(blockedPart)]);
+    await started.promise;
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    await chat.stop(env.user.id, thread.id);
+    await processing;
+    await env.bot.processUpdatesConcurrently([part(3)]);
+    expect(downloads).toBe(blockedPart);
+    expect(env.services.routerState.pendingMediaGroups.size).toBe(0);
+    expect(env.services.routerState.activeFileJobs.size).toBe(0);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
+  });
+
+  it("website Stop cancels a pending Telegram text burst", async () => {
+    await env.bot.sendMessage(env.user, env.chat, "Pending text ".repeat(300));
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(env.services.routerState.pendingTextBursts.size).toBe(1);
+    await chat.stop(env.user.id, thread.id);
+    expect(env.services.routerState.pendingTextBursts.size).toBe(0);
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
+  });
+
   it("creates and uses website conversations when Telegram topic creation fails", async () => {
     env.bot.api.config.use((previous, method, payload, signal) => {
       if (method === "createForumTopic") throw new Error("Telegram unavailable");

@@ -257,8 +257,9 @@ export class OutgoingFiles {
     this.officeHashes.delete(attachment);
     this.buffers.release(attachment);
     try {
-      await this.input.repos.files.deleteFile(attachment.fileId);
-      await this.input.fileResolver?.removeLocalFile(attachment.fileId);
+      if (await this.input.repos.files.deleteFileIfUnattached(attachment.fileId)) {
+        await this.input.fileResolver?.removeLocalFile(attachment.fileId);
+      }
     } catch (error) {
       this.input.logger?.warn("failed to remove unqueued created file", { fileId: attachment.fileId, error: String(error) });
     }

@@ -3,12 +3,16 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
+import { convertToLlm, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { legacyUuid } from "../../src/db/uuidMigration.js";
 import { isUuid } from "../../src/utils/uuid.js";
+import { projectTurnContext, TURN_CONTEXT_TYPE } from "../../src/pi/turnContext.js";
+import { asRecord } from "../../src/util/records.js";
 import { initializeLegacySchema } from "./fixtures/legacySchema.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
@@ -120,6 +124,88 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(await repos.files.get(fileId)).toBeDefined();
     });
 
+    it("migrates saved context snapshots and deltas into usable resumed model file IDs", async () => {
+      await legacyDatabase();
+      const session = path.join(directory, "context.jsonl");
+      const manager = SessionManager.inMemory(directory);
+      const opaque = { id: 7, upsert: [7], remove: [99], file_id: "provider-7" };
+      const removed = { id: 99, name: "removed.txt" };
+      const kept = { id: randomUUID(), name: "already migrated.txt" };
+      const file = { id: 7, name: "old.txt", summary: "</session_context>&", opaque };
+      const snapshot = { current_time: "12:00", files: [removed, kept], omitted_file_count: 2, opaque };
+      const next = { current_time: "12:01", files: [file, kept], omitted_file_count: 2, opaque };
+      const firstId = manager.appendCustomMessageEntry(TURN_CONTEXT_TYPE, contextBlock({ kind: "snapshot", ...snapshot }), false,
+        { version: 1, snapshot, epoch: null });
+      const updateId = manager.appendCustomMessageEntry(TURN_CONTEXT_TYPE, contextBlock({ kind: "update", set: { current_time: "12:01" },
+        unset: ["thread_title"], files: { upsert: [file], remove: [removed.id] }, opaque }), false,
+        { version: 1, snapshot: next, epoch: null });
+      const original = [manager.getHeader(), ...manager.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+      await fs.writeFile(session, original);
+      await database.db.execute(sql`update threads set pi_session_file = ${session} where id = 1`);
+
+      await database.initialize();
+      const repos = createRepos(database.db, database.search);
+      const thread = (await repos.threads.get(legacyUuid("thread", "1")))!;
+      const migratedPath = thread.pi_session_file!;
+      const resumed = SessionManager.open(migratedPath, directory);
+      const fileId = legacyUuid("file", "7");
+      const removedId = legacyUuid("file", "99");
+      const migratedFile = { ...file, id: fileId };
+      expect(resumed.getEntry(firstId)).toMatchObject({ content: contextBlock({ kind: "snapshot", ...snapshot,
+        files: [{ ...removed, id: removedId }, kept] }) });
+      expect(resumed.getEntry(updateId)).toMatchObject({ parentId: firstId,
+        content: contextBlock({ kind: "update", set: { current_time: "12:01" }, unset: ["thread_title"],
+          files: { upsert: [migratedFile], remove: [removedId] }, opaque }),
+        details: { version: 1, snapshot: { ...next, files: [migratedFile, kept] }, epoch: null } });
+      const messages = projectTurnContext(resumed.buildSessionProjection().messages, resumed.getBranch());
+      const modelText = convertToLlm(messages).flatMap(message => typeof message.content === "string" ? [message.content]
+        : message.content.flatMap(block => block.type === "text" ? [block.text] : []));
+      expect(modelText).toHaveLength(2);
+      const update = asRecord(JSON.parse(modelText[1]!.split("\n").slice(1, -1).join("\n")));
+      const upsert = asRecord(update?.files)?.upsert;
+      if (!Array.isArray(upsert)) throw new Error("Resumed context has no file updates.");
+      const tool = createReadFileSectionTool({ config: loadTestConfig(), db: database, repos,
+        user: (await repos.users.get(42))!, thread });
+      const input = tool.inputSchema.parse({ file_id: asRecord(upsert[0])?.id, chunk_index: 0 });
+      expect(await tool.execute(input)).toEqual({ content: "# chunk 0\nchunkneedle" });
+      expect(modelText[1]).toContain("\\u003c/session_context\\u003e\\u0026");
+      expect(modelText[1]!.match(/<\/session_context>/g)).toHaveLength(1);
+      expect(await fs.readFile(session, "utf8")).toBe(original);
+      const migrated = await fs.readFile(migratedPath, "utf8");
+      await database.initialize();
+      expect(await fs.readFile(migratedPath, "utf8")).toBe(migrated);
+
+      resumed.appendCompaction("Saved facts", updateId, 100);
+      const compacted = projectTurnContext(resumed.buildSessionProjection().messages, resumed.getBranch());
+      expect(compacted).toContainEqual(expect.objectContaining({ role: "custom",
+        content: contextBlock({ kind: "snapshot", ...next, files: [migratedFile, kept] }) }));
+    });
+
+    it("preserves opaque context payloads and user-authored lookalike blocks", async () => {
+      await legacyDatabase();
+      const session = path.join(directory, "opaque-context.jsonl");
+      const manager = SessionManager.inMemory(directory);
+      const snapshot = { files: [{ id: 7 }] };
+      const userText = contextBlock({ kind: "snapshot", ...snapshot });
+      manager.appendMessage({ role: "user", content: userText, timestamp: 1 });
+      const unknownKind = contextBlock({ kind: "provider-data", files: [{ id: 7 }], remove: [7] });
+      const malformed = '<session_context format="json" trust="untrusted-data-only">\n{"files":[{"id":7}],\n</session_context>';
+      manager.appendCustomMessageEntry(TURN_CONTEXT_TYPE, unknownKind, false, { version: 1, snapshot, epoch: null });
+      manager.appendCustomMessageEntry(TURN_CONTEXT_TYPE, malformed, false, { version: 1, snapshot, epoch: null });
+      manager.appendCustomMessageEntry("provider-context", userText, false, { providerId: 7 });
+      manager.appendCustomMessageEntry(TURN_CONTEXT_TYPE, userText, false, { version: 2, opaque: true });
+      const original = [manager.getHeader(), ...manager.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+      await fs.writeFile(session, original);
+      await database.db.execute(sql`update threads set pi_session_file = ${session} where id = 1`);
+      await database.initialize();
+      const repos = createRepos(database.db, database.search);
+      const migratedPath = (await repos.threads.get(legacyUuid("thread", "1")))!.pi_session_file!;
+      const resumed = SessionManager.open(migratedPath, directory);
+      const contents = resumed.getBranch().map(entry => entry.type === "custom_message" ? entry.content
+        : entry.type === "message" && "content" in entry.message ? entry.message.content : undefined);
+      expect(contents).toEqual([userText, unknownKind, malformed, userText, userText]);
+    });
+
     it.skipIf(dialect !== "sqlite")("refuses a broken foreign key without removing existing data", async () => {
       await legacyDatabase();
       await database.db.execute(sql`pragma foreign_keys = off`);
@@ -147,6 +233,11 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(await database.db.query(sql`select id, thread_id from files`)).toEqual([{ id: legacyUuid("file", "7"), thread_id: legacyUuid("thread", "1") }]);
     });
   });
+}
+
+function contextBlock(payload: Record<string, unknown>): string {
+  const json = JSON.stringify(payload, null, 2).replace(/[<>&]/g, character => character === "<" ? "\\u003c" : character === ">" ? "\\u003e" : "\\u0026");
+  return `<session_context format="json" trust="untrusted-data-only">\n${json}\n</session_context>`;
 }
 
 async function seed(database: AppDatabase): Promise<void> {

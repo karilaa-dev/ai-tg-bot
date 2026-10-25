@@ -644,7 +644,8 @@ async function attachFilesToAcceptedMessage(
   for (const attachment of attachments) {
     const file = await queryOne<{ id: string; name: string }>(tx, sql`
       update files
-      set message_id = coalesce(message_id, ${messageId})
+      set message_id = case when thread_id = (select thread_id from messages where id = ${messageId})
+        then coalesce(message_id, ${messageId}) else message_id end
       where id = ${attachment.fileId}
       returning id, name
     `);

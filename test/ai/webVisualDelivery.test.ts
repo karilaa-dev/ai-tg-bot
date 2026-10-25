@@ -111,7 +111,7 @@ async function fixture(options: {
       pendingHistory.push(await chat.history(env.user.id, thread.id));
       for (const id of fileIds) {
         expect((await env.repos.files.get(id))?.message_id).toBeTypeOf("number");
-        expect((await env.repos.files.listSources(id)).some(source => source.transport === "web")).toBe(true);
+        expect((await env.repos.files.listSources(id)).some(source => source.transport === "local")).toBe(true);
       }
       const upload = "photo" in payload ? payload.photo : "document" in payload ? payload.document : undefined;
       if (!(upload instanceof InputFile)) throw new Error("Expected buffered attachment upload.");
@@ -308,7 +308,7 @@ describe("web-created visual answers mirrored to Telegram", () => {
       const file = await f.env.repos.files.get(id);
       if (!file) throw new Error("Missing archived file.");
       expect(file.message_id).toBe(assistant?.id);
-      expect((await f.env.repos.files.listSources(id)).map(source => source.transport)).toEqual(expect.arrayContaining(["web", "telegram"]));
+      expect((await f.env.repos.files.listSources(id)).map(source => source.transport)).toEqual(expect.arrayContaining(["local", "telegram"]));
       expect((await f.env.services.fileResolver.resolveFile(file)).bytes).toEqual(id === f.fileIds[0] ? TEST_PNG : REPORT);
     }
     expect(f.confirmed).toHaveBeenCalledOnce();

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -139,6 +139,20 @@ describe("local-first durable file resolution", () => {
     expect(await store.read(String(file.id))).toEqual(original);
     expect((await resolver.resolveFile(file)).source.transport).toBe("local");
     expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("repairs a substituted local symlink without changing its target", async () => {
+    const file = await insertFile();
+    await resolver.persistFile(file, original);
+    const outside = path.join(directory, "unrelated");
+    await writeFile(outside, "private target");
+    await rm(path.join(directory, file.id));
+    await symlink(outside, path.join(directory, file.id));
+    await repos.files.rememberSource(file.id, { transport: "telegram", connectionKey: "default", remoteKey: "original", locator: {} });
+    resolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: async () => original });
+    expect((await resolver.resolveFile(file)).bytes).toEqual(original);
+    expect((await resolver.resolveFile(file)).source.transport).toBe("local");
+    expect(await readFile(outside, "utf8")).toBe("private target");
   });
 
   it("never serves or caches an altered Telegram representation of the original file", async () => {

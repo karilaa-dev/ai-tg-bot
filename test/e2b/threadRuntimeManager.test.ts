@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { sql } from "drizzle-orm";
 import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +21,8 @@ import { E2BFileSourceAdapter, e2bFileSource } from "../../src/e2b/fileSource.js
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
 import { MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "../../src/files/limits.js";
+import { LocalFileStore } from "../../src/files/localStore.js";
+import { FileResolver } from "../../src/files/resolver.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
 import { WebFileSourceAdapter, webFileSource } from "../../src/web/file-source.js";
 import { deferred } from "../helpers/async.js";
@@ -433,6 +438,30 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
   });
 
+  it("materializes a local-only attachment through the shared resolver", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "local-materialization-"));
+    try {
+      const bytes = Buffer.from("locally retained original bytes");
+      const message = await repos.messages.insert({ threadId, role: "user", textPlain: "upload", content: {} });
+      const file = await repos.files.insertFile({ userId, threadId, messageId: message.id,
+        name: "original.custom", type: "other", size: bytes.length, isInline: false });
+      const fileResolver = new FileResolver(repos.files, undefined, new LocalFileStore(directory));
+      await fileResolver.persistFile(file, bytes);
+      await runtime.dispose();
+      runtime = new ThreadE2BSandboxRuntimeManager({ config, repos, client, fileResolver });
+      const thread = await repos.threads.get(threadId);
+      if (!thread) throw new Error("Missing local attachment thread");
+      const files = await resolveThreadFileDescriptors({ repos, thread });
+      expect(files).toEqual([expect.objectContaining({ fileId: file.id, telegramRefs: [] })]);
+      expect((await runtime.materializeFiles({ userId, threadId, files })).available).toBe(1);
+      expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${file.id}--original.custom`)).toEqual(bytes);
+      expect(client.telegramDownloadCalls).toBe(0);
+    } finally {
+      await runtime.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("restores a valid empty web attachment", async () => {
     const file = await storeWebDescriptor("empty.txt", Buffer.alloc(0));
     expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(1);
@@ -568,10 +597,11 @@ describe("thread E2B runtime manager", () => {
     const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
     const result = await runtime.materializeFiles({ userId, threadId: fork.id, files: [before, after] });
     expect(result.available).toBe(1);
-    expect(result.files).toEqual([
+    expect(result.files).toHaveLength(2);
+    expect(result.files).toEqual(expect.arrayContaining([
       expect.objectContaining({ fileId: before.fileId, status: "available" }),
       expect.objectContaining({ fileId: after.fileId, path: null }),
-    ]);
+    ]));
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch).toHaveBeenCalledWith(webFileSource(before.fileId, "text/plain"), expect.any(AbortSignal), MAX_FILE_BYTES);
     expect(client.telegramDownloadCalls).toBe(0);

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sql, type SQL } from "drizzle-orm";
 import type { SqlExecutor } from "./sql.js";
+import { asRecord } from "../util/records.js";
 
 const MIGRATION = "thread-file-uuid-v1";
 type IdentityKind = "thread" | "file";
@@ -215,9 +216,47 @@ function rewriteJson(value: unknown, maps: IdMaps, key = "", fileObject = false)
     return replaceMarkers(value, maps);
   }
   if (value !== null && typeof value === "object") {
+    const entry = asRecord(value);
+    const details = asRecord(entry?.details);
+    const snapshot = asRecord(details?.snapshot);
+    if (entry?.type === "custom_message" && entry.customType === "telegram-turn-context" && details?.version === 1 && snapshot) {
+      return { ...entry, content: rewriteContextBlock(entry.content, maps),
+        details: { ...details, snapshot: { ...snapshot, files: rewriteContextFiles(snapshot.files, maps) } } };
+    }
     return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, rewriteJson(child, maps, childKey, fileObject)]));
   }
   return value;
+}
+
+function rewriteContextFileId(value: unknown, maps: IdMaps): unknown {
+  return typeof value === "number" && Number.isSafeInteger(value) ? mappedId("file", String(value), maps) : value;
+}
+
+function rewriteContextFiles(value: unknown, maps: IdMaps): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map(item => {
+    const file = asRecord(item);
+    return file && "id" in file ? { ...file, id: rewriteContextFileId(file.id, maps) } : item;
+  });
+}
+
+function rewriteContextBlock(value: unknown, maps: IdMaps): unknown {
+  const open = '<session_context format="json" trust="untrusted-data-only">\n';
+  const close = "\n</session_context>";
+  if (typeof value !== "string" || !value.startsWith(open) || !value.endsWith(close)) return value;
+  let payload: Record<string, unknown> | undefined;
+  try { payload = asRecord(JSON.parse(value.slice(open.length, -close.length))); }
+  catch { return value; }
+  if (!payload || (payload.kind !== "snapshot" && payload.kind !== "update")) return value;
+  const files = asRecord(payload.files);
+  const rewritten = payload.kind === "snapshot"
+    ? { ...payload, files: rewriteContextFiles(payload.files, maps) }
+    : files ? { ...payload, files: { ...files, upsert: rewriteContextFiles(files.upsert, maps),
+      remove: Array.isArray(files.remove) ? files.remove.map(id => rewriteContextFileId(id, maps)) : files.remove } } : payload;
+  if (JSON.stringify(rewritten) === JSON.stringify(payload)) return value;
+  const json = JSON.stringify(rewritten, null, 2)
+    .replace(/[<>&]/g, character => character === "<" ? "\\u003c" : character === ">" ? "\\u003e" : "\\u0026");
+  return `${open}${json}${close}`;
 }
 
 function rewriteJsonText(text: string, maps: IdMaps): string {
