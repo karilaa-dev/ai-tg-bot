@@ -1,5 +1,6 @@
 import type { BunRequest, Server } from "bun";
 import { z } from "zod";
+import { ConversationError } from "../application/errors.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { WebHttpError } from "./auth.js";
 import { chatClientAddress, ChatRateLimit, readBoundedBody, requireChatMutation, WebChatAuth } from "./chat-auth.js";
@@ -33,11 +34,12 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
     return options.chat.service;
   };
   const session = async (request: Request): Promise<ChatSession> => {
-    const userId = auth.userId(request);
+    const userId = await auth.userId(request);
     if (userId === undefined || !options.chat) return { authenticated: false, loginAvailable: auth.available && Boolean(options.chat) };
+    if (!await options.access.isAllowed(userId)) return { authenticated: false, loginAvailable: auth.available };
     reads.take(String(userId));
     try { return { authenticated: true, user: await service().profile(userId), botUsername: options.chat.botUsername, admin: auth.isAdmin(userId) }; }
-    catch (error) { if (error instanceof WebNotFound) return { authenticated: false, loginAvailable: auth.available }; throw error; }
+    catch (error) { if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) return { authenticated: false, loginAvailable: auth.available }; throw error; }
   };
   function guard<Path extends string>(handler: (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">) => Promise<Response> | Response) {
     return (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">): Promise<Response> => {
@@ -50,9 +52,9 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           for (const [key, value] of Object.entries(responseHeaders)) if (!headers.has(key)) headers.set(key, value);
           return new Response(request.method === "HEAD" ? null : result.body, { status: result.status, headers });
         } catch (error) {
-          const status = request.signal.aborted ? 499 : error instanceof WebHttpError ? error.status : error instanceof WebNotFound ? 404 : error instanceof z.ZodError ? 400 : 500;
+          const status = request.signal.aborted ? 499 : error instanceof WebHttpError || error instanceof ConversationError ? error.status : error instanceof WebNotFound ? 404 : error instanceof z.ZodError ? 400 : 500;
           if (status === 500) options.logger.error("web chat request failed", { error: error instanceof Error ? error.name : "unknown" });
-          return new Response(request.method === "HEAD" || status === 499 ? null : JSON.stringify({ error: error instanceof WebHttpError ? error.message : status === 400 ? "Invalid request." : status === 404 ? "Not found." : "Could not complete the request. Try again." }), {
+          return new Response(request.method === "HEAD" || status === 499 ? null : JSON.stringify({ error: error instanceof WebHttpError || error instanceof ConversationError ? error.message : status === 400 ? "Invalid request." : status === 404 ? "Not found." : "Could not complete the request. Try again." }), {
             status, headers: { ...responseHeaders, ...(error instanceof WebHttpError ? error.headers : {}), "Content-Type": "application/json" },
           });
         }
@@ -62,8 +64,8 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
       return task;
     };
   }
-  function requireBoundSession(request: Request): number {
-    const userId = auth.requireSession(request);
+  async function requireBoundSession(request: Request): Promise<number> {
+    const userId = await auth.requireSession(request);
     if (request.headers.get("X-Chat-User") !== String(userId)) {
       throw new WebHttpError(401, "Your account changed. Reload the page to continue.");
     }
@@ -71,7 +73,8 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
   }
   function user<Path extends string>(handler: (request: BunRequest<Path>, userId: number, chat: ChatService) => Promise<Response>) {
     return guard<Path>(async request => {
-      const userId = requireBoundSession(request);
+      const userId = await requireBoundSession(request);
+      if (!await options.access.isAllowed(userId)) throw new WebHttpError(403, "This Telegram account is not allowed to use this bot.");
       const chat = service();
       (request.method === "GET" || request.method === "HEAD" ? reads : writes).take(String(userId));
       await chat.profile(userId);
@@ -92,18 +95,17 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
     routes: {
       "/api/chat/session": {
         GET: sessionRead, HEAD: sessionRead,
-        DELETE: guard(request => {
-          requireBoundSession(request);
+        DELETE: guard(async request => {
+          await requireBoundSession(request);
           return Response.json({ authenticated: false, loginAvailable: auth.available && Boolean(options.chat) } satisfies ChatSession,
             { headers: { "Set-Cookie": auth.logout(request) } });
         }),
       },
-      "/api/auth/telegram/start": { GET: guard((request, server) => { service(); return auth.start(request, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS)); }) },
+      "/api/auth/telegram/start": { GET: guard((request, server) => auth.start(request, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS))) },
       "/api/auth/telegram/callback": { GET: guard((request, server) => {
-        const chat = service();
         return auth.callback(request, async userId => {
-          try { await chat.profile(userId); }
-          catch (error) { if (error instanceof WebNotFound) throw new WebHttpError(403, "Start a conversation with the bot in Telegram before signing in here."); throw error; }
+          try { await service().profile(userId); }
+          catch (error) { if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) throw new WebHttpError(403, "Send /start to the bot in Telegram before signing in here."); throw error; }
         }, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS));
       }) },
       "/api/chat/threads": {

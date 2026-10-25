@@ -7,6 +7,7 @@ import { BrandMark } from "./brand.js";
 import { apiJson } from "./api.js";
 import { Memories } from "./memories.js";
 import { CodexConnection } from "./codex-connection.js";
+import { AllowedUsers } from "./allowed-users.js";
 import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
 import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
 import { RichText } from "./rich-text.js";
@@ -36,7 +37,7 @@ function selection() {
   const parse = (name: string) => { const value = Number(params.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
   const threadId = parse("thread");
   const usage = params.get("view") === "usage";
-  return { userId: parse("user"), threadId, memories: Boolean(parse("user") && !threadId && params.get("view") === "memories"), codex: params.get("view") === "codex", usage: !threadId && usage,
+  return { userId: parse("user"), threadId, memories: Boolean(parse("user") && !threadId && params.get("view") === "memories"), codex: params.get("view") === "codex", allowedUsers: params.get("view") === "allowed-users", usage: !threadId && usage,
     threadUsage: Boolean(threadId && (params.get("usage") === "thread" || usage)) };
 }
 
@@ -92,8 +93,8 @@ function App() {
   const [selected, setSelected] = useState(selection);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
-  const users = usePages<WebUser>(selected.usage || selected.codex ? null : `/api/users?q=${encodeURIComponent(query)}`);
-  const threads = usePages<WebThread>(selected.userId && !selected.usage && !selected.codex ? `/api/users/${selected.userId}/threads` : null);
+  const users = usePages<WebUser>(selected.usage || selected.codex || selected.allowedUsers ? null : `/api/users?q=${encodeURIComponent(query)}`);
+  const threads = usePages<WebThread>(selected.userId && !selected.usage && !selected.codex && !selected.allowedUsers ? `/api/users/${selected.userId}/threads` : null);
   const user = users.items.find(u => u.id === selected.userId);
   useEffect(() => { const timeout = setTimeout(() => setQuery(search), 250); return () => clearTimeout(timeout); }, [search]);
   useEffect(() => { const pop = () => setSelected(selection()); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
@@ -103,12 +104,13 @@ function App() {
     if (threadId) params.set("thread", String(threadId));
     if (usage) { if (threadId) params.set("usage", "thread"); else params.set("view", "usage"); }
     history.pushState(null, "", `/admin${params.size ? `?${params}` : ""}`);
-    setSelected({ userId, threadId, memories: false, codex: false, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
+    setSelected({ userId, threadId, memories: false, codex: false, allowedUsers: false, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
   };
   const openCodex = () => { history.pushState(null, "", "/admin?view=codex"); setSelected(selection()); };
+  const openAllowedUsers = () => { history.pushState(null, "", "/admin?view=allowed-users"); setSelected(selection()); };
   const openMemories = () => { history.pushState(null, "", `/admin?user=${selected.userId}&view=memories`); setSelected(selection()); };
-  const screen = selected.memories ? "messages" : selected.codex ? "codex" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
-  const view = selected.codex ? "codex" : selected.usage ? "usage" : "conversations";
+  const screen = selected.memories ? "messages" : selected.codex ? "codex" : selected.allowedUsers ? "allowed-users" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
+  const view = selected.codex ? "codex" : selected.allowedUsers ? "allowed-users" : selected.usage ? "usage" : "conversations";
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <nav className="app-navigation" aria-label="Main navigation">
@@ -117,6 +119,7 @@ function App() {
         <BaseButton className="nav-item" aria-current={view === "conversations" ? "page" : undefined} onClick={() => navigate(null, null)}><IconMessage aria-hidden="true" /><span>Conversations</span></BaseButton>
         <BaseButton className="nav-item" aria-current={view === "usage" ? "page" : undefined} onClick={() => navigate(null, null, true)}><IconChartBar aria-hidden="true" /><span>Usage</span></BaseButton>
         <BaseButton className="nav-item" aria-current={view === "codex" ? "page" : undefined} onClick={openCodex}><IconKey aria-hidden="true" /><span>Codex</span></BaseButton>
+        <BaseButton className="nav-item" aria-current={view === "allowed-users" ? "page" : undefined} onClick={openAllowedUsers}><IconUsers aria-hidden="true" /><span>Allowed users</span></BaseButton>
       </div>
       <div className="nav-account"><ThemeToggle /><a className="nav-item nav-chat" href="/" aria-label="Back to chat" title="Back to chat"><IconMessageChatbot aria-hidden="true" /><span>Back to chat</span></a></div>
     </nav>
@@ -150,8 +153,8 @@ function App() {
       </div>
     </aside>
     </>}
-    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.usage ? "Usage statistics" : "Message history"}>
-      {selected.memories && selected.userId ? <Memories key={selected.userId} load={(offset, signal) => apiJson(`/api/users/${selected.userId}/memories?offset=${offset}`, { signal })} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Messages</h2></div><span className="read-only-label"><IconLock aria-hidden="true" size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><IconFolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "Select a person"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Then choose a conversation to view its messages."} /></div></>}
+    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.allowedUsers ? "Allowed users" : selected.usage ? "Usage statistics" : "Message history"}>
+      {selected.memories && selected.userId ? <Memories key={selected.userId} load={(offset, signal) => apiJson(`/api/users/${selected.userId}/memories?offset=${offset}`, { signal })} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.allowedUsers ? <AllowedUsers /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Messages</h2></div><span className="read-only-label"><IconLock aria-hidden="true" size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><IconFolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "Select a person"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Then choose a conversation to view its messages."} /></div></>}
     </main>
     </div>
   </div>;

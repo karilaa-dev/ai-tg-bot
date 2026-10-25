@@ -13,6 +13,7 @@ import { chatFileMarker } from "./contextMarker.js";
 import { sha256Hex } from "./hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "./limits.js";
 import { OutgoingBuffers, prepareWithTwoWorkers } from "./outgoingBuffers.js";
+import type { FileResolver } from "./resolver.js";
 import type { CreatedFileAttachment, CreatedFileDeliveryPreference } from "./types.js";
 
 type FileOptions = { name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference };
@@ -24,8 +25,9 @@ type Input = {
   thread: ThreadRow;
   commandRuntime?: CommandRuntime;
   officeValidation?: OfficeValidation;
+  fileResolver?: FileResolver;
   logger?: Logger;
-  selectContextFiles?(ids: number[]): void;
+  selectContextFiles?(ids: FileRow["id"][]): void;
 };
 
 /** Owns the attachment queue and every export reservation for one turn. */
@@ -184,6 +186,11 @@ export class OutgoingFiles {
         }
       }
       attachment = await this.store(file, signal);
+      if (this.input.fileResolver) {
+        const stored = await this.input.repos.files.get(attachment.fileId);
+        if (!stored) throw new Error(`Created file #${attachment.fileId} disappeared before persistence.`);
+        await this.input.fileResolver.persistFile(stored, file.bytes, signal);
+      }
       if (office) this.officeHashes.set(attachment, sha256Hex(file.bytes));
       if (exported) {
         if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
@@ -249,9 +256,12 @@ export class OutgoingFiles {
   private async remove(attachment: CreatedFileAttachment): Promise<void> {
     this.officeHashes.delete(attachment);
     this.buffers.release(attachment);
-    await this.input.repos.files.deleteFile(attachment.fileId).catch((error) => {
+    try {
+      await this.input.repos.files.deleteFile(attachment.fileId);
+      await this.input.fileResolver?.removeLocalFile(attachment.fileId);
+    } catch (error) {
       this.input.logger?.warn("failed to remove unqueued created file", { fileId: attachment.fileId, error: String(error) });
-    });
+    }
   }
 }
 

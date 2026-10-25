@@ -1,3 +1,6 @@
+import { AccessControl } from "../../src/access/control.js";
+import { ConversationError } from "../../src/application/errors.js";
+import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { serve, type Server } from "bun";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +21,8 @@ let server: Server<undefined>;
 let controller: AbortController;
 let api: ReturnType<typeof createWebRoutes>;
 let options: WebServerOptions;
+let access: AccessControl;
+let db: AppDatabase;
 let keys: Awaited<ReturnType<typeof generateKeyPair>>;
 let jwk: Awaited<ReturnType<typeof exportJWK>>;
 let nonce = "";
@@ -44,7 +49,7 @@ beforeAll(async () => {
   keys = await generateKeyPair("RS256");
   jwk = { ...await exportJWK(keys.publicKey), kid: "test", alg: "RS256" };
 });
-beforeEach(() => {
+beforeEach(async () => {
   fileLookup.mockReset(); resolver.mockReset();
   const config = loadTestConfig({ WEB_ENABLED: true, WEB_TELEGRAM_CLIENT_ID: "123", WEB_TELEGRAM_CLIENT_SECRET: "dedicated-secret", WEB_PUBLIC_URL: publicOrigin, WEB_PORT: 0 });
   vi.stubGlobal("fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -67,7 +72,12 @@ beforeEach(() => {
     memories: vi.fn(), deleteMemory: vi.fn(), usage: vi.fn(),
     avatar: vi.fn<ChatService["avatar"]>(async () => null),
   };
-  options = { config, chat: { service: chat, botUsername: "test_bot" }, repository: { file: fileLookup } as unknown as ConversationRepository, fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config) };
+  db = createDatabase(config);
+  await db.initialize();
+  access = new AccessControl(db.db);
+  await access.initialize();
+  for (const id of [42, 84]) await access.allow(id);
+  options = { config, access, chat: { service: chat, botUsername: "test_bot" }, repository: { file: fileLookup } as unknown as ConversationRepository, fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config) };
   controller = new AbortController();
   api = createWebRoutes(options, controller.signal);
   server = serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: MAX_CHAT_BODY_BYTES, routes: api.routes, fetch: api.fetch });
@@ -76,6 +86,7 @@ afterEach(async () => {
   controller.abort();
   await server.stop(true);
   await api.drain();
+  await db.destroy();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -146,12 +157,37 @@ it("does not issue a session to an unknown or disallowed Telegram identity", asy
     const location = new URL(start.headers.get("Location")!);
     nonce = location.searchParams.get("nonce")!;
     identity = userId;
-    if (userId === 42) options.config.BOT_ALLOWED_USER_IDS.push(84);
+    if (userId === 42) await access.revoke(42);
+    else await access.allow(userId);
     const result = await request(`/api/auth/telegram/callback?state=${location.searchParams.get("state")}&code=sample`, { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
     expect(result.status).toBe(403);
     expect(result.headers.get("Set-Cookie")).toBeNull();
-    expect(await result.json()).toEqual({ error: userId === 999 ? "Start a conversation with the bot in Telegram before signing in here." : "This Telegram account is not allowed to use this bot." });
+    expect(await result.json()).toEqual({ error: userId === 999 ? "Send /start to the bot in Telegram before signing in here." : "This Telegram account is not allowed to use this bot." });
   }
+});
+
+it("rechecks database revocation before any private handler or attachment work", async () => {
+  const cookie = await login();
+  await access.revoke(42);
+  vi.mocked(chat.profile).mockClear();
+  for (const pathname of ["/api/chat/threads", "/api/chat/threads/1/messages", "/api/chat/threads/1/files/1", "/api/chat/settings"]) {
+    expect((await request(pathname, { headers: { Cookie: cookie, "X-Chat-User": "42" } })).status).toBe(401);
+  }
+  expect((await request("/api/chat/threads/1/messages", { method: "POST", headers: { ...mutation, Cookie: cookie }, body: '{"text":"denied","requestId":"0123456789abcdef"}' })).status).toBe(401);
+  expect(chat.profile).not.toHaveBeenCalled();
+  expect(chat.send).not.toHaveBeenCalled();
+  expect(fileLookup).not.toHaveBeenCalled();
+  expect(resolver).not.toHaveBeenCalled();
+});
+
+it("preserves domain errors and treats a missing profile as signed out", async () => {
+  const cookie = await login();
+  vi.mocked(chat.threads).mockRejectedValue(new ConversationError(409, "Conversation changed."));
+  const result = await request("/api/chat/threads", { headers: { Cookie: cookie, "X-Chat-User": "42" } });
+  expect(result.status).toBe(409);
+  expect(await result.json()).toEqual({ error: "Conversation changed." });
+  vi.mocked(chat.profile).mockRejectedValue(new ConversationError(404, "Unknown user."));
+  expect(await (await request("/api/chat/session", { headers: { Cookie: cookie } })).json()).toMatchObject({ authenticated: false });
 });
 
 it("uses the session identity for lists, settings, memories and usage and rejects caller identity fields", async () => {

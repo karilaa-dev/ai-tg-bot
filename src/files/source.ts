@@ -7,7 +7,7 @@ export interface ChatFileSource {
 }
 
 /** Browser reads may inspect running sandboxes but need consent to resume one. */
-export interface FileReadPolicy { allowSandboxResume: boolean; pauseAfterRead: boolean }
+export interface FileReadPolicy { allowSandboxResume: boolean; pauseAfterRead: boolean; excludeSandbox?: boolean }
 export class SandboxConsentRequired extends Error {
   constructor() { super("This attachment needs its sandbox to be started."); }
 }

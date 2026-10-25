@@ -152,6 +152,20 @@ describe("transport-neutral file resolver", () => {
     await expect(resolver.resolveFile(file)).rejects.toThrow(`File #${file.id} has no durable source`);
   });
 
+  it("excludes sandbox adapters while resolving inside a sandbox operation", async () => {
+    const file = await insertFile(repos, 908, "inside-sandbox.txt");
+    await repos.files.rememberSource(file.id, {
+      transport: "e2b", connectionKey: "deployment", remoteKey: "sandbox:file", locator: {},
+    });
+    const fetch = vi.fn(async () => { throw new Error("Must not enter serialized sandbox operations"); });
+    const resolver = createResolver(repos);
+    resolver.registry.register({ transport: "e2b", connectionKey: "deployment", fetch });
+    await expect(resolver.resolveFile(file, undefined, undefined, {
+      allowSandboxResume: false, pauseAfterRead: false, excludeSandbox: true,
+    })).rejects.toThrow("no durable source");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each(["wrong size", "wrong hash"])("rejects corrupted canonical web bytes (%s)", async (corruption) => {
     const expected = Buffer.from("remote content");
     const file = await insertFile(repos, 907, "original.bin", createHash("sha256").update(expected).digest("hex"));

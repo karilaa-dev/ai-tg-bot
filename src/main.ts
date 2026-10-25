@@ -16,6 +16,9 @@ import { PiRuntimeManager } from "./pi/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
 import { checkManagedE2BTemplate } from "./e2b/templateNotFound.js";
 import type { ThreadTurnCoordinator } from "./ai/threadTurnCoordinator.js";
+import { AccessControl } from "./access/control.js";
+import { FileResolver } from "./files/resolver.js";
+import { LocalFileStore } from "./files/localStore.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -41,14 +44,18 @@ if (process.env.WEB_ADMIN_TOKEN && config.WEB_ENABLED) {
 try {
   logger.debug("initializing database");
   await db.initialize();
+  const access = new AccessControl(db.db);
+  await access.initialize();
   await checkManagedE2BTemplate(config, logger);
   await checkConfiguredBrowserUse(config, logger);
   const repos = createRepos(db.db, db.search);
+  const fileResolver = new FileResolver(repos.files, undefined, new LocalFileStore(config.FILE_STORAGE_PATH));
+  fileResolver.registry.register(new WebFileSourceAdapter(db.db));
   sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
     repos,
     logger,
-    webFileSource: new WebFileSourceAdapter(db.db),
+    fileResolver,
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime: sandboxRuntime });
   await pi.initialize();
@@ -62,6 +69,8 @@ try {
     db,
     logger,
     repos,
+    access,
+    fileResolver,
     commandRuntime: sandboxRuntime,
     pi,
   });
@@ -71,7 +80,7 @@ try {
   const repository = new ConversationRepository(db.db, repos, bot.botInfo.id);
   web = await startWebServer({
     development: process.argv.includes("--web-dev"), config, repository,
-    fileResolver: services.fileResolver, logger, codexLogin,
+    fileResolver: services.fileResolver, logger, codexLogin, access,
     chat: { service: new BotChatService({ services, repository, api: bot.api }), botUsername: bot.botInfo.username },
   });
   logger.debug("registering bot commands");

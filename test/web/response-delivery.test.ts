@@ -68,7 +68,7 @@ describe.each(["workspace", "bytes", "spooled bytes"])("saved assistant %s files
     chat = new BotChatService({ services: env.services, repository, api: env.bot.api });
     controller = new AbortController();
     const login = await telegram;
-    routes = createWebRoutes({ config: env.config, repository, chat: { service: chat, botUsername: "test_bot" }, telegramAuth: login.dependencies,
+    routes = createWebRoutes({ config: env.config, access: env.services.access, repository, chat: { service: chat, botUsername: "test_bot" }, telegramAuth: login.dependencies,
       fileResolver: env.services.fileResolver, logger: env.services.logger }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: routes.routes, fetch: routes.fetch });
     cookie = await login.signIn(server.url, ADMIN_ID);
@@ -234,7 +234,7 @@ describe.each([false, true])("workspace photos with OpenUI=%s", withOpenUi => {
     chat = new BotChatService({ services: env.services, repository, api: env.bot.api });
     controller = new AbortController();
     const login = await telegram;
-    routes = createWebRoutes({ config: env.config, repository, chat: { service: chat, botUsername: "test_bot" }, telegramAuth: login.dependencies,
+    routes = createWebRoutes({ config: env.config, access: env.services.access, repository, chat: { service: chat, botUsername: "test_bot" }, telegramAuth: login.dependencies,
       fileResolver: env.services.fileResolver, logger: env.services.logger }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: routes.routes, fetch: routes.fetch });
     cookie = await login.signIn(server.url, ADMIN_ID);

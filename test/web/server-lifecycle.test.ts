@@ -1,3 +1,4 @@
+import { AccessControl } from "../../src/access/control.js";
 import { copyFile, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,6 +18,7 @@ import { SandboxConsentRequired } from "../../src/files/source.js";
 const telegram = fakeTelegramLogin();
 
 let database: AppDatabase;
+let access: AccessControl;
 let assetsDirectory: string;
 let web: Awaited<ReturnType<typeof startWebServer>>;
 let resolver: FileResolver;
@@ -34,6 +36,8 @@ beforeEach(async () => {
   const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, WEB_ADMIN_USER_IDS: [1], WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
   database = createDatabase(config);
   await database.initialize();
+    access = new AccessControl(database.db);
+    await access.initialize();
   const repos = createRepos(database.db, database.search);
   await repos.users.ensure({ tgId: 1, firstName: "Alice" });
   const thread = await repos.threads.create({ userId: 1, topicId: null, title: "Test" });
@@ -57,7 +61,7 @@ beforeEach(async () => {
   await symlink(path.join(assetsDirectory, "private.txt"), path.join(assetsDirectory, "symlink.js"));
   repository = new ConversationRepository(database.db, repos);
   const login = await telegram;
-  web = await startWebServer({ config, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory, chat: signInOnlyChat(), telegramAuth: login.dependencies });
+  web = await startWebServer({ config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory, chat: signInOnlyChat(), telegramAuth: login.dependencies });
   cookie = await login.signIn(web!.url, 1);
   fileUrl = new URL(`/api/threads/${thread.id}/files/${file.id}?mode=auto`, web!.url);
 });
@@ -107,7 +111,7 @@ it("stops the Codex login worker exactly once when the website stops", async () 
   const state = { credentialStatus: "missing" as const, login: { status: "idle" as const } };
   const stop = vi.fn(async () => {});
   const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, WEB_ADMIN_USER_IDS: [1], WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
-  const other = await startWebServer({ config, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory,
+  const other = await startWebServer({ config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory,
     codexLogin: { status: async () => state, start: async () => state, cancel: async () => state, stop } });
   await Promise.all([other!.stop(), other!.stop()]);
   expect(stop).toHaveBeenCalledOnce();

@@ -1,9 +1,10 @@
 import type { Api } from "grammy";
-import { sql } from "drizzle-orm";
 import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
-import type { BotServices } from "../bot/context.js";
-import type { ThreadRow, UserRow } from "../db/types.js";
+import type { ApplicationServices } from "../application/services.js";
+import { ConversationService } from "../application/conversations.js";
+import { telegramConversationLink } from "../telegram/conversationLink.js";
+import type { FileRow, ThreadRow, UserRow } from "../db/types.js";
 import type { AcceptedTurnRun } from "../db/repos/turnRuns.js";
 import { ingestFileBytes } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
@@ -11,17 +12,9 @@ import { MAX_CHAT_UPLOAD_BYTES, MAX_CHAT_UPLOAD_FILES, MAX_FILE_BYTES } from "..
 import { WebHttpError } from "./auth.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
 import type { ChatService, ChatSettings, ChatSettingsPatch, ChatThread, ChatSendResult, ChatUploadFile } from "./chat-types.js";
-import { canonicalTimeZone, userOffsetMinutes, zoneOffsetMinutes } from "../bot/timezone.js";
-import { webFileSource } from "./file-source.js";
 import { deleteUserMemory } from "../memory/view.js";
 
 const sendSchema = z.object({ text: z.string().max(32_000), requestId: z.string().regex(/^[a-zA-Z0-9_-]{16,128}$/) });
-const settingsSchema = z.object({
-  language: z.enum(["en", "ru"]).optional(),
-  timeZone: z.string().max(64).nullable().optional(),
-  streaming: z.boolean().optional(), memoryEnabled: z.boolean().optional(),
-}).strict();
-
 type Avatar = { bytes: Uint8Array; mime: string };
 const AVATAR_TTL_MS = 60 * 60_000;
 const MAX_CACHED_AVATARS = 256;
@@ -30,14 +23,15 @@ const avatarMimeTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 export class BotChatService implements ChatService {
   private readonly submitting = new Map<string, Promise<ChatSendResult>>();
   private readonly avatars = new Map<number, { expires: number; value: Promise<Avatar | null> }>();
-  constructor(private readonly input: { services: BotServices; repository: ConversationRepository; api: Api; downloadFile?: TelegramFileDownloader }) {}
+  private readonly conversations: ConversationService;
+  constructor(private readonly input: { services: ApplicationServices; repository: ConversationRepository; api: Api; downloadFile?: TelegramFileDownloader }) {
+    this.conversations = new ConversationService(input.services);
+  }
 
   private get repos() { return this.input.services.repos; }
 
   private async user(userId: number): Promise<UserRow> {
-    const user = await this.repos.users.get(userId);
-    if (!user) throw new WebNotFound();
-    return user;
+    return this.conversations.user(userId);
   }
 
   async profile(userId: number) {
@@ -76,15 +70,13 @@ export class BotChatService implements ChatService {
     return mime && avatarMimeTypes.has(mime) ? { bytes, mime } : null;
   }
 
-  private async thread(userId: number, threadId: number): Promise<ThreadRow> {
-    const thread = await this.repos.threads.get(threadId);
-    if (!thread || thread.user_id !== userId) throw new WebNotFound();
-    return thread;
+  private async thread(userId: number, threadId: ThreadRow["id"]): Promise<ThreadRow> {
+    return this.conversations.thread(userId, threadId);
   }
 
-  async requireThread(userId: number, threadId: number): Promise<void> { await this.thread(userId, threadId); }
+  async requireThread(userId: number, threadId: ThreadRow["id"]): Promise<void> { await this.thread(userId, threadId); }
 
-  async markRead(userId: number, threadId: number, messageId: number) {
+  async markRead(userId: number, threadId: ThreadRow["id"], messageId: number) {
     await this.thread(userId, threadId);
     if (!Number.isSafeInteger(messageId) || messageId <= 0) throw new WebHttpError(400, "Invalid message ID.");
     const state = await this.repos.threadReads.markRead(userId, threadId, messageId);
@@ -93,10 +85,11 @@ export class BotChatService implements ChatService {
   }
 
   async threads(userId: number, offset: number, search = "") {
+    await this.user(userId);
     return this.input.repository.threads(userId, offset, 50, search);
   }
 
-  async history(userId: number, threadId: number, before?: number, after?: number) {
+  async history(userId: number, threadId: ThreadRow["id"], before?: number, after?: number) {
     const thread = await this.thread(userId, threadId);
     const history = await this.input.repository.history(threadId, before, after);
     return { ...history, thread: { ...history.thread, origin: thread.origin, topicId: thread.topic_id },
@@ -104,31 +97,12 @@ export class BotChatService implements ChatService {
       autoLoadMaxBytes: this.input.services.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES };
   }
 
-  private async createLinkedThread(userId: number, title: string, parent?: { threadId: number; messageId: number | null }): Promise<ThreadRow> {
-    let topicId: number | undefined;
-    try {
-      const me = await this.input.api.getMe();
-      if (!me.has_topics_enabled) throw new WebHttpError(409, "Enable topics for this bot in BotFather before creating a conversation.");
-      const topic = await this.input.api.createForumTopic(userId, title);
-      topicId = topic.message_thread_id;
-      return await this.repos.threads.create({ userId, title, topicId, origin: "web",
-        titleSource: title === "New conversation" ? "placeholder" : "explicit",
-        parentThreadId: parent?.threadId, forkPointMessageId: parent?.messageId });
-    } catch (error) {
-      if (topicId !== undefined) await this.input.api.deleteForumTopic(userId, topicId).catch(() => undefined);
-      if (error instanceof WebHttpError) throw error;
-      throw new WebHttpError(502, "Could not create the Telegram topic. Open the bot in Telegram, press Start, and try again.");
-    }
-  }
-
   async createThread(userId: number, title = "New conversation"): Promise<ChatThread> {
-    await this.user(userId);
-    const name = title.trim() || "New conversation";
-    if (Array.from(name).length > 128) throw new WebHttpError(400, "Use a conversation title of at most 128 characters.");
-    return threadView(await this.createLinkedThread(userId, name));
+    return threadView(await this.conversations.create({ userId, title, origin: "web",
+      link: telegramConversationLink(this.input.api, this.input.services.logger) }));
   }
 
-  async send(userId: number, threadId: number, input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult> {
+  async send(userId: number, threadId: ThreadRow["id"], input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult> {
     const parsed = sendSchema.safeParse(input);
     if (!parsed.success) throw new WebHttpError(400, "Enter a message of at most 32,000 characters and a valid request ID.");
     const key = `${userId}:${threadId}:${input.requestId}`;
@@ -139,7 +113,7 @@ export class BotChatService implements ChatService {
     try { return await task; } finally { this.submitting.delete(key); }
   }
 
-  private async accept(userId: number, threadId: number, input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult> {
+  private async accept(userId: number, threadId: ThreadRow["id"], input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult> {
     const thread = await this.thread(userId, threadId);
     const prior = await this.repos.turnRuns.webRequest(userId, threadId, input.requestId);
     if (prior) return sendResult(prior);
@@ -149,9 +123,9 @@ export class BotChatService implements ChatService {
     if (files.length > MAX_CHAT_UPLOAD_FILES || files.some(file => file.size > MAX_FILE_BYTES) || files.reduce((sum, file) => sum + file.size, 0) > MAX_CHAT_UPLOAD_BYTES) {
       throw new WebHttpError(413, "Attach up to 10 files, each at most 50 MiB (500 MiB total).");
     }
-    const user = await this.user(userId);
+    await this.user(userId);
     const prepared: Awaited<ReturnType<typeof ingestFileBytes>>[] = [];
-    const createdIds: number[] = [];
+    const createdIds: FileRow["id"][] = [];
     try {
       for (const file of files) {
         const bytes = Buffer.from(await file.arrayBuffer());
@@ -160,17 +134,18 @@ export class BotChatService implements ChatService {
           userId, threadId, name: file.name.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 240) || "attachment",
           mime: file.type, bytes, logger: this.input.services.logger });
         createdIds.push(result.fileId);
-        await this.input.services.db.db.execute(sql`insert into web_file_blobs(file_id, bytes) values (${result.fileId}, ${bytes})`);
-        await this.repos.files.rememberSource(result.fileId, webFileSource(result.fileId, file.type));
+        const stored = await this.repos.files.get(result.fileId);
+        if (!stored) throw new Error("Upload record disappeared.");
+        await this.input.services.fileResolver.persistFile(stored, bytes);
         prepared.push(result);
       }
       const text = [input.text.trim(), ...prepared.map(file => file.card)].filter(Boolean).join("\n\n");
       const content = { text, webText: input.text.trim(), caption: input.text.trim(),
         files: prepared.map(file => ({ id: file.fileId, type: file.type, inline: file.inline })) };
-      const accepted = await this.input.services.turnCoordinator.accept({
-        userId, threadId, chatId: userId, messageThreadId: thread.topic_id, locale: user.lang,
+      const accepted = await this.conversations.accept({
+        userId, threadId, source: { kind: "web", requestId: input.requestId },
         kind: prepared.length ? (prepared.every(file => file.type === "image") ? "image" : "file") : "text",
-        textPlain: text, content, sources: [], webRequestId: input.requestId,
+        text, content,
         attachments: prepared.map(file => ({ fileId: file.fileId })),
       });
       return sendResult(accepted);
@@ -178,87 +153,40 @@ export class BotChatService implements ChatService {
       // Failed preparations and losing retries never leave unreferenced upload blobs.
       for (const id of createdIds) {
         const file = await this.repos.files.get(id);
-        if (file && file.message_id === null) await this.repos.files.deleteFile(id);
+        if (file && file.message_id === null) {
+          await this.repos.files.deleteFile(id);
+          await this.input.services.fileResolver.removeLocalFile(id);
+        }
       }
     }
   }
 
-  async stop(userId: number, threadId: number): Promise<void> {
-    const thread = await this.thread(userId, threadId);
-    const state = this.input.services.routerState;
-    const key = `${userId}:${thread.topic_id ?? "general"}`;
-    state.activeFileJobs.get(key)?.controller.abort();
-    await this.input.services.turnCoordinator.cancelActive(threadId);
+  async stop(userId: number, threadId: ThreadRow["id"]): Promise<void> {
+    await this.conversations.stop(userId, threadId);
   }
 
-  async fork(userId: number, threadId: number, messageId?: number): Promise<ChatThread> {
-    const thread = await this.thread(userId, threadId);
-    const user = await this.user(userId);
-    return this.input.services.turnCoordinator.withThreadBarrier(threadId, "fork", async (snapshotId, signal) => {
-      const point = messageId ?? snapshotId;
-      const { chain } = await this.input.repository.scope(threadId);
-      const visible = point === null || point === 0 ? undefined : (await this.repos.messages.listForThreadChain(chain, point)).find(m => m.id === point);
-      if (point !== null && point !== 0 && !visible) throw new WebNotFound();
-      if (messageId !== undefined && !visible?.pi_entry_id) {
-        throw new WebHttpError(409, "This message has no saved model checkpoint. Fork the whole chat or choose an earlier completed reply.");
-      }
-      signal.throwIfAborted();
-      const created = await this.createLinkedThread(userId, Array.from(`Fork: ${thread.title}`).slice(0, 128).join(""), { threadId, messageId: point });
-      try {
-        await this.input.services.pi.fork(thread, created, user, visible?.pi_entry_id, signal);
-        signal.throwIfAborted();
-        if (point !== null && point > 0) await this.repos.threadReads.markRead(userId, created.id, point);
-        const reads = (await this.repos.threadReads.states(userId, [created.id])).get(created.id);
-        return { ...threadView(created), unread: reads?.unread ?? false, lastMessageId: reads?.lastMessageId ?? null };
-      } catch (error) {
-        await this.repos.threads.archive(created.id);
-        if (created.topic_id !== null) await this.input.api.deleteForumTopic(userId, created.topic_id).catch(() => undefined);
-        throw error;
-      }
-    });
+  async fork(userId: number, threadId: ThreadRow["id"], messageId?: number): Promise<ChatThread> {
+    const created = await this.conversations.fork({ userId, threadId, messageId, origin: "web",
+      link: telegramConversationLink(this.input.api, this.input.services.logger) });
+    const reads = (await this.repos.threadReads.states(userId, [created.id])).get(created.id);
+    return { ...threadView(created), unread: reads?.unread ?? false, lastMessageId: reads?.lastMessageId ?? null };
   }
 
-  async compact(userId: number, threadId: number): Promise<void> {
-    const thread = await this.thread(userId, threadId);
-    const user = await this.user(userId);
-    await this.input.services.turnCoordinator.withThreadBarrier(threadId, "compact", async (_snapshot, signal) => {
-      await this.input.services.pi.compact(thread, user, signal);
-    });
+  async compact(userId: number, threadId: ThreadRow["id"]): Promise<void> {
+    await this.conversations.compact(userId, threadId);
   }
 
-  async settings(userId: number): Promise<ChatSettings> {
-    const user = await this.user(userId);
-    return { language: user.lang, timeZone: user.tz_name, timezoneOffsetMinutes: userOffsetMinutes(user),
-      streaming: Boolean(user.stream_mode), memoryEnabled: Boolean(user.memory_enabled) };
+  settings(userId: number): Promise<ChatSettings> { return this.conversations.settings(userId); }
+  updateSettings(userId: number, patch: ChatSettingsPatch): Promise<ChatSettings> {
+    return this.conversations.updateSettings(userId, patch);
   }
 
-  async updateSettings(userId: number, patch: ChatSettingsPatch): Promise<ChatSettings> {
-    const parsed = settingsSchema.safeParse(patch);
-    if (!parsed.success) throw new WebHttpError(400, "Invalid settings.");
-    await this.user(userId);
-    const value = parsed.data;
-    const zoneChanged = value.timeZone !== undefined;
-    const zone = value.timeZone ? canonicalTimeZone(value.timeZone) : null;
-    if (value.timeZone && !zone) throw new WebHttpError(400, "Unknown time zone.");
-    // A named zone also stores today's offset for readers that only know offsets; clearing it clears both.
-    const offset = zone ? zoneOffsetMinutes(zone) : null;
-    await this.input.services.db.db.execute(sql`
-      update users set lang = coalesce(${value.language ?? null}, lang),
-        tz_name = case when ${zoneChanged ? 1 : 0} = 1 then ${zone} else tz_name end,
-        tz_offset_min = case when ${zoneChanged ? 1 : 0} = 1 then ${offset} else tz_offset_min end,
-        stream_mode = coalesce(${value.streaming === undefined ? null : Number(value.streaming)}, stream_mode),
-        memory_enabled = coalesce(${value.memoryEnabled === undefined ? null : Number(value.memoryEnabled)}, memory_enabled)
-      where tg_id = ${userId}
-    `);
-    return this.settings(userId);
-  }
-
-  memories(userId: number, offset: number) { return this.input.repository.memories(userId, offset); }
+  async memories(userId: number, offset: number) { await this.user(userId); return this.input.repository.memories(userId, offset); }
   async deleteMemory(userId: number, memoryId: number): Promise<void> {
     await this.user(userId);
     if (!await deleteUserMemory(this.input.services.db.db, userId, memoryId)) throw new WebNotFound();
   }
-  usage(userId: number, days: number, signal?: AbortSignal) { return this.input.repository.usageReport({ userId, days }, signal); }
+  async usage(userId: number, days: number, signal?: AbortSignal) { await this.user(userId); return this.input.repository.usageReport({ userId, days }, signal); }
 }
 
 function threadView(thread: ThreadRow): ChatThread {

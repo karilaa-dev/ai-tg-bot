@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import type { AccessControl } from "../access/control.js";
 import { WebHttpError } from "./auth.js";
 
 const ISSUER = "https://oauth.telegram.org";
@@ -18,7 +19,7 @@ const equal = (a: string, b: string) => timingSafeEqual(hash(a), hash(b));
 type TelegramFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
 export interface TelegramAuthDependencies { jwks?: JWTVerifyGetKey; fetch?: TelegramFetch; authorizeUrl?: string }
 
-type AuthConfig = Pick<AppConfig, "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "BOT_ALLOWED_USER_IDS" | "WEB_ADMIN_USER_IDS">;
+type AuthConfig = Pick<AppConfig, "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_ADMIN_USER_IDS">;
 /** Pages a finished sign-in may return to; anything else lands on the chat. */
 const RETURN_PATHS = new Set(["/", "/admin"]);
 interface Transaction { browser: string; verifier: string; nonce: string; returnTo: string; expires: number }
@@ -95,7 +96,7 @@ export class WebChatAuth {
   private readonly fetcher: TelegramFetch;
   private readonly authorizeUrl: string;
 
-  constructor(private readonly config: AuthConfig, dependencies: TelegramAuthDependencies = {}) {
+  constructor(private readonly config: AuthConfig, private readonly access: Pick<AccessControl, "isAllowed">, dependencies: TelegramAuthDependencies = {}) {
     this.jwks = dependencies.jwks ?? createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`), { timeoutDuration: 10_000 });
     this.fetcher = dependencies.fetch ?? fetch;
     this.authorizeUrl = dependencies.authorizeUrl ?? `${ISSUER}/auth`;
@@ -125,23 +126,20 @@ export class WebChatAuth {
     for (const [key, entry] of this.sessions) if (entry.expires <= now) this.sessions.delete(key);
     for (const [key, entry] of this.transactions) if (entry.expires <= now) this.transactions.delete(key);
   }
-  private allowed(userId: number) {
-    return !this.config.BOT_ALLOWED_USER_IDS.length || this.config.BOT_ALLOWED_USER_IDS.includes(userId);
-  }
   isAdmin(userId: number) { return this.config.WEB_ADMIN_USER_IDS.includes(userId); }
-  userId(request: Request) {
+  async userId(request: Request) {
     if (!this.available) return undefined;
     const value = this.cookieValue(request, "session");
     const sessionKey = value ? key(value) : undefined;
     const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
-    if (!session || session.expires <= Date.now() || !this.allowed(session.userId)) {
+    if (!session || session.expires <= Date.now() || (!this.isAdmin(session.userId) && !await this.access.isAllowed(session.userId))) {
       if (sessionKey) this.sessions.delete(sessionKey);
       return undefined;
     }
     return session.userId;
   }
-  requireSession(request: Request) {
-    const userId = this.userId(request);
+  async requireSession(request: Request) {
+    const userId = await this.userId(request);
     if (userId === undefined) throw new WebHttpError(401, "Sign in with Telegram to continue.");
     return userId;
   }
@@ -197,8 +195,11 @@ export class WebChatAuth {
     } catch {
       throw new WebHttpError(401, "Telegram sign-in could not be verified. Try again.");
     } finally { this.exchanging--; }
-    if (!this.allowed(userId)) throw new WebHttpError(403, "This Telegram account is not allowed to use this bot.");
-    await requireExistingUser(userId);
+    if (!this.isAdmin(userId)) {
+      if (!await this.access.isAllowed(userId)) throw new WebHttpError(403, "This Telegram account is not allowed to use this bot.");
+      await requireExistingUser(userId);
+      if (!await this.access.isAllowed(userId)) throw new WebHttpError(403, "This Telegram account is not allowed to use this bot.");
+    }
     this.credentials();
     request.signal.throwIfAborted();
     this.prune();
@@ -218,6 +219,9 @@ export class WebChatAuth {
     const value = this.cookieValue(request, "session");
     if (value) this.sessions.delete(key(value));
     return this.cookie("session", "", 0);
+  }
+  revokeSessions(userId: number) {
+    for (const [sessionKey, session] of this.sessions) if (session.userId === userId) this.sessions.delete(sessionKey);
   }
   clear() { this.stopped = true; this.sessions.clear(); this.transactions.clear(); this.starts.clear(); this.globalStarts.clear(); this.callbacks.clear(); }
 }

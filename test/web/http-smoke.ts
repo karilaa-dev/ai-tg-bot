@@ -1,3 +1,4 @@
+import { AccessControl } from "../../src/access/control.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -107,7 +108,9 @@ const pricing = new UsagePricing(async () => Response.json({ "gpt-6-astra": {
 const telegram = await fakeTelegramLogin();
 // In the preview, "Sign in with Telegram" goes to a local page that approves Alice straight away.
 const consent = preview ? telegram.serveAuthorizePage(ADMIN_ID, (): URL => new URL(`http://127.0.0.1:${web.url.port}`)) : undefined;
-const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
+const access = new AccessControl(db.db);
+await access.initialize();
+const options = { access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
   chat: signInOnlyChat("archive_test_bot"), telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
 const web = (await startWebServer(options))!;
 if (preview) {

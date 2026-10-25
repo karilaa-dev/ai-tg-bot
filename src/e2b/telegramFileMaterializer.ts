@@ -8,6 +8,7 @@ import type { Logger } from "../logger.js";
 import { threadChainScope } from "../memory/retrieval.js";
 import type { SandboxThreadFile, SandboxThreadFileSyncResult } from "../sandbox/types.js";
 import { webFileSource, type WebFileSourceAdapter } from "../web/file-source.js";
+import type { FileResolver } from "../files/resolver.js";
 import { quoteShellToken, shellJoin } from "../util/shell.js";
 import { type E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_FILE_SOURCES, E2B_TELEGRAM_FILES } from "./paths.js";
@@ -21,6 +22,7 @@ type MaterializerInput = {
   config: AppConfig; repos: Repos; logger?: Logger;
   downloadTelegramBytes(fileId: string, signal?: AbortSignal): Promise<Buffer>;
   webFileSource?: Pick<WebFileSourceAdapter, "fetch">;
+  fileResolver?: FileResolver;
 };
 const FILE_RESTORE_RETRY_BASE_MS = 5 * 60_000;
 const FILE_RESTORE_RETRY_MAX_MS = 60 * 60_000;
@@ -343,10 +345,10 @@ async function restoreTelegramFile(context: MaterializerInput,
     const sources = await context.repos.files.listSources(item.file.fileId);
     throwIfAborted(signal);
     // A descriptor's Telegram refs cannot grant access to a private web attachment.
-    if (sources.some((entry) => entry.transport === "web") && !webFileIds.has(item.file.fileId)) {
+    if (sources.some((entry) => entry.transport === "web" || entry.transport === "local") && !webFileIds.has(item.file.fileId)) {
       return webUnavailable;
     }
-    hasWebSource = sources.some((entry) => entry.transport === "web"
+    hasWebSource = sources.some((entry) => (entry.transport === "web" || entry.transport === "local")
       && entry.connection_key === "default" && entry.remote_key === String(item.file.fileId));
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? error;
@@ -358,18 +360,20 @@ async function restoreTelegramFile(context: MaterializerInput,
   const candidates = primaryTelegramRestoreCandidates(item.file);
   let lastRefId: number | null = null;
   let lastError: unknown = candidates.length ? undefined : new Error("no primary Telegram file reference");
-  if (context.webFileSource && hasWebSource) {
+  if ((context.fileResolver || context.webFileSource) && hasWebSource) {
     try {
       const timeoutSignal = AbortSignal.timeout(context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
       const transferSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
       if (item.file.expectedSize !== null && item.file.expectedSize > MAX_FILE_BYTES) {
         throw new Error("file exceeds the configured size limit");
       }
-      const bytes = await context.webFileSource.fetch(
-        webFileSource(item.file.fileId, item.file.mimeType ?? "application/octet-stream"),
-        transferSignal,
-        MAX_FILE_BYTES,
-      );
+      const stored = await context.repos.files.get(item.file.fileId);
+      if (!stored) throw new Error("Attachment not found.");
+      const bytes = context.fileResolver
+        ? (await context.fileResolver.resolveFile(stored, transferSignal, MAX_FILE_BYTES,
+          { allowSandboxResume: false, pauseAfterRead: false, excludeSandbox: true })).bytes
+        : await context.webFileSource!.fetch(
+          webFileSource(item.file.fileId, item.file.mimeType ?? "application/octet-stream"), transferSignal, MAX_FILE_BYTES);
       throwIfAborted(transferSignal);
       if (bytes.length > MAX_FILE_BYTES
         || (item.file.expectedSize !== null && bytes.length !== item.file.expectedSize)) {

@@ -44,7 +44,7 @@ interface FileIngestInput {
   config: AppConfig;
   repo: FilesRepo;
   userId: number;
-  threadId: number;
+  threadId: FileRow["thread_id"];
   messageId?: number | null;
   requireMessage?: boolean;
   contentSha256?: string | null;
@@ -58,7 +58,7 @@ interface FileIngestInput {
 }
 
 interface FileIngestResult {
-  fileId: number;
+  fileId: FileRow["id"];
   card: string;
   inline: boolean;
   type: AcceptedFileType;
@@ -135,7 +135,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: false, type };
   }
-  let fileId: number | undefined;
+  let fileId: FileRow["id"] | undefined;
   const chunkIds: number[] = [];
   let completed = false;
   const cleanup = async () => {

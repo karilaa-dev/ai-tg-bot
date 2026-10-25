@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { IconArrowLeft, IconBrandTelegram, IconLoader2, IconRefresh } from "@tabler/icons-react";
-import type { ChatSession } from "../chat-types.js";
+import type { AdminSession } from "../admin-types.js";
 import { logo } from "./brand.js";
 import { apiJson, SESSION_EXPIRED_EVENT } from "./api.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
@@ -10,7 +10,7 @@ type AdminState =
   | { kind: "checking" }
   | { kind: "unreachable" }
   | { kind: "signed-out"; loginAvailable: boolean; ended: boolean }
-  | { kind: "not-admin"; name: string; id: number }
+  | { kind: "not-admin"; id: number }
   | { kind: "admin" };
 
 /** The admin dashboard uses the website's Telegram session; WEB_ADMIN_USER_IDS decides who gets in. */
@@ -32,11 +32,11 @@ export function AdminGate({ children }: { children: ReactNode }) {
       if (busy || document.hidden) return;
       busy = true;
       try {
-        const session = await apiJson<ChatSession>("/api/chat/session", { signal: controller.signal });
+        const session = await apiJson<AdminSession>("/api/admin/session", { signal: controller.signal });
         if (controller.signal.aborted) return;
         if (!session.authenticated) setState({ kind: "signed-out", loginAvailable: session.loginAvailable, ended: admitted.current });
         else if (session.admin) setState({ kind: "admin" });
-        else setState({ kind: "not-admin", id: session.user.id, name: session.user.name || (session.user.username ? `@${session.user.username}` : `Telegram user ${session.user.id}`) });
+        else setState({ kind: "not-admin", id: session.userId });
         admitted.current = session.authenticated && session.admin;
       } catch {
         // A brief outage keeps an open dashboard; requests inside it report their own failures.
@@ -71,7 +71,7 @@ export function AdminGate({ children }: { children: ReactNode }) {
             : <p className="access-note" role="note">Telegram sign-in is not available. Check the website's Telegram login settings.</p>}
         </>}
         {state.kind === "not-admin" && <>
-          <p className="access-note" role="status">You're signed in as <strong>{state.name}</strong> (Telegram ID {state.id}), which isn't an admin account.</p>
+          <p className="access-note" role="status">You're signed in with <strong>Telegram ID {state.id}</strong>, which isn't an admin account.</p>
           <a className={cn(buttonVariants(), "access-submit")} href="/"><IconArrowLeft aria-hidden="true" /> Back to chat</a>
         </>}
       </div>

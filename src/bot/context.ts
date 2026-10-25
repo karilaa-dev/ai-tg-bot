@@ -1,18 +1,13 @@
+import type { ApplicationServices } from "../application/services.js";
+import type { ConversationService } from "../application/conversations.js";
 import type { Context } from "grammy";
 import type { ConversationFlavor } from "@grammyjs/conversations";
-import type { AppConfig } from "../config.js";
-import type { AppDatabase } from "../db/index.js";
-import type { Repos } from "../db/repos/index.js";
 import type { ThreadRow, UserRow } from "../db/types.js";
-import type { Logger } from "../logger.js";
 import type { TurnRunner } from "../ai/types.js";
 import type { AcceptedFileType } from "../files/ingest.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
 import type { FileProcessingStatus } from "./files.js";
-import type { FileResolver } from "../files/resolver.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
-import type { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
 
 interface ActiveFileJob {
@@ -62,16 +57,10 @@ export function createRouterState(): RouterState {
   };
 }
 
-export interface BotServices {
-  config: AppConfig;
-  db: AppDatabase;
-  repos: Repos;
-  logger: Logger;
+export interface BotServices extends ApplicationServices {
+  conversations: ConversationService;
   turnRunner: TurnRunner;
-  turnCoordinator: ThreadTurnCoordinator;
-  fileResolver: FileResolver;
   commandRuntime?: CommandRuntime;
-  pi: PiRuntimeService;
   threadTitles: ThreadTitleCoordinator;
   routerState: RouterState;
 }

@@ -1,7 +1,7 @@
-import type { StoredFileType } from "../db/types.js";
+import type { FileRow, StoredFileType } from "../db/types.js";
 
 export interface CreatedFileAttachment {
-  fileId: number;
+  fileId: FileRow["id"];
   sourceVirtualPath?: string;
   type: StoredFileType;
   name: string;

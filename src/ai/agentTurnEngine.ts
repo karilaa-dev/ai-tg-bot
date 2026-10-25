@@ -83,6 +83,7 @@ export const runTurn: TurnRunner = async (input) => {
     const runtime = await input.pi.runtime(input.thread, input.user);
     activeBridge = runtime.bridge;
     await runtime.bridge.beginTurn({
+      fileResolver: input.fileResolver,
       api: input.api,
       chatId: input.chatId,
       messageThreadId: input.messageThreadId,

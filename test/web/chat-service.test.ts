@@ -69,6 +69,21 @@ describe("shared web and Telegram conversations", () => {
     await expect(chat.history(env.user.id + 1, thread.id)).rejects.toThrow();
   });
 
+  it("creates and uses website conversations when Telegram topic creation fails", async () => {
+    env.bot.api.config.use((previous, method, payload, signal) => {
+      if (method === "createForumTopic") throw new Error("Telegram unavailable");
+      return previous(method, payload, signal);
+    });
+    const thread = await chat.createThread(env.user.id, "Website only");
+    expect(thread.topicId).toBeNull();
+    const sent = await chat.send(env.user.id, thread.id, { text: "Keep working", requestId: randomUUID() });
+    expect((await env.repos.turnRuns.get(sent.turnId))?.status).toBe("succeeded");
+    expect((await chat.history(env.user.id, thread.id)).messages.map(message => message.text))
+      .toEqual(["Keep working", "Echo: Keep working"]);
+    const general = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(general.id).not.toBe(thread.id);
+  });
+
   it("creates a linked web thread, mirrors user and assistant quietly, and continues it from Telegram", async () => {
     const thread = await chat.createThread(env.user.id, "A shared conversation");
     expect(thread).toMatchObject({ origin: "web", title: "A shared conversation" });
@@ -223,9 +238,9 @@ describe("shared web and Telegram conversations", () => {
     expect(history.messages[0]?.attachments).toMatchObject([{ name: "data.csv", mimeType: "text/csv" }]);
     const file = await env.repos.files.get(history.messages[0]!.attachments[0]!.id);
     expect(file?.message_id).toBe(sent.messageId);
-    const web = (await env.repos.files.listSources(file!.id)).find(source => source.transport === "web");
-    expect(web).toBeDefined();
-    const resolved = await env.services.fileResolver.resolveSource({ transport: "web", connectionKey: "default", remoteKey: String(file!.id), locator: {} });
+    const local = (await env.repos.files.listSources(file!.id)).find(source => source.transport === "local");
+    expect(local).toBeDefined();
+    const resolved = await env.services.fileResolver.resolveFile(file!);
     expect(resolved.bytes.toString()).toBe("a,b\n1,2\n");
     expect(calls.find(call => call.method === "sendDocument")?.payload).toMatchObject({ disable_notification: true, message_thread_id: thread.topicId });
     expect((await env.repos.turnRuns.get(sent.turnId))?.status).toBe("succeeded");

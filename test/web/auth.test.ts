@@ -1,3 +1,5 @@
+import { AccessControl } from "../../src/access/control.js";
+import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { serve, type Server } from "bun";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
@@ -17,21 +19,28 @@ let server: Server<undefined>;
 let api: ReturnType<typeof createWebRoutes>;
 let controller: AbortController;
 let options: WebServerOptions;
+let access: AccessControl;
+let db: AppDatabase;
 let repository: Record<"users" | "threads" | "history" | "usageReport" | "file", ReturnType<typeof vi.fn>>;
 let resolver: ReturnType<typeof vi.fn>;
 type StatusMock = ReturnType<typeof vi.fn<() => Promise<CodexStatus>>>;
 let codex: { status: StatusMock; start: StatusMock; cancel: StatusMock; stop: ReturnType<typeof vi.fn<() => Promise<void>>> };
 const request = (pathname: string, init?: RequestInit) => fetch(new URL(pathname, server.url), init);
 const signIn = (userId = adminId) => login.signIn(server.url, userId);
-const adminPaths = ["/api/users", "/api/users/1/threads", "/api/users/1/memories", "/api/threads/1/messages", "/api/usage", "/api/threads/1/files/1", "/api/admin/codex"];
+const adminPaths = ["/api/users", "/api/users/1/threads", "/api/users/1/memories", "/api/threads/1/messages", "/api/usage", "/api/threads/1/files/1", "/api/admin/codex", "/api/admin/allowed-users"];
 
 beforeAll(async () => { login = await fakeTelegramLogin(); });
-beforeEach(() => {
+beforeEach(async () => {
   repository = { users: vi.fn(async () => ({ items: [] })), threads: vi.fn(), history: vi.fn(), usageReport: vi.fn(), file: vi.fn() };
   resolver = vi.fn();
   const state: CodexStatus = { credentialStatus: "missing", login: { status: "idle" } };
   codex = { status: vi.fn(async () => state), start: vi.fn(async () => state), cancel: vi.fn(async () => state), stop: vi.fn(async () => {}) };
-  options = { config, repository: repository as unknown as ConversationRepository, chat: signInOnlyChat(), telegramAuth: login.dependencies,
+  db = createDatabase(config);
+  await db.initialize();
+  access = new AccessControl(db.db);
+  await access.initialize();
+  for (const id of [7, 42]) await access.allow(id);
+  options = { config, access, repository: repository as unknown as ConversationRepository, chat: signInOnlyChat(), telegramAuth: login.dependencies,
     fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config), codexLogin: codex };
   controller = new AbortController();
   api = createWebRoutes(options, controller.signal);
@@ -43,6 +52,7 @@ afterEach(async () => {
   controller.abort();
   await server.stop(true);
   await api.drain();
+  await db.destroy();
 });
 
 it("fails closed when routes or a server are created without Telegram login", async () => {
@@ -121,7 +131,7 @@ it("sends a finished admin sign-in back to the admin page", async () => {
 describe("same-origin mutations", () => {
   it("rejects cross-site or same-site requests and requires the custom header", async () => {
     const cookie = await signIn();
-    const paths = [["/api/admin/codex/login", "POST"], ["/api/admin/codex/login", "DELETE"], ["/api/threads/1/files/1?mode=download&sandbox=start", "POST"]] as const;
+    const paths = [["/api/admin/codex/login", "POST"], ["/api/admin/codex/login", "DELETE"], ["/api/admin/allowed-users", "POST"], ["/api/admin/allowed-users/42", "DELETE"], ["/api/threads/1/files/1?mode=download&sandbox=start", "POST"]] as const;
     for (const [pathname, method] of paths) {
       for (const extra of [{ "X-Admin-Request": "" }, { "Sec-Fetch-Site": "cross-site" }, { "Sec-Fetch-Site": "same-site" }, { Origin: "https://attacker.test" }, { Origin: "null" }, { Origin: "https://attacker.test", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "https" }] as Record<string, string>[]) {
         const response = await request(pathname, { method, headers: { ...mutationHeaders, Cookie: cookie, ...extra } });
@@ -164,4 +174,47 @@ it("exposes account controls only to authenticated admins and handles an absent 
   const unavailable = await request("/api/admin/codex", { headers });
   expect(unavailable.status).toBe(503);
   expect(await unavailable.json()).toEqual({ error: "Codex sign-in is unavailable. Restart the application and try again." });
+});
+
+it("bootstraps configured administrators without bot registration or chat access", async () => {
+  await access.revoke(adminId);
+  options.chat = undefined;
+  const cookie = await signIn();
+  expect(await (await request("/api/admin/session", { headers: { Cookie: cookie } })).json())
+    .toEqual({ authenticated: true, userId: adminId, admin: true });
+  expect(await (await request("/api/chat/session", { headers: { Cookie: cookie } })).json())
+    .toMatchObject({ authenticated: false });
+  expect((await request("/api/admin/allowed-users", { headers: { Cookie: cookie } })).status).toBe(200);
+  expect(await access.isAllowed(adminId)).toBe(false);
+});
+
+it("lets only admins add and remove pending registrations without creating a user", async () => {
+  const headers = { ...mutationHeaders, Cookie: await signIn() };
+  const member = await signIn(memberId);
+  expect((await request("/api/admin/allowed-users", { method: "POST", headers: { ...headers, Cookie: member }, body: '{"telegramId":999}' })).status).toBe(403);
+  expect((await request("/api/admin/allowed-users/42", { method: "DELETE", headers: { ...headers, Cookie: member } })).status).toBe(403);
+  for (const telegramId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "999"]) {
+    expect((await request("/api/admin/allowed-users", { method: "POST", headers, body: JSON.stringify({ telegramId }) })).status).toBe(400);
+  }
+  const added = await request("/api/admin/allowed-users", { method: "POST", headers, body: '{"telegramId":999}' });
+  expect(added.status).toBe(200);
+  expect((await added.json()).users).toContainEqual({ telegramId: 999, firstName: null, username: null, registered: false, createdAt: expect.any(Number) });
+  expect(await access.isAllowed(999)).toBe(true);
+  expect((await request("/api/admin/allowed-users/999", { method: "DELETE", headers })).status).toBe(200);
+  expect(await access.isAllowed(999)).toBe(false);
+});
+
+it("revokes existing member sessions for reads, mutations and attachments, even after re-allowing", async () => {
+  const member = await signIn(memberId);
+  const admin = await signIn();
+  expect((await request(`/api/admin/allowed-users/${memberId}`, { method: "DELETE", headers: { ...mutationHeaders, Cookie: admin } })).status).toBe(200);
+  expect(await (await request("/api/chat/session", { headers: { Cookie: member } })).json()).toMatchObject({ authenticated: false });
+  for (const path of ["/api/chat/threads", "/api/chat/settings", "/api/chat/threads/1/files/1"]) {
+    expect((await request(path, { headers: { Cookie: member, "X-Chat-User": String(memberId) } })).status).toBe(401);
+  }
+  expect((await request("/api/chat/threads", { method: "POST", headers: { "X-Chat-Request": "1", "X-Chat-User": String(memberId), Cookie: member, "Content-Type": "application/json" }, body: '{}' })).status).toBe(401);
+  expect(resolver).not.toHaveBeenCalled();
+  expect(repository.file).not.toHaveBeenCalled();
+  await access.allow(memberId);
+  expect((await request("/api/chat/settings", { headers: { Cookie: member, "X-Chat-User": String(memberId) } })).status).toBe(401);
 });

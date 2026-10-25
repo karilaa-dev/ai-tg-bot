@@ -11,6 +11,7 @@ import { type InferenceUsageDelta } from "../pi/usage.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
 import type { ToolActivity } from "./toolActivity.js";
 import type { OpenUiLanguage } from "../openui/language.js";
+import type { FileResolver } from "../files/resolver.js";
 
 export interface TurnInferenceMetadata {
   provider?: string;
@@ -62,6 +63,7 @@ export interface TurnInput {
   onDeliveryFailed?: (result: { assistantMessageId: number; failureCode: string }) => Promise<void>;
   onExecutionFailure?: (failureCode: string) => Promise<void>;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
+  fileResolver?: FileResolver;
   pi?: Pick<PiRuntimeService, "runtime">;
   t: (key: string, params?: Record<string, string | number>) => string;
 }

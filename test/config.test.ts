@@ -21,7 +21,7 @@ describe("website access configuration", () => {
     const config = loadConfig({ ...required, WEB_ENABLED: "true", WEB_TELEGRAM_CLIENT_ID: "123456", WEB_TELEGRAM_CLIENT_SECRET: "dedicated-oauth-secret", WEB_PUBLIC_URL: "https://chat.example/", BOT_ALLOWED_USER_IDS: "123, 456", WEB_ADMIN_USER_IDS: " 456 " });
     expect(config.WEB_ADMIN_USER_IDS).toEqual([456]);
     expect(config.WEB_PUBLIC_URL).toBe("https://chat.example");
-    expect(config.BOT_ALLOWED_USER_IDS).toEqual([123, 456]);
+    expect(config).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
     expect(loadConfig(required).WEB_ADMIN_USER_IDS).toEqual([]);
     for (const WEB_ADMIN_USER_IDS of ["0", "@karilaa", "1,", "9007199254740992"]) {
       expect(() => loadConfig({ ...required, WEB_ADMIN_USER_IDS })).toThrow("WEB_ADMIN_USER_IDS");
@@ -36,13 +36,13 @@ describe("website access configuration", () => {
       expect(() => loadConfig({ ...oauth, WEB_PUBLIC_URL })).toThrow("WEB_PUBLIC_URL");
     }
     expect(loadConfig({ ...oauth, WEB_PUBLIC_URL: "http://localhost:3000" }).WEB_PUBLIC_URL).toBe("http://localhost:3000");
-    expect(loadConfig(required).BOT_ALLOWED_USER_IDS).toEqual([]);
+    expect(loadConfig(required)).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
     expect(loadConfig({ ...required, WEB_TRUSTED_PROXY_IPS: "127.0.0.1, ::1" }).WEB_TRUSTED_PROXY_IPS).toEqual(["127.0.0.1", "::1"]);
     for (const WEB_TRUSTED_PROXY_IPS of ["proxy.example", "127.0.0.0/8", "invalid"]) {
       expect(() => loadConfig({ ...required, WEB_TRUSTED_PROXY_IPS })).toThrow("WEB_TRUSTED_PROXY_IPS");
     }
     for (const BOT_ALLOWED_USER_IDS of ["0", "-1", "1.5", "1,", "1,nope", "9007199254740992"]) {
-      expect(() => loadConfig({ ...required, BOT_ALLOWED_USER_IDS })).toThrow("BOT_ALLOWED_USER_IDS");
+      expect(loadConfig({ ...required, BOT_ALLOWED_USER_IDS })).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
     }
   });
 });

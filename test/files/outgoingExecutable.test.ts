@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { InputFile } from "grammy";
+import type { FileRow } from "../../src/db/types.js";
 import { createCreateFileTool } from "../../src/ai/tools/createFile.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import { E2BFileSourceAdapter } from "../../src/e2b/fileSource.js";
@@ -27,7 +28,7 @@ it.each([
   const snapshotPath = path.join(directory, sha256Hex(original));
   await writeFile(workspacePath, original);
   let sourceReads = 0;
-  let generatedId: number | undefined;
+  let generatedId: FileRow["id"] | undefined;
   let env: GrammyEmulator | undefined;
   const runtime: CommandRuntime = {
     async readWorkspaceFile(request) {
@@ -51,8 +52,9 @@ it.each([
     async dispose() {},
   };
   try {
-    env = await createGrammyEmulator({ privateTopics: true, turnRunner: async input => {
-      const files = new OutgoingFiles({ ...input, commandRuntime: runtime });
+    env = await createGrammyEmulator({ config: { FILE_STORAGE_PATH: path.join(directory, "files") }, privateTopics: true, turnRunner: async input => {
+      if (!env) throw new Error("Emulator is not ready");
+      const files = new OutgoingFiles({ ...input, commandRuntime: runtime, fileResolver: env.services.fileResolver });
       try {
         const result = source === "workspace"
           ? await createCreateFileTool({ ...input, commandRuntime: runtime, outgoingFiles: files })
@@ -87,21 +89,19 @@ it.each([
     await chat.send(env.user.id, thread.id, { text: "Send the executable", requestId: randomUUID() });
     expect(uploaded).toHaveLength(1);
     expect(uploaded[0]?.equals(original)).toBe(true);
-    if (source === "workspace") expect(sourceReads).toBeGreaterThan(0);
+    expect(sourceReads).toBe(0);
     const assistant = (await chat.history(env.user.id, thread.id)).messages.at(-1)!;
     expect(assistant.attachments).toMatchObject([{ id: generatedId, name: "program.exe", kind: "file" }]);
     if (generatedId === undefined) throw new Error("No file was created.");
     const file = (await env.repos.files.get(generatedId))!;
     expect(file).toMatchObject({ message_id: assistant.id, type: "other", extraction_status: "source_only", content_md: null });
     env.services.fileResolver.registry.register({ transport: "telegram", connectionKey: "default", fetch: async () => { throw new Error("Telegram offline"); } });
-    if (size === MAX_FILE_BYTES) {
-      const e2bFetch = vi.fn(async () => { throw new Error("Sandbox expired after send"); });
-      env.services.fileResolver.registry.register({ transport: "e2b", connectionKey: env.config.E2B_DEPLOYMENT_ID, fetch: e2bFetch });
-      const resolved = await env.services.fileResolver.resolveFile(file);
-      expect(resolved.source.transport).toBe("web");
-      expect(resolved.bytes.equals(original)).toBe(true);
-      expect(e2bFetch).not.toHaveBeenCalled();
-    } else expect((await env.services.fileResolver.resolveFile(file)).bytes).toEqual(original);
+    const e2bFetch = vi.fn(async () => { throw new Error("Sandbox expired after send"); });
+    env.services.fileResolver.registry.register({ transport: "e2b", connectionKey: env.config.E2B_DEPLOYMENT_ID, fetch: e2bFetch });
+    const resolved = await env.services.fileResolver.resolveFile(file);
+    expect(resolved.source.transport).toBe("local");
+    expect(resolved.bytes.equals(original)).toBe(true);
+    expect(e2bFetch).not.toHaveBeenCalled();
     expect((await readFile(workspacePath)).equals(original)).toBe(false);
     if (source === "workspace") expect((await readFile(snapshotPath)).equals(original)).toBe(true);
   } finally {

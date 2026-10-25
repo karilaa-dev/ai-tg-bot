@@ -2,7 +2,10 @@ import path from "node:path";
 import { readdir } from "node:fs/promises";
 import { file as bunFile, serve, type BunRequest, type HTMLBundle, type Server } from "bun";
 import { fileTypeFromBuffer } from "file-type";
+import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import type { AccessControl } from "../access/control.js";
+import { ConversationError } from "../application/errors.js";
 import type { FileResolver } from "../files/resolver.js";
 import { SandboxConsentRequired } from "../files/source.js";
 import { isAudioMime, imageMimeTypes } from "./media.js";
@@ -10,14 +13,15 @@ import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { Logger } from "../logger.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
 import { WebHttpError as HttpError, requireAdminMutation } from "./auth.js";
-import type { CodexStatus } from "./admin-types.js";
+import type { AdminSession, CodexStatus } from "./admin-types.js";
 import type { ChatService } from "./chat-types.js";
-import { WebChatAuth, type TelegramAuthDependencies } from "./chat-auth.js";
+import { readBoundedBody, WebChatAuth, type TelegramAuthDependencies } from "./chat-auth.js";
 import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
 
 export interface WebServerOptions {
   config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
-    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "BOT_ALLOWED_USER_IDS" | "WEB_TRUSTED_PROXY_IPS">;
+    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS">;
+  access: AccessControl;
   repository: ConversationRepository;
   fileResolver: FileResolver;
   logger: Logger;
@@ -40,6 +44,7 @@ const headers = {
   "Referrer-Policy": "no-referrer",
   "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
 };
+const AllowedUserInput = z.object({ telegramId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict();
 
 // The same wrappers protect every API method and track work that outlives a closed socket.
 export function createWebRoutes(options: WebServerOptions, shutdownSignal: AbortSignal) {
@@ -47,9 +52,9 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     throw new Error("Telegram login (WEB_TELEGRAM_CLIENT_ID, WEB_TELEGRAM_CLIENT_SECRET, WEB_PUBLIC_URL) must be configured when the website is enabled.");
   }
   // Admins sign in with Telegram like everyone else; the chat routes clear these sessions on shutdown.
-  const auth = new WebChatAuth(options.config, options.telegramAuth);
-  const requireAdmin = (request: Request) => {
-    if (!auth.isAdmin(auth.requireSession(request))) throw new HttpError(403, "This Telegram account does not have admin access.");
+  const auth = new WebChatAuth(options.config, options.access, options.telegramAuth);
+  const requireAdmin = async (request: Request) => {
+    if (!auth.isAdmin(await auth.requireSession(request))) throw new HttpError(403, "This Telegram account does not have admin access.");
   };
   let downloads = 0;
   const tasks = new Set<Promise<Response>>();
@@ -58,15 +63,15 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       const task = (async () => {
         try {
           if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
-          if (!publicRoute) requireAdmin(request);
+          if (!publicRoute) await requireAdmin(request);
           if (request.method !== "GET" && request.method !== "HEAD") requireAdminMutation(request);
           const response = await handler(request, server);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
         } catch (error) {
           if (request.signal.aborted) return new Response(null, { status: 499, headers });
-          const status = error instanceof HttpError ? error.status : error instanceof WebNotFound ? 404 : 500;
+          const status = error instanceof HttpError || error instanceof ConversationError ? error.status : error instanceof WebNotFound ? 404 : error instanceof z.ZodError ? 400 : 500;
           if (status === 500) options.logger.error("website request failed", { error: error instanceof Error ? error.name : "unknown" });
-          return new Response(request.method === "HEAD" ? null : JSON.stringify({ error: error instanceof HttpError ? error.message : status === 404 ? "Not found." : "Could not load conversations. Try again." }), {
+          return new Response(request.method === "HEAD" ? null : JSON.stringify({ error: error instanceof HttpError || error instanceof ConversationError ? error.message : status === 404 ? "Not found." : status === 400 ? "Invalid request." : "Could not load conversations. Try again." }), {
             status, headers: { ...headers, ...(error instanceof HttpError ? error.headers : {}), "Content-Type": "application/json" },
           });
         }
@@ -136,6 +141,33 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   return {
     routes: {
       ...chat.routes,
+      "/api/admin/session": read(async request => {
+        const userId = await auth.userId(request);
+        const session: AdminSession = userId === undefined
+          ? { authenticated: false, loginAvailable: auth.available }
+          : { authenticated: true, userId, admin: auth.isAdmin(userId) };
+        return Response.json(session, { headers });
+      }, true),
+      "/api/admin/allowed-users": {
+        ...read(async () => Response.json({ users: await options.access.list() }, { headers })),
+        POST: guard(async request => {
+          if (request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") throw new HttpError(415, "Send JSON.");
+          const body = await readBoundedBody(request, 4_096);
+          let input: unknown;
+          try { input = JSON.parse(body); }
+          catch { throw new HttpError(400, "Invalid JSON."); }
+          await options.access.allow(AllowedUserInput.parse(input).telegramId);
+          return Response.json({ users: await options.access.list() }, { headers });
+        }),
+      },
+      "/api/admin/allowed-users/:telegramId": {
+        DELETE: guard<"/api/admin/allowed-users/:telegramId">(async request => {
+          const userId = integer(request.params.telegramId);
+          await options.access.revoke(userId);
+          if (!auth.isAdmin(userId)) auth.revokeSessions(userId);
+          return Response.json({ users: await options.access.list() }, { headers });
+        }),
+      },
       "/api/admin/codex": read(async () => Response.json(await codexLogin().status(), { headers })),
       "/api/admin/codex/login": {
         POST: guard(async () => Response.json(await codexLogin().start(), { headers })),

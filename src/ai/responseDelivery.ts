@@ -4,7 +4,7 @@ import type { MessageRow } from "../db/types.js";
 import { renderFinalAnswer, renderFinalThinking, variantsForRichRetry } from "../telegram/render.js";
 import { closeOpenStructures } from "../telegram/mdRepair.js";
 import { isRichParseError, editRich, prefixPlainForThreadFallback, prefixRichForThreadFallback, sendRich, withThreadNotFoundFallback, type InputRichMessage } from "../telegram/richApi.js";
-import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
 import type { CreatedFileAttachment } from "../files/types.js";
 import { escapeHtml } from "../util/text.js";
 import { telegramFileSource } from "../files/telegramSource.js";
@@ -16,7 +16,8 @@ import type { TurnInput, ThinkingDelivery, TurnInferenceMetadata } from "./types
 import { finishResponseOpenUi } from "./openui.js";
 import { resolveOpenUiLanguage, type OpenUiLanguage } from "../openui/language.js";
 import { sha256Hex } from "../files/hash.js";
-import { webFileSource } from "../web/file-source.js";
+import { FileResolver } from "../files/resolver.js";
+import { LocalFileStore } from "../files/localStore.js";
 import { queryOne } from "../db/sql.js";
 import { createTextSearch } from "../db/search.js";
 import { FilesRepo } from "../db/repos/files.js";
@@ -710,12 +711,12 @@ async function persistRecoverableAttachments(
     const stored = await input.repos.files.get(attachment.fileId);
     if (!stored) continue;
     const sources = await input.repos.files.listSources(attachment.fileId);
-    const needsWebBackup = attachment.size > TG_DOWNLOAD_MAX_BYTES && !sources.some(source => source.transport === "web");
-    if (!sources.length || needsWebBackup) {
+    const needsLocalBackup = !sources.some(source => source.transport === "local");
+    if (needsLocalBackup) {
       if (attachment.size > MAX_FILE_BYTES) continue;
       let loaded = false;
       try {
-        if (needsWebBackup && !attachment.data && input.outgoingBuffers) {
+        if (!attachment.data && input.outgoingBuffers) {
           await input.outgoingBuffers.load(attachment, async () => {
             if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
             return (await input.resolveFile(stored, input.signal)).bytes;
@@ -724,19 +725,15 @@ async function persistRecoverableAttachments(
         }
         const bytes = attachment.data ?? await input.outgoingBuffers?.readSpool(attachment, input.signal);
         if (!bytes || bytes.length > MAX_FILE_BYTES) {
-          if (needsWebBackup) throw new Error("Large attachment has no durable download backup.");
-          continue;
+          throw new Error("Attachment has no durable local copy.");
         }
         if (bytes.length !== stored.size || (stored.content_sha256 && sha256Hex(bytes) !== stored.content_sha256)) {
           throw new Error(`Attachment #${attachment.fileId} did not match its recorded bytes.`);
         }
         await retryAttachmentMetadataWrite(input, attachment, "durable source", async () => {
-          await input.db.db.execute(sql`
-            insert into web_file_blobs(file_id, bytes) values (${attachment.fileId}, ${bytes})
-            on conflict(file_id) do nothing
-          `);
-          await input.repos.files.rememberSource(attachment.fileId,
-            webFileSource(attachment.fileId, attachment.mimeType ?? stored.mime_type ?? "application/octet-stream"));
+          const resolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined,
+            new LocalFileStore(input.config.FILE_STORAGE_PATH));
+          await resolver.persistFile(stored, bytes, input.signal);
         });
       } catch (error) {
         input.signal?.throwIfAborted();

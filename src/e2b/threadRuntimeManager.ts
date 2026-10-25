@@ -16,6 +16,7 @@ import { sha256Hex } from "../files/hash.js";
 import { downloadTelegramFile } from "../files/telegram.js";
 import type { Logger } from "../logger.js";
 import type { WebFileSourceAdapter } from "../web/file-source.js";
+import type { FileResolver } from "../files/resolver.js";
 import type {
   CommandRuntime,
   PublishWebsiteRequest,
@@ -89,6 +90,7 @@ interface ThreadE2BSandboxRuntimeInput {
   client?: E2BClient;
   downloadTelegramBytes?: (fileId: string, signal?: AbortSignal) => Promise<Buffer>;
   webFileSource?: Pick<WebFileSourceAdapter, "fetch">;
+  fileResolver?: FileResolver;
 }
 
 export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {

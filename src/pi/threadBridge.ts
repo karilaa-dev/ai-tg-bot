@@ -27,8 +27,10 @@ import { TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
 import { OutgoingFiles } from "../files/outgoingFiles.js";
 import { OfficeValidation } from "../office/validation.js";
 import { searchCodexWeb } from "./codexWebSearch.js";
+import type { FileResolver } from "../files/resolver.js";
 
 interface PiTurnTransport {
+  fileResolver?: FileResolver;
   api: Api;
   chatId: number;
   messageThreadId?: number;
@@ -98,6 +100,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       config: this.config, repos: this.repos, user: this.user, thread: this.thread,
       commandRuntime: this.commandRuntime, logger: this.logger,
       officeValidation: this.officeValidation,
+      fileResolver: this.transport?.fileResolver,
       selectContextFiles: (ids) => this.selectContextFiles(ids),
     });
   }

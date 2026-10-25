@@ -1,3 +1,4 @@
+import { telegramTurnFrontend } from "../../src/telegram/turnFrontend.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import { ThreadTurnCoordinator } from "../../src/ai/threadTurnCoordinator.js";
@@ -1051,15 +1052,16 @@ function createCoordinator(
   api: TurnInput["api"] = { raw: { setMessageReaction: vi.fn(async () => true) } } as never,
 ): ThreadTurnCoordinator {
   const config = loadTestConfig(configOverrides);
+  const logger = createLogger({ ...config, LOG_LEVEL: "error" });
+  const fileResolver = { resolveFile: vi.fn() } as never;
   return new ThreadTurnCoordinator({
-    api,
+    frontend: telegramTurnFrontend({ api, repos, logger, fileResolver, turnRunner: runner }),
     config,
     db,
     repos,
-    logger: createLogger({ ...config, LOG_LEVEL: "error" }),
+    logger,
     pi: { abort } as never,
-    fileResolver: { resolveFile: vi.fn() } as never,
-    turnRunner: runner,
+    fileResolver,
     t: (_locale, key) => key,
   });
 }

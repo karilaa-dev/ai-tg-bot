@@ -11,12 +11,13 @@ export async function resolveThreadFileDescriptors(
   const selected = selectedFileIds
     ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
     : scope.fileIds;
-  const [files, refs, webFiles] = await Promise.all([
+  const [files, refs, webFiles, localFiles] = await Promise.all([
     input.repos.files.listByIds(selected, scope.messageScopes),
     input.repos.files.listTelegramFileRefs(selected),
     input.repos.files.listByIdsWithSource(selected, "web", "default"),
+    input.repos.files.listByIdsWithSource(selected, "local", "default"),
   ]);
-  const webFileIds = new Set(webFiles.map((file) => file.id));
+  const webFileIds = new Set([...webFiles, ...localFiles].map((file) => file.id));
   const refsByFile = new Map<number, typeof refs>();
   for (const ref of refs) {
     const list = refsByFile.get(ref.file_id) ?? [];

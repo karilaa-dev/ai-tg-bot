@@ -106,7 +106,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
       throw new Error("External network is disabled in this test.");
     });
     controller = new AbortController();
-    routes = createWebRoutes({ config: env.config, repository, chat: { service: chat, botUsername: "ai_test_bot" },
+    routes = createWebRoutes({ config: env.config, access: env.services.access, repository, chat: { service: chat, botUsername: "ai_test_bot" },
       fileResolver: env.services.fileResolver, logger: env.services.logger }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: MAX_CHAT_BODY_BYTES, routes: routes.routes, fetch: routes.fetch });
     cookie = await login();

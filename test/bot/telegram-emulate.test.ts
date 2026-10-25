@@ -22,7 +22,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.dispose();
   });
 
-  it("onboards a brand-new private-chat user without an invite", async () => {
+  it("onboards an allowed private-chat user", async () => {
     const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start");
     const richWelcome = JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload);
     expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
@@ -43,7 +43,7 @@ describe("Telegram bot with grammy-emulate", () => {
 
     expect(res.text).toContain("private chats");
     expect(res.getLastApiCall("leaveChat")).toBeDefined();
-    expect(await env.repos.users.get(env.user.id)).toBeUndefined();
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tg_id: env.user.id });
   });
 
   it("ignores an unrecognized /start payload during onboarding", async () => {
@@ -755,13 +755,13 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.files.listTelegramFileRefs([files[0]!.id])).toHaveLength(2);
   });
 
-  it("registers distinct source-only docx uploads without inspecting their bytes", async () => {
+  it("stores and deduplicates source-only docx uploads by their original bytes", async () => {
     await env.dispose();
-    const downloadFile = vi.fn(async () => ({ bytes: Buffer.from("must not be fetched") }));
+    const bytes = Buffer.from("same fake docx bytes");
+    const downloadFile = vi.fn(async () => ({ bytes }));
     env = await createGrammyEmulator({ config: { FILE_INLINE_TOKENS: 1 }, downloadFile });
     await startBot();
 
-    const bytes = Buffer.from("same fake docx bytes");
     const firstDoc = env.bot.server.fileState.storeDocument(
       "hash-report-a.docx",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -781,13 +781,14 @@ describe("Telegram bot with grammy-emulate", () => {
       env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, secondDoc),
     ]);
 
-    expect(downloadFile).not.toHaveBeenCalled();
-    expect(expectResponseSurface(second!)).not.toContain("Reused saved file");
+    expect(downloadFile).toHaveBeenCalledTimes(2);
+    expect(expectResponseSurface(second!)).toContain("Reused saved file");
     expect(expectResponseSurface(second!)).not.toContain("Extracting <code>hash-report-b.docx</code>");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
-    expect(files).toHaveLength(2);
-    expect(files.every((file) => file.extraction_status === "source_only")).toBe(true);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ extraction_status: "source_only", size: bytes.length });
+    expect((await env.services.fileResolver.resolveFile(files[0]!)).bytes).toEqual(bytes);
     expect(await env.repos.files.listTelegramFileRefs(files.map((file) => file.id))).toHaveLength(2);
   });
 
@@ -814,7 +815,8 @@ describe("Telegram bot with grammy-emulate", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const chunksBefore = await env.repos.files.chunks(file!.id);
     expect(chunksBefore.length).toBeGreaterThan(0);
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(1);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "telegram")).toHaveLength(1);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "local")).toHaveLength(1);
 
     const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -826,7 +828,8 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(expectResponseSurface(second!)).toContain("Reused saved file <code>restore-b.txt</code>.");
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(2);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "telegram")).toHaveLength(2);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "local")).toHaveLength(1);
     expect(await env.repos.files.listTelegramFileRefs([file!.id])).toHaveLength(2);
     const chunksAfter = await env.repos.files.chunks(file!.id);
     expect(chunksAfter.map((chunk) => chunk.id)).toEqual(chunksBefore.map((chunk) => chunk.id));
@@ -945,7 +948,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(files[0]?.summary).toBe("a sketched system diagram");
     expect(caption).toHaveBeenCalledTimes(1);
     expect(caption).toHaveBeenCalledWith(expect.objectContaining({ bytes: Buffer.from([1, 2, 3, 4]) }));
-    expect(await env.repos.files.listSources(files[0]!.id)).toHaveLength(1);
+    expect((await env.repos.files.listSources(files[0]!.id)).map(source => source.transport).sort()).toEqual(["local", "telegram"]);
     const refs = await env.repos.files.listTelegramFileRefs([files[0]!.id]);
     expect(refs.length).toBeGreaterThan(0);
     expect(refs.filter((ref) => ref.is_primary === 1)).toHaveLength(1);
@@ -988,7 +991,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(ownerRefs).toHaveLength(firstPhotos.length);
     expect(ownerRefs.filter((ref) => ref.is_primary === 1)).toHaveLength(1);
     // Existing deployments can already have cached descriptions containing a
-    // previous uploader's caption. Reuse must also repair those old entries.
+    // previous uploader's caption. Reuse must sanitize its card without changing the owner's metadata.
     await env.repos.files.updateSummary(ownerFile!.id, "private caption alpha");
 
     const secondPhotos = env.bot.server.fileState.storePhoto(640, 480, {
@@ -1011,7 +1014,9 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(otherRows.find((row) => row.kind === "image")?.text_plain).toContain("bob caption beta");
     const [otherFile] = await env.repos.files.listForThreads([otherThread.id]);
     expect(otherFile?.id).toBe(ownerFile?.id);
-    expect(otherFile?.summary).toBe("Telegram image");
+    expect(otherFile?.summary).toBe("private caption alpha");
+    expect(otherRows.find(row => row.kind === "image")?.text_plain).toContain("Telegram image");
+    expect((await env.repos.files.get(ownerFile!.id))?.summary).toBe("private caption alpha");
   });
 
   it("chunks large Telegram documents into searchable file content", async () => {
@@ -1051,9 +1056,10 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(res.apiCalls.some((call) => call.payload.parse_mode === "HTML" && typeof call.payload.text === "string" && call.payload.text.includes("<code>status.txt</code>"))).toBe(true);
   });
 
-  it("registers docx as source-only without downloading or extracting it", async () => {
+  it("downloads and stores original docx bytes without extracting them", async () => {
     await env.dispose();
-    const downloadFile = vi.fn(async () => ({ bytes: Buffer.from("should not be downloaded") }));
+    const bytes = Buffer.from("fake docx bytes");
+    const downloadFile = vi.fn(async () => ({ bytes }));
     env = await createGrammyEmulator({
       config: { FILE_INLINE_TOKENS: 1 },
       downloadFile,
@@ -1063,16 +1069,17 @@ describe("Telegram bot with grammy-emulate", () => {
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "report.docx",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      content: Buffer.from("fake docx bytes"),
+      content: bytes,
     });
 
-    expect(downloadFile).not.toHaveBeenCalled();
-    expect(expectResponseSurface(res)).not.toContain("Downloading <code>report.docx</code>");
+    expect(downloadFile).toHaveBeenCalledOnce();
+    expect(expectResponseSurface(res)).toContain("Downloading <code>report.docx</code>");
     expect(expectResponseSurface(res)).not.toContain("Extracting <code>report.docx</code>");
     expect(expectResponseSurface(res)).toContain("File <code>report.docx</code> registered for sandbox inspection");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
-    expect(file).toMatchObject({ name: "report.docx", extraction_status: "source_only" });
+    expect(file).toMatchObject({ name: "report.docx", extraction_status: "source_only", size: bytes.length });
+    expect((await env.services.fileResolver.resolveFile(file!)).bytes).toEqual(bytes);
     const latest = await env.repos.messages.latest(thread.id);
     expect(latest?.text_plain).toContain("materialize_chat_files");
   });
@@ -1269,6 +1276,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   async function startBot(user = env.user, chat = env.chat): Promise<BotResponse> {
+    await env.services.access.allow(user.id);
     return env.bot.sendCommand(user, chat, "/start");
   }
 });

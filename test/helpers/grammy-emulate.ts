@@ -1,3 +1,7 @@
+import { AccessControl } from "../../src/access/control.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { TestBot } from "@bonkers-agency/grammy-test";
 import type { Chat, User } from "grammy/types";
 import { loadTestConfig, type AppConfig } from "../../src/config.js";
@@ -30,11 +34,16 @@ export async function createGrammyEmulator(options: {
   pi?: PiRuntimeService;
   downloadFile?: TelegramFileDownloader;
 } = {}): Promise<GrammyEmulator> {
-  const config = loadTestConfig(options.config);
+  const storageDirectory = await mkdtemp(path.join(tmpdir(), "ai-tg-bot-emulator-"));
+  const config = loadTestConfig({ FILE_STORAGE_PATH: path.join(storageDirectory, "files"), ...options.config });
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
   await db.initialize();
   const repos = createRepos(db.db, db.search);
+  const access = new AccessControl(db.db);
+  await access.initialize();
+  await access.allow(1001);
+  await repos.users.ensure({ tgId: 1001, firstName: "Alice", lang: "en" });
   const bot = new TestBot<BotContext>({
     token: config.BOT_TOKEN,
     botInfo: {
@@ -80,6 +89,7 @@ export async function createGrammyEmulator(options: {
   const services = installBot(bot as unknown as any, {
     config,
     db,
+    access,
     logger,
     repos,
     turnRunner,
@@ -119,6 +129,7 @@ export async function createGrammyEmulator(options: {
       await services.threadTitles.waitForIdle();
       bot.dispose();
       await db.destroy();
+      await rm(storageDirectory, { recursive: true, force: true });
     },
   };
 }

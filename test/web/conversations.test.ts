@@ -1,3 +1,4 @@
+import { AccessControl } from "../../src/access/control.js";
 import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
@@ -26,6 +27,7 @@ const telegram = fakeTelegramLogin();
 
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
   let database: AppDatabase;
+  let access: AccessControl;
   let admin: AppDatabase | undefined;
   let schema: string;
   let repos: Repos;
@@ -49,6 +51,8 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     }
     database = createDatabase({ DB_URL: dbUrl });
     await database.initialize();
+    access = new AccessControl(database.db);
+    await access.initialize();
     repos = createRepos(database.db, database.search);
     repository = new ConversationRepository(database.db, repos, 99, new UsagePricing(async () => Response.json({
       "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
@@ -57,7 +61,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
     const login = await telegram;
-    api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config), chat: signInOnlyChat(), telegramAuth: login.dependencies }, controller.signal);
+    api = createWebRoutes({ config, access, repository, fileResolver: resolver, logger: createLogger(config), chat: signInOnlyChat(), telegramAuth: login.dependencies }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: api.routes, fetch: api.fetch });
     const cookie = await login.signIn(server.url, ADMIN_ID);
     request = (url, init) => {
@@ -863,7 +867,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(await response.text()).not.toContain("hidden");
     controller.abort();
     expect((await request("/api/users")).status).toBe(503);
-    expect(await startWebServer({ config: { ...config, WEB_ENABLED: false }, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
+    expect(await startWebServer({ config: { ...config, WEB_ENABLED: false }, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
   });
 });
 
