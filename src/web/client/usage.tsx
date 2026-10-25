@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Select } from "@base-ui/react/select";
-import { ArrowLeft, ArrowUpRight, Check, ChevronDown, RefreshCw } from "lucide-react";
+import { IconArrowLeft, IconArrowUpRight, IconCheck, IconChevronDown, IconRefresh } from "@tabler/icons-react";
 import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } from "../types.js";
 import { userLabel } from "../types.js";
 import { Button } from "./components/ui/button.js";
@@ -56,7 +56,7 @@ export function TokenBreakdown({ usage }: { usage: WebUsageTotals }) {
 
 export function CacheExplanation() {
   return <Collapsible.Root className="cache-explanation">
-    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />Why can cache reads be much higher than writes?</Collapsible.Trigger>
+    <Collapsible.Trigger className="usage-disclosure"><IconChevronDown aria-hidden="true" />Why can cache reads be much higher than writes?</Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound><div className="cache-explanation-content">
     <p>A prompt can be written once and reused across many requests. Each reuse adds cache-read tokens, so reads can far exceed writes.</p>
     <p>Write reporting varies by provider, model, and saved response. Missing fields are unknown, not measured zeroes. Reported cache writes include only recorded values; the bot does not estimate missing writes from reads or uncached input.</p>
@@ -78,7 +78,7 @@ function CallTokens({ call }: { call: InferenceUsageCall }) {
 export function UsageCalls({ calls }: { calls?: InferenceUsageCall[] }) {
   if (!calls?.length) return <p className="usage-call-unavailable">Individual call details were not saved for this reply.</p>;
   return <Collapsible.Root className="usage-calls">
-    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />{number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</Collapsible.Trigger>
+    <Collapsible.Trigger className="usage-disclosure"><IconChevronDown aria-hidden="true" />{number(calls.length)} recorded {calls.some(call => call.aggregate) ? "usage records" : calls.length === 1 ? "call" : "calls"}</Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound><ol>{calls.map((call, index) => <li key={index}><details className="usage-call">
     <summary><span>{index + 1}. {call.model}</span><span>{number(call.inputTokens + call.cacheReadTokens + call.cacheWriteTokens + call.outputTokens)} tokens</span></summary>
     <div className="usage-call-details">
@@ -96,7 +96,7 @@ function TokenBar({ usage }: { usage: WebUsageTotals }) {
 export function MessageUsage({ usage }: { usage?: WebMessageUsage | null }) {
   if (!usage?.recordedTurns) return <span className="usage-unavailable">Usage not recorded</span>;
   return <Collapsible.Root className="message-usage">
-    <Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" /><span>{compact(usage.totalTokens)} tokens · <Cost usage={usage} /></span></Collapsible.Trigger>
+    <Collapsible.Trigger className="usage-disclosure"><IconChevronDown aria-hidden="true" /><span>{compact(usage.totalTokens)} tokens · <Cost usage={usage} /></span></Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound>
     <div className="message-usage-content detail-scroll" tabIndex={0} role="region" aria-label="Usage details"><UsageDetails usage={usage} models={usage.models} modelCalls={usage.modelCalls} /><UsageCalls calls={usage.calls} />
       <p>Reasoning is included in output. Cost is an API estimate in USD.</p>
@@ -124,7 +124,7 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: num
       <span className="thread-usage-label">Thread usage</span>
       <span className="thread-usage-metric"><strong data-unavailable={!tokensRecorded || undefined} title={tokensRecorded ? `${number(report.totals.totalTokens)} tokens` : undefined}>{report ? tokensRecorded ? compact(report.totals.totalTokens) : "Not recorded" : error ? "Unavailable" : "Loading…"}</strong><span>tokens</span></span>
       <span className="thread-usage-metric"><strong data-unavailable={!report || report.totals.estimatedCostUsd === null || undefined}>{report ? <Cost usage={report.totals} /> : error ? "Unavailable" : "Loading…"}</strong><span>est.</span></span>
-      <span className="thread-usage-toggle">{open ? "Less" : "Details"}<ChevronDown size={16} aria-hidden="true" /></span>
+      <span className="thread-usage-toggle">{open ? "Less" : "Details"}<IconChevronDown size={16} aria-hidden="true" /></span>
     </Collapsible.Trigger>
     <Collapsible.Panel hiddenUntilFound>
     <div className="message-usage-content detail-scroll" tabIndex={0} role="region" aria-label="Usage details">
@@ -179,8 +179,8 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
   const { report, error, busy, retry } = useUsageReport(userId, null, days);
   const displayTitle = userId && report?.user?.id === userId ? userLabel(report.user) : title;
   return <>
-    <header className="pane-header usage-header"><Button variant="ghost" size="icon-sm" onClick={back} aria-label="Back to conversations"><ArrowLeft /></Button><div><h2>Usage & estimated cost</h2><p>{displayTitle}</p></div>
-      <Button variant="ghost" size="icon-sm" onClick={retry} disabled={busy} aria-label="Refresh usage"><RefreshCw /></Button>
+    <header className="pane-header usage-header"><Button variant="ghost" size="icon-sm" onClick={back} aria-label="Back to conversations"><IconArrowLeft aria-hidden="true" /></Button><div><h2>Usage & estimated cost</h2><p>{displayTitle}</p></div>
+      <Button variant="ghost" size="icon-sm" onClick={retry} disabled={busy} aria-label="Refresh usage"><IconRefresh aria-hidden="true" /></Button>
     </header>
     <div className="usage-scroll"><div className="usage-dashboard">
       <div className="usage-controls">
@@ -188,12 +188,12 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
         <div className="usage-period">
           <Select.Root items={periods} value={days} onValueChange={value => { if (value !== null) setDays(value); }}>
             <Select.Label>Period</Select.Label>
-            <Select.Trigger className="usage-select-trigger"><Select.Value /><Select.Icon><ChevronDown size={16} /></Select.Icon></Select.Trigger>
+            <Select.Trigger className="usage-select-trigger"><Select.Value /><Select.Icon><IconChevronDown aria-hidden="true" size={16} /></Select.Icon></Select.Trigger>
             <Select.Portal>
               <Select.Positioner className="usage-select-positioner" align="end" sideOffset={6} alignItemWithTrigger={false}>
                 <Select.Popup className="usage-select-popup">
                   <Select.List>{periods.map(period => <Select.Item key={period.value} value={period.value} className="usage-select-item">
-                    <Select.ItemText>{period.label}</Select.ItemText><Select.ItemIndicator><Check size={16} /></Select.ItemIndicator>
+                    <Select.ItemText>{period.label}</Select.ItemText><Select.ItemIndicator><IconCheck aria-hidden="true" size={16} /></Select.ItemIndicator>
                   </Select.Item>)}</Select.List>
                 </Select.Popup>
               </Select.Positioner>
@@ -216,10 +216,10 @@ export function UsageDashboard({ userId, title, back, all, openThread }: {
         {!report.totals.recordedTurns ? <div className="notice"><h3>No recorded usage in this period</h3><p>Try a longer period. New bot replies will appear here after the model finishes.</p></div> : <UsageGraphs daily={report.daily} />}
         {report.models.length > 0 && <section className="usage-section"><h3>By model</h3><ModelTable models={report.models} /></section>}
         {report.threads.length > 0 && <section className="usage-section"><h3>By thread</h3><div className="usage-table-scroll"><table className="usage-table"><thead><tr><th>Thread</th><th>Tokens</th><th>Cache hit</th><th>Turns</th><th>Est. USD</th></tr></thead><tbody>{report.threads.map(thread => <tr key={thread.id}>
-          <td><button className="usage-thread-link" onClick={() => openThread(thread.userId, thread.id, true)}>{thread.title}</button><small>{thread.archived ? "Archived · " : ""}<button onClick={() => openThread(thread.userId, thread.id, false)}>Messages <ArrowUpRight size={11} /></button></small></td>
+          <td><button className="usage-thread-link" onClick={() => openThread(thread.userId, thread.id, true)}>{thread.title}</button><small>{thread.archived ? "Archived · " : ""}<button onClick={() => openThread(thread.userId, thread.id, false)}>Messages <IconArrowUpRight aria-hidden="true" size={11} /></button></small></td>
           <td>{number(thread.totalTokens)}<TokenBar usage={thread} /></td><td>{percent(thread.cacheReadRatio)}</td><td>{number(thread.recordedTurns)}{thread.missingUsageTurns > 0 && <small>{number(thread.missingUsageTurns)} untracked</small>}</td><td><Cost usage={thread} /></td>
         </tr>)}</tbody></table></div></section>}
-        <Collapsible.Root className="usage-method"><Collapsible.Trigger className="usage-disclosure"><ChevronDown aria-hidden="true" />How usage and estimates work</Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="usage-method-content">
+        <Collapsible.Root className="usage-method"><Collapsible.Trigger className="usage-disclosure"><IconChevronDown aria-hidden="true" />How usage and estimates work</Collapsible.Trigger><Collapsible.Panel hiddenUntilFound><div className="usage-method-content">
           <p>Estimates use the <a href="https://ccusage.com/guide/cost-modes" target="_blank" rel="noreferrer">ccusage token calculation method</a>: uncached input × input rate + cache reads × cache-read rate + cache writes × cache-write rate + output × output rate.</p>
           <p>Reasoning tokens are part of output and are not counted twice. The cache hit rate is recorded cache reads divided by recorded prompt tokens. Uncached input, cache reads, and cache writes are separate parts of input; a missing cache field does not establish a zero value.</p>
           <p>Fast mode reflects saved request settings. Requested and delivered service tiers can differ; the delivered tier takes precedence when pricing is available. A request without a reported delivery tier uses its requested tier for the estimate. Older records without this metadata show unknown fast mode.</p>

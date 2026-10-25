@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { TimeoutError } from "e2b";
-import { throwIfAborted, raceWithAbort } from "../files/cancel.js";
+import { throwIfAborted, raceWithAbort, isAbortError } from "../files/cancel.js";
 import type { Logger } from "../logger.js";
 import type { SandboxCommandRequest, SandboxCommandResult, SandboxThreadFileSyncResult } from "../sandbox/types.js";
 import { quoteShellToken } from "../util/shell.js";
@@ -119,6 +119,8 @@ export async function runCommandResult(
     const result = await sandbox.run(command, { timeoutMs, signal, user });
     return result;
   } catch (error) {
+    throwIfAborted(signal);
+    if (isAbortError(error)) throw error;
     const result = commandErrorResult(error);
     throw new Error(result.error || `sandbox command failed with exit code ${String(result.exitCode)}`);
   }

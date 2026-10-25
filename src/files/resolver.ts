@@ -3,7 +3,7 @@ import { sha256Hex } from "./hash.js";
 import type { FileRow, FileSourceRow } from "../db/types.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
-import { FileTooLargeError, MAX_FILE_BYTES } from "./limits.js";
+import { FileTooLargeError, MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "./limits.js";
 import {
   type FileReadPolicy,
   SandboxConsentRequired,
@@ -32,13 +32,14 @@ export class FileResolver {
 
   async resolveFile(file: FileRow, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES, policy?: FileReadPolicy): Promise<ResolvedChatFile> {
     const sources = await this.files.listSources(file.id);
-    if (policy) sources.sort((a, b) => Number(a.transport === "e2b") - Number(b.transport === "e2b"));
+    sources.sort((a, b) => Number(b.transport === "web") - Number(a.transport === "web")
+      || (policy ? Number(a.transport === "e2b") - Number(b.transport === "e2b") : 0));
     const errors: string[] = [];
     let consentRequired = false;
     for (const source of sources) {
       try {
         const resolved = await this.resolveSource(rowToSource(source), signal, maxBytes, policy);
-        if (source.transport === "e2b") assertE2BSourceIntegrity(file, resolved);
+        if (source.transport === "e2b" || source.transport === "web") assertCanonicalSourceIntegrity(file, resolved);
         await this.files.markSourceVerified(source.id).catch(() => undefined);
         return resolved;
       } catch (error) {
@@ -57,10 +58,11 @@ export class FileResolver {
     const adapter = this.registry.get(source);
     if (!adapter) throw new Error(`No ${source.transport}/${source.connectionKey} file adapter is configured.`);
     throwIfAborted(signal);
-    const payload = await adapter.fetch(source, signal, Math.min(maxBytes, MAX_FILE_BYTES), policy);
+    const limit = Math.min(maxBytes, source.transport === "telegram" ? TG_DOWNLOAD_MAX_BYTES : MAX_FILE_BYTES);
+    const payload = await adapter.fetch(source, signal, limit, policy);
     throwIfAborted(signal);
     const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-    if (bytes.length > Math.min(maxBytes, MAX_FILE_BYTES)) throw new FileTooLargeError();
+    if (bytes.length > limit) throw new FileTooLargeError();
     return {
       bytes,
       mimeType: source.mimeType ?? null,
@@ -71,12 +73,12 @@ export class FileResolver {
   }
 }
 
-function assertE2BSourceIntegrity(file: FileRow, resolved: ResolvedChatFile): void {
+function assertCanonicalSourceIntegrity(file: FileRow, resolved: ResolvedChatFile): void {
   if (resolved.size !== file.size) {
-    throw new Error(`E2B source size mismatch for file #${file.id}.`);
+    throw new Error(`${resolved.source.transport} source size mismatch for file #${file.id}.`);
   }
   if (file.content_sha256 && resolved.contentSha256 !== file.content_sha256) {
-    throw new Error(`E2B source hash mismatch for file #${file.id}.`);
+    throw new Error(`${resolved.source.transport} source hash mismatch for file #${file.id}.`);
   }
 }
 

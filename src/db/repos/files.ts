@@ -20,6 +20,7 @@ export class FilesRepo {
     userId: number;
     threadId: number;
     messageId?: number | null;
+    requireMessage?: boolean;
     type: StoredFileType;
     contentSha256?: string | null;
     mimeType?: string | null;
@@ -34,11 +35,12 @@ export class FilesRepo {
     return insertReturning<FileRow>(
       this.db,
       sql`
-        insert into files(user_id, thread_id, message_id, type, content_sha256, mime_type, extraction_status, name, size, content_md, summary, outline_json, is_inline, created_at)
+        insert into files(user_id, thread_id, message_id, requires_message, type, content_sha256, mime_type, extraction_status, name, size, content_md, summary, outline_json, is_inline, created_at)
         values (
           ${input.userId},
           ${input.threadId},
           ${input.messageId ?? null},
+          ${input.requireMessage ? 1 : 0},
           ${input.type},
           ${input.contentSha256 ?? null},
           ${input.mimeType ?? null},
@@ -144,6 +146,7 @@ export class FilesRepo {
         select f.id, 0 as attached
         from files f
         where f.message_id is null and f.thread_id = ${scopes.at(-1)!.threadId}
+          and f.requires_message = 0
           and not exists (select 1 from message_files mf where mf.file_id = f.id)
           and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
             exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')

@@ -19,6 +19,33 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
         await tx.execute(sql`alter table users add column memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
       }
     }
+    for (const table of ["threads", "turn_runs"]) {
+      const definition = "origin text not null default 'telegram' check(origin in ('telegram', 'web'))";
+      if (dialect === "postgres") await tx.execute(sql.raw(`alter table ${table} add column if not exists ${definition}`));
+      else {
+        const columns = await tx.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+        if (!columns.some(column => column.name === "origin")) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
+      }
+    }
+    if (dialect === "postgres") await tx.execute(sql`alter table turn_runs add column if not exists web_request_id text`);
+    else {
+      const columns = await tx.query<{ name: string }>(sql`pragma table_info(turn_runs)`);
+      if (!columns.some(column => column.name === "web_request_id")) await tx.execute(sql`alter table turn_runs add column web_request_id text`);
+    }
+    await tx.execute(sql`create unique index if not exists turn_runs_web_request_idx on turn_runs(user_id, thread_id, web_request_id) where web_request_id is not null`);
+    for (const [table, name, definition] of [
+      ["files", "requires_message", "requires_message integer not null default 0 check(requires_message in (0, 1))"],
+      ["optmem_notes", "deleted", "deleted integer not null default 0 check(deleted in (0, 1))"],
+      ["optmem_stores", "revision", "revision integer not null default 0"],
+      // An IANA time zone such as Europe/Berlin; tz_offset_min keeps its offset at save time for older readers.
+      ["users", "tz_name", "tz_name text"],
+    ]) {
+      if (dialect === "postgres") await tx.execute(sql.raw(`alter table ${table} add column if not exists ${definition}`));
+      else {
+        const columns = await tx.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+        if (!columns.some(column => column.name === name)) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
+      }
+    }
   });
 }
 
@@ -200,6 +227,14 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create index if not exists messages_thread_id_idx on messages(thread_id, id)`));
+  await db.execute(sql.raw(`
+    create table if not exists thread_reads (
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      message_id ${intType} not null references messages(id),
+      primary key(user_id, thread_id)
+    )
+  `));
   await db.execute(sql`create index if not exists messages_thread_activity_idx on messages(thread_id, created_at)`);
   await db.execute(sql.raw(`
     create table if not exists thread_operation_barriers (
@@ -286,6 +321,7 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create index if not exists files_content_sha256_idx on files(content_sha256, type, size)`));
+  await db.execute(sql`create index if not exists files_message_id_idx on files(message_id)`);
   await db.execute(sql.raw(`
     create table if not exists audio_transcripts (
       id text primary key,
@@ -375,6 +411,12 @@ async function initializeCommonTables(
     )
   `));
   await db.execute(sql.raw(`create index if not exists message_files_file_id_idx on message_files(file_id)`));
+  await db.execute(sql.raw(`
+    create table if not exists web_file_blobs (
+      file_id ${intType} primary key references files(id) on delete cascade,
+      bytes ${blobType} not null
+    )
+  `));
   await db.execute(sql.raw(`
     create table if not exists embeddings (
       id ${idType},

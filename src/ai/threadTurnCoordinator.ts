@@ -8,9 +8,11 @@ import type { Locale, MessageKind, TurnRunRow } from "../db/types.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
-import type { TurnRunner } from "./types.js";
+import type { TurnDraft, TurnRunner } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
 import { TurnActivityCoordinator } from "./turnActivity.js";
+import { quietTelegramApi, mirrorWebMessage, replyToWebMessage } from "../web/telegram-mirror.js";
+import { asRecord } from "../util/records.js";
 
 interface ActiveTurn {
   run: TurnRunRow;
@@ -21,6 +23,7 @@ interface ActiveTurn {
 export class ThreadTurnCoordinator {
   private readonly draining = new Map<number, Promise<void>>();
   private readonly active = new Map<number, ActiveTurn>();
+  private readonly drafts = new Map<number, TurnDraft>();
   private readonly activity: TurnActivityCoordinator;
   private readonly recovery: Promise<number[]>;
   private readonly ownerId = randomUUID();
@@ -74,6 +77,7 @@ export class ThreadTurnCoordinator {
     content: unknown;
     textPlain: string;
     sources: TelegramTurnSource[];
+    webRequestId?: string;
     attachments?: DurableTurnAttachment[];
     signal?: AbortSignal;
   }): Promise<AcceptedTurnRun> {
@@ -132,6 +136,10 @@ export class ThreadTurnCoordinator {
       threadId,
     });
     return true;
+  }
+
+  draft(threadId: number): TurnDraft | null {
+    return this.drafts.get(threadId) ?? null;
   }
 
   async waitForIdle(threadId?: number, includeActivity = true): Promise<void> {
@@ -534,8 +542,25 @@ export class ThreadTurnCoordinator {
       } catch {
         // Keep the plain-text fallback; malformed historical JSON must not strand FIFO.
       }
+      const api = run.origin === "web" ? quietTelegramApi(this.input.api) : this.input.api;
+      if (run.origin === "web") {
+        try {
+          await mirrorWebMessage({ api, run, message, title: thread.title, repos: this.input.repos, resolver: this.input.fileResolver, signal: controller.signal });
+        } catch (error) {
+          controller.signal.throwIfAborted();
+          this.input.logger.warn("web message Telegram mirror failed; continuing assistant turn", {
+            turnRunId: run.id, threadId: run.thread_id, error: String(error),
+          });
+          const current = await this.input.repos.messages.get(message.id);
+          await this.input.repos.messages.setDeliveryContent({ messageId: message.id,
+            content: { ...asRecord(content), telegramSyncFailed: true }, textPlain: message.text_plain,
+            tgMessageId: current?.tg_message_id ?? null });
+        }
+        const mirrored = await this.input.repos.messages.get(message.id);
+        if (mirrored?.tg_message_id) replyToWebMessage(api, run.chat_id, mirrored.tg_message_id);
+      }
       await this.input.turnRunner({
-        api: this.input.api,
+        api,
         chatId: run.chat_id,
         messageThreadId: run.message_thread_id ?? undefined,
         config: this.input.config,
@@ -549,12 +574,22 @@ export class ThreadTurnCoordinator {
         userMessageContent: content,
         userMessageId: message.id,
         turnRunId: run.id,
+        origin: run.origin,
         signal: controller.signal,
+        onDraft: (draft) => {
+          if (!controller.signal.aborted) this.drafts.set(thread.id, {
+            text: draft.text.slice(-64_000), thinking: draft.thinking.slice(-32_000),
+            ...(draft.toolActivity ? { toolActivity: draft.toolActivity } : {}),
+          });
+        },
         resolveFile: (file, signal) => this.input.fileResolver.resolveFile(file, signal),
         pi: this.input.pi,
         t: (key, params) => this.input.t(run.locale, key, params),
         onInferenceUsage: (result) => this.input.repos.turnRuns.recordUsage(run.id, this.ownerId, result),
-        onAwaitingDelivery: (result) => finalizer.awaitingDelivery(result),
+        onAwaitingDelivery: (result) => {
+          this.drafts.delete(thread.id);
+          return finalizer.awaitingDelivery(result);
+        },
         onDeliveryStarting: () => finalizer.beginDelivery(),
         onDeliveryConfirmed: (result) => finalizer.confirmDelivery(result.assistantMessageId),
         onDeliveryUnknown: (result) => finalizer.unknownDelivery(result.assistantMessageId, result.failureCode),
@@ -574,6 +609,7 @@ export class ThreadTurnCoordinator {
       });
     } finally {
       leaseMonitoring = false;
+      this.drafts.delete(run.thread_id);
       clearInterval(leaseTimer);
       leaseDeadline.stop();
       clearInterval(cancellationTimer);

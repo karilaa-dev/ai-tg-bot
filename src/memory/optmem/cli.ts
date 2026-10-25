@@ -8,6 +8,7 @@ import { runMemo } from "./index.js";
 import { DatabaseMemoryStore } from "./databaseStore.js";
 import { MemoryEnvironmentSchema, memorySizes } from "./settings.js";
 import { recallInWorker } from "./recall.js";
+import { userOffsetMinutes } from "../../bot/timezone.js";
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 const [option, requestedUser, ...args] = process.argv.slice(2);
@@ -27,7 +28,7 @@ if (option !== "--user" || !userId.success || !args.length) {
     if (user.memory_enabled) await initializeUserMemory(db.db, userId.data);
     const input = {
       store: new DatabaseMemoryStore(db.db, userId.data), settings: memorySizes(config),
-      utcOffsetMinutes: user.tz_offset_min ?? 0,
+      utcOffsetMinutes: userOffsetMinutes(user) ?? 0,
       command: `${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} --user ${userId.data}`,
     };
     const result = args[0] === "recall" && args.length === 2

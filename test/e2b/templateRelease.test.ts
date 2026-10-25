@@ -1,11 +1,12 @@
 import { SandboxError, type BuildInfo } from "e2b";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   E2BTemplateReleaseManager,
   type E2BTemplateReleaseDependencies,
 } from "../../src/e2b/templateRelease.js";
 import {
   createWithTemplateNotFoundError,
+  checkManagedE2BTemplate,
   isE2BNotFoundError,
 } from "../../src/e2b/templateNotFound.js";
 import {
@@ -15,6 +16,43 @@ import {
 } from "../../src/e2b/templateIdentity.js";
 import { e2bToolboxBuildRef } from "../../e2b-template/template.js";
 import { deferred } from "../helpers/async.js";
+import { createLogger } from "../../src/logger.js";
+
+describe("startup E2B image check", () => {
+  const config = { E2B_TEMPLATE: E2B_TOOLBOX_RELEASE_REF, E2B_API_KEY: "e2b_test", E2B_REQUEST_TIMEOUT_MS: 1_000 };
+  const logger = createLogger({ LOG_LEVEL: "error" });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("rejects a missing release before accepting user work", async () => {
+    const exists = vi.fn().mockResolvedValue(false);
+    await expect(checkManagedE2BTemplate(config, logger, exists)).rejects.toMatchObject({
+      name: "E2BTemplateNotFoundError", templateRef: config.E2B_TEMPLATE,
+      message: expect.stringContaining("bun run e2b:release"),
+    });
+    expect(exists).toHaveBeenCalledExactlyOnceWith(config.E2B_TEMPLATE, {
+      apiKey: config.E2B_API_KEY, requestTimeoutMs: 1_000,
+    });
+  });
+
+  it("accepts a released image without building a sandbox", async () => {
+    const exists = vi.fn().mockResolvedValue(true);
+    await expect(checkManagedE2BTemplate(config, logger, exists)).resolves.toBeUndefined();
+  });
+
+  it("does not mistake a temporary service failure for a missing release", async () => {
+    const exists = vi.fn().mockRejectedValue(new Error("Service unavailable"));
+    const warn = vi.spyOn(logger, "warn");
+    await expect(checkManagedE2BTemplate(config, logger, exists)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("availability check failed"),
+      expect.objectContaining({ templateRef: config.E2B_TEMPLATE }));
+  });
+
+  it.each(["external-template:custom", "nkeclxc4sm73vmb1e93y"])("leaves explicit external reference %s to sandbox creation", async templateRef => {
+    const exists = vi.fn();
+    await checkManagedE2BTemplate({ ...config, E2B_TEMPLATE: templateRef }, logger, exists);
+    expect(exists).not.toHaveBeenCalled();
+  });
+});
 
 describe("versioned E2B template identity", () => {
   it("keeps build tags separate from the reserved production tag", () => {

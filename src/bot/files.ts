@@ -1,11 +1,11 @@
 import type { FileRow } from "../db/types.js";
 import { isAbortError, raceWithAbort, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
-import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
+import { cardForFile, classifyFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { audioFormat, detectAudioType, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
 import { boundTranscript } from "../audio/transcripts.js";
 import { chatFileMarker } from "../files/contextMarker.js";
-import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
+import { FileTooLargeError, TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
@@ -155,9 +155,9 @@ async function ingestTelegramFile(
     : undefined;
   if (reused) return { outcome: "reused-cached", prepared: reused };
 
-  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
+  if (input.type === "pdf" || input.type === "docx" || input.type === "audio" || input.type === "other") {
     throwIfAborted(signal);
-    if ((input.size ?? 0) > MAX_FILE_BYTES) {
+    if ((input.size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       if (status) await status.updateText(ctx.t("file-too-big"));
       else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return "too-big";
@@ -193,7 +193,7 @@ async function ingestTelegramFile(
     ...(withType ? { type: input.type } : {}),
     bytes: bytes.length,
   }));
-  if ((input.size ?? bytes.length) > MAX_FILE_BYTES || bytes.length > MAX_FILE_BYTES) {
+  if ((input.size ?? bytes.length) > TG_DOWNLOAD_MAX_BYTES || bytes.length > TG_DOWNLOAD_MAX_BYTES) {
     ctx.services.logger.warn(withType ? "downloaded file rejected; too large" : "downloaded image rejected; too large", ctxLogMeta(ctx, {
       name: input.name,
       ...(withType ? { type: input.type } : {}),
@@ -203,6 +203,7 @@ async function ingestTelegramFile(
     else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
     return "too-big";
   }
+  input = { ...input, type: classifyFile(input.name, input.mime, bytes) };
   const contentSha256 = sha256Hex(bytes);
   const cachedByHash = await ctx.services.repos.files.findByContentHash(contentSha256, {
     type: input.type,
@@ -357,7 +358,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
       return;
     }
-    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio"
+    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio" || result.prepared.type === "other"
       ? "file-source-registered"
       : "file-processed");
     ctx.services.logger.info("file job complete", ctxLogMeta(ctx, {
@@ -478,7 +479,7 @@ function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): 
 
 function isCompatibleStoredFile(file: FileRow, input: TelegramFileInput): boolean {
   if (file.type !== input.type) return false;
-  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
+  if (input.type === "pdf" || input.type === "docx" || input.type === "audio" || input.type === "other") {
     return file.extraction_status === "source_only" || file.extraction_status === "ready";
   }
   return file.extraction_status === "ready";

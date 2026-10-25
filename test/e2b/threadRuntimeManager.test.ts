@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../../src/config.js";
@@ -15,7 +16,10 @@ import {
 import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
 import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
+import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
+import { MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "../../src/files/limits.js";
 import type { SandboxCommandRequest, SandboxThreadFile } from "../../src/sandbox/types.js";
+import { WebFileSourceAdapter, webFileSource } from "../../src/web/file-source.js";
 import { deferred } from "../helpers/async.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "../../src/e2b/officeBundle.js";
 
@@ -334,6 +338,337 @@ describe("thread E2B runtime manager", () => {
     const index = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
     expect(index.files.map((file: { file_id: number }) => file.file_id)).toEqual([8_001, 8_002]);
     expect(command.threadFiles.available).toBe(2);
+  });
+
+  it.each([false, true])("restores durable web bytes after sandbox replacement (failed Telegram: %s)", async (failedTelegram) => {
+    const bytes = Buffer.from("#!/bin/sh\ntouch /tmp/do-not-execute-web-attachment\n");
+    const file = await storeWebDescriptor("../upload?.sh", bytes);
+    if (failedTelegram) {
+      file.telegramRefs = descriptor(file.fileId, file.name, "tg-missing-web", 9_111, bytes.length).telegramRefs;
+    }
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    const first = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    expect(first.files).toEqual([expect.objectContaining({ fileId: file.fileId, status: "available" })]);
+    const destination = `${E2B_TELEGRAM_FILES}/${file.fileId}--upload_.sh`;
+    expect(client.onlySandbox().files.get(destination)).toEqual(bytes);
+    expect(client.onlySandbox().backgroundCalls).toBe(0);
+    expect(fetch).toHaveBeenCalledWith(webFileSource(file.fileId, "text/plain"), expect.any(AbortSignal), MAX_FILE_BYTES);
+    await runtime.dispose();
+    client.sandboxes.clear();
+    runtime = createRuntime();
+
+    const restored = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    const sandbox = client.onlySandbox();
+    expect(restored.available).toBe(1);
+    expect(sandbox.files.get(destination)).toEqual(bytes);
+    expect(client.createCalls).toBe(2);
+    expect(client.telegramDownloadCalls).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sandbox.backgroundCalls).toBe(0);
+    expect(sandbox.controlCommands.join("\n")).not.toContain("do-not-execute-web-attachment");
+    const writes = sandbox.writeFileCalls.filter(call => call.path.includes("/restore-"));
+    expect(writes).toEqual([expect.objectContaining({ user: "root" })]);
+    expect(sandbox.controlCommands.some(command => command.includes(`chmod 444 '${writes[0]?.path}'`))).toBe(true);
+    expect(sandbox.controlCommands.some(command => command.includes(`chmod 555 '${E2B_TELEGRAM_FILES}'`))).toBe(true);
+    expect([...sandbox.files.keys()].some(name => name.includes("/restore-"))).toBe(false);
+    expect(await repos.sandboxFileRestores.listForSandbox(config.E2B_DEPLOYMENT_ID, sandbox.id))
+      .toMatchObject([{ file_id: file.fileId, status: "available", telegram_file_ref_id: null, restored_size: bytes.length }]);
+  });
+
+  it("prefers canonical web bytes even when a Telegram representation is available", async () => {
+    const file = await storeWebDescriptor("shared.txt", Buffer.from("hello"));
+    client.telegramFiles.set("tg-web-valid", Buffer.from("hello"));
+    file.telegramRefs = descriptor(file.fileId, file.name, "tg-web-valid", 9_112, 5).telegramRefs;
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(1);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(client.telegramDownloadCalls).toBe(0);
+  });
+
+  it.each(["read", "size", "hash"])("restores a canonical Telegram document after a web %s failure", async (failure) => {
+    const bytes = Buffer.from("hello");
+    const file = await storeWebDescriptor("fallback.txt", bytes);
+    await addTelegramDocument(file, bytes);
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    if (failure === "read") fetch.mockRejectedValueOnce(new Error("web read unavailable"));
+    else fetch.mockResolvedValueOnce(Buffer.from(failure === "size" ? "shorter?" : "wrong"));
+
+    const result = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    const sandbox = client.onlySandbox();
+    expect(result.available).toBe(1);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(client.telegramDownloadCalls).toBe(1);
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${file.fileId}--fallback.txt`)).toEqual(bytes);
+    expect(await repos.sandboxFileRestores.listForSandbox(config.E2B_DEPLOYMENT_ID, sandbox.id))
+      .toMatchObject([{ file_id: file.fileId, status: "available", telegram_file_ref_id: file.telegramRefs[0]?.id,
+        restored_size: bytes.length, restored_sha256: file.expectedSha256 }]);
+    expect([...sandbox.files.keys()].some(name => name.includes("/restore-"))).toBe(false);
+  });
+
+  it.each(["hash", "unknown size", "different size"])("rejects a corrupt Telegram document fallback with %s", async (failure) => {
+    const file = await storeWebDescriptor("corrupt.txt", Buffer.from("hello"));
+    const corrupt = Buffer.from(failure === "different size" ? "wrong length" : "wrong");
+    await addTelegramDocument(file, corrupt, failure === "unknown size" ? null : corrupt.length);
+    vi.spyOn(WebFileSourceAdapter.prototype, "fetch").mockRejectedValueOnce(new Error("web read unavailable"));
+
+    const result = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    const sandbox = client.onlySandbox();
+    expect(result.files).toEqual([expect.objectContaining({ fileId: file.fileId, path: null, errorCode: "file_unavailable" })]);
+    expect(client.telegramDownloadCalls).toBe(1);
+    expect(sandbox.writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+    expect(sandbox.files.has(`${E2B_TELEGRAM_FILES}/${file.fileId}--corrupt.txt`)).toBe(false);
+  });
+
+  it("does not download an oversized Telegram fallback after web failure", async () => {
+    const file = await storeWebDescriptor("large.txt", Buffer.from("hello"));
+    await addTelegramDocument(file, Buffer.from("hello"), TG_DOWNLOAD_MAX_BYTES + 1);
+    vi.spyOn(WebFileSourceAdapter.prototype, "fetch").mockRejectedValueOnce(new Error("web read unavailable"));
+
+    const result = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    expect(result.files).toEqual([expect.objectContaining({ fileId: file.fileId, path: null, errorCode: "file_unavailable" })]);
+    expect(client.telegramDownloadCalls).toBe(0);
+    expect(client.onlySandbox().writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+  });
+
+  it("restores a valid empty web attachment", async () => {
+    const file = await storeWebDescriptor("empty.txt", Buffer.alloc(0));
+    expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(1);
+    expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${file.fileId}--empty.txt`)).toEqual(Buffer.alloc(0));
+  });
+
+  it("materializes a 50 MiB web source after Telegram acceptance and sandbox replacement", async () => {
+    const bytes = Buffer.alloc(MAX_FILE_BYTES, 0xa5);
+    const file = await storeWebDescriptor("maximum.bin", bytes);
+    file.telegramRefs = descriptor(file.fileId, file.name, "too-large-for-getFile", 9_113, MAX_FILE_BYTES).telegramRefs;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const restored = await runtime.materializeFiles({ userId, threadId, files: [file] });
+      expect(restored.available).toBe(1);
+      expect(client.onlySandbox().files.get(`${E2B_TELEGRAM_FILES}/${file.fileId}--maximum.bin`)?.equals(bytes)).toBe(true);
+      expect(client.telegramDownloadCalls).toBe(0);
+      await runtime.dispose();
+      client.sandboxes.clear();
+      runtime = createRuntime();
+    }
+  }, 30_000);
+
+  it("retains immutable snapshots whose accepted Telegram document cannot be downloaded", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const bytes = Buffer.alloc(TG_DOWNLOAD_MAX_BYTES + 1, 0xa5);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const canonicalPath = `${E2B_FILE_SOURCES}/${hash}`;
+    sandbox.files.set(canonicalPath, bytes);
+    const file = await repos.files.insertFile({ userId, threadId, type: "other", name: "large.bin",
+      size: bytes.length, contentSha256: hash, isInline: false });
+    await repos.files.rememberSource(file.id, e2bFileSource(config, { userId, threadId, fileId: file.id,
+      sandboxId: sandbox.id, sourceCanonicalPath: canonicalPath, size: bytes.length, contentSha256: hash }));
+    await repos.files.rememberTelegramFileRefs(file.id, { direction: "outbound", mediaKind: "document",
+      refs: [{ fileId: "accepted-large-file", size: bytes.length, primary: true }] });
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    await runtime.execute(commandRequest(userId, threadId));
+    expect(sandbox.files.has(canonicalPath)).toBe(true);
+    expect((await repos.files.listSources(file.id)).map(source => source.transport)).toContain("e2b");
+  });
+
+  it.each(["missing", "size", "hash", "declared limit", "actual limit"])("rejects a web blob with %s failure before staging", async (failure) => {
+    const file = await storeWebDescriptor("broken.txt", Buffer.from("hello"));
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    if (failure === "missing") await db.db.execute(sql`delete from web_file_blobs where file_id = ${file.fileId}`);
+    if (failure === "size") file.expectedSize = 6;
+    if (failure === "hash") file.expectedSha256 = "0".repeat(64);
+    if (failure === "declared limit") file.expectedSize = MAX_FILE_BYTES + 1;
+    if (failure === "actual limit") {
+      await db.db.execute(sql`update web_file_blobs set bytes = ${Buffer.alloc(MAX_FILE_BYTES + 1)} where file_id = ${file.fileId}`);
+    }
+
+    const result = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    const sandbox = client.onlySandbox();
+    expect(result.available).toBe(0);
+    expect(result.files).toEqual([expect.objectContaining({ fileId: file.fileId, path: null, errorCode: "file_unavailable" })]);
+    expect(sandbox.writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+    expect(sandbox.files.has(`${E2B_TELEGRAM_FILES}/${file.fileId}--broken.txt`)).toBe(false);
+    if (failure === "declared limit") expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "connection", "remote key"])("requires a matching registered web source (%s)", async (failure) => {
+    const file = await storeWebDescriptor("private.txt", Buffer.from("hello"));
+    if (failure === "missing") await db.db.execute(sql`delete from file_sources where file_id = ${file.fileId}`);
+    if (failure === "connection") await db.db.execute(sql`update file_sources set connection_key = 'other' where file_id = ${file.fileId}`);
+    if (failure === "remote key") await db.db.execute(sql`update file_sources set remote_key = '999999' where file_id = ${file.fileId}`);
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an arbitrary private file ID but restores an explicit cross-user attachment grant", async () => {
+    const owner = await repos.users.ensure({ tgId: 7002, firstName: "Other", lang: "en" });
+    const privateThread = await repos.threads.create({ userId: owner.tg_id, topicId: null, title: "Private" });
+    const privateFile = await storeWebDescriptor("private-original.txt", Buffer.from("hello"), { userId: owner.tg_id, threadId: privateThread.id });
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    expect((await runtime.materializeFiles({ userId, threadId, files: [privateFile] })).available).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+
+    const message = await repos.messages.insert({ threadId, role: "user", content: [], textPlain: "shared" });
+    await repos.files.attachToMessage(message.id, privateFile.fileId, { displayName: "shared.txt" });
+    const thread = await repos.threads.get(threadId);
+    if (!thread) throw new Error("missing thread fixture");
+    const files = await resolveThreadFileDescriptors({ repos, thread });
+    const result = await runtime.materializeFiles({ userId, threadId, files });
+    expect(result.files).toEqual([expect.objectContaining({ fileId: privateFile.fileId, originalName: "shared.txt", status: "available" })]);
+    expect(fetch).toHaveBeenCalledOnce();
+    const sandbox = client.onlySandbox();
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${privateFile.fileId}--shared.txt`)).toEqual(Buffer.from("hello"));
+    expect(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`)).not.toContain("private-original");
+  });
+
+  it.each([true, false])("does not bypass a private web file's scope with forged Telegram fallback refs (web adapter: %s)", async (webAdapter) => {
+    await runtime.dispose();
+    runtime = createRuntime(webAdapter);
+    const owner = await repos.users.ensure({ tgId: 7002, firstName: "Other", lang: "en" });
+    const privateThread = await repos.threads.create({ userId: owner.tg_id, topicId: null, title: "Private" });
+    const bytes = Buffer.from("private bytes");
+    const file = await storeWebDescriptor("private.txt", bytes, { userId: owner.tg_id, threadId: privateThread.id });
+    file.telegramRefs = descriptor(file.fileId, file.name, "forged-private-ref", 9_114, bytes.length).telegramRefs;
+    client.telegramFiles.set("forged-private-ref", bytes);
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+
+    const result = await runtime.materializeFiles({ userId, threadId, files: [file] });
+    expect(result.available).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.telegramDownloadCalls).toBe(0);
+    expect(client.onlySandbox().files.has(`${E2B_TELEGRAM_FILES}/${file.fileId}--private.txt`)).toBe(false);
+    expect(client.onlySandbox().writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+  });
+
+  it.each([false, true])("rejects a different user's thread before sandbox access (cached: %s)", async (cached) => {
+    const file = await storeWebDescriptor("private.txt", Buffer.from("hello"));
+    const other = await repos.users.ensure({ tgId: 7002, firstName: "Other", lang: "en" });
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    if (cached) {
+      expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(1);
+      fetch.mockClear();
+    }
+    const createCalls = client.createCalls;
+    const connectCalls = client.connectCalls;
+    await expect(runtime.materializeFiles({ userId: other.tg_id, threadId, files: [file] }))
+      .rejects.toThrow("Sandbox thread does not belong to this user");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.createCalls).toBe(createCalls);
+    expect(client.connectCalls).toBe(connectCalls);
+  });
+
+  it("restores only ancestor attachments before the fork boundary", async () => {
+    const before = await storeWebDescriptor("before.txt", Buffer.from("before"));
+    const after = await storeWebDescriptor("after.txt", Buffer.from("after"));
+    await addTelegramDocument(after, Buffer.from("after"));
+    const fork = await repos.threads.create({ userId, topicId: null, title: "Fork", parentThreadId: threadId, forkPointMessageId: before.messageId });
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    const result = await runtime.materializeFiles({ userId, threadId: fork.id, files: [before, after] });
+    expect(result.available).toBe(1);
+    expect(result.files).toEqual([
+      expect.objectContaining({ fileId: before.fileId, status: "available" }),
+      expect.objectContaining({ fileId: after.fileId, path: null }),
+    ]);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(webFileSource(before.fileId, "text/plain"), expect.any(AbortSignal), MAX_FILE_BYTES);
+    expect(client.telegramDownloadCalls).toBe(0);
+  });
+
+  it("propagates cancellation during web fetching and seals the sandbox directory", async () => {
+    const file = await storeWebDescriptor("cancelled.txt", Buffer.from("hello"));
+    await addTelegramDocument(file, Buffer.from("hello"));
+    const controller = new AbortController();
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch").mockImplementationOnce(async () => {
+      controller.abort(new Error("web download cancelled"));
+      return Buffer.from("hello");
+    });
+    await expect(runtime.materializeFiles({ userId, threadId, files: [file], signal: controller.signal }))
+      .rejects.toThrow("web download cancelled");
+    await runtime.dispose();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(client.telegramDownloadCalls).toBe(0);
+    const sandbox = client.onlySandbox();
+    expect(sandbox.writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+    expect(sandbox.controlCommands.some(command => command.includes(`chmod 555 '${E2B_TELEGRAM_FILES}'`))).toBe(true);
+  });
+
+  it("propagates a standalone web AbortError without Telegram fallback", async () => {
+    const file = await storeWebDescriptor("cancelled.txt", Buffer.from("hello"));
+    await addTelegramDocument(file, Buffer.from("hello"));
+    const cancellation = new Error("web fetch cancelled");
+    cancellation.name = "AbortError";
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch").mockRejectedValueOnce(cancellation);
+
+    await expect(runtime.materializeFiles({ userId, threadId, files: [file] })).rejects.toBe(cancellation);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(client.telegramDownloadCalls).toBe(0);
+    const sandbox = client.onlySandbox();
+    expect(sandbox.writeFileCalls.filter(call => call.path.includes("/restore-"))).toEqual([]);
+    expect(sandbox.controlCommands.some(command => command.includes(`chmod 555 '${E2B_TELEGRAM_FILES}'`))).toBe(true);
+  });
+
+  it.each([true, false])("distinguishes staging control cancellation from recoverable failure (cancelled: %s)", async (cancelled) => {
+    const bytes = Buffer.from("hello");
+    const file = await storeWebDescriptor("staging.txt", bytes);
+    await addTelegramDocument(file, bytes);
+    await runtime.materializeFiles({ userId, threadId, files: [] });
+    const sandbox = client.onlySandbox();
+    const failure = new Error("staging command interrupted");
+    if (cancelled) failure.name = "AbortError";
+    const run = sandbox.run.bind(sandbox);
+    let interrupted = false;
+    vi.spyOn(sandbox, "run").mockImplementation(async (...args) => {
+      if (!interrupted && args[0].includes("/restore-") && args[0].includes("mv -f")) {
+        interrupted = true;
+        throw failure;
+      }
+      return run(...args);
+    });
+
+    const restoration = runtime.materializeFiles({ userId, threadId, files: [file] });
+    if (cancelled) {
+      await expect(restoration).rejects.toBe(failure);
+      expect(client.telegramDownloadCalls).toBe(0);
+      expect(sandbox.files.has(`${E2B_TELEGRAM_FILES}/${file.fileId}--staging.txt`)).toBe(false);
+    } else {
+      expect((await restoration).available).toBe(1);
+      expect(client.telegramDownloadCalls).toBe(1);
+      expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${file.fileId}--staging.txt`)).toEqual(bytes);
+    }
+    await runtime.dispose();
+    expect([...sandbox.files.keys()].some(name => name.includes("/restore-"))).toBe(false);
+    expect(sandbox.controlCommands.some(command => command.includes(`chmod 555 '${E2B_TELEGRAM_FILES}'`))).toBe(true);
+  });
+
+  it("keeps adapter failure details out of the sandbox index and persisted restore status", async () => {
+    const file = await storeWebDescriptor("unavailable.txt", Buffer.from("hello"));
+    vi.spyOn(WebFileSourceAdapter.prototype, "fetch").mockRejectedValueOnce(new Error("private-db-detail-and-credentials"));
+    expect((await runtime.materializeFiles({ userId, threadId, files: [file] })).available).toBe(0);
+    const sandbox = client.onlySandbox();
+    expect(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`)).not.toContain("private-db-detail-and-credentials");
+    expect(JSON.stringify(await repos.sandboxFileRestores.listForSandbox(config.E2B_DEPLOYMENT_ID, sandbox.id)))
+      .not.toContain("private-db-detail-and-credentials");
+  });
+
+  it("cleans partial web staging and seals the directory when a write is cancelled", async () => {
+    const file = await storeWebDescriptor("cancelled.txt", Buffer.from("hello"));
+    await runtime.materializeFiles({ userId, threadId, files: [] });
+    const sandbox = client.onlySandbox();
+    const controller = new AbortController();
+    const writeFile = sandbox.writeFile.bind(sandbox);
+    vi.spyOn(sandbox, "writeFile").mockImplementation(async (...args) => {
+      await writeFile(...args);
+      if (args[0].includes("/restore-")) {
+        controller.abort(new Error("web staging cancelled"));
+        throw controller.signal.reason;
+      }
+    });
+    await expect(runtime.materializeFiles({ userId, threadId, files: [file], signal: controller.signal }))
+      .rejects.toThrow("web staging cancelled");
+    await runtime.dispose();
+    expect([...sandbox.files.keys()].some(name => name.includes("/restore-"))).toBe(false);
+    expect(sandbox.files.has(`${E2B_TELEGRAM_FILES}/${file.fileId}--cancelled.txt`)).toBe(false);
+    expect(sandbox.controlCommands.at(-1)).toContain(`chmod 555 '${E2B_TELEGRAM_FILES}'`);
   });
 
   it("ignores traversal names read from a tampered sandbox index", async () => {
@@ -1053,7 +1388,7 @@ describe("thread E2B runtime manager", () => {
     await expect(repos.files.listSources(second.id)).resolves.toHaveLength(1);
   });
 
-  it("accepts a Telegram-reencoded outbound photo as best-effort recovery", async () => {
+  it.each([false, true])("accepts a Telegram-reencoded outbound photo as best-effort recovery (web failure: %s)", async (webFailure) => {
     const original = Buffer.from("original outbound photo bytes");
     const recovered = Buffer.from("telegram photo");
     const recoveredHash = createHash("sha256").update(recovered).digest("hex");
@@ -1067,6 +1402,11 @@ describe("thread E2B runtime manager", () => {
       size: original.length,
       isInline: false,
     });
+    const fetch = vi.spyOn(WebFileSourceAdapter.prototype, "fetch");
+    if (webFailure) {
+      await repos.files.rememberSource(stored.id, webFileSource(stored.id, "image/jpeg"));
+      fetch.mockRejectedValueOnce(new Error("web read unavailable"));
+    }
     const [telegramRef] = await repos.files.rememberTelegramFileRefs(stored.id, {
       direction: "outbound",
       mediaKind: "photo",
@@ -1092,6 +1432,8 @@ describe("thread E2B runtime manager", () => {
     }]));
 
     const sandbox = client.onlySandbox();
+    expect(fetch).toHaveBeenCalledTimes(webFailure ? 1 : 0);
+    expect(client.telegramDownloadCalls).toBe(1);
     expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${stored.id}--photo.jpg`)).toEqual(recovered);
     const index = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
     expect(index.files[0]).toMatchObject({
@@ -1579,11 +1921,12 @@ describe("thread E2B runtime manager", () => {
     expect(client.onlySandbox().id).toBe(sandboxId);
   });
 
-  function createRuntime(): ThreadE2BSandboxRuntimeManager {
+  function createRuntime(webAdapter = true): ThreadE2BSandboxRuntimeManager {
     return new ThreadE2BSandboxRuntimeManager({
       config,
       repos,
       client,
+      ...(webAdapter ? { webFileSource: new WebFileSourceAdapter(db.db) } : {}),
       downloadTelegramBytes: async (fileId) => {
         client.telegramDownloadCalls += 1;
         const bytes = client.telegramFiles.get(fileId);
@@ -1591,6 +1934,32 @@ describe("thread E2B runtime manager", () => {
         return bytes;
       },
     });
+  }
+
+  async function addTelegramDocument(file: SandboxThreadFile, bytes: Buffer, size: number | null = bytes.length): Promise<void> {
+    const telegramFileId = `tg-backup-${file.fileId}`;
+    const refs = await repos.files.rememberTelegramFileRefs(file.fileId, {
+      direction: "outbound", mediaKind: "document", refs: [{ fileId: telegramFileId, size, primary: true }],
+    });
+    file.telegramRefs = refs.map(ref => ({
+      id: ref.id, telegramFileId: ref.telegram_file_id, telegramSize: ref.telegram_size,
+      direction: ref.direction, mediaKind: ref.media_kind, isPrimary: ref.is_primary === 1, lastSeenAt: ref.last_seen_at,
+    }));
+    client.telegramFiles.set(telegramFileId, bytes);
+  }
+
+  async function storeWebDescriptor(name: string, bytes: Buffer, scope = { userId, threadId }): Promise<SandboxThreadFile> {
+    const message = await repos.messages.insert({ threadId: scope.threadId, role: "user", content: [], textPlain: "attachment" });
+    const file = await repos.files.insertFile({
+      ...scope, messageId: message.id, type: "txt", name, size: bytes.length,
+      mimeType: "text/plain", contentSha256: createHash("sha256").update(bytes).digest("hex"), isInline: false,
+    });
+    await repos.files.rememberSource(file.id, webFileSource(file.id, "text/plain"));
+    await db.db.execute(sql`insert into web_file_blobs(file_id, bytes) values (${file.id}, ${bytes})`);
+    return {
+      fileId: file.id, messageId: file.message_id, name: file.name, mimeType: file.mime_type,
+      expectedSize: file.size, expectedSha256: file.content_sha256, telegramRefs: [],
+    };
   }
 });
 

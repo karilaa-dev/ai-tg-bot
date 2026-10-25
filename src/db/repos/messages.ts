@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import { createTextSearch, messageScopePredicate, type MessageSearchScope } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
+import { lockThreadTransaction } from "../threadLock.js";
 
 export class MessagesRepo {
   constructor(private readonly db: SqlExecutor) {}
@@ -17,6 +18,7 @@ export class MessagesRepo {
     piEntryId?: string | null;
   }): Promise<MessageRow> {
     return this.db.transaction(async (tx) => {
+      await lockThreadTransaction(tx, input.threadId);
       const inserted = await insertReturning<MessageRow>(
         tx,
         sql`

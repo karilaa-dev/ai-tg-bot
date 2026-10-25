@@ -1,4 +1,5 @@
 import { parse } from "csv-parse/sync";
+import { isUtf8 } from "node:buffer";
 import type { AppConfig } from "../config.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
@@ -13,7 +14,7 @@ const APPROX_CHARS_PER_TOKEN = 4;
 const FILE_SUMMARY_MAX_CHARS = 180;
 const OUTLINE_PREVIEW_HEADINGS = 5;
 
-export type AcceptedFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "audio";
+export type AcceptedFileType = FileRow["type"];
 type FileIngestStage = "extracting" | "indexing";
 export interface FileIngestProgress {
   stage: FileIngestStage;
@@ -22,15 +23,21 @@ export interface FileIngestProgress {
 }
 type FileIngestStageReporter = (progress: FileIngestProgress) => void | Promise<void>;
 
-export function classifyFile(name: string, mime = ""): AcceptedFileType | "legacy-doc" | null {
-  if (/\.doc$/i.test(name)) return "legacy-doc";
-  if (/\.csv$/i.test(name) || mime === "text/csv") return "csv";
-  if (/\.txt$/i.test(name) || /^text\//.test(mime)) return "txt";
+export function classifyFile(name: string, mime = "", bytes?: Uint8Array): AcceptedFileType {
+  mime = mime.split(";", 1)[0]!.trim().toLowerCase();
+  if (/\.doc$/i.test(name)) return "other";
   if (/\.pdf$/i.test(name) || mime === "application/pdf") return "pdf";
   if (/\.docx$/i.test(name) || mime.includes("wordprocessingml.document")) return "docx";
   if (/\.(jpe?g|png|webp)$/i.test(name) || /^image\/(jpeg|png|webp)$/.test(mime)) return "image";
   if (audioFormat(name, mime)) return "audio";
-  return null;
+  const textType = /\.csv$/i.test(name) || mime === "text/csv" ? "csv"
+    : /\.txt$/i.test(name) || /^text\//.test(mime) ? "txt" : undefined;
+  if (textType && (!bytes || isTextBytes(bytes))) return textType;
+  return "other";
+}
+
+function isTextBytes(bytes: Uint8Array): boolean {
+  return isUtf8(bytes) && !bytes.some(byte => byte < 9 || byte === 11 || (byte > 13 && byte < 32) || byte === 127);
 }
 
 interface FileIngestInput {
@@ -39,6 +46,7 @@ interface FileIngestInput {
   userId: number;
   threadId: number;
   messageId?: number | null;
+  requireMessage?: boolean;
   contentSha256?: string | null;
   bytes: Buffer | Uint8Array;
   name: string;
@@ -68,8 +76,7 @@ interface FileRefreshInput {
 }
 
 export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
-  const type = classifyFile(input.name, input.mime);
-  if (!type || type === "legacy-doc") throw new Error(`unsupported file type: ${type ?? "unknown"}`);
+  const type = classifyFile(input.name, input.mime, input.bytes);
   const startedAt = Date.now();
   input.logger?.info("file ingest starting", {
     name: input.name,
@@ -85,6 +92,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       userId: input.userId,
       threadId: input.threadId,
       messageId: input.messageId ?? null,
+      requireMessage: input.requireMessage,
       contentSha256: input.contentSha256 ?? sha256Hex(bytes),
       mimeType: input.mime ?? null,
       type,
@@ -101,13 +109,14 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   }
-  if (type === "pdf" || type === "docx" || type === "audio") {
+  if (type === "pdf" || type === "docx" || type === "audio" || type === "other") {
     throwIfAborted(input.signal);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
     const file = await input.repo.insertFile({
       userId: input.userId,
       threadId: input.threadId,
       messageId: input.messageId ?? null,
+      requireMessage: input.requireMessage,
       contentSha256: input.contentSha256 ?? sha256Hex(bytes),
       mimeType: input.mime ?? null,
       extractionStatus: "source_only",
@@ -117,7 +126,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       summary: sourceFileSummary(type),
       isInline: false,
     });
-    input.logger?.info("sandbox document registered", {
+    input.logger?.info("file source registered", {
       fileId: file.id,
       name: input.name,
       type,
@@ -209,9 +218,9 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
 }
 
 export async function refreshExtractedFileBytes(input: FileRefreshInput): Promise<FileRow> {
-  const type = classifyFile(input.file.name, input.mime ?? input.file.mime_type ?? "");
-  if (!type || type === "legacy-doc" || type !== input.file.type) {
-    throw new Error(`File #${input.file.id} cannot be re-extracted as ${type ?? "unknown"}.`);
+  const type = classifyFile(input.file.name, input.mime ?? input.file.mime_type ?? "", input.bytes);
+  if (type !== input.file.type) {
+    throw new Error(`File #${input.file.id} cannot be re-extracted as ${type}.`);
   }
   const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
   const contentSha256 = sha256Hex(bytes);
@@ -228,7 +237,7 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  if (type === "pdf" || type === "docx" || type === "audio") {
+  if (type === "pdf" || type === "docx" || type === "audio" || type === "other") {
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
       mimeType: input.mime ?? input.file.mime_type,
@@ -285,6 +294,7 @@ function baseFileFields(
     userId: input.userId,
     threadId: input.threadId,
     messageId: input.messageId ?? null,
+    requireMessage: input.requireMessage,
     contentSha256,
     mimeType: input.mime ?? null,
     type,
@@ -326,6 +336,9 @@ export function cardForFile(
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
   if (file.type === "audio") return `${marker} Audio file #${file.id}: ${displayName}. Use transcribe_audio with file_id: ${file.id}.`;
+  if (file.type === "other") {
+    return `${marker} File #${file.id}: ${displayName} (${file.size} bytes, original file). Use materialize_chat_files to access the original bytes in the sandbox.`;
+  }
   if (file.extraction_status === "source_only") {
     return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "docx-cli"}.`;
   }
@@ -371,7 +384,8 @@ async function contentFor(
   throw new Error(`${type} content must be inspected in the sandbox`);
 }
 
-export function sourceFileSummary(type: "pdf" | "docx" | "audio"): string {
+export function sourceFileSummary(type: "pdf" | "docx" | "audio" | "other"): string {
+  if (type === "other") return "Original file available through materialize_chat_files in the sandbox.";
   if (type === "audio") return "Original audio available for transcribe_audio.";
   return type === "pdf"
     ? "Original PDF available for PDF Inspector or model vision in the sandbox."

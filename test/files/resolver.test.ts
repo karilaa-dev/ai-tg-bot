@@ -152,6 +152,19 @@ describe("transport-neutral file resolver", () => {
     await expect(resolver.resolveFile(file)).rejects.toThrow(`File #${file.id} has no durable source`);
   });
 
+  it.each(["wrong size", "wrong hash"])("rejects corrupted canonical web bytes (%s)", async (corruption) => {
+    const expected = Buffer.from("remote content");
+    const file = await insertFile(repos, 907, "original.bin", createHash("sha256").update(expected).digest("hex"));
+    await repos.files.rememberSource(file.id, {
+      transport: "web", connectionKey: "default", remoteKey: String(file.id), locator: {},
+    });
+    const resolver = createResolver(repos);
+    resolver.registry.register({ transport: "web", connectionKey: "default",
+      fetch: async () => corruption === "wrong size" ? Buffer.from("short") : Buffer.alloc(expected.length),
+    });
+    await expect(resolver.resolveFile(file)).rejects.toThrow(corruption === "wrong size" ? "size mismatch" : "hash mismatch");
+  });
+
   it("keeps the first file canonical when the same remote source is claimed twice", async () => {
     const user = await repos.users.ensure({ tgId: 904, firstName: "Canonical", lang: "en" });
     const thread = await repos.threads.activeForUserTopic(user.tg_id, null);

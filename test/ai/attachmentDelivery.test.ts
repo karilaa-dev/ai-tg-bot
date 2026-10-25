@@ -1,4 +1,5 @@
 import { GrammyError, InputFile } from "grammy";
+import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { describe, expect, it, vi } from "vitest";
 import { buildFinalThinkingSummary } from "../../src/ai/agentTurnEngine.js";
 import { normalizeTelegramAttachmentDeliveries, refreshFinalThinkingVisible, sendCreatedFileAttachments, sendFinal } from "../../src/ai/responseDelivery.js";
@@ -502,7 +503,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     const attachments = Array.from({ length: 4 }, (_, index) =>
-      imageAttachment(index + 1, `${index + 1}.jpg`, 20 * 1024 * 1024));
+      imageAttachment(index + 1, `${index + 1}.jpg`, MAX_FILE_BYTES));
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, attachments);
 

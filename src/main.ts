@@ -1,6 +1,8 @@
 import { startWebServer } from "./web/server.js";
 import { ConversationRepository } from "./web/repository.js";
 import { CodexLoginManager } from "./web/codex-login.js";
+import { BotChatService } from "./web/chat-service.js";
+import { WebFileSourceAdapter } from "./web/file-source.js";
 import type { BotServices } from "./bot/context.js";
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
@@ -12,6 +14,7 @@ import { createRepos } from "./db/repos/index.js";
 import { createLogger, type Logger } from "./logger.js";
 import { PiRuntimeManager } from "./pi/runtime.js";
 import { ThreadE2BSandboxRuntimeManager } from "./e2b/threadRuntimeManager.js";
+import { checkManagedE2BTemplate } from "./e2b/templateNotFound.js";
 import type { ThreadTurnCoordinator } from "./ai/threadTurnCoordinator.js";
 
 const config = loadConfig();
@@ -29,16 +32,23 @@ logger.info("bot process starting", {
   model: config.CODEX_MODEL,
   fallbackModel: config.OPENROUTER_MAIN_MODEL,
 });
+if (process.env.WEB_ADMIN_TOKEN && config.WEB_ENABLED) {
+  logger.warn("WEB_ADMIN_TOKEN is no longer used; admins sign in with Telegram. List their IDs in WEB_ADMIN_USER_IDS.", {
+    adminUserIds: config.WEB_ADMIN_USER_IDS.length,
+  });
+}
 
 try {
   logger.debug("initializing database");
   await db.initialize();
+  await checkManagedE2BTemplate(config, logger);
   await checkConfiguredBrowserUse(config, logger);
   const repos = createRepos(db.db, db.search);
   sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
     repos,
     logger,
+    webFileSource: new WebFileSourceAdapter(db.db),
   });
   pi = new PiRuntimeManager({ config, db, repos, logger, commandRuntime: sandboxRuntime });
   await pi.initialize();
@@ -58,7 +68,12 @@ try {
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
   await bot.init();
-  web = await startWebServer({ development: process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, bot.botInfo.id), fileResolver: services.fileResolver, logger, codexLogin });
+  const repository = new ConversationRepository(db.db, repos, bot.botInfo.id);
+  web = await startWebServer({
+    development: process.argv.includes("--web-dev"), config, repository,
+    fileResolver: services.fileResolver, logger, codexLogin,
+    chat: { service: new BotChatService({ services, repository, api: bot.api }), botUsername: bot.botInfo.username },
+  });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });

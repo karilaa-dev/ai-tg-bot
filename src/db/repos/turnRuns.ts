@@ -3,6 +3,7 @@ import { messageScopePredicate, type TextSearch } from "../search.js";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import { messageSearchScopesForChain } from "./messages.js";
 import { ThreadsRepo } from "./threads.js";
+import { lockThreadTransaction } from "../threadLock.js";
 import type {
   Locale,
   MessageKind,
@@ -46,6 +47,7 @@ interface TurnAcceptanceInput {
   content: unknown;
   textPlain: string;
   sources: TelegramTurnSource[];
+  webRequestId?: string;
   attachments?: DurableTurnAttachment[];
   signal?: AbortSignal;
 }
@@ -74,18 +76,24 @@ export class TurnRunsRepo {
     input.signal?.throwIfAborted();
     const sources = uniqueSources(input.sources);
     const attachments = uniqueAttachments(input.attachments ?? []);
-    if (!sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
+    const web = input.webRequestId !== undefined;
+    if (!web && !sources.length) throw new Error("A durable turn requires at least one Telegram update source.");
+    if (web && (sources.length || !/^[a-zA-Z0-9_-]{16,128}$/.test(input.webRequestId!))) throw new Error("Invalid web turn source.");
     const observedOwnedUpdateIds = new Set<number>();
     let accepted: AcceptedTurnRun;
     try {
       accepted = await this.db.transaction(async (tx) => {
         await lockThreadTransaction(tx, input.threadId);
         input.signal?.throwIfAborted();
+        if (web) {
+          const duplicate = await new TurnRunsRepo(tx, this.search).webRequest(input.userId, input.threadId, input.webRequestId!);
+          if (duplicate) return duplicate;
+        }
         const mappings = await existingSourceMappings(tx, sources.map((source) => source.updateId));
         for (const mapping of mappings) observedOwnedUpdateIds.add(mapping.telegram_update_id);
         const ownedUpdateIds = new Set(mappings.map((mapping) => mapping.telegram_update_id));
         const acceptedSources = sources.filter((source) => !ownedUpdateIds.has(source.updateId));
-        if (!acceptedSources.length) {
+        if (!web && !acceptedSources.length) {
           const duplicate = await existingTurnForMappings(tx, mappings);
           if (!duplicate) throw new Error("Duplicate Telegram sources have no owning turn.");
           const userMessage = await queryOne<MessageRow>(tx, sql`select * from messages where id = ${duplicate.user_message_id}`);
@@ -101,7 +109,7 @@ export class TurnRunsRepo {
           return { turnRun: duplicate, userMessage, created: false, queuedBehind: false };
         }
 
-        const acceptedPayload = turnPayloadForSources(input, acceptedSources);
+        const acceptedPayload = web ? input : turnPayloadForSources(input, acceptedSources);
         const now = Date.now();
         const userMessage = await insertReturning<MessageRow>(tx, sql`
           insert into messages(thread_id, role, kind, content_json, text_plain, thinking, tg_message_id, pi_entry_id, created_at)
@@ -114,10 +122,10 @@ export class TurnRunsRepo {
         const turnRun = await insertReturning<TurnRunRow>(tx, sql`
           insert into turn_runs(
             user_id, thread_id, user_message_id, chat_id, message_thread_id, locale,
-            status, delivery_status, accepted_at, updated_at
+            status, delivery_status, accepted_at, updated_at, origin, web_request_id
           ) values (
             ${input.userId}, ${input.threadId}, ${userMessage.id}, ${input.chatId}, ${input.messageThreadId}, ${input.locale},
-            'queued', 'pending', ${now}, ${now}
+            'queued', 'pending', ${now}, ${now}, ${web ? "web" : "telegram"}, ${input.webRequestId ?? null}
           ) returning *
         `);
         await tx.execute(sql`insert into turn_activity_sync(turn_run_id) values (${turnRun.id})`);
@@ -194,6 +202,16 @@ export class TurnRunsRepo {
 
   get(id: number): Promise<TurnRunRow | undefined> {
     return queryOne<TurnRunRow>(this.db, sql`select * from turn_runs where id = ${id}`);
+  }
+
+  async webRequest(userId: number, threadId: number, requestId: string): Promise<AcceptedTurnRun | undefined> {
+    const run = await queryOne<TurnRunRow>(this.db, sql`
+      select * from turn_runs where user_id = ${userId} and thread_id = ${threadId} and web_request_id = ${requestId}
+    `);
+    if (!run) return undefined;
+    const message = await queryOne<MessageRow>(this.db, sql`select * from messages where id = ${run.user_message_id}`);
+    if (!message) throw new Error("Web turn references a missing message.");
+    return { turnRun: run, userMessage: message, created: false, queuedBehind: false };
   }
 
   listForThread(threadId: number): Promise<TurnRunRow[]> {
@@ -641,13 +659,4 @@ async function attachFilesToAcceptedMessage(
         caption = excluded.caption
     `);
   }
-}
-
-async function lockThreadTransaction(tx: SqlExecutor, threadId: number): Promise<void> {
-  if (tx.dialect !== "postgres") return;
-  // Acceptance, claims, and operation barriers share this transaction lock,
-  // which gives each thread one cross-process linearization point.
-  await tx.execute(sql`
-    select pg_advisory_xact_lock(938472616, cast(mod(${threadId}, 2147483647) as integer))
-  `);
 }

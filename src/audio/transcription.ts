@@ -2,7 +2,9 @@ import path from "node:path";
 import { z } from "zod";
 import { fileTypeFromBuffer } from "file-type";
 import type { AppConfig } from "../config.js";
-import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
+import { FileTooLargeError } from "../files/limits.js";
+
+export const MAX_TRANSCRIPTION_BYTES = 20 * 1024 * 1024;
 
 export const AudioFormatSchema = z.enum(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"]);
 export type AudioFormat = z.infer<typeof AudioFormatSchema>;
@@ -106,7 +108,7 @@ export async function transcribeAudio(
 ) {
   input.signal?.throwIfAborted();
   if (!input.bytes.length) throw new Error("The audio file is empty.");
-  if (input.bytes.length > MAX_FILE_BYTES) throw new FileTooLargeError("Audio exceeds the 20 MB file size limit.");
+  if (input.bytes.length > MAX_TRANSCRIPTION_BYTES) throw new FileTooLargeError("Audio exceeds the 20 MB file size limit.");
   await detectAudioType(input.bytes, input.format);
   input.signal?.throwIfAborted();
   const deadline = Date.now() + config.TRANSCRIPTION_TIMEOUT_MS;

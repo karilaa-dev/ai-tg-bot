@@ -1,4 +1,5 @@
 import { SandboxConsentRequired } from "../files/source.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
@@ -14,6 +15,7 @@ import { throwIfAborted, raceWithAbort } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { downloadTelegramFile } from "../files/telegram.js";
 import type { Logger } from "../logger.js";
+import type { WebFileSourceAdapter } from "../web/file-source.js";
 import type {
   CommandRuntime,
   PublishWebsiteRequest,
@@ -86,6 +88,7 @@ interface ThreadE2BSandboxRuntimeInput {
   logger?: Logger;
   client?: E2BClient;
   downloadTelegramBytes?: (fileId: string, signal?: AbortSignal) => Promise<Buffer>;
+  webFileSource?: Pick<WebFileSourceAdapter, "fetch">;
 }
 
 export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
@@ -328,6 +331,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     forcePrune = false,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
+    const thread = await this.input.repos.threads.get(scope.threadId);
+    if (thread?.user_id !== scope.userId) throw new Error("Sandbox thread does not belong to this user");
     const previousSync = state.threadFilesSync;
     const filesRevision = threadFilesRevision(files);
     const synchronizationCached = previousSync !== undefined
@@ -560,7 +565,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const refs = await this.input.repos.files.listTelegramFileRefs(
       [...new Set(sources.map((source) => source.file_id))],
     );
-    const telegramBacked = new Set(refs.map((ref) => ref.file_id));
+    const telegramBacked = new Set(refs.filter(ref => ref.is_primary === 1
+      && ref.telegram_size !== null && ref.telegram_size <= TG_DOWNLOAD_MAX_BYTES).map(ref => ref.file_id));
     const byCanonicalPath = new Map<string, typeof sources>();
     for (const source of sources) {
       const canonicalPath = e2bSnapshotPath(source.locator_json);

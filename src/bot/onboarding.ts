@@ -1,5 +1,5 @@
 import type { Conversation } from "@grammyjs/conversations";
-import { formatUtcOffset, offsetFromLocalTime } from "./timezone.js";
+import { canonicalTimeZone, formatUtcOffset, offsetFromLocalTime, zoneOffsetMinutes } from "./timezone.js";
 import type { BotContext } from "./context.js";
 import { ctxLogMeta, optionalLogger } from "./logging.js";
 import { onboardingTimezoneKeyboard } from "./keyboards.js";
@@ -33,6 +33,20 @@ export async function timezoneConversation(conversation: BotConversation, ctx: B
   for (let attempts = 0; attempts < 3; attempts += 1) {
     const answer = await conversation.waitFor("message:text");
     const text = answer.message.text;
+    // A zone name such as Europe/Berlin follows daylight saving; a local time only fixes today's offset.
+    const zone = canonicalTimeZone(text);
+    if (zone) {
+      const zoneOffset = zoneOffsetMinutes(zone);
+      const data = await conversation.external(async (ctx) => {
+        await ctx.services.repos.users.setTimeZoneName(ctx.from!.id, zone, zoneOffset);
+        return markdownReplyData(ctx, ctx.t("tz-direct-set", { label: zone, offset: formatUtcOffset(zoneOffset) }));
+      });
+      optionalLogger(answer)?.info("timezone set", ctxLogMeta(answer, { timeZone: zone }));
+      await replyWithCapturedThreadFallback(answer, data);
+      const ready = await conversation.external((ctx) => markdownReplyData(ctx, ctx.t("onboarding-ready")));
+      await replyWithCapturedThreadFallback(answer, ready);
+      return;
+    }
     const offset = offsetFromLocalTime(text);
     if (offset === null) {
       optionalLogger(answer)?.debug("timezone input rejected", ctxLogMeta(answer, { attempt: attempts + 1 }));

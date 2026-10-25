@@ -1,5 +1,6 @@
 import { Bot, GrammyError, HttpError } from "grammy";
 import { telegramRetry } from "../telegram/retry.js";
+import { silentSends } from "../telegram/silent.js";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import { sequentialize } from "@grammyjs/runner";
 import type { AppConfig } from "../config.js";
@@ -17,7 +18,7 @@ import { languageKeyboard } from "./keyboards.js";
 import { Localizer } from "./i18n.js";
 import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
 import {
   clearInlineKeyboard,
@@ -45,6 +46,7 @@ import type { CommandRuntime } from "../sandbox/types.js";
 import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 import { audioFormat } from "../audio/transcription.js";
 import { showMemories } from "./memory.js";
+import { WebFileSourceAdapter } from "../web/file-source.js";
 
 interface InstallOptions {
   config: AppConfig;
@@ -61,6 +63,7 @@ interface InstallOptions {
 }
 
 const moscowTimezoneOffsetMin = 180;
+const moscowTimeZone = "Europe/Moscow";
 
 export function createBot(options: InstallOptions): Bot<BotContext> {
   const bot = new Bot<BotContext>(options.config.BOT_TOKEN);
@@ -105,6 +108,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     fileResolver.registry.register(new E2BFileSourceAdapter(options.config, options.commandRuntime));
   }
   const threadTitles = new ThreadTitleCoordinator({ repos, pi, logger: options.logger });
+  fileResolver.registry.register(new WebFileSourceAdapter(options.db.db));
   const turnRunner = options.turnRunner ?? runTurn;
   const turnCoordinator = new ThreadTurnCoordinator({
     api: bot.api,
@@ -139,6 +143,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   };
 
   bot.api.config.use(telegramRetry());
+  bot.api.config.use(silentSends());
   bot.use(async (ctx, next) => {
     ctx.services = services;
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);
@@ -147,6 +152,13 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.use(sequentialize<BotContext>(threadSequentializationKey));
   bot.use(privateOnly);
   bot.use(initializeUserAndThread);
+  bot.use(async (ctx, next) => {
+    if (ctx.user && ctx.thread && !ctx.from?.is_bot
+      && ((ctx.message && !isIgnoredServiceMessage(ctx.message)) || ctx.callbackQuery?.message)) {
+      await ctx.services.repos.threadReads.markCurrentRead(ctx.user.tg_id, ctx.thread.id);
+    }
+    await next();
+  });
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
   bot.use(async (ctx, next) => {
@@ -247,8 +259,8 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.callbackQuery("tz:onboarding:moscow", async (ctx) => {
     logCallback(ctx, "timezone:onboarding:moscow");
     if (!ctx.user || !ctx.from) return;
-    await ctx.services.repos.users.setTimezone(ctx.from.id, moscowTimezoneOffsetMin);
-    ctx.user = { ...ctx.user, tz_offset_min: moscowTimezoneOffsetMin };
+    await ctx.services.repos.users.setTimeZoneName(ctx.from.id, moscowTimeZone, moscowTimezoneOffsetMin);
+    ctx.user = { ...ctx.user, tz_name: moscowTimeZone, tz_offset_min: moscowTimezoneOffsetMin };
     await ctx.answerCallbackQuery();
     await clearInlineKeyboard(ctx);
     await replyMarkdownWithThreadFallback(ctx, ctx.t("tz-direct-set", {
@@ -328,7 +340,29 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       parentThreadId: thread.id,
       topicId: fork.topic_id,
     }));
+    if (fork.fork_point_message_id !== null && fork.fork_point_message_id > 0) {
+      await ctx.services.repos.threadReads.markRead(user.tg_id, fork.id, fork.fork_point_message_id);
+    }
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
+  });
+  bot.on(["message:video", "message:animation"], async (ctx) => {
+    const media = ctx.message.video ?? ctx.message.animation;
+    if (!media) return;
+    if ((media.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
+      await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
+      return;
+    }
+    await handleTelegramFile(ctx, {
+      fileId: media.file_id,
+      fileUniqueId: media.file_unique_id,
+      name: media.file_name ?? `${media.file_unique_id}.${media.mime_type === "image/gif" ? "gif" : "mp4"}`,
+      mime: media.mime_type ?? "video/mp4",
+      caption: ctx.message.caption,
+      type: "other",
+      mediaKind: "document",
+      size: media.file_size,
+      mediaGroupId: ctx.message.media_group_id,
+    });
   });
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
@@ -337,7 +371,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       mime: doc.mime_type ?? null,
       size: doc.file_size ?? null,
     }));
-    if ((doc.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((doc.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       ctx.services.logger.warn("document rejected; too large", ctxLogMeta(ctx, {
         name: doc.file_name ?? "file",
         size: doc.file_size ?? null,
@@ -347,16 +381,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     }
     const name = doc.file_name ?? "file";
     const type = classifyFile(name, doc.mime_type ?? "");
-    if (type === "legacy-doc") {
-      ctx.services.logger.info("document rejected; legacy doc unsupported", ctxLogMeta(ctx, { name }));
-      await replyWithThreadFallback(ctx, ctx.t("file-doc-legacy"), threadExtra(ctx.thread));
-      return;
-    }
-    if (!type) {
-      ctx.services.logger.info("document rejected; unsupported type", ctxLogMeta(ctx, { name, mime: doc.mime_type ?? null }));
-      await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
-      return;
-    }
     await handleTelegramFile(ctx, {
       fileId: doc.file_id,
       fileUniqueId: doc.file_unique_id,
@@ -380,7 +404,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     const audio = ctx.message.audio;
     const media = voice ?? audio;
     if (!media) return;
-    if ((media.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((media.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
@@ -407,7 +431,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       width: photo.width,
       height: photo.height,
     }));
-    if ((photo.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((photo.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       ctx.services.logger.warn("photo rejected; too large", ctxLogMeta(ctx, { size: photo.file_size ?? null }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;

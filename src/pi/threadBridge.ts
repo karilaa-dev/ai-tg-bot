@@ -112,7 +112,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
     const fileIds = await this.repos.files.listRecoverableIds(this.visibilityScope.fileIds);
     const [turnSystemPrompt, turnSessionContext] = await Promise.all([
-      renderSystemPrompt({ user: this.user, config: this.config }),
+      renderSystemPrompt({ user: this.user, thread: this.thread, config: this.config }),
       renderThreadSessionContext({
         repos: this.repos,
         user: this.user,

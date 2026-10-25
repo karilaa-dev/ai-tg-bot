@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import type { CreatedFileAttachment } from "./types.js";
 import { raceWithAbort } from "./cancel.js";
+import { MAX_FILE_BYTES } from "./limits.js";
 
-export const OUTGOING_BUFFER_BYTES = 40 * 1024 * 1024;
+export const OUTGOING_BUFFER_BYTES = 2 * MAX_FILE_BYTES;
 const FILE_PREPARATION_WORKERS = 2;
 
 interface OutgoingReservation {

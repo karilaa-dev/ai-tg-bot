@@ -14,11 +14,11 @@ tz-ask =
     🕒 *Set timezone*
 
     What time is it for you right now?
-    Example: `14:30` or `2:30 PM`
+    Example: `14:30` or `2:30 PM`. You can also send a time zone name like `Europe/Berlin`.
 tz-bad-format =
     ⚠️ *I could not parse that time.*
 
-    Send it like `14:30` or `2:30 PM`.
+    Send it like `14:30` or `2:30 PM`, or a time zone name like `Europe/Berlin`.
 tz-set =
     ✅ *Timezone saved*
 

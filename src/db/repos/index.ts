@@ -10,6 +10,7 @@ import { BrowserUseProfilesRepo } from "./browserUseProfiles.js";
 import { TurnRunsRepo } from "./turnRuns.js";
 import { TurnActivityRepo } from "./turnActivity.js";
 import { AudioTranscriptsRepo } from "./audioTranscripts.js";
+import { ThreadReadsRepo } from "./threadReads.js";
 
 export interface Repos {
   users: UsersRepo;
@@ -22,6 +23,7 @@ export interface Repos {
   turnRuns: TurnRunsRepo;
   turnActivity: TurnActivityRepo;
   audioTranscripts: AudioTranscriptsRepo;
+  threadReads: ThreadReadsRepo;
 }
 
 export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
@@ -36,5 +38,6 @@ export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
     turnRuns: new TurnRunsRepo(db, search),
     turnActivity: new TurnActivityRepo(db),
     audioTranscripts: new AudioTranscriptsRepo(db),
+    threadReads: new ThreadReadsRepo(db),
   };
 }

@@ -220,28 +220,39 @@ describe("create_file", () => {
     expect(await repos.files.listForThreads([thread.id])).toHaveLength(0);
   });
 
-  it("blocks an executable extension before a long file name is truncated", async () => {
+  it.each([
+    ["program.exe", "application/x-msdownload", "4d5a0000ff"],
+    ["program", "application/x-executable", "7f454c4600ff"],
+    ["module.wasm", "application/wasm", "0061736d01000000"],
+    ["library.dylib", "application/x-mach-binary", "feedfacf0000ff"],
+    ["archive.zip", "application/zip", "504b030400ff"],
+    ["clip.mp4", "video/mp4", "00000018667479706d703432"],
+    ["unknown.data", "application/octet-stream", "00ff80"],
+  ])("queues %s as a document with a durable opaque source", async (name, mime, hex) => {
     const config = loadTestConfig();
-    const user = await repos.users.ensure({ tgId: 803, firstName: "Blocked", lang: "en" });
+    const user = await repos.users.ensure({ tgId: 803, firstName: "Files", lang: "en" });
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Files" });
-    const bytes = Buffer.from("zip container without executable magic");
+    const bytes = Buffer.from(hex, "hex");
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const createdFiles: CreatedFileAttachment[] = [];
     const tool = createCreateFileTool({
       config,
       db,
       repos,
       user,
       thread,
-      createdFiles: [],
+      createdFiles,
       commandRuntime: fileRuntime(bytes, contentSha256),
     });
 
     await expect(tool.execute({
-      path: "/photo.jpg",
-      name: `${"a".repeat(200)}.jar`,
-      delivery: "document",
-    })).resolves.toMatchObject({ error: expect.stringContaining("blocked executable file type: .jar") });
-    expect(await repos.files.listForThreads([thread.id])).toHaveLength(0);
+      path: `/${name}`, name, mime, delivery: "auto",
+    })).resolves.toMatchObject({ type: "other", name, size: bytes.length });
+    expect(createdFiles).toMatchObject([{ type: "other", delivery: "document", data: bytes }]);
+    const stored = (await repos.files.listForThreads([thread.id]))[0]!;
+    expect(stored).toMatchObject({ extraction_status: "source_only", content_md: null, is_inline: 0, content_sha256: contentSha256 });
+    expect(await repos.files.listSources(stored.id)).toMatchObject([{ transport: "e2b", remote_key: expect.stringContaining(contentSha256) }]);
+    expect(createdFiles[0]?.card).toContain("materialize_chat_files");
   });
 });
 

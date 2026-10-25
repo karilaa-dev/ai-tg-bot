@@ -27,6 +27,8 @@ interface UsersTable {
   username: string | null;
   lang: Locale;
   tz_offset_min: number | null;
+  /** IANA time zone; when set it decides the offset, including daylight saving. */
+  tz_name: string | null;
   stream_mode: number;
   memory_enabled: number;
   created_at: number;
@@ -34,6 +36,7 @@ interface UsersTable {
 
 interface ThreadsTable {
   id: number;
+  origin: "telegram" | "web";
   user_id: number;
   topic_id: number | null;
   parent_thread_id: number | null;
@@ -63,6 +66,8 @@ interface MessagesTable {
 
 interface TurnRunsTable {
   id: number;
+  origin: "telegram" | "web";
+  web_request_id: string | null;
   user_id: number;
   thread_id: number;
   user_message_id: number;

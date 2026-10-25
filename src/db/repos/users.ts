@@ -38,8 +38,14 @@ export class UsersRepo {
     await this.db.execute(sql`update users set lang = ${lang} where tg_id = ${tgId}`);
   }
 
+  /** A bare offset, such as one worked out from the user's local time; it replaces any named zone. */
   async setTimezone(tgId: number, offset: number): Promise<void> {
-    await this.db.execute(sql`update users set tz_offset_min = ${offset} where tg_id = ${tgId}`);
+    await this.db.execute(sql`update users set tz_offset_min = ${offset}, tz_name = null where tg_id = ${tgId}`);
+  }
+
+  /** A named IANA zone; the offset column keeps its current value for readers that only know offsets. */
+  async setTimeZoneName(tgId: number, timeZone: string, offset: number): Promise<void> {
+    await this.db.execute(sql`update users set tz_name = ${timeZone}, tz_offset_min = ${offset} where tg_id = ${tgId}`);
   }
 
   async toggleStream(tgId: number): Promise<UserRow> {

@@ -8,20 +8,17 @@ import { RichText } from "../../src/web/client/rich-text.js";
 import { ThinkingDetails } from "../../src/web/client/thinking-details.js";
 import { MessageUsage, UsageGraphs, TokenBreakdown, FastModeSummary, UsageCalls } from "../../src/web/client/usage.js";
 import { emptyUsage } from "../../src/web/usage.js";
-import { AdminGate, LoginForm } from "../../src/web/client/auth.js";
+import { AdminGate } from "../../src/web/client/auth.js";
 import { trustedVerificationUri } from "../../src/web/client/codex-connection.js";
 import { apiFetch, SESSION_EXPIRED_EVENT } from "../../src/web/client/api.js";
 
-it("expires the workspace for private request failures without treating an incorrect sign-in token as session expiry", async () => {
+it("rechecks the admin session when a private request is no longer signed in", async () => {
   const dispatchEvent = vi.fn();
   vi.stubGlobal("window", { dispatchEvent });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
   try {
     await expect(apiFetch("/api/threads/1/files/2")).rejects.toMatchObject({ status: 401 });
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(SESSION_EXPIRED_EVENT);
-    dispatchEvent.mockClear();
-    await expect(apiFetch("/api/auth/login", { method: "POST" })).rejects.toMatchObject({ status: 401 });
-    expect(dispatchEvent).not.toHaveBeenCalled();
   } finally { vi.unstubAllGlobals(); }
 });
 
@@ -40,14 +37,10 @@ it("sends the admin mutation guard alongside explicit sandbox consent", async ()
 });
 
 it("does not render private workspace content before the admin session is checked", () => {
-  const privateContent = vi.fn(() => createElement("div", null, "private conversation"));
-  const html = renderToStaticMarkup(createElement(AdminGate, { children: privateContent }));
-  expect(privateContent).not.toHaveBeenCalled();
+  const html = renderToStaticMarkup(createElement(AdminGate, null, createElement("div", null, "private conversation")));
   expect(html).not.toContain("private conversation");
   expect(html).toContain("Checking your session");
-  const login = renderToStaticMarkup(createElement(LoginForm, { onSuccess: () => {} }));
-  expect(login).toContain('type="password"');
-  expect(login).toMatch(/autocomplete="current-password"/i);
+  expect(html).not.toContain("<input");
 });
 
 it("only links device authorization to the trusted HTTPS OpenAI login host", () => {

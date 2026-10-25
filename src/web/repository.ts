@@ -3,11 +3,12 @@ import type { SqlExecutor } from "../db/sql.js";
 import { valueList } from "../db/sql.js";
 import type { Repos } from "../db/repos/index.js";
 import { messageSearchScopesForChain } from "../db/repos/messages.js";
-import { messageScopePredicate } from "../db/search.js";
+import { messageScopePredicate, type MessageSearchScope } from "../db/search.js";
 import type { MessageRow, ThreadRow } from "../db/types.js";
-import type { WebPage, WebThread, WebThreadActivity, WebUser } from "./types.js";
+import type { WebThread, WebThreadActivity, WebUser, WebPage } from "./types.js";
+import type { ChatThread } from "./chat-types.js";
 
-import { messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
+import { attachmentDeliveryTurnId, messageView, type SavedAttachment, type SavedTranscript } from "./message-view.js";
 import { UsageRepository, type UsageScope } from "./usage.js";
 import type { UsagePricing } from "./usage-pricing.js";
 import { refreshPostgresUserSearch } from "../db/userSearch.js";
@@ -72,39 +73,52 @@ export class ConversationRepository {
     return { ...await readUserMemories(this.db, userId, offset, 50), user, enabled: owner?.memory_enabled === 1 };
   }
 
-  async threads(userId: number, offset: number, limit = 50): Promise<WebPage<WebThread>> {
+  async threads(userId: number, offset: number, limit = 50, search = ""): Promise<WebPage<ChatThread>> {
     await this.user(userId);
+    const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+    const lower = (value: ReturnType<typeof sql>) => this.db.dialect === "sqlite" ? sql`unicode_lower(${value})` : sql`lower(${value})`;
+    const ancestry = search ? sql`with recursive visible_threads(root_id, source_id, max_message_id, depth) as (
+      select id, id, cast(null as bigint), 0 from threads where user_id = ${userId}
+      union all
+      select v.root_id, parent.id,
+        case when v.max_message_id is null or child.fork_point_message_id < v.max_message_id
+          then child.fork_point_message_id else v.max_message_id end,
+        v.depth + 1
+      from visible_threads v join threads child on child.id = v.source_id
+      join threads parent on parent.id = child.parent_thread_id and parent.user_id = ${userId}
+      where child.fork_point_message_id is not null and v.depth < 999
+    )` : sql``;
+    const matches = search ? sql`and (${lower(sql`t.title`)} like ${pattern} escape ${"\\"}
+      or exists (select 1 from visible_threads v join messages m on m.thread_id = v.source_id
+        where v.root_id = t.id and (v.max_message_id is null or m.id <= v.max_message_id)
+        and m.role in ('user', 'assistant') and ${lower(sql`m.text_plain`)} like ${pattern} escape ${"\\"}))` : sql``;
     const rows = await this.db.query<ThreadRow & { lastActivity: number }>(sql`
+      ${ancestry}
       select t.*, coalesce((select max(m.created_at) from messages m where m.thread_id = t.id), t.created_at) as "lastActivity"
-      from threads t where t.user_id = ${userId}
+      from threads t where t.user_id = ${userId} ${matches}
       order by "lastActivity" desc, t.id desc limit ${limit + 1} offset ${offset}
     `);
     const activities = await this.threadActivities(rows.map(row => row.id));
-    return page(rows.map(row => threadView(row, activities.get(row.id))), offset, limit);
+    const reads = await this.repos.threadReads.states(userId, rows.map(row => row.id));
+    return page(rows.map(row => ({ ...threadView(row, activities.get(row.id)),
+      origin: row.origin, topicId: row.topic_id,
+      unread: reads.get(row.id)?.unread ?? false, lastMessageId: reads.get(row.id)?.lastMessageId ?? null,
+    })), offset, limit);
   }
 
   async scope(threadId: number) {
     const thread = await this.repos.threads.get(threadId);
     if (!thread || thread.user_id === this.botUserId) throw new WebNotFound();
-    // Bound traversal and require every ancestor to belong to the same user.
-    const chain: ThreadRow[] = [thread];
-    const seen = new Set([thread.id]);
-    let current = thread;
-    while (current.parent_thread_id !== null) {
-      if (seen.has(current.parent_thread_id) || chain.length >= 1000) throw new Error("Invalid thread ancestry");
-      const parent = await this.repos.threads.get(current.parent_thread_id);
-      if (!parent || parent.user_id !== thread.user_id || current.fork_point_message_id === null) break;
-      seen.add(parent.id);
-      chain.push(parent);
-      current = parent;
-    }
-    chain.reverse();
+    const chain = await this.repos.threads.chain(thread);
     const scopes = messageSearchScopesForChain(chain);
     return { thread, chain, scopes };
   }
 
   async history(threadId: number, before?: number, after?: number) {
     const { thread, chain, scopes } = await this.scope(threadId);
+    // Capture the acknowledgement bound before rendering. A delivery that
+    // completes during projection must be acknowledged on a subsequent read.
+    const reads = (await this.repos.threadReads.states(thread.user_id, [threadId])).get(threadId);
     const rows = await this.db.query<MessageRow>(sql`
       select * from messages where ${messageScopePredicate(sql`thread_id`, sql`id`, chain.map(t => t.id), scopes)}
       ${before === undefined ? sql`` : sql`and id < ${before}`}
@@ -114,15 +128,29 @@ export class ConversationRepository {
     const hasMore = rows.length > 50;
     const selected = rows.slice(0, 50);
     if (after === undefined) selected.reverse();
-    const attachments = await this.attachments(selected.map(m => m.id));
+    const attachments = await this.attachments(selected.map(m => m.id), scopes);
     const transcripts = selected.some(m => m.text_plain.includes("[Audio transcript preview;"))
       ? await this.savedTranscripts(selected.map(m => m.id)) : [];
-    const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts));
-    const usage = await this.usage.messages(selected.filter(m => m.role === "assistant").map(m => m.id));
-    for (const message of messages) if (message.role === "assistant") message.usage = usage.get(message.id) ?? null;
+    const pendingTurnIds = selected.flatMap(m => attachmentDeliveryTurnId(m) ?? []);
+    const delivering = pendingTurnIds.length ? await this.db.query<{ id: number; thread_id: number }>(sql`
+      select id, thread_id from turn_runs where id in (${valueList(pendingTurnIds)})
+        and status in ('running', 'awaiting_delivery') and lease_expires_at > ${Date.now()}
+    `) : [];
+    const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts,
+      delivering.some(run => run.id === attachmentDeliveryTurnId(m) && run.thread_id === m.thread_id)));
+    const replyIds = selected.filter(m => m.role === "assistant").map(m => m.id);
+    const usage = await this.usage.messages(replyIds);
+    const durations = await this.replyDurations(replyIds);
+    for (const message of messages) if (message.role === "assistant") {
+      message.usage = usage.get(message.id) ?? null;
+      const startedAt = durations.get(message.id);
+      if (startedAt !== undefined && message.createdAt >= startedAt) message.durationMs = message.createdAt - startedAt;
+    }
     const activities = await this.threadActivities([threadId]);
+    const lastMessageId = selected.findLast(message => message.id <= (reads?.lastMessageId ?? 0))?.id ?? null;
     return {
-      user: await this.user(thread.user_id), thread: threadView(thread, activities.get(threadId)),
+      user: await this.user(thread.user_id), thread: { ...threadView(thread, activities.get(threadId)),
+        origin: thread.origin, topicId: thread.topic_id, unread: reads?.unread ?? false, lastMessageId },
       chain: chain.map(t => ({ id: t.id, title: t.title, parentThreadId: t.parent_thread_id, forkPointMessageId: t.fork_point_message_id })),
       messages,
       olderCursor: after === undefined && hasMore ? selected[0]!.id : null,
@@ -130,16 +158,28 @@ export class ConversationRepository {
     };
   }
 
+  /** Start times of the turns that produced these replies, keyed by reply message ID. */
+  private async replyDurations(messageIds: number[]): Promise<Map<number, number>> {
+    if (!messageIds.length) return new Map();
+    const rows = await this.db.query<{ id: number; started: number }>(sql`
+      select result_message_id as id, min(started_at) as started from turn_runs
+      where result_message_id in (${valueList(messageIds)}) and started_at is not null
+      group by result_message_id
+    `);
+    return new Map(rows.map(row => [Number(row.id), Number(row.started)]));
+  }
+
   private async threadActivities(threadIds: number[]): Promise<Map<number, WebThreadActivity>> {
     if (!threadIds.length) return new Map();
     const rows = await this.db.query<{
-      id: number; queued: number; status: string | null; cancelled: number | null; lease: number | null;
+      id: number; queued: number; status: string | null; cancelled: number | null; lease: number | null; started: number | null;
     }>(sql`
       select r.thread_id as id,
         sum(case when r.status = 'queued' then 1 else 0 end) as queued,
         max(case when r.status <> 'queued' then r.status end) as status,
         max(case when r.status <> 'queued' then r.cancel_requested_at end) as cancelled,
-        max(case when r.status <> 'queued' then r.lease_expires_at end) as lease
+        max(case when r.status <> 'queued' then r.lease_expires_at end) as lease,
+        max(case when r.status <> 'queued' then r.started_at end) as started
       from turn_runs r join threads t on t.id = r.thread_id and t.user_id = r.user_id
       where r.thread_id in (${valueList(threadIds)}) and r.status in ('queued', 'running', 'awaiting_delivery')
       group by r.thread_id
@@ -151,28 +191,42 @@ export class ConversationRepository {
         : row.cancelled !== null ? "stopping"
         : row.status === "awaiting_delivery" ? "delivering" : "generating",
       queuedTurns: Number(row.queued),
+      startedAt: row.status === null || row.started === null ? null : Number(row.started),
     }]));
   }
 
-  private async attachments(messageIds: number[]): Promise<Map<number, SavedAttachment[]>> {
+  private async attachments(messageIds: number[], scopes: MessageSearchScope[]): Promise<Map<number, SavedAttachment[]>> {
     const result = new Map<number, SavedAttachment[]>();
     if (!messageIds.length) return result;
-    const rows = await this.db.query<SavedAttachment & { messageId: number }>(sql`
-      select m.id as "messageId", f.id, coalesce(mf.display_name, f.name) as name,
-        f.size, f.mime_type as "mimeType", mf.caption,
-        case when f.is_inline = 1 then f.content_md else null end as "inlineContent",
-        case when f.type in ('image', 'audio') then f.type else 'file' end as kind,
-        case when f.type = 'image' then f.summary else null end as description
+    const visibleOwner = messageScopePredicate(sql`owner.thread_id`, sql`owner.id`, scopes.map(scope => scope.threadId), scopes);
+    const rows = await this.db.query<{
+      messageId: number; fileId: number; name: string | null; caption: string | null; description: string | null;
+    }>(sql`
+      select m.id as "messageId", f.id as "fileId", mf.caption,
+        coalesce(mf.display_name, case when ${visibleOwner} then f.name else null end) as name,
+        case when f.type = 'image' and ${visibleOwner} then f.summary else null end as description
       from messages m join files f on f.message_id = m.id or exists (
         select 1 from message_files link where link.file_id = f.id and link.message_id = m.id
       )
       left join message_files mf on mf.file_id = f.id and mf.message_id = m.id
+      left join messages owner on owner.id = f.message_id
       where m.id in (${valueList(messageIds)}) order by m.id, f.id
     `);
-    for (const { messageId, ...file } of rows) {
-      const files = result.get(messageId) ?? [];
-      files.push({ ...file, size: file.size !== null && file.size > 0 ? file.size : null });
-      result.set(messageId, files);
+    // Empty scopes provide generic fallback names without borrowing another message's alias.
+    const projected = await this.repos.files.listByIds([...new Set(rows.map(row => row.fileId))], []);
+    const files = new Map(projected.map(file => [file.id, file]));
+    for (const row of rows) {
+      const file = files.get(row.fileId);
+      if (!file) continue;
+      const attachments = result.get(row.messageId) ?? [];
+      attachments.push({
+        id: file.id, name: row.name ?? file.name, caption: row.caption,
+        size: file.size !== null && file.size > 0 ? file.size : null, mimeType: file.mime_type,
+        inlineContent: file.is_inline === 1 ? file.content_md : null,
+        kind: file.type === "image" || file.type === "audio" ? file.type : "file",
+        description: row.description,
+      });
+      result.set(row.messageId, attachments);
     }
     return result;
   }

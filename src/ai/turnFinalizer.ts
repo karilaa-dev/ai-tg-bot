@@ -1,6 +1,13 @@
 import type { Repos } from "../db/repos/index.js";
 import type { Logger } from "../logger.js";
 
+export class TurnCancelledError extends Error {
+  constructor() {
+    super("Turn cancellation won the delivery transition.");
+    this.name = "TurnCancelledError";
+  }
+}
+
 export class TurnFinalizer {
   private phase: "running" | "cancelled" | "delivering" | "confirmed" | "unknown" | "rejected" = "running";
   private pendingDeliveryWrite?: () => Promise<void>;
@@ -51,7 +58,7 @@ export class TurnFinalizer {
       // A remote /stop and this delivery transition compete on the same row.
       // If cancellation won, no Telegram delivery may start.
       this.phase = "cancelled";
-      throw new Error("Turn cancellation won the delivery transition.");
+      throw new TurnCancelledError();
     }
   }
 

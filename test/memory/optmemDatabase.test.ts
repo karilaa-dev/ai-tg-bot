@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDatabase } from "../../src/db/index.js";
 import { UsersRepo } from "../../src/db/repos/users.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
+import { deleteUserMemory, readUserMemories } from "../../src/memory/view.js";
 import { runMemo } from "../../src/memory/optmem/index.js";
 import { DEFAULT_MEMORY_SIZES } from "../../src/memory/optmem/settings.js";
 import { initializeUserMemory } from "../../src/memory/userMemory.js";
@@ -45,6 +46,63 @@ async function fixture(postgres: boolean) {
 }
 
 for (const postgres of [false, true]) describe.skipIf(postgres && !process.env.TEST_POSTGRES_URL)(`OptMem ${postgres ? "PostgreSQL" : "SQLite"}`, () => {
+  it("deletes saved text and summaries with stable IDs, disabled memory and scoped pagination", async () => {
+    const { db, store, users, run } = await fixture(postgres);
+    await store.append([["2026-10-07", "erase this secret"], ["2026-10-07", "keep this fact"], ["2026-10-07", "another fact"]]);
+    expect(await store.put(0, 2, "summary with secret")).toBe(true);
+    const other = new DatabaseMemoryStore(db.db, 43);
+    await other.initialize();
+    await other.append([["2026-10-07", "other owner's note"]]);
+    await users.setMemoryEnabled(42, false);
+    expect(await deleteUserMemory(db.db, 42, 0)).toBe(true);
+    expect(await deleteUserMemory(db.db, 42, 0)).toBe(true);
+    expect(await deleteUserMemory(db.db, 42, 999)).toBe(false);
+    expect(await readUserMemories(db.db, 42, 0, 1)).toEqual({ items: [{ id: 1, date: "2026-10-07", text: "keep this fact" }], total: 2, nextOffset: 1 });
+    expect(await readUserMemories(db.db, 42, 1, 1)).toMatchObject({ items: [{ id: 2 }], total: 2, nextOffset: null });
+    expect(await other.get(0)).toEqual([0, "2026-10-07", "other owner's note"]);
+    expect(await db.db.query(sql`select * from optmem_summaries where user_id = 42`)).toEqual([]);
+    const erased = await db.db.query<{ content: Buffer }>(sql`select content from optmem_notes where user_id = 42 and id = 0`);
+    expect(erased[0]?.content.byteLength).toBe(0);
+    await users.setMemoryEnabled(42, true);
+    expect((await run("recall", "secret")).stdout).toBe("No match.\n");
+    expect(await store.get(0)).toEqual([0, "2026-10-07", "[Deleted memory]"]);
+    expect(await store.append([["2026-10-08", "new fact"]])).toBe(3);
+    expect(await store.put(0, 2, "only keep this fact")).toBe(true);
+    await db.initialize();
+    expect((await readUserMemories(db.db, 42, 0, 50)).items.map(item => item.id)).toEqual([1, 2, 3]);
+  });
+
+  it("rejects an in-flight summary after deletion invalidates its source", async () => {
+    const { db, store } = await fixture(postgres);
+    await store.append([["2026-10-07", "deleted"], ["2026-10-07", "retained"]]);
+    await store.open();
+    expect(await deleteUserMemory(db.db, 42, 0)).toBe(true);
+    expect(await store.put(0, 2, "stale summary contains deleted text")).toBe(false);
+    expect(await store.summary(0, 2)).toBeUndefined();
+    await store.open();
+    expect(await store.put(0, 2, "retained only")).toBe(true);
+  });
+
+  it("rejects stale compression across separate memo calls and accepts the refreshed source revision", async () => {
+    const { db, store, settings } = await fixture(postgres);
+    await store.append([["2026-10-07", "private fact REDACT-ME"], ["2026-10-07", "retained fact"]]);
+    const call = (...args: string[]) => runMemo({ store: new DatabaseMemoryStore(db.db, 42), settings: { ...settings, WAKE_LINES: 1 }, args });
+    expect((await call("nap")).stdout).toContain("private fact REDACT-ME");
+    await deleteUserMemory(db.db, 42, 0);
+    const stale = await call("nap", "0-1", "private fact REDACT-ME; retained fact");
+    expect(stale.stdout).toContain("was settled or forgotten meanwhile");
+    expect(stale.stdout).toContain('Run: memo nap 0-1 "<your line>" 1');
+    expect(stale.stdout).not.toContain("REDACT-ME");
+    expect(await store.summary(0, 2)).toBeUndefined();
+    expect((await call("nap", "0-1", "retained fact", "1")).stdout).toContain("0-1 saved.");
+    expect((await call("wake")).stdout).toContain("retained fact");
+    expect((await call("wake")).stdout).not.toContain("REDACT-ME");
+    await deleteUserMemory(db.db, 42, 1);
+    expect((await call("nap", "0-1", "retained fact", "1")).stdout).toContain("was settled or forgotten meanwhile");
+    expect(await store.summary(0, 2)).toBeUndefined();
+    expect((await call("nap", "0-1", "Both notes deleted", "2")).stdout).toContain("0-1 saved.");
+  });
+
   it("isolates owners, persists disable, blocks stale writers and keeps notes for re-enable", async () => {
     const { store, db, users, run, url } = await fixture(postgres);
     await run("note", "private fact");

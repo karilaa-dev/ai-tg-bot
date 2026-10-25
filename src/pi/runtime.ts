@@ -200,6 +200,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     if (user.memory_enabled) await initializeUserMemory(this.input.db.db, user.tg_id);
     const systemPrompt = await renderSystemPrompt({
       user,
+      thread,
       config: this.input.config,
     });
     const bridge = new ThreadBridge({

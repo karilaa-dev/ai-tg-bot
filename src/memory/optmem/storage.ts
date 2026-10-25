@@ -10,7 +10,8 @@ export interface MemoryStore {
   scan(): AsyncGenerator<Memory>;
   summary(lo: number, hi: number): Promise<string | undefined>;
   append(items: ReadonlyArray<readonly [date: string, text: string]>, options?: { chronological: true }): Promise<number>;
-  put(lo: number, hi: number, text: string): Promise<boolean>;
+  put(lo: number, hi: number, text: string, sourceRevision?: number): Promise<boolean>;
+  revision?(): Promise<number>;
   drop(lo: number, hi: number): Promise<Block[]>;
   pending(total: number, limit?: number): Promise<Block[]>;
   pendingCount(total: number): Promise<number>;

@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { chromium } from "playwright-core";
 
 const browser = await chromium.launch({ headless: true });
-const server = spawn(process.execPath, ["test/web/http-smoke.ts", "--browser"], {
+const server = spawn(process.execPath, ["test/web/http-smoke.ts", "--browser", ...process.argv.filter(arg => arg === "--web-dev")], {
   stdio: ["ignore", "pipe", "inherit"], timeout: 120_000,
 });
 const stopped = once(server, "exit");
@@ -18,29 +18,21 @@ try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
+  const adminUrl = new URL(url);
+  adminUrl.pathname = "/admin/";
+  await page.goto(adminUrl.href);
+  assert.equal(page.url(), url, "The trailing admin slash redirects while preserving the selected chat");
+  const signIn = page.getByRole("link", { name: "Sign in with Telegram", exact: true });
+  await signIn.waitFor();
+  assert.equal(await page.locator("input").count(), 0, "Admins sign in with Telegram, not a token");
+  assert.equal(new URL(await signIn.getAttribute("href") ?? "", url).search, "?return=/admin");
+  await signIn.click();
+  await page.waitForURL(new URL("/admin", url).href);
+  const navigation = page.getByRole("navigation", { name: "Main navigation" });
+  await navigation.waitFor();
+  assert.equal(await navigation.getByRole("link", { name: "Back to chat", exact: true }).getAttribute("href"), "/");
   await page.goto(url);
-  const token = page.getByLabel("Admin token", { exact: true });
-  const submit = page.getByRole("button", { name: "Sign in", exact: true });
-  await token.waitFor();
-  assert.equal(await token.evaluate(input => getComputedStyle(input).fontSize), "16px");
-  assert.equal(await submit.isDisabled(), true);
-  await token.fill("rejected-token");
-  const rejection = page.waitForResponse(response => response.url().endsWith("/api/auth/login"));
-  await submit.click();
-  assert.equal((await rejection).status(), 401);
-  const error = page.getByRole("alert");
-  await error.waitFor();
-  assert.equal(await error.textContent(), "That admin token was not accepted. Check it and try again.");
-  assert.equal(await token.inputValue(), "");
-  assert.equal(await submit.isDisabled(), true);
-
-  await token.fill("  preview-admin-token  ");
-  await error.waitFor({ state: "hidden" });
-  const acceptance = page.waitForResponse(response => response.url().endsWith("/api/auth/login"));
-  await token.press("Enter");
-  assert.equal((await acceptance).status(), 200);
-  await page.getByRole("navigation", { name: "Main navigation" }).waitFor();
-  assert.equal(await token.count(), 0);
+  await navigation.waitFor();
 
   const thinking = page.getByRole("button", { name: "3 tool calls", exact: true });
   await thinking.waitFor();
@@ -98,7 +90,7 @@ try {
   await slider.press("ArrowLeft");
   assert.notEqual(await slider.getAttribute("aria-valuetext"), selectedDay);
   assert.deepEqual(errors, []);
-  console.log("Browser smoke passed: sign-in retry, compact tool and usage details, keyboard disclosures, responsive charts, and keyboard day selection");
+  console.log("Browser smoke passed: Telegram admin sign-in, compact tool and usage details, keyboard disclosures, responsive charts, and keyboard day selection");
 } finally {
   server.kill("SIGTERM");
   await stopped;

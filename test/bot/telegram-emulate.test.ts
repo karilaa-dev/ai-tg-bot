@@ -132,6 +132,19 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(typeof user?.tz_offset_min).toBe("number");
   });
 
+  it("accepts a time zone name in the timezone conversation", async () => {
+    await startBot();
+    await env.bot.sendCommand(env.user, env.chat, "/timezone");
+    const done = await env.bot.sendMessage(env.user, env.chat, "europe/berlin");
+    expect(done.texts.join("\n")).toContain("Europe/Berlin");
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tz_name: "Europe/Berlin" });
+
+    // A local time afterwards replaces the name with a bare offset.
+    await env.bot.sendCommand(env.user, env.chat, "/timezone");
+    await env.bot.sendMessage(env.user, env.chat, "2:30 PM");
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tz_name: null });
+  });
+
   it("lets users postpone timezone setup from onboarding", async () => {
     const onboarded = await startBot();
     const later = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:later", onboarded.messages.at(-1)!);
@@ -165,6 +178,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const user = await env.repos.users.get(ruUser.id);
     expect(user?.lang).toBe("ru");
     expect(user?.tz_offset_min).toBe(180);
+    expect(user?.tz_name).toBe("Europe/Moscow");
   });
 
   it("does not show onboarding timezone prompt when timezone is already set", async () => {
@@ -870,7 +884,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await resolveThreadFileDescriptors({ repos: env.repos, thread: otherThread }))[0]?.name).toBe("global-copy.txt");
   });
 
-  it("refuses legacy .doc files before download", async () => {
+  it("accepts legacy .doc files as opaque saved attachments", async () => {
     await startBot();
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "legacy.doc",
@@ -878,18 +892,36 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from("not docx"),
     });
 
-    expect(res.text).toContain(".docx");
+    expect(expectResponseSurface(res)).toContain("legacy.doc");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ name: "legacy.doc", type: "other", extraction_status: "source_only" }),
+    ]);
   });
 
-  it("replies to unsupported media instead of silently ignoring it", async () => {
+  it("saves native video as an opaque attachment", async () => {
     await startBot();
     const res = await env.bot.sendVideo(env.user, env.chat, { width: 640, height: 480, duration: 3 });
 
-    expect(res.text).toContain("not supported");
+    expect(expectResponseSurface(res)).toContain(".mp4");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ type: "other", extraction_status: "source_only", mime_type: "video/mp4" }),
+    ]);
+  });
+
+  it("saves native animation as an opaque attachment with its original media type", async () => {
+    await startBot();
+    await env.bot.handleUpdate({ update_id: 99001, message: {
+      message_id: 99001, date: Math.floor(Date.now() / 1000), from: env.user, chat: env.chat,
+      animation: { file_id: "animation-source", file_unique_id: "animation-unique", width: 64, height: 64,
+        duration: 1, mime_type: "image/gif", file_size: 100 }, caption: "An animation",
+      document: { file_id: "animation-source", file_unique_id: "animation-unique", mime_type: "image/gif", file_size: 100 },
+    } });
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ name: "animation-unique.gif", type: "other", extraction_status: "source_only", mime_type: "image/gif" }),
+    ]);
   });
 
   it("downloads and captions photos while recording all Telegram sizes", async () => {

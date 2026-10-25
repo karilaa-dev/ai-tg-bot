@@ -52,6 +52,7 @@ export class ThreadsRepo {
     topicId: number | null;
     title: string;
     titleSource?: ThreadTitleSource;
+    origin?: ThreadRow["origin"];
     parentThreadId?: number | null;
     forkPointMessageId?: number | null;
   }): Promise<ThreadRow> {
@@ -59,12 +60,12 @@ export class ThreadsRepo {
       this.db,
       sql`
         insert into threads(
-          user_id, topic_id, parent_thread_id, fork_point_message_id, title,
+          user_id, topic_id, parent_thread_id, fork_point_message_id, title, origin,
           title_source, title_attempts, topic_title_synced,
           pi_session_file, pi_session_id, archived, created_at
         )
         values (
-          ${input.userId}, ${input.topicId}, ${input.parentThreadId ?? null}, ${input.forkPointMessageId ?? null}, ${input.title},
+          ${input.userId}, ${input.topicId}, ${input.parentThreadId ?? null}, ${input.forkPointMessageId ?? null}, ${input.title}, ${input.origin ?? "telegram"},
           ${input.titleSource ?? "explicit"}, 0, 1,
           null, null, 0, ${Date.now()}
         )
@@ -143,10 +144,13 @@ export class ThreadsRepo {
 
   async chain(thread: ThreadRow): Promise<ThreadRow[]> {
     const chain: ThreadRow[] = [thread];
+    const seen = new Set([thread.id]);
     let current = thread;
     while (current.parent_thread_id !== null) {
+      if (seen.has(current.parent_thread_id) || chain.length >= 1000) throw new Error("Invalid thread ancestry");
       const parent = await this.get(current.parent_thread_id);
-      if (!parent) break;
+      if (!parent || parent.user_id !== thread.user_id || current.fork_point_message_id === null) break;
+      seen.add(parent.id);
       chain.push(parent);
       current = parent;
     }

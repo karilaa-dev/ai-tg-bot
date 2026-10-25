@@ -7,6 +7,8 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { threadVisibilityScope } from "../../src/memory/retrieval.js";
 import { createLoadMessageTool } from "../../src/ai/tools/loadMessage.js";
 import { renderThreadSessionContext } from "../../src/ai/prompt.js";
+import { ingestFileBytes } from "../../src/files/ingest.js";
+import { webFileSource } from "../../src/web/file-source.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dialect} visibility`, () => {
@@ -59,6 +61,21 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const scope = await threadVisibilityScope(repos, child, accepted.id);
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
         expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
+        for (const name of ["upload.txt", "upload.png", "upload.zip"]) {
+          const pending = await ingestFileBytes({ config: loadTestConfig(), repo: repos.files,
+            userId: user.tg_id, threadId: child.id, name, bytes: Buffer.from("pending upload"), requireMessage: true });
+          // Visibility is closed from insertion, before a transport source exists.
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, child)).fileIds).not.toContain(pending.fileId);
+          await repos.files.rememberSource(pending.fileId, webFileSource(pending.fileId, "application/octet-stream"));
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          await repos.files.setMessageId(pending.fileId, queued.id);
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, child)).fileIds).toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, other)).fileIds).not.toContain(pending.fileId);
+        }
+        await repos.files.rememberSource(outgoing.id, webFileSource(outgoing.id, "text/plain"));
+        expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).toContain(outgoing.id);
         expect((await repos.files.get(reused.id, scope.messageScopes))?.name).toBe("accepted-name.txt");
         expect((await repos.files.get(reusedPending.id, scope.messageScopes))?.name).toBe(`attachment-${reusedPending.id}.txt`);
         expect((await repos.messages.listForThreadChain([parent, child], accepted.id)).map((row) => row.id)).toEqual(scope.messageIds);

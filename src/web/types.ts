@@ -1,5 +1,7 @@
 import type { InferenceUsageCall } from "../pi/usage.js";
 import type { MemoryPage } from "../memory/view.js";
+import type { ToolActivity } from "../ai/toolActivity.js";
+import type { OpenUiLanguage } from "../openui/language.js";
 
 export interface WebMemories extends MemoryPage {
   user: WebUser;
@@ -21,6 +23,8 @@ export function userLabel(user: Pick<WebUser, "id" | "name" | "username">): stri
 export interface WebThreadActivity {
   state: "queued" | "generating" | "delivering" | "stopping" | "interrupted";
   queuedTurns: number;
+  /** When the current reply started generating; null while it waits in the queue. */
+  startedAt?: number | null;
 }
 
 export interface WebThread {
@@ -52,9 +56,15 @@ export interface WebMessage {
   role: "user" | "assistant" | "system";
   text: string;
   thinking: string | null;
+  toolActivity?: ToolActivity;
   createdAt: number;
   attachments: WebAttachment[];
   usage?: WebMessageUsage | null;
+  openui?: string | null;
+  openuiLanguage?: OpenUiLanguage;
+  telegramSyncFailed?: boolean;
+  /** Time from the start of generation until this reply was saved, when its turn is known. */
+  durationMs?: number | null;
 }
 
 export interface WebUsageTotals {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import { audioFixture } from "../helpers/audio.js";
 import { deferred } from "../helpers/async.js";
-import { MAX_FILE_BYTES } from "../../src/files/limits.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../../src/files/limits.js";
 import { createTranscribeAudioTool } from "../../src/ai/tools/transcribeAudio.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { sql } from "drizzle-orm";
@@ -255,8 +255,8 @@ describe("Telegram audio prompts", () => {
 
   it.each(["metadata", "download", "missing metadata"])("rejects oversized audio from %s before transcription", async (source) => {
     const update = voiceUpdate(source === "metadata"
-      ? { fileSize: MAX_FILE_BYTES + 1 }
-      : { fileSize: 1, content: Buffer.alloc(MAX_FILE_BYTES + 1) });
+      ? { fileSize: TG_DOWNLOAD_MAX_BYTES + 1 }
+      : { fileSize: 1, content: Buffer.alloc(TG_DOWNLOAD_MAX_BYTES + 1) });
     if (source === "missing metadata") delete update.message!.voice!.file_size;
     const res = await processUpdate(update);
     const surface = JSON.stringify([...res.messages, ...res.editedMessages]);

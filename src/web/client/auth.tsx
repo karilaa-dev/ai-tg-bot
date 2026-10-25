@@ -1,25 +1,28 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Field } from "@base-ui/react/field";
-import { Form } from "@base-ui/react/form";
-import { Input } from "@base-ui/react/input";
-import { ArrowRight, LoaderCircle, LockKeyhole } from "lucide-react";
-import { BrandMark } from "./brand.js";
-import { ApiError, apiJson, SESSION_EXPIRED_EVENT } from "./api.js";
-import { Button } from "./components/ui/button.js";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { IconArrowLeft, IconBrandTelegram, IconLoader2, IconRefresh } from "@tabler/icons-react";
+import type { ChatSession } from "../chat-types.js";
+import { logo } from "./brand.js";
+import { apiJson, SESSION_EXPIRED_EVENT } from "./api.js";
+import { Button, buttonVariants } from "./components/ui/button.js";
+import { cn } from "./lib/utils.js";
 
-export function AdminGate({ children }: { children: (logout: () => Promise<void>, signingOut: boolean, error: string) => ReactNode }) {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
-  const [message, setMessage] = useState("");
-  const [checkError, setCheckError] = useState("");
+type AdminState =
+  | { kind: "checking" }
+  | { kind: "unreachable" }
+  | { kind: "signed-out"; loginAvailable: boolean; ended: boolean }
+  | { kind: "not-admin"; name: string; id: number }
+  | { kind: "admin" };
+
+/** The admin dashboard uses the website's Telegram session; WEB_ADMIN_USER_IDS decides who gets in. */
+export function AdminGate({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AdminState>({ kind: "checking" });
   const [revision, setRevision] = useState(0);
-  const [signingOut, setSigningOut] = useState(false);
-  const [logoutError, setLogoutError] = useState("");
-  const generation = useRef(0);
+  const admitted = useRef(false);
 
   useEffect(() => {
-    const expire = () => { generation.current++; setAuthenticated(false); setMessage("Your session expired. Sign in again to continue."); };
-    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+    const expired = () => setRevision(v => v + 1);
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   }, []);
 
   useEffect(() => {
@@ -28,19 +31,18 @@ export function AdminGate({ children }: { children: (logout: () => Promise<void>
     const check = async () => {
       if (busy || document.hidden) return;
       busy = true;
-      const current = generation.current;
       try {
-        const session = await apiJson<{ authenticated: boolean }>("/api/auth/session", { signal: controller.signal });
-        if (!controller.signal.aborted && current === generation.current) {
-          if (authenticated && !session.authenticated) setMessage("Your session expired. Sign in again to continue.");
-          setAuthenticated(session.authenticated); setCheckError("");
-        }
-      } catch (error) {
-        if (!controller.signal.aborted && !(error instanceof ApiError && error.status === 401)) setCheckError("Could not check your session. Check your connection and try again.");
+        const session = await apiJson<ChatSession>("/api/chat/session", { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!session.authenticated) setState({ kind: "signed-out", loginAvailable: session.loginAvailable, ended: admitted.current });
+        else if (session.admin) setState({ kind: "admin" });
+        else setState({ kind: "not-admin", id: session.user.id, name: session.user.name || (session.user.username ? `@${session.user.username}` : `Telegram user ${session.user.id}`) });
+        admitted.current = session.authenticated && session.admin;
+      } catch {
+        // A brief outage keeps an open dashboard; requests inside it report their own failures.
+        if (!controller.signal.aborted && !admitted.current) setState({ kind: "unreachable" });
       } finally { busy = false; }
     };
-    // Signed-out pages stay signed out until the user submits a token.
-    if (authenticated === false) return;
     void check();
     const timer = setInterval(() => void check(), 60_000);
     const visible = () => { if (!document.hidden) void check(); };
@@ -48,59 +50,31 @@ export function AdminGate({ children }: { children: (logout: () => Promise<void>
     window.addEventListener("pageshow", visible);
     document.addEventListener("visibilitychange", visible);
     return () => { controller.abort(); clearInterval(timer); window.removeEventListener("focus", visible); window.removeEventListener("pageshow", visible); document.removeEventListener("visibilitychange", visible); };
-  }, [authenticated, revision]);
+  }, [revision]);
 
-  const logout = async () => {
-    generation.current++;
-    setSigningOut(true); setLogoutError("");
-    try {
-      await apiJson("/api/auth/session", { method: "DELETE" });
-      generation.current++; setAuthenticated(false); setMessage("You signed out.");
-      history.replaceState(null, "", "/");
-    } catch (error) {
-      if (!(error instanceof ApiError && error.status === 401)) setLogoutError("Could not sign out. Check your connection and try again.");
-    } finally { setSigningOut(false); }
-  };
-
-  if (authenticated) return children(logout, signingOut, logoutError);
-  return <div className="access-page">
-    <header className="access-brand"><BrandMark /><span>AI KaRiLaA<span className="brand-divider">/</span><span className="utility-label">Admin</span></span></header>
-    <main className="access-main">
-      <section className="access-form" aria-labelledby="access-title">
-        <div className="access-lock"><LockKeyhole size={20} aria-hidden="true" /></div>
-        <h1 id="access-title">Admin access</h1>
-        {authenticated === null ? <>{checkError ? <div className="failure" role="alert">{checkError}<Button onClick={() => setRevision(v => v + 1)}>Try again</Button></div> : <p className="access-check" role="status"><LoaderCircle className="activity-spinner" size={16} aria-hidden="true" /> Checking your session…</p>}</> : <LoginForm message={message} onSuccess={() => { generation.current++; setMessage(""); setAuthenticated(true); }} />}
-      </section>
-    </main>
-  </div>;
-}
-
-export function LoginForm({ onSuccess, message = "" }: { onSuccess: () => void; message?: string }) {
-  const [token, setToken] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (busy || !token.trim()) return;
-    setBusy(true); setError("");
-    try {
-      await apiJson("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: token.trim() }) });
-      onSuccess();
-    } catch (error) {
-      setError(error instanceof ApiError && error.status === 401 ? "That admin token was not accepted. Check it and try again."
-        : error instanceof ApiError && error.status === 429 ? "Too many sign-in attempts. Wait a minute before trying again."
-        : error instanceof ApiError && error.status === 503 ? "Admin access is not configured. Set the admin token in the server environment."
-        : "Could not sign in. Check your connection and try again.");
-    } finally { setToken(""); setBusy(false); }
-  };
-  return <Form className="access-token-form" onSubmit={event => void submit(event)}>
-    {message && !error && <p className="form-message" role="status">{message}</p>}
-    <Field.Root name="password" className="access-field" invalid={Boolean(error)} disabled={busy}>
-      <Field.Label>Admin token</Field.Label>
-      <Input id="admin-token" type="password" autoComplete="current-password" autoFocus required value={token} onValueChange={value => { setToken(value); setError(""); }} placeholder="Enter your admin token" />
-      <Field.Description className="access-hint">Use the admin token configured for this bot.</Field.Description>
-      <Field.Error className="form-error" match={error ? true : undefined} role="alert">{error || undefined}</Field.Error>
-    </Field.Root>
-    <Button type="submit" variant="primary" className="access-submit" disabled={busy || !token.trim()}>{busy ? <><LoaderCircle className="activity-spinner" /> Signing in…</> : <>Sign in <ArrowRight /></>}</Button>
-  </Form>;
+  if (state.kind === "admin") return children;
+  return <main className="access-page">
+    <section className="access-panel" aria-labelledby="access-title" aria-busy={state.kind === "checking"}>
+      <img className="access-logo" src={logo} alt="" width={56} height={56} />
+      <h1 id="access-title">Admin</h1>
+      <p className="access-lede">AI KaRiLaA conversations, usage, and connections.</p>
+      <div className="access-slot">
+        {state.kind === "checking" && <p className="access-check" role="status"><IconLoader2 className="activity-spinner" size={16} aria-hidden="true" /> Checking your session…</p>}
+        {state.kind === "unreachable" && <>
+          <p className="access-note is-error" role="alert">Could not check your session. Check your connection and try again.</p>
+          <Button className="access-submit" onClick={() => { setState({ kind: "checking" }); setRevision(v => v + 1); }}><IconRefresh aria-hidden="true" /> Try again</Button>
+        </>}
+        {state.kind === "signed-out" && <>
+          {state.ended && <p className="access-note" role="status">Your session ended. Sign in again to continue.</p>}
+          {state.loginAvailable
+            ? <a className={cn(buttonVariants({ variant: "primary" }), "access-submit")} href="/api/auth/telegram/start?return=/admin"><IconBrandTelegram aria-hidden="true" /> Sign in with Telegram</a>
+            : <p className="access-note" role="note">Telegram sign-in is not available. Check the website's Telegram login settings.</p>}
+        </>}
+        {state.kind === "not-admin" && <>
+          <p className="access-note" role="status">You're signed in as <strong>{state.name}</strong> (Telegram ID {state.id}), which isn't an admin account.</p>
+          <a className={cn(buttonVariants(), "access-submit")} href="/"><IconArrowLeft aria-hidden="true" /> Back to chat</a>
+        </>}
+      </div>
+    </section>
+  </main>;
 }

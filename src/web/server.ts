@@ -9,16 +9,23 @@ import { isAudioMime, imageMimeTypes } from "./media.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { Logger } from "../logger.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
-import { WebAdminAuth, WebHttpError as HttpError, requireAdminMutation } from "./auth.js";
+import { WebHttpError as HttpError, requireAdminMutation } from "./auth.js";
 import type { CodexStatus } from "./admin-types.js";
+import type { ChatService } from "./chat-types.js";
+import { WebChatAuth, type TelegramAuthDependencies } from "./chat-auth.js";
+import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
 
 export interface WebServerOptions {
-  config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_TOKEN" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES">;
+  config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
+    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "BOT_ALLOWED_USER_IDS" | "WEB_TRUSTED_PROXY_IPS">;
   repository: ConversationRepository;
   fileResolver: FileResolver;
   logger: Logger;
   assetsDirectory?: string;
   development?: boolean;
+  chat?: { service: ChatService; botUsername: string };
+  /** Replaces Telegram's key set and token endpoint, for tests and local previews. */
+  telegramAuth?: TelegramAuthDependencies;
   codexLogin?: {
     status(): Promise<CodexStatus>;
     start(): Promise<CodexStatus>;
@@ -36,8 +43,14 @@ const headers = {
 
 // The same wrappers protect every API method and track work that outlives a closed socket.
 export function createWebRoutes(options: WebServerOptions, shutdownSignal: AbortSignal) {
-  const auth = new WebAdminAuth(options.config.WEB_ADMIN_TOKEN);
-  shutdownSignal.addEventListener("abort", () => auth.clear(), { once: true });
+  if (!(options.config.WEB_PUBLIC_URL && options.config.WEB_TELEGRAM_CLIENT_ID && options.config.WEB_TELEGRAM_CLIENT_SECRET)) {
+    throw new Error("Telegram login (WEB_TELEGRAM_CLIENT_ID, WEB_TELEGRAM_CLIENT_SECRET, WEB_PUBLIC_URL) must be configured when the website is enabled.");
+  }
+  // Admins sign in with Telegram like everyone else; the chat routes clear these sessions on shutdown.
+  const auth = new WebChatAuth(options.config, options.telegramAuth);
+  const requireAdmin = (request: Request) => {
+    if (!auth.isAdmin(auth.requireSession(request))) throw new HttpError(403, "This Telegram account does not have admin access.");
+  };
   let downloads = 0;
   const tasks = new Set<Promise<Response>>();
   function guard<Path extends string>(handler: (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">) => Response | Promise<Response>, publicRoute = false) {
@@ -45,7 +58,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       const task = (async () => {
         try {
           if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
-          if (!publicRoute) auth.requireSession(request);
+          if (!publicRoute) requireAdmin(request);
           if (request.method !== "GET" && request.method !== "HEAD") requireAdminMutation(request);
           const response = await handler(request, server);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
@@ -72,7 +85,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     if (!options.codexLogin) throw new HttpError(503, "Codex sign-in is unavailable. Restart the application and try again.");
     return options.codexLogin;
   }
-  const attachment = async (request: BunRequest<"/api/threads/:threadId/files/:fileId">) => {
+  const attachment = async (request: Request & { params: { threadId: string; fileId: string } }) => {
     const url = new URL(request.url);
     const sandboxConsent = request.method === "POST" && url.searchParams.get("sandbox") === "start" && url.searchParams.get("mode") === "download";
     if (request.method === "POST" && !sandboxConsent) return methodNotAllowed();
@@ -86,7 +99,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     const sandbox = url.searchParams.get("sandbox");
     if (sandbox !== null && !sandboxConsent) throw new HttpError(400, "Sandbox consent requires a same-origin POST.");
     const maxBytes = mode === "auto" ? options.config.WEB_AUTOLOAD_MAX_BYTES : MAX_FILE_BYTES;
-    if (file.size > MAX_FILE_BYTES) throw new HttpError(413, "This file exceeds the 20 MiB download limit.");
+    if (file.size > MAX_FILE_BYTES) throw new HttpError(413, "This file exceeds the 50 MiB download limit.");
     if (mode === "auto" && (maxBytes === 0 || file.size <= 0 || file.size > maxBytes)) {
       throw new HttpError(413, "Load this attachment manually.");
     }
@@ -119,18 +132,10 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       throw new HttpError(502, "This attachment could not be retrieved. Try again later.");
     } finally { downloads--; }
   };
+  const chat = createChatRoutes(options, shutdownSignal, attachment, auth);
   return {
     routes: {
-      "/api/auth/session": {
-        ...read(request => Response.json({ authenticated: auth.authenticated(request) }, { headers }), true),
-        DELETE: guard(request => Response.json({ authenticated: false }, { headers: { ...headers, "Set-Cookie": auth.logout(request) } }), true),
-      },
-      "/api/auth/login": {
-        POST: guard(async (request, server) => Response.json({ authenticated: true }, { headers: { ...headers,
-          // Only the socket peer is trusted; forwarded IP headers are caller-controlled.
-          "Set-Cookie": await auth.login(request, server?.requestIP(request)?.address),
-        } }), true),
-      },
+      ...chat.routes,
       "/api/admin/codex": read(async () => Response.json(await codexLogin().status(), { headers })),
       "/api/admin/codex/login": {
         POST: guard(async () => Response.json(await codexLogin().start(), { headers })),
@@ -168,11 +173,11 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
           autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES,
         }, { headers });
       }),
-      "/api/threads/:threadId/files/:fileId": { ...read(attachment), POST: guard(attachment) },
+      "/api/threads/:threadId/files/:fileId": { ...read<"/api/threads/:threadId/files/:fileId">(attachment), POST: guard<"/api/threads/:threadId/files/:fileId">(attachment) },
     },
     fetch: (request: BunRequest) => request.method !== "GET" && request.method !== "HEAD"
       ? Promise.resolve(methodNotAllowed()) : guard(() => { throw new WebNotFound(); }, true)(request),
-    async drain() { await Promise.allSettled([...tasks]); },
+    async drain() { await Promise.allSettled([...tasks, chat.drain()]); },
   };
 }
 
@@ -194,6 +199,9 @@ async function assetRoutes(directory: string) {
       } });
     };
     routes[entry.name === "index.html" ? "/" : `/${entry.name}`] = { GET: () => respond(false), HEAD: () => respond(true) };
+    if (entry.name === "index.html") {
+      routes["/admin"] = { GET: () => respond(false), HEAD: () => respond(true) };
+    }
   }
   return routes;
 }
@@ -205,6 +213,10 @@ export async function startWebServer(options: WebServerOptions) {
   const assets: Record<string, HTMLBundle | { GET: () => Response; HEAD: () => Response }> = options.development
     ? { "/": (await import("./client/index.html")).default }
     : await assetRoutes(path.resolve(options.assetsDirectory ?? "dist/web"));
+  if (options.development && assets["/"]) assets["/admin"] = assets["/"];
+  const adminRedirect = (request: Request) => new Response(null, {
+    status: 308, headers: { ...headers, Location: `/admin${new URL(request.url).search}` },
+  });
   let server: Server<undefined>;
   try {
     server = serve({
@@ -212,8 +224,9 @@ export async function startWebServer(options: WebServerOptions) {
       port: options.config.WEB_PORT,
       reusePort: false,
       idleTimeout: 130,
+      maxRequestBodySize: MAX_CHAT_BODY_BYTES,
       development: options.development ? { hmr: true, console: false } : false,
-      routes: { ...assets, ...api.routes },
+      routes: { ...assets, ...api.routes, "/admin/": { GET: adminRedirect, HEAD: adminRedirect } },
       fetch: api.fetch,
       error(error) {
         options.logger.error("website response failed", { error: error.name });

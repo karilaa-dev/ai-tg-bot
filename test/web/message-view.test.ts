@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { MessageRow } from "../../src/db/types.js";
-import { messageView } from "../../src/web/message-view.js";
+import { attachmentDeliveryTurnId, messageView } from "../../src/web/message-view.js";
 import type { WebAttachment } from "../../src/web/types.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import type { FileRow } from "../../src/db/types.js";
@@ -15,6 +15,28 @@ it("moves photo descriptions into image details while retaining the caption and 
   const view = messageView(message("Make a picture\n\n[[chat-file:1]] [image #1: A cat [with stripes].]\n\nKeep this too."), [image]);
   expect(view.text).toBe("Make a picture\n\nKeep this too.");
   expect(view.attachments[0]?.description).toBe("A cat [with stripes].");
+});
+
+it("withholds pending assistant images and OpenUI without leaking internal attachment cards", () => {
+  const row = message("A picture\n\n[[chat-file:1]] [image #1: A cat [with stripes].]", {
+    openui: 'root = Stack([Image("file:1","A cat","")])', attachmentDeliveryTurnId: 12,
+  });
+  row.role = "assistant";
+  expect(attachmentDeliveryTurnId(row)).toBe(12);
+  const pending = messageView(row, [image], [], true);
+  expect(pending.text).toBe("A picture");
+  expect(pending.attachments).toEqual([]);
+  expect(pending.openui).toBeUndefined();
+  expect(JSON.stringify(pending)).not.toContain("attachmentDeliveryTurnId");
+  const recovered = messageView(row, [image]);
+  expect(recovered.attachments).toHaveLength(1);
+  expect(recovered.openui).toContain('Image("file:1"');
+});
+
+it("never gates user attachments using assistant delivery metadata", () => {
+  const row = message("A user photo", { attachmentDeliveryTurnId: 12 });
+  expect(attachmentDeliveryTurnId(row)).toBeUndefined();
+  expect(messageView(row, [image], [], true).attachments).toHaveLength(1);
 });
 
 it("separates each audio transcription from captions in mixed albums", () => {

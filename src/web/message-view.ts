@@ -1,15 +1,25 @@
 import type { MessageRow } from "../db/types.js";
 import type { WebAttachment, WebMessage } from "./types.js";
 import { attachmentKind } from "./media.js";
+import { safeOpenUi } from "../openui/validate.js";
+import { asRecord } from "../util/records.js";
+import { savedToolActivity } from "../ai/toolActivity.js";
+import { resolveOpenUiLanguage } from "../openui/language.js";
 
 export interface SavedTranscript { id: string; messageId: number; fileId: number; text: string }
 export interface SavedAttachment extends WebAttachment { inlineContent?: string | null }
 
 /** Separate the bot's saved media cards from the words a person actually sent. */
-export function messageView(message: MessageRow, attachments: SavedAttachment[], transcripts: SavedTranscript[] = []): WebMessage {
+export function messageView(message: MessageRow, attachments: SavedAttachment[], transcripts: SavedTranscript[] = [], attachmentDeliveryPending = false): WebMessage {
+  const pending = message.role === "assistant" && attachmentDeliveryPending;
   const files = attachments.map(({ inlineContent, ...file }) => file);
+  const visualization = !pending && message.role === "assistant" && message.text_plain.trim() ? savedOpenUi(message.content_json, message.text_plain) : undefined;
+  const toolActivity = message.role === "assistant" ? savedMessageToolActivity(message.content_json) : undefined;
   const view = { id: message.id, threadId: message.thread_id, role: message.role, text: message.text_plain,
-    thinking: message.thinking, createdAt: message.created_at, attachments: files };
+    thinking: toolActivity ? toolActivity.reasoning.join("\n\n") || null : message.thinking,
+    createdAt: message.created_at, attachments: pending ? [] : files, ...visualization,
+    ...(toolActivity ? { toolActivity } : {}),
+    ...(savedTelegramSyncFailure(message.content_json) ? { telegramSyncFailed: true } : {}) };
   if (message.kind === "text" && message.role !== "assistant") return view;
   const captions = savedCaptions(message.content_json, files);
   const visible: string[] = [];
@@ -71,6 +81,14 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
   return view;
 }
 
+export function attachmentDeliveryTurnId(message: MessageRow): number | undefined {
+  if (message.role !== "assistant") return undefined;
+  try {
+    const turnId = asRecord(JSON.parse(message.content_json))?.attachmentDeliveryTurnId;
+    return typeof turnId === "number" && Number.isSafeInteger(turnId) && turnId > 0 ? turnId : undefined;
+  } catch { return undefined; }
+}
+
 function fileCardEnd(text: string, file: WebAttachment, inlineContent?: string | null): number | null {
   const prefix = `File #${file.id}: ${file.name} (`;
   if (!text.startsWith(prefix)) return null;
@@ -95,6 +113,22 @@ function savedCaptions(content: string, files: WebAttachment[]): string[] {
     if (Array.isArray(parsed?.captions)) captions.unshift(...parsed.captions.filter((c: unknown) => typeof c === "string"));
   } catch { /* Older messages may have no structured caption. */ }
   return [...new Set(captions.map(c => c.trim()).filter(Boolean))];
+}
+
+function savedOpenUi(content: string, text: string) {
+  try {
+    const saved = asRecord(JSON.parse(content));
+    const openui = safeOpenUi(saved?.openui);
+    return openui ? { openui, openuiLanguage: resolveOpenUiLanguage(text, saved?.openuiLanguage) } : undefined;
+  } catch { return undefined; }
+}
+
+function savedMessageToolActivity(content: string) {
+  try { return savedToolActivity(asRecord(JSON.parse(content))?.toolActivity); } catch { return undefined; }
+}
+
+function savedTelegramSyncFailure(content: string): boolean {
+  try { return asRecord(JSON.parse(content))?.telegramSyncFailed === true; } catch { return false; }
 }
 
 function bracketEnd(text: string): number | null {

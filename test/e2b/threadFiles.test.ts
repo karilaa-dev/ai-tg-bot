@@ -4,6 +4,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { e2bFileSource } from "../../src/e2b/fileSource.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
+import { webFileSource } from "../../src/web/file-source.js";
 
 describe("E2B thread file descriptors", () => {
   let database: AppDatabase | undefined;
@@ -88,5 +89,59 @@ describe("E2B thread file descriptors", () => {
 
     expect(first.remoteKey).not.toBe(second.remoteKey);
     expect(first.locator).toMatchObject({ path: base.sourceCanonicalPath, size: 5, sha256: "b".repeat(64) });
+  });
+
+  it("includes registered web attachments without Telegram refs, within message and fork boundaries", async () => {
+    database = createDatabase(loadTestConfig());
+    await database.initialize();
+    const repos = createRepos(database.db, database.search);
+    const user = await repos.users.ensure({ tgId: 501, firstName: "Files", lang: "en" });
+    const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Files" });
+    const files = [];
+    for (const name of ["before.txt", "after.txt"]) {
+      const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: [], textPlain: name });
+      const file = await repos.files.insertFile({
+        userId: user.tg_id, threadId: thread.id, messageId: message.id,
+        type: "txt", name, size: 5, contentSha256: "a".repeat(64), mimeType: "text/plain", isInline: false,
+      });
+      await repos.files.rememberSource(file.id, webFileSource(file.id, "text/plain"));
+      files.push(file);
+    }
+    const [before, after] = files;
+    if (!before || !after || before.message_id === null) throw new Error("missing attachment fixture");
+    const fork = await repos.threads.create({
+      userId: user.tg_id, topicId: null, title: "Fork", parentThreadId: thread.id, forkPointMessageId: before.message_id,
+    });
+    const selected = [before.id, after.id, before.id];
+    for (const input of [{ repos, thread, maxMessageId: before.message_id }, { repos, thread: fork }]) {
+      const descriptors = await resolveThreadFileDescriptors(input, undefined, selected);
+      expect(descriptors).toEqual([{
+        fileId: before.id, messageId: before.message_id, name: "before.txt", mimeType: "text/plain",
+        expectedSize: 5, expectedSha256: "a".repeat(64), telegramRefs: [],
+      }]);
+    }
+    expect(await resolveThreadFileDescriptors({ repos, thread })).toHaveLength(2);
+  });
+
+  it("requires a visible attachment grant for another user's web blob and keeps the recipient's name", async () => {
+    database = createDatabase(loadTestConfig());
+    await database.initialize();
+    const repos = createRepos(database.db, database.search);
+    const owner = await repos.users.ensure({ tgId: 501, firstName: "Owner", lang: "en" });
+    const recipient = await repos.users.ensure({ tgId: 502, firstName: "Recipient", lang: "en" });
+    const original = await repos.threads.create({ userId: owner.tg_id, topicId: null, title: "Private" });
+    const thread = await repos.threads.create({ userId: recipient.tg_id, topicId: null, title: "Shared" });
+    const file = await repos.files.insertFile({
+      userId: owner.tg_id, threadId: original.id, type: "txt", name: "private-original.txt",
+      size: 5, isInline: false, mimeType: "text/plain",
+    });
+    await repos.files.rememberSource(file.id, webFileSource(file.id, "text/plain"));
+    expect(await resolveThreadFileDescriptors({ repos, thread }, undefined, [file.id])).toEqual([]);
+
+    const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: [], textPlain: "attachment" });
+    await repos.files.attachToMessage(message.id, file.id, { displayName: "shared.txt" });
+    const descriptors = await resolveThreadFileDescriptors({ repos, thread }, undefined, [file.id]);
+    expect(descriptors).toEqual([expect.objectContaining({ fileId: file.id, name: "shared.txt", telegramRefs: [] })]);
+    expect(JSON.stringify(descriptors)).not.toContain("private-original");
   });
 });

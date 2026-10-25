@@ -20,12 +20,14 @@ const baseUser: UserRow = {
   username: "alice",
   lang: "en",
   tz_offset_min: null,
+  tz_name: null,
   stream_mode: 1,
   memory_enabled: 1,
   created_at: 1,
 };
 
 const thread: ThreadRow = {
+  origin: "telegram",
   id: 10,
   user_id: baseUser.tg_id,
   topic_id: null,
@@ -57,6 +59,43 @@ function browserConfig(defaultMinutes = 5) {
 }
 
 describe("renderSystemPrompt", () => {
+  it("proactively teaches rich OpenUI only for immutable web creation origin", async () => {
+    const web = await renderSystemPrompt({ user: baseUser, thread: { origin: "web" } });
+    expect(web).toContain("Proactively compose useful OpenUI");
+    expect(web).toContain("Do not wait for the user to request a visualization");
+    expect(web).toContain("creation origin is immutable");
+    expect(web).toContain("Prioritize the website experience");
+    expect(web).toContain("Do not duplicate visual content merely for Telegram compatibility");
+    expect(web).toContain("language of the AI response, not the account or website language");
+    expect(web).toContain("finish_response.openui_language");
+    expect(web).toContain("Image(source: string, alt: string, caption: string)");
+    expect(web).toContain("BarChart(title: string, labels: string[], values: string[], unit: string)");
+    expect(web).toContain("A numbered list restyled as Steps is not a visualization");
+    expect(web).toContain("Flow(title:");
+    expect(web).toContain("StatGrid(title:");
+    expect(web).toContain("ItemList(title:");
+    expect(web).toContain("No expressions, reactive variables, functions");
+    for (const origin of [undefined, { origin: "telegram" }] satisfies (Pick<ThreadRow, "origin"> | undefined)[]) {
+      const prompt = await renderSystemPrompt({ user: baseUser, thread: origin });
+      expect(prompt).not.toContain("finish_response.openui");
+      expect(prompt).not.toContain("Image(source:");
+      expect(prompt).not.toContain("BarChart(title:");
+    }
+  });
+
+  it("names the user's zone and follows its daylight saving offset", () => {
+    const contextBlock = renderSessionContext({
+      user: { ...baseUser, tz_name: "America/Los_Angeles", tz_offset_min: -420 },
+      thread,
+      files: [],
+      now: new Date("2026-12-01T20:05:00.000Z"),
+    });
+    expect(parseSessionContext(contextBlock)).toMatchObject({
+      current_time: "2026-12-01 12:05",
+      timezone: "America/Los_Angeles (UTC-08:00)",
+    });
+  });
+
   it("renders current time and the stored timezone as structured context", () => {
     const contextBlock = renderSessionContext({
       user: { ...baseUser, tz_offset_min: -420 },

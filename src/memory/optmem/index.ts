@@ -64,7 +64,7 @@ function usage(command: string): string {
   ${command} init             create this memory; print the setup block.
   ${command} wake [part [T]]  read your memory. Run first, every session.
   ${command} note "..."       record one memory: one short line.
-  ${command} nap [id "..."]   do the pending compressions.
+  ${command} nap [id "..." [revision]]  do the pending compressions.
   ${command} recall <regex>   search every memory ever recorded.
   ${command} zoom <lo>-<hi>   open a tree node: its two halves.
   ${command} forget <lo>-<hi> drop a bad summary; nap rebuilds it.
@@ -139,6 +139,7 @@ class Command {
   }
 
   private async nextNap(total: number): Promise<string | undefined> {
+    const revision = await this.store.revision?.() ?? 0;
     const [block] = await this.store.pending(total, 1);
     if (!block) return;
     const [lo, hi] = block, left = await this.store.pendingCount(total) - 1;
@@ -153,7 +154,7 @@ class Command {
       }
     }
     const tail = !left ? "" : `\n${left === 1 ? "1 compression remains" : `${left} compressions remain`} after this one.`;
-    return `Compress memories #${lo}-${hi - 1} into one line of at most ${this.sizes.ENTRY_CHARS} bytes.\nKeep what has lasting effect, drop what does not. Invent nothing.\n\n${body.join("\n")}\n${tail}\nRun: ${this.name} nap ${lo}-${hi - 1} "<your line>"`;
+    return `Compress memories #${lo}-${hi - 1} into one line of at most ${this.sizes.ENTRY_CHARS} bytes.\nKeep what has lasting effect, drop what does not. Invent nothing.\n\n${body.join("\n")}\n${tail}\nRun: ${this.name} nap ${lo}-${hi - 1} "<your line>"${revision ? ` ${revision}` : ""}`;
   }
 
   private paginate(lines: string[]): string[][] {
@@ -232,13 +233,14 @@ class Command {
   private async nap(args: string[]): Promise<void> {
     const total = await this.store.length();
     if (args.length) {
-      if (args.length !== 2) throw new MemoError(`usage: ${this.name} nap <lo>-<hi> "<one line>"`);
+      const sourceRevision = args[2] === undefined ? 0 : decimal(args[2]);
+      if (args.length < 2 || args.length > 3 || sourceRevision === undefined) throw new MemoError(`usage: ${this.name} nap <lo>-<hi> "<one line>" [source revision]`);
       const [lo, hi] = blockId(args[0]), [next] = await this.store.pending(total, 1);
       if (!next) { this.print("Nothing left to compress."); return; }
       if (lo !== next[0] || hi !== next[1]) {
         if (await this.store.summary(lo, hi) !== undefined) this.print(`${lo}-${hi - 1} is already settled.`);
         else throw new MemoError(`Wrong block: ${args[0]}. Blocks are built in order; the next is ${next[0]}-${next[1] - 1}. Run: ${this.name} nap`);
-      } else if (!await this.store.put(lo, hi, this.check(args[1]))) this.print(`${lo}-${hi - 1} was settled or forgotten meanwhile.`);
+      } else if (!await this.store.put(lo, hi, this.check(args[1]), sourceRevision)) this.print(`${lo}-${hi - 1} was settled or forgotten meanwhile.`);
       else this.print(`${lo}-${hi - 1} saved.`);
     }
     const nap = await this.nextNap(total);

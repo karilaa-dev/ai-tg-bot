@@ -5,6 +5,7 @@ import { decode, MemoError, pad, precedes, LOG_REC, TREE_REC, type Memory } from
 import type { MemoryStore } from "./storage.js";
 
 export class DatabaseMemoryStore implements MemoryStore {
+  private openedRevision: number | null = null;
   constructor(private readonly db: SqlExecutor, readonly userId: number, private readonly signal?: AbortSignal) {
     if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("Invalid memory owner.");
   }
@@ -23,7 +24,9 @@ export class DatabaseMemoryStore implements MemoryStore {
 
   async open(): Promise<void> {
     await this.assertEnabled();
-    if (!await this.exists()) throw new MemoError(`No memory for user ${this.userId}. Initialize this user's memory first.`);
+    const store = await queryOne<{ revision: number }>(this.db, sql`select revision from optmem_stores where user_id = ${this.userId}`);
+    if (!store) throw new MemoError(`No memory for user ${this.userId}. Initialize this user's memory first.`);
+    this.openedRevision = store.revision;
   }
 
   async initialize(): Promise<boolean> {
@@ -31,6 +34,8 @@ export class DatabaseMemoryStore implements MemoryStore {
       await this.assertEnabled(tx, true);
       const created = await queryOne(tx, sql`insert into optmem_stores(user_id) values (${this.userId})
         on conflict(user_id) do nothing returning user_id`);
+      const state = await queryOne<{ revision: number }>(tx, sql`select revision from optmem_stores where user_id = ${this.userId}`);
+      this.openedRevision = state?.revision ?? null;
       return Boolean(created);
     });
   }
@@ -50,12 +55,18 @@ export class DatabaseMemoryStore implements MemoryStore {
     return row?.next_id ?? 0;
   }
 
+  async revision(): Promise<number> {
+    const row = await queryOne<{ revision: number }>(this.db, sql`select revision from optmem_stores where user_id = ${this.userId}`);
+    if (!row) throw new MemoError(`No memory for user ${this.userId}. Initialize this user's memory first.`);
+    return row.revision;
+  }
+
   async slice(lo: number, hi: number): Promise<Memory[]> {
     await this.assertEnabled();
-    const rows = await this.db.query<{ id: number; date: string; content: Buffer }>(sql`
-      select id, date, content from optmem_notes where user_id = ${this.userId} and id >= ${lo} and id < ${hi} order by id
+    const rows = await this.db.query<{ id: number; date: string; content: Buffer; deleted: number }>(sql`
+      select id, date, content, deleted from optmem_notes where user_id = ${this.userId} and id >= ${lo} and id < ${hi} order by id
     `);
-    return rows.map(row => [row.id, row.date, decode(row.content)]);
+    return rows.map(row => [row.id, row.date, row.deleted ? "[Deleted memory]" : decode(row.content)]);
   }
 
   async get(index: number): Promise<Memory> {
@@ -67,10 +78,13 @@ export class DatabaseMemoryStore implements MemoryStore {
   async *scan(): AsyncGenerator<Memory> {
     let lo = 0;
     while (true) {
-      const rows = await this.slice(lo, lo + 4096);
+      await this.assertEnabled();
+      const rows = await this.db.query<{ id: number; date: string; content: Buffer }>(sql`
+        select id, date, content from optmem_notes where user_id = ${this.userId} and deleted = 0 and id >= ${lo} order by id limit 4096
+      `);
       if (!rows.length) return;
-      yield* rows;
-      lo = rows[rows.length - 1][0] + 1;
+      for (const row of rows) yield [row.id, row.date, decode(row.content)];
+      lo = rows[rows.length - 1].id + 1;
     }
   }
 
@@ -107,8 +121,10 @@ export class DatabaseMemoryStore implements MemoryStore {
     return row?.n ?? 0;
   }
 
-  async put(lo: number, hi: number, text: string): Promise<boolean> {
+  async put(lo: number, hi: number, text: string, sourceRevision = this.openedRevision ?? 0): Promise<boolean> {
     return this.locked(async store => {
+      const current = await queryOne<{ revision: number }>(store.db, sql`select revision from optmem_stores where user_id = ${this.userId}`);
+      if (current?.revision !== sourceRevision) return false;
       // Earlier levels include the children; forgetting one makes it pending
       // again and prevents an in-flight parent from bypassing the rebuild.
       const [next] = await store.pending(await store.length(), 1);

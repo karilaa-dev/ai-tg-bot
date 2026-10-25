@@ -1,0 +1,290 @@
+/* Telegram-login chat workspace. Kumo tokens only, so light and dark follow data-mode. */
+:root {
+  --chat-subtle: var(--text-color-kumo-subtle);
+  --chat-hover: color-mix(in oklab, var(--text-color-kumo-default) 6%, transparent);
+  --chat-active: color-mix(in oklab, var(--text-color-kumo-default) 9%, transparent);
+  --chat-raised: light-dark(var(--color-kumo-base), var(--color-kumo-tint));
+  --chat-bubble: light-dark(var(--color-kumo-recessed), var(--color-kumo-tint));
+  /* Cards in the dock; Kumo's elevated surface is darker than the page in dark mode. */
+  --chat-card: light-dark(var(--color-kumo-elevated), color-mix(in oklab, var(--text-color-kumo-default) 4%, transparent));
+}
+.chat-shell {
+  --chat-column: 46rem;
+  --chat-gutter: 24px;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-kumo-base);
+  color: var(--text-color-kumo-default);
+}
+.chat-shell ::selection, .chat-access ::selection { background: color-mix(in oklab, var(--color-kumo-brand) 24%, transparent); }
+.chat-shell * { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--text-color-kumo-default) 18%, transparent) transparent; }
+/* Kumo scroll areas draw their own hover scrollbar; the native one would show beside it. */
+.chat-shell [data-sidebar="viewport"] { scrollbar-width: none; }
+.chat-shell [data-sidebar="viewport"]::-webkit-scrollbar { display: none; }
+.chat-muted { color: var(--chat-subtle); }
+.chat-error-text { color: var(--text-color-kumo-danger); }
+
+/* Sign-in: the logo, the name, one line, one action. */
+.chat-access { display: grid; place-items: center; min-height: 100dvh; padding: 32px 20px 12vh; background: var(--color-kumo-base); color: var(--text-color-kumo-default); }
+.chat-access-panel { display: grid; justify-items: center; width: min(100%, 340px); text-align: center; }
+.chat-access-logo { width: 56px; height: 56px; border-radius: 16px; object-fit: cover; box-shadow: 0 0 0 1px var(--color-kumo-line), 0 8px 24px -10px var(--color-kumo-shadow-drop); }
+.chat-access-panel h1 { margin-top: 20px; font-size: 22px; font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; }
+.chat-access-lede { margin-top: 6px; color: var(--chat-subtle); font-size: 15px; line-height: 1.5; text-wrap: balance; }
+.chat-access-slot { display: grid; gap: 12px; width: 100%; min-height: 44px; margin-top: 28px; }
+.chat-access-button { width: 100%; justify-content: center; height: 44px; border-radius: 12px; font-size: 15px; font-weight: 500; }
+.chat-access-status { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; color: var(--chat-subtle); }
+.chat-access-note { display: flex; align-items: flex-start; justify-content: center; gap: 8px; color: var(--chat-subtle); line-height: 1.5; text-wrap: pretty; }
+.chat-access-note > svg { flex-shrink: 0; margin-top: 3px; }
+.chat-access-note > span { text-align: left; }
+.chat-access-note strong { color: var(--text-color-kumo-default); font-weight: 500; }
+.chat-access-note.is-error, .chat-access-note.is-error strong { color: var(--text-color-kumo-danger); }
+
+/* Sidebar */
+.chat-sidebar { font-size: 14px; }
+.chat-sidebar-head { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 10px 12px 6px; border-bottom: 0; }
+.chat-brand { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 4px 8px 4px 4px; border-radius: 10px; color: inherit; font-weight: 600; text-decoration: none; }
+.chat-brand:hover { background: var(--chat-hover); }
+.chat-brand .brand-mark { width: 28px; height: 28px; border-radius: 8px; }
+.chat-sidebar-actions { display: grid; gap: 1px; padding: 4px 8px 8px; }
+.chat-side-action, .chat-thread { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border-radius: 10px; color: var(--text-color-kumo-default); text-align: left; font-size: 14px; }
+.chat-side-action:hover, .chat-thread:hover { background: var(--chat-hover); }
+.chat-side-action[aria-current="page"], .chat-thread.is-active { background: var(--chat-active); }
+.chat-side-action:focus-visible, .chat-thread:focus-visible, .chat-account:focus-visible, .chat-brand:focus-visible { outline: 2px solid var(--color-kumo-brand); outline-offset: -2px; }
+.chat-side-action > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-side-action > kbd, .chat-search-hints kbd { display: inline-grid; place-items: center; min-width: 20px; padding: 1px 5px; border-radius: 5px; background: var(--color-kumo-base); box-shadow: inset 0 0 0 1px var(--color-kumo-line); color: var(--chat-subtle); font-family: inherit; font-size: 12px; line-height: 16px; }
+.chat-side-action > kbd { opacity: 0; transition: opacity .15s; }
+.chat-side-action:hover > kbd, .chat-side-action:focus-visible > kbd { opacity: 1; }
+.chat-sidebar-content { min-height: 0; padding-inline: 8px; }
+.chat-thread-group + .chat-thread-group { margin-top: 10px; }
+/* Expanded Kumo group labels drop their divider; the variant that does so is not generated here. */
+.chat-thread-group-label { border-bottom-color: transparent; color: var(--chat-subtle); font-size: 12px; font-weight: 500; }
+.chat-sidebar-empty { padding: 4px 10px 12px; color: var(--chat-subtle); white-space: normal; line-height: 1.5; }
+.chat-sidebar-banner { margin: 4px 0 8px; white-space: normal; }
+.chat-sidebar-more { padding: 4px 4px 12px; }
+.chat-thread-skeleton { display: grid; gap: 14px; padding: 10px 10px 16px; }
+.chat-thread-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 0; margin: 0; list-style: none; }
+.chat-thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-thread-meta { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: var(--chat-subtle); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chat-thread-time { white-space: nowrap; }
+.chat-thread-working { display: inline-flex; color: var(--text-color-kumo-default); }
+.chat-thread-origin { display: inline-flex; flex-shrink: 0; margin-right: -4px; color: var(--chat-subtle); }
+.chat-thread.is-unread .chat-thread-title { font-weight: 600; }
+/* The padding widens the hover target for the tooltip without enlarging the dot. */
+.chat-unread-dot { box-sizing: content-box; width: 7px; height: 7px; margin: -5px; padding: 5px; border-radius: 50%; background: var(--color-kumo-brand); background-clip: content-box; }
+.chat-sidebar-foot { display: grid; align-items: stretch; gap: 4px; border-top: 1px solid var(--color-kumo-line); }
+.chat-sidebar-pages { display: grid; gap: 1px; }
+.chat-account { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px; border-radius: 10px; text-align: left; color: var(--text-color-kumo-default); }
+.chat-account:hover, .chat-account[data-popup-open] { background: var(--chat-hover); }
+.chat-avatar { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; overflow: hidden; border-radius: 50%; background: var(--color-kumo-brand); color: white; font-weight: 500; }
+.chat-avatar > img { width: 100%; height: 100%; object-fit: cover; }
+.chat-account-copy { display: grid; flex: 1; min-width: 0; line-height: 1.35; }
+.chat-account-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-account-copy > .chat-muted { font-size: 12px; }
+.chat-account-name { font-weight: 500; }
+.chat-account > svg { color: var(--chat-subtle); }
+
+/* Main column */
+.chat-main { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100dvh; outline: none; background: var(--color-kumo-base); }
+.chat-view { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.chat-view-header { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 12px 8px 20px; background: var(--color-kumo-base); }
+.chat-view-title { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.chat-view-title h1 { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 600; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.chat-view-title > p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-view-marks { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: var(--chat-subtle); }
+.chat-view-mark { display: inline-flex; border-radius: 4px; }
+.chat-view-mark:focus-visible { outline: 2px solid var(--color-kumo-brand); outline-offset: 2px; }
+.chat-view-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.chat-nav-button { margin-left: -6px; }
+.chat-save-state { display: inline-flex; align-items: center; gap: 6px; color: var(--chat-subtle); }
+.chat-banner-row { width: 100%; max-width: calc(var(--chat-column) + 2 * var(--chat-gutter)); margin-inline: auto; padding: 4px var(--chat-gutter) 0; }
+
+/* Transcript */
+.chat-scroller { position: relative; display: flex; flex: 1; min-height: 0; }
+.chat-viewport { width: 100%; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; outline: none; }
+.chat-transcript { display: flex; flex-direction: column; gap: 32px; width: 100%; max-width: calc(var(--chat-column) + 2 * var(--chat-gutter)); margin-inline: auto; padding: 16px var(--chat-gutter) 40px; font-size: 15px; }
+.chat-transcript-skeleton { display: grid; gap: 16px; padding-top: 12px; }
+.chat-older { display: flex; justify-content: center; }
+.chat-turn { display: grid; gap: 24px; }
+.chat-day { display: flex; align-items: center; gap: 12px; color: var(--chat-subtle); font-size: 12px; font-weight: 500; }
+.chat-day::before, .chat-day::after { content: ""; flex: 1; height: 1px; background: var(--color-kumo-line); }
+.chat-boundary { justify-self: center; padding: 3px 10px; border-radius: 999px; background: var(--color-kumo-elevated); color: var(--chat-subtle); font-size: 13px; box-shadow: inset 0 0 0 1px var(--color-kumo-line); }
+.chat-message { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; }
+.chat-message[data-role="user"] { position: relative; align-items: flex-end; gap: 6px; }
+.chat-message-actions { display: flex; align-items: center; gap: 0; min-height: 30px; margin: -4px 0 0 -6px; color: var(--chat-subtle); font-size: 13px; }
+/* Your own message's actions sit in the gap below it, so revealing them never moves the transcript. */
+.chat-message[data-role="user"] .chat-message-actions { position: absolute; top: 100%; right: -6px; margin: 2px 0 0; }
+.chat-message[data-role="assistant"] .chat-message-time { order: 1; margin-left: 6px; }
+.chat-message[data-role="user"] .chat-message-time { margin-right: 6px; }
+.chat-message-time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chat-action-button { color: var(--chat-subtle); }
+.chat-action-button:hover { color: var(--text-color-kumo-default); }
+/* Actions stay quiet until you point at a message; the newest reply keeps them visible. */
+@media (hover: hover) {
+  .chat-message-actions { opacity: 0; transition: opacity .15s; }
+  .chat-message:hover .chat-message-actions, .chat-message:focus-within .chat-message-actions,
+  .chat-turn:last-of-type .chat-message[data-role="assistant"] .chat-message-actions { opacity: 1; }
+}
+.chat-prose { width: 100%; min-width: 0; }
+.chat-prose .markdown, .chat-bubble .markdown { font-size: 15px; line-height: 1.7; }
+.chat-prose .markdown p + p, .chat-prose .markdown ul, .chat-prose .markdown ol, .chat-prose .markdown table, .chat-prose .markdown blockquote { margin-top: 14px; }
+.chat-prose .markdown li + li { margin-top: 4px; }
+.chat-prose .markdown h1, .chat-prose .markdown h2, .chat-prose .markdown h3 { margin: 24px 0 8px; font-size: 17px; line-height: 1.4; }
+.chat-prose .markdown h1:first-child, .chat-prose .markdown h2:first-child, .chat-prose .markdown h3:first-child { margin-top: 0; }
+.chat-prose .markdown a, .chat-bubble .markdown a { color: var(--text-color-kumo-link); text-underline-offset: 3px; }
+.chat-bubble { max-width: min(80%, 36rem); min-width: 0; padding: 10px 16px; border-radius: 20px; background: var(--chat-bubble); overflow-wrap: anywhere; }
+.chat-bubble .markdown { line-height: 1.55; }
+.chat-plain { white-space: pre-wrap; line-height: 1.55; }
+.chat-message[data-pending] .chat-bubble { opacity: .7; }
+.chat-message[data-pending="failed"] .chat-bubble { opacity: 1; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-color-kumo-danger) 45%, transparent); }
+.chat-pending-files { display: grid; gap: 4px; margin-top: 6px; padding: 0; list-style: none; color: var(--chat-subtle); }
+.chat-pending-files li { display: flex; align-items: center; gap: 6px; }
+.chat-message-meta { display: flex; align-items: center; gap: 6px; color: var(--chat-subtle); font-size: 13px; }
+.chat-send-failed { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 8px; color: var(--text-color-kumo-danger); font-size: 14px; }
+.chat-send-failed > span { flex: 1 1 12rem; text-align: right; }
+.chat-attachments { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; max-width: 520px; }
+.chat-message[data-role="user"] .chat-attachments { justify-items: end; }
+.chat-openui { width: 100%; min-width: 0; }
+.chat-system { align-self: center; max-width: 36rem; padding: 6px 12px; border-radius: 10px; color: var(--chat-subtle); background: var(--color-kumo-elevated); text-align: center; font-size: 14px; }
+.chat-empty-state { display: grid; justify-items: center; gap: 8px; margin: 14vh auto 0; max-width: 26rem; text-align: center; }
+.chat-empty-state h2 { font-size: 18px; font-weight: 600; }
+.chat-empty-state .chat-muted { line-height: 1.6; text-wrap: balance; }
+.chat-empty-state > button { margin-top: 8px; }
+/* Kumo draws the button ring with box-shadow, so the lift repeats it. */
+.chat-jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--chat-raised); box-shadow: 0 0 0 1px var(--color-kumo-line), 0 6px 16px -6px var(--color-kumo-shadow-drop); }
+
+/* Composer */
+.chat-composer-dock { width: 100%; max-width: calc(var(--chat-column) + 2 * var(--chat-gutter)); margin-inline: auto; padding: 0 var(--chat-gutter) max(18px, env(safe-area-inset-bottom)); }
+.chat-composer { display: grid; gap: 4px; padding: 8px 8px 8px 12px; border-radius: 26px; background: var(--chat-raised); cursor: text;
+  box-shadow: 0 0 0 1px var(--color-kumo-line), 0 1px 2px var(--color-kumo-shadow-drop), 0 8px 24px -12px var(--color-kumo-shadow-drop); transition: box-shadow .15s ease-out; }
+.chat-composer:focus-within { box-shadow: 0 0 0 1px color-mix(in oklab, var(--text-color-kumo-default) 28%, transparent), 0 1px 2px var(--color-kumo-shadow-drop), 0 8px 24px -12px var(--color-kumo-shadow-drop); }
+.chat-composer.is-disabled { cursor: default; opacity: .7; }
+.chat-composer-input { width: 100%; min-height: 28px; max-height: 240px; padding: 6px 6px 2px; resize: none; overflow-y: hidden; border: 0; outline: none; background: transparent; color: inherit; caret-color: var(--color-kumo-brand); font: inherit; font-size: 15px; line-height: 1.6; }
+.chat-composer-input:focus-visible { outline: none; }
+.chat-composer-input::placeholder { color: var(--chat-subtle); opacity: 1; }
+.chat-composer-bar { display: flex; align-items: center; gap: 6px; }
+.chat-composer-tool { color: var(--chat-subtle); }
+.chat-composer-tool:not(:disabled):hover { color: var(--text-color-kumo-default); }
+.chat-composer-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.chat-composer-send:disabled { opacity: .35; }
+.chat-composer-problem { padding: 0 6px 4px; color: var(--text-color-kumo-danger); font-size: 14px; }
+.chat-composer-dock > .chat-composer-problem { padding: 0 12px 8px; }
+.chat-composer-files { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 4px; margin: 0; list-style: none; }
+.chat-file-chip { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; padding: 6px 6px 6px 6px; border-radius: 14px; background: var(--color-kumo-base); box-shadow: inset 0 0 0 1px var(--color-kumo-line); }
+.chat-file-chip-icon { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; border-radius: 9px; background: var(--color-kumo-brand); color: white; }
+.chat-file-chip-copy { display: grid; min-width: 0; line-height: 1.3; }
+.chat-file-chip-copy > .chat-muted { font-size: 12px; }
+.chat-file-chip-name { min-width: 0; max-width: 14rem; overflow: hidden; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-chip-remove { color: var(--chat-subtle); }
+.chat-drop { position: absolute; inset: 8px; z-index: 5; display: grid; place-content: center; justify-items: center; gap: 8px; border-radius: 20px; border: 2px dashed var(--color-kumo-brand); background: color-mix(in srgb, var(--color-kumo-base) 90%, transparent); color: var(--text-color-kumo-default); font-weight: 500; pointer-events: none; }
+.chat-drop > svg { color: var(--color-kumo-brand); }
+.chat-archived { display: flex; align-items: center; gap: 12px; padding: 12px 12px 12px 16px; border-radius: 20px; background: var(--chat-card); color: var(--chat-subtle); box-shadow: inset 0 0 0 1px var(--color-kumo-line); }
+.chat-archived > p { flex: 1; min-width: 0; line-height: 1.5; }
+.chat-archived > svg { flex-shrink: 0; }
+/* A one-time question near the composer, such as confirming the time zone. */
+.chat-notice { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; column-gap: 12px; align-items: start; padding: 14px 10px 14px 14px; border-radius: 20px; background: var(--chat-card); box-shadow: inset 0 0 0 1px var(--color-kumo-line); }
+.chat-composer-dock > .chat-notice { margin-bottom: 10px; }
+.chat-notice-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: color-mix(in srgb, var(--color-kumo-brand) 14%, transparent); color: var(--color-kumo-brand); }
+.chat-notice-copy { grid-column: 2; display: grid; gap: 2px; min-width: 0; padding-top: 5px; }
+.chat-notice-title { color: var(--text-color-kumo-default); font-size: 14px; font-weight: 600; line-height: 1.45; text-wrap: pretty; }
+.chat-notice-text { color: var(--chat-subtle); font-size: 14px; line-height: 1.5; text-wrap: pretty; }
+.chat-notice-copy > .chat-error-text { font-size: 14px; }
+.chat-notice-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chat-notice-close { grid-column: 3; grid-row: 1; color: var(--chat-subtle); }
+
+/* Home */
+.chat-home-header { min-height: 52px; }
+.chat-home-body { display: grid; align-content: center; gap: 24px; flex: 1; width: 100%; max-width: calc(var(--chat-column) + 2 * var(--chat-gutter)); margin-inline: auto; padding: 0 var(--chat-gutter) 16vh; }
+.chat-home-title { font-size: 28px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; text-align: center; text-wrap: balance; }
+.chat-home .chat-composer-input { min-height: 52px; }
+
+/* Settings and reused pages */
+.chat-page-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.chat-page { display: grid; gap: 32px; width: 100%; max-width: 44rem; margin-inline: auto; padding: 20px 24px 48px; }
+.chat-view-spacer { flex: 1; }
+.chat-page-title { display: grid; gap: 4px; padding-inline: 4px; }
+.chat-page-title h1 { font-size: 24px; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+.chat-page-title p { line-height: 1.5; }
+.chat-settings-section { display: grid; gap: 10px; }
+.chat-settings-section h2 { padding-inline: 4px; color: var(--chat-subtle); font-size: 13px; font-weight: 500; }
+.chat-settings-card { padding: 0; overflow: visible; }
+.chat-setting { display: flex; align-items: center; gap: 24px; padding: 16px 20px; }
+.chat-setting + .chat-setting { border-top: 1px solid var(--color-kumo-line); }
+.chat-setting-copy { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.chat-setting-copy .chat-muted { line-height: 1.5; }
+.chat-setting-label { font-weight: 500; }
+.chat-setting-control { min-width: 10rem; }
+.chat-setting-inline { justify-self: start; margin: 4px 0 0 -8px; color: var(--text-color-kumo-link); }
+/* Zone names run long (America/Argentina/ComodRivadavia), so the picker is wider than other controls. */
+.chat-zone-input { width: 17rem; }
+.chat-zone-popup { max-height: min(22rem, 60dvh); }
+/* Kumo wraps item content in its own cell, beside the column for the selected check. */
+.chat-zone-item > :first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; min-width: 0; }
+.chat-zone-name { min-width: 0; overflow-wrap: anywhere; }
+.chat-zone-offset { flex-shrink: 0; color: var(--chat-subtle); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chat-legacy-view .pane-header { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 12px 8px 20px; border: 0; background: var(--color-kumo-base); }
+.chat-legacy-view .pane-header h2 { font-size: 15px; }
+.chat-legacy-view .pane-header p { margin-top: 0; font-size: 13px; }
+.chat-legacy-view .memory-content { width: 100%; max-width: 44rem; margin-inline: auto; padding: 16px 24px 48px; }
+.chat-legacy-view .memory-header > .button:last-child { color: var(--chat-subtle); }
+.chat-legacy-view .memory-delete.button { width: 28px; min-height: 28px; color: var(--chat-subtle); }
+.chat-legacy-view .memory-delete.button:hover { color: var(--text-color-kumo-danger); }
+@media (hover: hover) {
+  .chat-legacy-view .memory-delete.button { opacity: 0; transition: opacity .15s; }
+  .chat-legacy-view .memory-list li:hover .memory-delete.button, .chat-legacy-view .memory-delete.button:focus-visible { opacity: 1; }
+}
+.memory-notice { display: inline-flex; align-items: center; gap: 6px; color: var(--text-color-kumo-success); }
+.memory-notice:empty { display: none; }
+.memory-dialog-quote { max-height: 40dvh; overflow: auto; white-space: pre-wrap; }
+/* Confirmations: Kumo's dialog brings no padding or type, so they are set here, centered like other chat apps. */
+.chat-dialog { top: 50%; translate: -50% -50%; display: grid; gap: 8px; width: min(440px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow-y: auto; padding: 24px; border-radius: 20px; }
+.chat-dialog > h2 { color: var(--text-color-kumo-strong); font-size: 18px; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; text-wrap: balance; }
+.chat-dialog > p { color: var(--chat-subtle); font-size: 14px; line-height: 1.6; text-wrap: pretty; }
+.chat-dialog > .chat-error-text { color: var(--text-color-kumo-danger); }
+.chat-dialog-quote { margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--color-kumo-elevated); color: var(--chat-subtle); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; box-shadow: inset 0 0 0 1px var(--color-kumo-line); }
+.chat-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* Search palette */
+.chat-search-list { min-height: 120px; }
+/* The palette header already shows focus; the global outline would box the bare input. */
+.chat-search-input:focus-visible { outline: none; }
+.chat-search-pending { display: inline-flex; color: var(--chat-subtle); }
+.chat-search-item { justify-content: space-between; min-height: 36px; font-size: 14px; }
+.chat-search-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-search-status { display: flex; justify-content: center; align-items: center; gap: 8px; padding: 32px 16px; text-align: center; }
+.chat-search-more { display: flex; justify-content: center; align-items: center; gap: 8px; padding: 10px 8px 4px; color: var(--chat-subtle); }
+.chat-search-retry { color: var(--text-color-kumo-link); }
+.chat-search-hints { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.chat-search-hints > span { display: inline-flex; align-items: center; gap: 4px; }
+.chat-search-hints kbd + kbd { margin-left: -2px; }
+@media (hover: none) { div:has(> .chat-search-hints) { display: none; } }
+
+@media (max-width: 767px) {
+  .chat-shell { --chat-gutter: 16px; }
+  .chat-view-header, .chat-legacy-view .pane-header { padding-inline: 8px 8px; min-height: 52px; }
+  .chat-nav-button { margin-left: 0; }
+  .chat-transcript { gap: 28px; padding-top: 8px; }
+  .chat-bubble { max-width: 88%; }
+  .chat-composer-dock { padding-inline: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .chat-home-body { padding-bottom: 10vh; }
+  .chat-home-title { font-size: 24px; }
+  .chat-page { padding: 12px 16px 40px; }
+  .chat-legacy-view .memory-content { padding: 12px 16px 40px; }
+  .chat-setting { flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
+  .chat-setting-control { width: 100%; }
+  .chat-archived { flex-wrap: wrap; border-radius: 16px; }
+  .chat-notice { border-radius: 16px; }
+  .chat-notice-actions { grid-column: 1 / -1; }
+  .chat-dialog { padding: 20px; }
+  .chat-dialog-actions > * { flex: 1; justify-content: center; }
+  [role="dialog"]:has(.chat-search-list) { top: 12px; width: calc(100% - 24px); }
+}
+/* Touch: bigger targets, and 16px text so iOS does not zoom focused fields. */
+@media (pointer: coarse) {
+  .chat-composer-input { font-size: 16px; }
+  .chat-composer-bar .chat-composer-tool, .chat-composer-bar .chat-composer-send { width: 40px; height: 40px; }
+  .chat-side-action, .chat-thread { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer, .chat-message-actions, .chat-side-action > kbd { transition: none; }
+}

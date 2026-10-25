@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { audioFormat, AudioFormatSchema, transcribeAudio } from "../../audio/transcription.js";
+import { audioFormat, AudioFormatSchema, MAX_TRANSCRIPTION_BYTES, transcribeAudio } from "../../audio/transcription.js";
 import { boundTranscript, transcriptPage } from "../../audio/transcripts.js";
-import { MAX_FILE_BYTES } from "../../files/limits.js";
 import { threadVisibilityScope } from "../../memory/retrieval.js";
 import { getScopedFile, normalizeBashCwd, toToolError } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
@@ -51,7 +50,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
         if (file_id !== undefined) {
           const file = await getScopedFile(input, file_id);
           if (!file) return { error: "File not found in this thread." };
-          if (file.size > MAX_FILE_BYTES) return { error: "Audio exceeds the 20 MB file size limit." };
+          if (file.size > MAX_TRANSCRIPTION_BYTES) return { error: "Audio exceeds the 20 MB file size limit." };
           if (!input.resolveFile) return { error: "Chat file resolver is unavailable." };
           name = file.name;
           mime = file.mime_type ?? undefined;
@@ -66,7 +65,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
             userId: input.user.tg_id,
             threadId: input.thread.id,
             virtualPath: name,
-            maxBytes: MAX_FILE_BYTES,
+            maxBytes: MAX_TRANSCRIPTION_BYTES,
             signal,
           })).bytes;
         }

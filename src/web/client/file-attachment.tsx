@@ -1,20 +1,25 @@
-import { useState } from "react";
-import { Download, FileText, ImageIcon, Mic } from "lucide-react";
+import { useEffect, useState } from "react";
+import { IconDownload, IconFileText, IconMicrophone, IconPhoto } from "@tabler/icons-react";
 import type { WebAttachment } from "../types.js";
 import { attachmentKind, isAudioMime, imageMimeTypes } from "../media.js";
+import { useFirstVisible } from "./authenticated-image.js";
 import type { LoadedAttachment } from "./attachments.js";
+import { fileSize, localizeServerError, useSharedStrings, useUiLanguage } from "./i18n.js";
 import { RichText } from "./rich-text.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
 
-const fileSize = (size: number | null) => size === null ? "Unknown size" : size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
-
-export function FileAttachment({ file, state, maxBytes, load, messageText = "", messageAttachments = [file] }: {
-  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string; messageAttachments?: WebAttachment[];
+export function FileAttachment({ file, state, maxBytes, load, autoLoad, preview = true, messageText = "", messageAttachments = [file] }: {
+  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string; messageAttachments?: WebAttachment[]; autoLoad?: () => void; preview?: boolean;
 }) {
+  const language = useUiLanguage();
+  const t = useSharedStrings();
   const [decoded, setDecoded] = useState<{ url: string; width: number; height: number }>();
   const [broken, setBroken] = useState<string>();
+  const size = file.size === null ? t.unknownSize : fileSize(language, file.size);
   const kind = attachmentKind(file);
-  const image = kind === "image";
+  const image = kind === "image" && preview;
+  const { ref, visible } = useFirstVisible<HTMLDivElement>();
+  useEffect(() => { if (visible && preview) autoLoad?.(); }, [visible, preview, autoLoad]);
   const audio = kind === "audio";
   const caption = file.caption?.trim();
   const fallbackNames = messageAttachments.map(f => f.caption?.trim() || f.name).filter(Boolean).join(", ");
@@ -26,40 +31,40 @@ export function FileAttachment({ file, state, maxBytes, load, messageText = "", 
   const mediaError = Boolean(state?.url && (broken === state.url || (image && !readyImage) || (audio && !readyAudio)));
   const pending = state?.status === "loading";
   const action = state?.url
-    ? <a className={buttonVariants({ variant: "ghost", size: image ? "icon-sm" : "sm" })} href={state.url} download={file.name} aria-label={image ? "Save image" : `Save ${file.name}`} title={image ? "Save image" : undefined}><Download />{!image && "Save"}</a>
-    : !oversized && !state?.needsSandbox && <Button variant="outline" size="sm" disabled={pending} onClick={() => load()}>{pending ? "Loading…" : state?.status === "error" ? "Retry" : image ? "Load image" : audio ? "Load audio" : "Load file"}</Button>;
-  const placeholder = oversized ? "Exceeds the 20 MiB limit" : state?.needsSandbox ? "Waiting for sandbox approval"
-    : state?.status === "error" || mediaError ? "Preview unavailable" : pending ? `Loading ${kind}…` : `${image ? "Image" : "Audio"} preview`;
+    ? <a className={buttonVariants({ variant: "ghost", size: image ? "icon-sm" : "sm" })} href={state.url} download={file.name} aria-label={image ? t.saveImage : t.saveFile(file.name)} title={image ? t.saveImage : undefined}><IconDownload aria-hidden="true" />{!image && t.save}</a>
+    : !oversized && !state?.needsSandbox && <Button variant="outline" size="sm" disabled={pending} onClick={() => load()}>{pending ? t.loading : state?.status === "error" ? t.retry : image ? t.loadImage : audio ? t.loadAudio : t.loadFile}</Button>;
+  const placeholder = oversized ? t.exceedsLimit : state?.needsSandbox ? t.waitingSandbox
+    : state?.status === "error" || mediaError ? t.previewUnavailable : pending ? t.loadingKind(kind) : t.mediaPreview(image ? "image" : "audio");
 
-  return <div className={`file-block ${image ? "image-attachment" : audio ? "audio-attachment" : ""}`}>
+  return <div ref={ref} className={`file-block ${image ? "image-attachment" : audio ? "audio-attachment" : ""}`}>
     {image && <>
-      <div className="image-frame" aria-label={`Image: ${file.caption ?? "Attached photo"}`} aria-busy={pending || Boolean(readyImage && decoded?.url !== state.url && !mediaError)}>
-        {readyImage && <img className="attachment-image" src={state.url} alt={file.caption ?? "Attached image"} style={{ visibility: decoded?.url === state.url ? "visible" : "hidden" }} onLoad={e => setDecoded({ url: state.url!, width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })} onError={() => setBroken(state.url)} />}
-        {(!readyImage || decoded?.url !== state?.url) && <div className="image-placeholder" role="status"><ImageIcon className="size-9" /><span>{readyImage && !mediaError ? "Loading image…" : placeholder}</span></div>}
+      <div className="image-frame" aria-label={t.imageLabel(file.caption ?? t.attachedPhoto)} aria-busy={pending || Boolean(readyImage && decoded?.url !== state.url && !mediaError)}>
+        {readyImage && <img className="attachment-image" src={state.url} alt={file.caption ?? t.attachedImage} style={{ visibility: decoded?.url === state.url ? "visible" : "hidden" }} onLoad={e => setDecoded({ url: state.url!, width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })} onError={() => setBroken(state.url)} />}
+        {(!readyImage || decoded?.url !== state?.url) && <div className="image-placeholder" role="status"><IconPhoto className="size-9" aria-hidden="true" /><span>{readyImage && !mediaError ? t.loadingImage : placeholder}</span></div>}
         <div className="image-actions">{action}</div>
       </div>
-      <details className="media-details"><summary>Image details</summary><div className="media-details-content">
+      <details className="media-details"><summary>{t.imageDetails}</summary><div className="media-details-content">
         {file.description && <RichText text={file.description} />}
-        <dl><dt>File</dt><dd>{file.name}</dd><dt>Size</dt><dd>{fileSize(file.size)}</dd>
-          {file.mimeType && <><dt>Format</dt><dd>{file.mimeType}</dd></>}
-          {decoded?.url === state?.url && decoded && <><dt>Dimensions</dt><dd>{decoded.width} × {decoded.height}</dd></>}
+        <dl><dt>{t.detailFile}</dt><dd>{file.name}</dd><dt>{t.detailSize}</dt><dd>{size}</dd>
+          {file.mimeType && <><dt>{t.detailFormat}</dt><dd>{file.mimeType}</dd></>}
+          {decoded?.url === state?.url && decoded && <><dt>{t.detailDimensions}</dt><dd>{decoded.width} × {decoded.height}</dd></>}
         </dl>
       </div></details>
     </>}
     {audio && <div className="audio-card">
-      <div className="audio-heading"><Mic className="size-4" aria-hidden="true" /><span>Audio message</span><small>{fileSize(file.size)}</small>{action}</div>
+      <div className="audio-heading"><IconMicrophone className="size-4" aria-hidden="true" /><span>{t.audioMessage}</span><small>{size}</small>{action}</div>
       {readyAudio && !mediaError
-        ? <audio key={state.url} controls preload="auto" src={state.url} aria-label="Audio message" onError={() => setBroken(state.url)}>Your browser cannot play this audio. Use Save to download it.</audio>
+        ? <audio key={state.url} controls preload="auto" src={state.url} aria-label={t.audioMessage} onError={() => setBroken(state.url)}>{t.audioUnsupported}</audio>
         : <div className="audio-placeholder" role="status" aria-busy={pending}><span className="audio-bars" aria-hidden="true">▂ ▅ ▃ ▇ ▄ ▂ ▆ ▅ ▃ ▇ ▄ ▂</span><span>{placeholder}</span></div>}
-      {file.transcription && <details className="media-details audio-transcription"><summary>Transcription{file.transcriptionTruncated ? " · Saved preview" : ""}</summary><p className="transcription-text">{file.transcription}</p></details>}
+      {file.transcription && <details className="media-details audio-transcription"><summary>{t.transcription}{file.transcriptionTruncated ? t.savedPreview : ""}</summary><p className="transcription-text">{file.transcription}</p></details>}
     </div>}
     {!image && !audio && <div className="file-card">
-      <FileText aria-hidden="true" /><div className="file-info"><strong>{file.name}</strong><small>{fileSize(file.size)}{pending ? " · Loading" : oversized ? " · Exceeds 20 MiB limit" : ""}</small></div>{action}
+      <IconFileText aria-hidden="true" /><div className="file-info"><strong>{file.name}</strong><small>{size}{pending ? t.loadingSuffix : oversized ? t.exceedsLimitShort : ""}</small></div>{action}
     </div>}
-    {state?.needsSandbox && <div className="sandbox-prompt" role="status"><p>Retrieve this file using its sandbox? If paused, it will start temporarily and pause again as soon as the file is loaded.</p><Button variant="outline" size="sm" onClick={() => load(true)}>Start sandbox and load</Button></div>}
-    {state?.error && <p role="status" className="file-error">{state.error}</p>}
-    {mediaError && <p role="status" className="file-error">This preview could not be opened. You can save the file or <button className="underline" onClick={() => load()}>retry</button>.</p>}
-    {state?.text !== undefined && !image && !audio && <details className="text-preview" open><summary>Text preview{file.size !== null && file.size > 65536 ? " · First 64 KiB" : ""}</summary><pre>{state.text}</pre></details>}
+    {state?.needsSandbox && <div className="sandbox-prompt" role="status"><p>{t.sandboxPrompt}</p><Button variant="outline" size="sm" onClick={() => load(true)}>{t.sandboxLoad}</Button></div>}
+    {state?.error && <p role="status" className="file-error">{localizeServerError(state.error, language)}</p>}
+    {mediaError && <p role="status" className="file-error">{t.mediaErrorBefore}<button className="underline" onClick={() => load()}>{t.mediaErrorRetry}</button>{t.mediaErrorAfter}</p>}
+    {state?.text !== undefined && !image && !audio && <details className="text-preview" open><summary>{t.textPreview}{file.size !== null && file.size > 65536 ? t.firstKilobytes : ""}</summary><pre>{state.text}</pre></details>}
     {showCaption && <p className="file-caption">{caption}</p>}
   </div>;
 }

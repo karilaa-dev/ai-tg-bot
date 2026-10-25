@@ -11,10 +11,12 @@ export async function resolveThreadFileDescriptors(
   const selected = selectedFileIds
     ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
     : scope.fileIds;
-  const [files, refs] = await Promise.all([
+  const [files, refs, webFiles] = await Promise.all([
     input.repos.files.listByIds(selected, scope.messageScopes),
     input.repos.files.listTelegramFileRefs(selected),
+    input.repos.files.listByIdsWithSource(selected, "web", "default"),
   ]);
+  const webFileIds = new Set(webFiles.map((file) => file.id));
   const refsByFile = new Map<number, typeof refs>();
   for (const ref of refs) {
     const list = refsByFile.get(ref.file_id) ?? [];
@@ -39,5 +41,5 @@ export async function resolveThreadFileDescriptors(
       isPrimary: ref.is_primary === 1,
       lastSeenAt: ref.last_seen_at,
     })),
-  })).filter((file) => file.telegramRefs.some((ref) => ref.isPrimary));
+  })).filter((file) => webFileIds.has(file.fileId) || file.telegramRefs.some((ref) => ref.isPrimary));
 }
