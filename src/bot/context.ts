@@ -20,7 +20,7 @@ export interface PendingMediaGroupItem {
   caption?: string;
   card: string;
   file: {
-    id: number;
+    id: string;
     type: AcceptedFileType;
     name: string;
     inline: boolean;

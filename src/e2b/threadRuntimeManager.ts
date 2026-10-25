@@ -36,7 +36,7 @@ import { quoteShellToken, shellJoin } from "../util/shell.js";
 import { createE2BClient, E2B_IDLE_PAUSE_MS, E2B_WEBSITE_IDLE_PAUSE_MS, FileType, type E2BClient, type E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_FILE_SOURCES, E2B_RUNTIME_TMP, E2B_TELEGRAM_FILES, E2B_WORKSPACE, isSameOrDescendant, sandboxWorkspaceFile } from "./paths.js";
 
-type SandboxScope = { userId: number; threadId: number };
+type SandboxScope = { userId: number; threadId: string };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
@@ -116,7 +116,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
+  acquireActivityLease(userId: number, threadId: string): SandboxActivityLease {
     if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
     const scope = { userId, threadId };
     const state = this.stateFor(scope);
@@ -985,7 +985,7 @@ function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string,
     deployment: config.E2B_DEPLOYMENT_ID,
     template_ref: config.E2B_TEMPLATE,
     telegram_user_id: String(scope.userId),
-    thread_id: String(scope.threadId),
+    thread_id: scope.threadId,
   };
 }
 

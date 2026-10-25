@@ -54,7 +54,7 @@ const evidence: Record<string, unknown> = {
 let pi: PiRuntimeManager | undefined;
 let commands: ThreadE2BSandboxRuntimeManager | undefined;
 let runtime: Awaited<ReturnType<PiRuntimeManager["runtime"]>> | undefined;
-let threadId: number | undefined;
+let threadId: string | undefined;
 let sandboxId: string | undefined;
 let telegramRequests = 0;
 let failure: unknown;
@@ -133,10 +133,10 @@ try {
   const inspected = results.filter(message => !message.isError && message.content.some(part => part.type === "image" && part.data.length > 0) && (asRecord(message.details)?.inspected === true || asRecord(asRecord(message.details)?.inspection)?.inspected === true));
   assert(inspected.length > 0, "An inspection must provide actual image content to model vision.");
   assert(!calls.some(({ call }) => call.name === "generate_image"), "Existing restaurant photos must not be synthesized.");
-  const finalIds = z.array(z.number().int().positive()).parse(asRecord(finished.details)?.file_ids);
+  const finalIds = z.array(z.uuid()).parse(asRecord(finished.details)?.file_ids);
   const attachmentEvidence = [];
   for (const picture of pictures) {
-    const fileId = Number(picture.source.slice("file:".length));
+    const fileId = z.uuid().parse(picture.source.slice("file:".length));
     const created = results.find(message => message.toolName === "create_file" && !message.isError && asRecord(message.details)?.file_id === fileId);
     assert(created && messages.indexOf(created) < messages.indexOf(finished), `Image ${picture.source} must reference an earlier successful create_file.`);
     const attachment: CreatedFileAttachment | undefined = runtime.bridge.attachments.find(file => file.fileId === fileId);

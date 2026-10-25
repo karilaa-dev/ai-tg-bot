@@ -17,6 +17,7 @@ import type { AdminSession, CodexStatus } from "./admin-types.js";
 import type { ChatService } from "./chat-types.js";
 import { readBoundedBody, WebChatAuth, type TelegramAuthDependencies } from "./chat-auth.js";
 import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
+import { uuid } from "./ids.js";
 
 export interface WebServerOptions {
   config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
@@ -98,7 +99,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     const fetchSite = request.headers.get("Sec-Fetch-Site");
     if (sandboxConsent && (request.headers.get("X-Conversation-Sandbox-Consent") !== "start"
       || (fetchSite && fetchSite !== "same-origin"))) throw new HttpError(403, "Sandbox consent must come from this website.");
-    const file = await options.repository.file(integer(request.params.threadId), integer(request.params.fileId));
+    const file = await options.repository.file(uuid(request.params.threadId), uuid(request.params.fileId));
     const mode = url.searchParams.get("mode") ?? "download";
     if (mode !== "auto" && mode !== "download") throw new HttpError(400, "Invalid file mode.");
     const sandbox = url.searchParams.get("sandbox");
@@ -178,7 +179,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         const days = integer(query.get("days"), 30, true);
         if (![0, 7, 30, 90].includes(days)) throw new HttpError(400, "Choose 7, 30, 90 days, or 0 for all time.");
         return Response.json(await options.repository.usageReport({
-          userId: optionalInteger(query.get("user")), threadId: optionalInteger(query.get("thread")), days,
+          userId: optionalInteger(query.get("user")), threadId: query.has("thread") ? uuid(query.get("thread")) : undefined, days,
         }, AbortSignal.any([request.signal, shutdownSignal])), { headers });
       }),
       "/api/users": read(async request => {
@@ -201,7 +202,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         const after = optionalInteger(query.get("after"));
         if (before !== undefined && after !== undefined) throw new HttpError(400, "Use either before or after.");
         return Response.json({
-          ...await options.repository.history(integer(request.params.threadId), before, after),
+          ...await options.repository.history(uuid(request.params.threadId), before, after),
           autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES,
         }, { headers });
       }),

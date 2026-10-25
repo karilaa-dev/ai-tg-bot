@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
@@ -6,7 +7,7 @@ describe("currentTurnAssistantResult", () => {
   it("preserves terminal caption-only completion instead of reviving provisional text", () => {
     const result: AgentMessage = {
       role: "toolResult", toolCallId: "finish", toolName: "finish_response", isError: false,
-      content: [{ type: "text", text: "completed" }], details: { completed: true, text: "", file_ids: [1] }, timestamp: 2,
+      content: [{ type: "text", text: "completed" }], details: { completed: true, text: "", file_ids: [fixtureUuid(1)] }, timestamp: 2,
     };
     expect(currentTurnAssistantResult([assistantMessage("Working...", "toolUse", ""), result]))
       .toEqual({ completed: true, text: "", stopReason: "stop" });

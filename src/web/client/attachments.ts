@@ -9,7 +9,7 @@ type Listener = (state: LoadedAttachment) => void;
 
 /** A shared cache belongs to one verified session, never to a global file ID. */
 export interface AttachmentSource {
-  url: (threadId: number, fileId: number) => string;
+  url: (threadId: string, fileId: string) => string;
   fetch: (url: string, init: RequestInit) => Promise<Response>;
   cache?: AttachmentCache;
 }
@@ -50,7 +50,7 @@ export class AttachmentCache {
     this.retryDelayMs = retryDelayMs;
   }
 
-  subscribe(source: AttachmentSource, threadId: number, fileId: number, listener: Listener): { load: (policy: RequestPolicy, retry: boolean) => void; release: () => void } {
+  subscribe(source: AttachmentSource, threadId: string, fileId: string, listener: Listener): { load: (policy: RequestPolicy, retry: boolean) => void; release: () => void } {
     const url = source.url(threadId, fileId);
     const key = JSON.stringify([threadId, fileId, url]);
     let entry = this.entries.get(key);
@@ -209,11 +209,11 @@ export class AttachmentCache {
 
 /** A view subscribes to shared bytes; closing it releases its pins without discarding the session cache. */
 export class AttachmentLoader {
-  private states = new Map<number, LoadedAttachment>();
-  private subscriptions = new Map<number, ReturnType<AttachmentCache["subscribe"]>>();
+  private states = new Map<string, LoadedAttachment>();
+  private subscriptions = new Map<string, ReturnType<AttachmentCache["subscribe"]>>();
   private cache: AttachmentCache;
   private closed = false;
-  constructor(private threadId: number, private changed: (states: Map<number, LoadedAttachment>) => void, private source: AttachmentSource = adminSource) {
+  constructor(private threadId: string, private changed: (states: Map<string, LoadedAttachment>) => void, private source: AttachmentSource = adminSource) {
     this.cache = source.cache ?? new AttachmentCache();
   }
 

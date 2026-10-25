@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -74,10 +75,10 @@ try {
     await page.route("**/api/chat/threads?**", async route => {
       const response = await route.fetch();
       const body: WebPage<ChatThread> = await response.json();
-      for (const thread of body.items) if (thread.id === 2) thread.unread = !read;
+      for (const thread of body.items) if (thread.id === fixtureUuid(2)) thread.unread = !read;
       await route.fulfill({ response, json: body });
     });
-    await page.route("**/api/chat/threads/2/read", async route => {
+    await page.route(`**/api/chat/threads/${fixtureUuid(2)}/read`, async route => {
       const { messageId } = route.request().postDataJSON() as { messageId: number };
       requested.push(messageId);
       assert.equal(route.request().headers()["x-chat-user"], "1001");
@@ -91,7 +92,7 @@ try {
         accepted.resolve();
       }
     });
-    await page.goto(`${root}?thread=2`);
+    await page.goto(`${root}?thread=${fixtureUuid(2)}`);
     await within(first.promise, "The visible unread message must be acknowledged");
     await painted(page);
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
@@ -117,16 +118,16 @@ try {
       if (holdRefresh) { refreshes.push(route); return; }
       const response = await route.fetch();
       const body: WebPage<ChatThread> = await response.json();
-      for (const thread of body.items) if (thread.id === 3 && newer) {
+      for (const thread of body.items) if (thread.id === fixtureUuid(3) && newer) {
         thread.title = newerTitle; thread.lastMessageId = target + 1; thread.unread = true;
       }
       await route.fulfill({ response, json: body });
     });
-    await page.route("**/api/chat/threads/3/read", route => {
+    await page.route(`**/api/chat/threads/${fixtureUuid(3)}/read`, route => {
       target = (route.request().postDataJSON() as { messageId: number }).messageId;
       held.resolve(route);
     });
-    await page.goto(`${root}?thread=3`);
+    await page.goto(`${root}?thread=${fixtureUuid(3)}`);
     const request = await within(held.promise, "The original unread reply must be acknowledged");
     newer = true;
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
@@ -155,22 +156,22 @@ try {
     await page.route("**/api/chat/threads?**", async route => {
       const response = await route.fetch();
       const body: WebPage<ChatThread> = await response.json();
-      for (const thread of body.items) if (thread.id === 2 && acknowledged) {
+      for (const thread of body.items) if (thread.id === fixtureUuid(2) && acknowledged) {
         thread.title = refreshedTitle; thread.lastMessageId = target; thread.unread = true;
       }
       await route.fulfill({ response, json: body });
     });
-    await page.route("**/api/chat/threads/2/messages*", async route => {
+    await page.route(`**/api/chat/threads/${fixtureUuid(2)}/messages*`, async route => {
       const response = await route.fetch();
       const body: ChatHistory = await response.json();
       body.thread.unread = true;
       await route.fulfill({ response, json: body });
     });
-    await page.route("**/api/chat/threads/2/read", route => {
+    await page.route(`**/api/chat/threads/${fixtureUuid(2)}/read`, route => {
       target = (route.request().postDataJSON() as { messageId: number }).messageId;
       held.resolve(route);
     });
-    await page.goto(`${root}?thread=2`);
+    await page.goto(`${root}?thread=${fixtureUuid(2)}`);
     const request = await within(held.promise, "The safe watermark must be acknowledged");
     acknowledged = true;
     await request.fulfill({ json: { readMessageId: target, unread: true } });

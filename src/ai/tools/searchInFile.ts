@@ -8,7 +8,7 @@ export function createSearchInFileTool(input: ToolBuildInput) {
     description:
       "Lexically search chunks of a large TXT or CSV attachment by file_id. PDF and DOCX files are source-only and must be inspected with materialize_chat_files plus sandbox tools.",
     inputSchema: z.object({
-      file_id: z.number().int().positive(),
+      file_id: z.string().uuid(),
       query: z.string(),
       limit: z.number().int().min(1).max(20).default(8),
     }),

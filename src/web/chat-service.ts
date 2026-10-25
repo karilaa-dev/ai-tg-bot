@@ -152,9 +152,7 @@ export class BotChatService implements ChatService {
     } finally {
       // Failed preparations and losing retries never leave unreferenced upload blobs.
       for (const id of createdIds) {
-        const file = await this.repos.files.get(id);
-        if (file && file.message_id === null) {
-          await this.repos.files.deleteFile(id);
+        if (await this.repos.files.deleteFileIfUnattached(id)) {
           await this.input.services.fileResolver.removeLocalFile(id);
         }
       }

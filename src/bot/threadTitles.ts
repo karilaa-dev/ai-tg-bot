@@ -11,13 +11,13 @@ const MAX_REMEMBERED_TOPIC_TITLES = 1_000;
 interface ThreadTitleScheduleInput {
   api: Api;
   chatId: number;
-  threadId: number;
+  threadId: string;
   signal?: AbortSignal;
 }
 
 export class ThreadTitleCoordinator {
-  private readonly jobs = new Map<number, Promise<void>>();
-  private readonly titleUpdates = new Map<number, Promise<boolean>>();
+  private readonly jobs = new Map<string, Promise<void>>();
+  private readonly titleUpdates = new Map<string, Promise<boolean>>();
   private readonly requestedActivityTitles = new Map<string, Set<string>>();
 
   constructor(private readonly input: {

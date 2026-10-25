@@ -15,7 +15,7 @@ export function toToolError(
   return { error: String(err) };
 }
 
-export async function getScopedFile(input: ToolBuildInput, fileId: number): Promise<FileRow | undefined> {
+export async function getScopedFile(input: ToolBuildInput, fileId: string): Promise<FileRow | undefined> {
   const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const isCurrentTurnAttachment = input.outgoingFiles?.items.some((attachment) => attachment.fileId === fileId) ?? false;
   if (!scope.fileIds.includes(fileId) && !isCurrentTurnAttachment) return undefined;
@@ -112,7 +112,7 @@ function isRawDataUrl(value: string): boolean {
 
 export async function enrichThreadHits(
   repos: Repos,
-  fileIds: number[],
+  fileIds: string[],
   hits: Array<{ kind: "message" | "chunk"; ref_id: number; snippet: string; score: number }>,
 ): Promise<unknown[]> {
   const chunks = fileIds.length ? await repos.files.chunksForFiles(fileIds) : [];

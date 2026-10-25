@@ -13,16 +13,16 @@ interface SearchHit {
 }
 
 export interface TextSearch {
-  indexMessage(id: number, threadId: number, text: string): Promise<void>;
-  indexChunk(id: number, fileId: number, text: string): Promise<void>;
+  indexMessage(id: number, threadId: string, text: string): Promise<void>;
+  indexChunk(id: number, fileId: string, text: string): Promise<void>;
   removeMessage(id: number): Promise<void>;
-  removeChunksForFile(fileId: number): Promise<void>;
-  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]>;
-  searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]>;
+  removeChunksForFile(fileId: string): Promise<void>;
+  searchMessages(threadIds: string[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]>;
+  searchChunks(fileIds: string[], q: string, limit: number): Promise<SearchHit[]>;
 }
 
 export interface MessageSearchScope {
-  threadId: number;
+  threadId: string;
   maxMessageId?: number;
 }
 
@@ -45,11 +45,11 @@ export function createTextSearch(db: SqlExecutor, dialect: DialectName): TextSea
 class SqliteTextSearch implements TextSearch {
   constructor(private readonly db: SqlExecutor) {}
 
-  indexMessage(id: number, threadId: number, text: string): Promise<void> {
+  indexMessage(id: number, threadId: string, text: string): Promise<void> {
     return this.index(TARGETS.message, id, threadId, text);
   }
 
-  indexChunk(id: number, fileId: number, text: string): Promise<void> {
+  indexChunk(id: number, fileId: string, text: string): Promise<void> {
     return this.index(TARGETS.chunk, id, fileId, text);
   }
 
@@ -57,19 +57,19 @@ class SqliteTextSearch implements TextSearch {
     return this.removeById(TARGETS.message, id);
   }
 
-  removeChunksForFile(fileId: number): Promise<void> {
+  removeChunksForFile(fileId: string): Promise<void> {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
+  searchMessages(threadIds: string[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
     return this.search(TARGETS.message, threadIds, q, limit, scopes);
   }
 
-  searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
+  searchChunks(fileIds: string[], q: string, limit: number): Promise<SearchHit[]> {
     return this.search(TARGETS.chunk, fileIds, q, limit);
   }
 
-  private async index(target: SearchTarget, id: number, scopeId: number, text: string): Promise<void> {
+  private async index(target: SearchTarget, id: number, scopeId: string, text: string): Promise<void> {
     const table = sql.raw(target.sqliteTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
@@ -85,7 +85,7 @@ class SqliteTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${idColumn} = ${id}`);
   }
 
-  private async removeByScope(target: SearchTarget, scopeId: number): Promise<void> {
+  private async removeByScope(target: SearchTarget, scopeId: string): Promise<void> {
     const table = sql.raw(target.sqliteTable);
     const scopeColumn = sql.raw(target.scopeColumn);
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
@@ -93,7 +93,7 @@ class SqliteTextSearch implements TextSearch {
 
   private search(
     target: SearchTarget,
-    scopeIds: number[],
+    scopeIds: string[],
     q: string,
     limit: number,
     scopes?: MessageSearchScope[],
@@ -117,11 +117,11 @@ class SqliteTextSearch implements TextSearch {
 class PgTextSearch implements TextSearch {
   constructor(private readonly db: SqlExecutor) {}
 
-  indexMessage(id: number, threadId: number, text: string): Promise<void> {
+  indexMessage(id: number, threadId: string, text: string): Promise<void> {
     return this.index(TARGETS.message, id, threadId, text);
   }
 
-  indexChunk(id: number, fileId: number, text: string): Promise<void> {
+  indexChunk(id: number, fileId: string, text: string): Promise<void> {
     return this.index(TARGETS.chunk, id, fileId, text);
   }
 
@@ -129,19 +129,19 @@ class PgTextSearch implements TextSearch {
     return this.removeById(TARGETS.message, id);
   }
 
-  removeChunksForFile(fileId: number): Promise<void> {
+  removeChunksForFile(fileId: string): Promise<void> {
     return this.removeByScope(TARGETS.chunk, fileId);
   }
 
-  searchMessages(threadIds: number[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
+  searchMessages(threadIds: string[], q: string, limit: number, scopes?: MessageSearchScope[]): Promise<SearchHit[]> {
     return this.search(TARGETS.message, threadIds, q, limit, scopes);
   }
 
-  searchChunks(fileIds: number[], q: string, limit: number): Promise<SearchHit[]> {
+  searchChunks(fileIds: string[], q: string, limit: number): Promise<SearchHit[]> {
     return this.search(TARGETS.chunk, fileIds, q, limit);
   }
 
-  private async index(target: SearchTarget, id: number, scopeId: number, text: string): Promise<void> {
+  private async index(target: SearchTarget, id: number, scopeId: string, text: string): Promise<void> {
     const table = sql.raw(target.pgTable);
     const idColumn = sql.raw(target.idColumn);
     const scopeColumn = sql.raw(target.scopeColumn);
@@ -161,7 +161,7 @@ class PgTextSearch implements TextSearch {
     await this.db.execute(sql`delete from ${table} where ${idColumn} = ${id}`);
   }
 
-  private async removeByScope(target: SearchTarget, scopeId: number): Promise<void> {
+  private async removeByScope(target: SearchTarget, scopeId: string): Promise<void> {
     const table = sql.raw(target.pgTable);
     const scopeColumn = sql.raw(target.scopeColumn);
     await this.db.execute(sql`delete from ${table} where ${scopeColumn} = ${scopeId}`);
@@ -169,7 +169,7 @@ class PgTextSearch implements TextSearch {
 
   private search(
     target: SearchTarget,
-    scopeIds: number[],
+    scopeIds: string[],
     q: string,
     limit: number,
     scopes?: MessageSearchScope[],
@@ -196,7 +196,7 @@ class PgTextSearch implements TextSearch {
 export function messageScopePredicate(
   scopeColumn: ReturnType<typeof sql.raw>,
   idColumn: ReturnType<typeof sql.raw>,
-  scopeIds: number[],
+  scopeIds: string[],
   scopes?: MessageSearchScope[],
 ) {
   if (!scopes) return sql`${scopeColumn} in (${valueList(scopeIds)})`;

@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { GrammyError, InputFile } from "grammy";
 import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { describe, expect, it, vi } from "vitest";
@@ -16,9 +17,9 @@ describe("buffered Telegram attachment delivery", () => {
     const input = turnInput(api);
     const textGate = deferred<void>();
     api.raw.sendRichMessage.mockImplementation(async () => { await textGate.promise; return { message_id: 700 }; });
-    const file = imageAttachment(1, "a.jpg", 100);
+    const file = imageAttachment(fixtureUuid(1), "a.jpg", 100);
     file.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1) } as never);
     input.resolveFile = vi.fn(async () => ({ bytes: Buffer.from("prefetched") } as never));
     const sending = sendFinal(input, "", "Final answer", 0, [file]);
     try {
@@ -37,12 +38,12 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     const uploadGate = deferred<void>();
-    const first = imageAttachment(1, "first.stl", 100);
+    const first = imageAttachment(fixtureUuid(1), "first.stl", 100);
     first.delivery = "document";
-    const second = imageAttachment(2, "second.jpg", 100);
-    const generated = imageAttachment(3, "generated.jpg", 100);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 100);
+    const generated = imageAttachment(fixtureUuid(3), "generated.jpg", 100);
     generated.origin = "generated_image";
-    const last = imageAttachment(4, "last.stl", 100);
+    const last = imageAttachment(fixtureUuid(4), "last.stl", 100);
     last.delivery = "document";
     for (const file of [first, second, generated, last]) file.data = undefined;
     vi.mocked(input.repos.files.get).mockImplementation(async (id) => ({ id }) as never);
@@ -69,12 +70,12 @@ describe("buffered Telegram attachment delivery", () => {
     const pool = new OutgoingBuffers(40);
     input.outgoingBuffers = pool;
     const uploadGate = deferred<void>();
-    const first = imageAttachment(1, "first.stl", 30);
+    const first = imageAttachment(fixtureUuid(1), "first.stl", 30);
     first.delivery = "document";
-    const second = imageAttachment(2, "second.jpg", 20);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 20);
     first.data = undefined; second.data = undefined;
     vi.mocked(input.repos.files.get).mockImplementation(async (id) => ({ id }) as never);
-    input.resolveFile = vi.fn(async (file) => ({ bytes: Buffer.alloc(file.id === 1 ? 30 : 20) } as never));
+    input.resolveFile = vi.fn(async (file) => ({ bytes: Buffer.alloc(file.id === fixtureUuid(1) ? 30 : 20) } as never));
     api.sendDocument.mockImplementationOnce(async () => { await uploadGate.promise; return { message_id: 600, document: { file_id: "doc", file_unique_id: "doc", file_size: 30 } }; });
     const sending = sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
     try {
@@ -94,8 +95,8 @@ describe("buffered Telegram attachment delivery", () => {
     const controller = new AbortController();
     input.signal = controller.signal;
     const pool = new OutgoingBuffers(); input.outgoingBuffers = pool;
-    const file = imageAttachment(1, "a.jpg", 100); file.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    const file = imageAttachment(fixtureUuid(1), "a.jpg", 100); file.data = undefined;
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1) } as never);
     input.resolveFile = vi.fn(async (_file, signal) => new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true })));
     const sending = sendCreatedFileAttachments(input, { id: 99 } as never, [file]);
     const rejected = expect(sending).rejects.toThrow("cancelled");
@@ -111,7 +112,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     api.sendMediaGroup.mockResolvedValueOnce([photoMessage(500, "one-result")]);
-    const files = [imageAttachment(1, "a.jpg", 100), imageAttachment(2, "b.jpg", 100)];
+    const files = [imageAttachment(fixtureUuid(1), "a.jpg", 100), imageAttachment(fixtureUuid(2), "b.jpg", 100)];
     await sendCreatedFileAttachments(input, { id: 99 } as never, files);
     expect(api.sendMediaGroup).toHaveBeenCalledOnce();
     expect(api.sendPhoto).not.toHaveBeenCalled();
@@ -120,7 +121,7 @@ describe("buffered Telegram attachment delivery", () => {
 
   it("reports the confirmed count when a capped delivery is only partially successful", () => {
     const delivered = Array.from({ length: 20 }, (_, index) =>
-      imageAttachment(index + 1, `${index + 1}.jpg`, 100));
+      imageAttachment(fixtureUuid(index + 1), `${index + 1}.jpg`, 100));
     const summary = buildFinalThinkingSummary({
       t: (key, params) => `${key}:${JSON.stringify(params)}`,
       shaper: new StreamShaper(),
@@ -140,7 +141,7 @@ describe("buffered Telegram attachment delivery", () => {
     const summary = buildFinalThinkingSummary({
       t: (key) => key,
       shaper,
-      attachments: [imageAttachment(1, "confirmed.jpg", 100)],
+      attachments: [imageAttachment(fixtureUuid(1), "confirmed.jpg", 100)],
     });
 
     const rendered = renderFinalThinking({ thinkingLog: summary, elapsedMs: 0, t: (key) => key });
@@ -162,7 +163,7 @@ describe("buffered Telegram attachment delivery", () => {
   });
 
   it("downgrades oversized generated images before attachment delivery", () => {
-    const oversized = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
+    const oversized = imageAttachment(fixtureUuid(1), "large.jpg", 15 * 1024 * 1024);
     oversized.origin = "generated_image";
 
     normalizeTelegramAttachmentDeliveries([oversized]);
@@ -173,7 +174,7 @@ describe("buffered Telegram attachment delivery", () => {
   it("sends final thinking before a captioned generated image without a completion reply", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const attachment = imageAttachment(1, "generated.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "generated.jpg", 100);
     attachment.origin = "generated_image";
     attachment.caption = "A pear with the cat's face";
 
@@ -192,7 +193,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     vi.mocked(input.repos.messages.insert).mockRejectedValueOnce(new Error("database unavailable"));
-    const attachment = imageAttachment(1, "generated.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "generated.jpg", 100);
     attachment.origin = "generated_image";
     attachment.caption = "Generated image";
 
@@ -209,9 +210,9 @@ describe("buffered Telegram attachment delivery", () => {
     const input = turnInput(api);
     const started = deferred<void>();
     let drained = false;
-    const attachment = imageAttachment(1, "pending.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "pending.jpg", 100);
     attachment.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValue({ id: 1 } as never);
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1) } as never);
     input.resolveFile = vi.fn(async (_file, signal) => {
       started.resolve();
       try {
@@ -284,7 +285,7 @@ describe("buffered Telegram attachment delivery", () => {
     api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));
     api.sendDocument.mockRejectedValue(telegramError("Bad Request: document rejected", "sendDocument"));
     const input = turnInput(api);
-    const attachment = imageAttachment(1, "generated.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "generated.jpg", 100);
     attachment.origin = "generated_image";
     attachment.caption = "Generated image";
 
@@ -301,7 +302,7 @@ describe("buffered Telegram attachment delivery", () => {
   it("sends images over Telegram's photo limit as documents", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const attachment = imageAttachment(1, "large.jpg", 15 * 1024 * 1024);
+    const attachment = imageAttachment(fixtureUuid(1), "large.jpg", 15 * 1024 * 1024);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
 
@@ -318,8 +319,8 @@ describe("buffered Telegram attachment delivery", () => {
       .mockResolvedValueOnce(photoMessage(501, "photo-1"))
       .mockRejectedValueOnce(telegramError("Bad Request: photo rejected", "sendPhoto"));
     const input = turnInput(api);
-    const first = imageAttachment(1, "first.jpg", 100);
-    const second = imageAttachment(2, "second.jpg", 200);
+    const first = imageAttachment(fixtureUuid(1), "first.jpg", 100);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 200);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
 
@@ -334,7 +335,7 @@ describe("buffered Telegram attachment delivery", () => {
   it("sends a photo_only attachment as a photo without document fallback", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const attachment = imageAttachment(1, "model.final.png", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "model.final.png", 100);
     attachment.photoFallback = "none";
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
@@ -348,7 +349,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));
     const input = turnInput(api);
-    const attachment = imageAttachment(1, "model.final.png", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "model.final.png", 100);
     attachment.photoFallback = "none";
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
@@ -364,12 +365,12 @@ describe("buffered Telegram attachment delivery", () => {
     api.sendPhoto.mockRejectedValue(telegramError("Bad Request: photo rejected", "sendPhoto"));
     const input = turnInput(api);
     const source = {
-      ...imageAttachment(1, "model.scad", 100),
+      ...imageAttachment(fixtureUuid(1), "model.scad", 100),
       type: "other" as const,
       mimeType: "text/plain",
       delivery: "document" as const,
     };
-    const preview = imageAttachment(2, "model.final.png", 100);
+    const preview = imageAttachment(fixtureUuid(2), "model.final.png", 100);
     preview.photoFallback = "none";
 
     await sendFinal(input, "", "", 0, [source, preview]);
@@ -381,7 +382,7 @@ describe("buffered Telegram attachment delivery", () => {
       messageId: 99,
       content: expect.objectContaining({
         text: "image-delivery-failed",
-        attachment_failures: [{ file_id: 2, status: "telegram_rejected" }],
+        attachment_failures: [{ file_id: fixtureUuid(2), status: "telegram_rejected" }],
       }),
     }));
   });
@@ -391,12 +392,12 @@ describe("buffered Telegram attachment delivery", () => {
     api.sendPhoto.mockRejectedValue(new Error("request timed out after upload"));
     const input = turnInput(api);
     const source = {
-      ...imageAttachment(1, "model.stl", 100),
+      ...imageAttachment(fixtureUuid(1), "model.stl", 100),
       type: "other" as const,
       mimeType: "model/stl",
       delivery: "document" as const,
     };
-    const preview = imageAttachment(2, "model.final.png", 100);
+    const preview = imageAttachment(fixtureUuid(2), "model.final.png", 100);
     preview.photoFallback = "none";
 
     await sendFinal(input, "", "", 0, [source, preview]);
@@ -409,7 +410,7 @@ describe("buffered Telegram attachment delivery", () => {
       messageId: 99,
       content: expect.objectContaining({
         text: "image-delivery-failed",
-        attachment_delivery_unknown: [{ file_id: 2, status: "delivery_unknown" }],
+        attachment_delivery_unknown: [{ file_id: fixtureUuid(2), status: "delivery_unknown" }],
       }),
     }));
   });
@@ -418,8 +419,8 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     api.sendMediaGroup.mockRejectedValue(new Error("request timed out after upload"));
     const input = turnInput(api);
-    const first = imageAttachment(1, "first.jpg", 100);
-    const second = imageAttachment(2, "second.jpg", 200);
+    const first = imageAttachment(fixtureUuid(1), "first.jpg", 100);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 200);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
 
@@ -434,8 +435,8 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     api.sendMediaGroup.mockRejectedValue(new Error("request timed out after upload"));
     const input = turnInput(api);
-    const first = imageAttachment(1, "first.jpg", 100);
-    const second = imageAttachment(2, "second.jpg", 200);
+    const first = imageAttachment(fixtureUuid(1), "first.jpg", 100);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 200);
 
     await sendFinal(input, "", "", 0, [first, second]);
 
@@ -444,8 +445,8 @@ describe("buffered Telegram attachment delivery", () => {
       content: {
         text: "",
         attachment_delivery_unknown: [
-          { file_id: 1, status: "delivery_unknown" },
-          { file_id: 2, status: "delivery_unknown" },
+          { file_id: fixtureUuid(1), status: "delivery_unknown" },
+          { file_id: fixtureUuid(2), status: "delivery_unknown" },
         ],
       },
     }));
@@ -456,7 +457,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
-    const attachment = imageAttachment(1, "picture.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "picture.jpg", 100);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
 
@@ -470,7 +471,7 @@ describe("buffered Telegram attachment delivery", () => {
     const input = turnInput(api);
     vi.mocked(input.repos.files.rememberTelegramObservation)
       .mockRejectedValueOnce(new Error("database temporarily unavailable"));
-    const attachment = imageAttachment(1, "picture.jpg", 100);
+    const attachment = imageAttachment(fixtureUuid(1), "picture.jpg", 100);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [attachment]);
 
@@ -486,8 +487,8 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
-    const first = imageAttachment(1, "first.jpg", 100);
-    const second = imageAttachment(2, "second.jpg", 200);
+    const first = imageAttachment(fixtureUuid(1), "first.jpg", 100);
+    const second = imageAttachment(fixtureUuid(2), "second.jpg", 200);
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [first, second]);
 
@@ -503,7 +504,7 @@ describe("buffered Telegram attachment delivery", () => {
     const api = fakeApi();
     const input = turnInput(api);
     const attachments = Array.from({ length: 4 }, (_, index) =>
-      imageAttachment(index + 1, `${index + 1}.jpg`, MAX_FILE_BYTES));
+      imageAttachment(fixtureUuid(index + 1), `${index + 1}.jpg`, MAX_FILE_BYTES));
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, attachments);
 
@@ -514,9 +515,9 @@ describe("buffered Telegram attachment delivery", () => {
   it("continues with readable files when one media-group source cannot be loaded", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const first = imageAttachment(1, "first.jpg", 100);
-    const missing = imageAttachment(2, "missing.jpg", 100);
-    const third = imageAttachment(3, "third.jpg", 100);
+    const first = imageAttachment(fixtureUuid(1), "first.jpg", 100);
+    const missing = imageAttachment(fixtureUuid(2), "missing.jpg", 100);
+    const third = imageAttachment(fixtureUuid(3), "third.jpg", 100);
     missing.data = undefined;
     vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: missing.fileId } as never);
     input.resolveFile = vi.fn(async () => { throw new Error("source unavailable"); });
@@ -534,7 +535,7 @@ describe("buffered Telegram attachment delivery", () => {
   it("sends a visible failure when a caption-only turn cannot load its only file", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const missing = imageAttachment(2, "missing.jpg", 100);
+    const missing = imageAttachment(fixtureUuid(2), "missing.jpg", 100);
     missing.data = undefined;
     vi.mocked(input.repos.files.get).mockResolvedValueOnce({ id: missing.fileId } as never);
     input.resolveFile = vi.fn(async () => { throw new Error("source unavailable"); });
@@ -545,7 +546,7 @@ describe("buffered Telegram attachment delivery", () => {
       messageId: 99,
       content: {
         text: "file-delivery-failed",
-        attachment_failures: [{ file_id: 2, status: "source_unavailable" }],
+        attachment_failures: [{ file_id: fixtureUuid(2), status: "source_unavailable" }],
       },
     }));
     expect(api.sendPhoto).not.toHaveBeenCalled();
@@ -556,13 +557,13 @@ describe("buffered Telegram attachment delivery", () => {
   it("continues pending delivery when bookkeeping for an earlier photo fails", async () => {
     const api = fakeApi();
     const input = turnInput(api);
-    const delivered = imageAttachment(1, "delivered.jpg", 100);
+    const delivered = imageAttachment(fixtureUuid(1), "delivered.jpg", 100);
     delivered.telegramDelivery = {
       messageId: 400,
       fileId: "existing-photo",
       fileUniqueId: "existing-photo-unique",
     };
-    const pending = imageAttachment(2, "pending.jpg", 100);
+    const pending = imageAttachment(fixtureUuid(2), "pending.jpg", 100);
     vi.mocked(input.repos.files.setMessageId).mockRejectedValueOnce(new Error("database unavailable"));
 
     await sendCreatedFileAttachments(input, { id: 99 } as never, [delivered, pending]);
@@ -572,7 +573,7 @@ describe("buffered Telegram attachment delivery", () => {
   });
 });
 
-function imageAttachment(fileId: number, name: string, size: number): CreatedFileAttachment {
+function imageAttachment(fileId: string, name: string, size: number): CreatedFileAttachment {
   return {
     fileId,
     type: "image",
@@ -661,7 +662,7 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
       level: "error",
     },
     user: { tg_id: 1 } as never,
-    thread: { id: 2, title: "Thread" } as never,
+    thread: { id: fixtureUuid(2), title: "Thread" } as never,
     text: "",
     t: (key: string) => key,
   } as unknown as TurnInput;

@@ -14,10 +14,10 @@ type RetrievalHit =
 export async function hybridSearch(input: {
   search: TextSearch;
   repos: Repos;
-  threadIds: number[];
+  threadIds: string[];
   messageScopes?: MessageSearchScope[];
   messageIds?: number[];
-  fileIds: number[];
+  fileIds: string[];
   query: string;
   k: number;
   logger?: Logger;
@@ -59,10 +59,10 @@ export async function hybridSearch(input: {
 }
 
 export type ThreadScope = {
-  threadIds: number[];
+  threadIds: string[];
   messageScopes: MessageSearchScope[];
   messageIds: number[];
-  fileIds: number[];
+  fileIds: string[];
 };
 
 export async function threadChainScope(repos: Repos, thread: ThreadRow, maxMessageId?: number): Promise<ThreadScope> {

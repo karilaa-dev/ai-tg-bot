@@ -90,11 +90,11 @@ export const chatApi = {
     return chatJson<WebPage<ChatThread>>(`/api/chat/threads?${params}`, { signal });
   },
   createThread: (title?: string) => chatJson<ChatThread>("/api/chat/threads", json("POST", title ? { title } : {})),
-  history: (threadId: number, cursor: HistoryCursor, signal: AbortSignal) => {
+  history: (threadId: string, cursor: HistoryCursor, signal: AbortSignal) => {
     const query = cursor === null ? "" : "before" in cursor ? `?before=${cursor.before}` : `?after=${cursor.after}`;
     return chatJson<ChatHistory>(`/api/chat/threads/${threadId}/messages${query}`, { signal });
   },
-  send: (threadId: number, input: { text: string; requestId: string; files: File[] }) => {
+  send: (threadId: string, input: { text: string; requestId: string; files: File[] }) => {
     const url = `/api/chat/threads/${threadId}/messages`;
     if (!input.files.length) return chatJson<ChatSendResult>(url, json("POST", { text: input.text, requestId: input.requestId }));
     const form = new FormData();
@@ -103,17 +103,17 @@ export const chatApi = {
     for (const file of input.files) form.append("files", file, file.name);
     return chatJson<ChatSendResult>(url, { method: "POST", body: form });
   },
-  stop: (threadId: number) => chatJson<unknown>(`/api/chat/threads/${threadId}/stop`, json("POST", {})),
-  fork: (threadId: number, messageId?: number) => chatJson<ChatThread>(`/api/chat/threads/${threadId}/fork`, json("POST", messageId === undefined ? {} : { messageId })),
-  compact: (threadId: number) => chatJson<unknown>(`/api/chat/threads/${threadId}/compact`, json("POST", {})),
+  stop: (threadId: string) => chatJson<unknown>(`/api/chat/threads/${threadId}/stop`, json("POST", {})),
+  fork: (threadId: string, messageId?: number) => chatJson<ChatThread>(`/api/chat/threads/${threadId}/fork`, json("POST", messageId === undefined ? {} : { messageId })),
+  compact: (threadId: string) => chatJson<unknown>(`/api/chat/threads/${threadId}/compact`, json("POST", {})),
   /** The server keeps the cursor monotonic, so a late or repeated acknowledgement never marks newer messages read. */
-  markRead: (threadId: number, messageId: number, signal?: AbortSignal) =>
+  markRead: (threadId: string, messageId: number, signal?: AbortSignal) =>
     chatJson<ChatReadResult>(`/api/chat/threads/${threadId}/read`, { ...json("POST", { messageId }), signal }),
   settings: (signal?: AbortSignal) => chatJson<ChatSettings>("/api/chat/settings", { signal }),
   updateSettings: (patch: ChatSettingsPatch) => chatJson<ChatSettings>("/api/chat/settings", json("PATCH", patch)),
   memories: (offset: number, signal: AbortSignal) => chatJson<WebMemories>(`/api/chat/memories?offset=${offset}`, { signal }),
   deleteMemory: async (memoryId: number) => { await chatJson<{ deleted: true }>(`/api/chat/memories/${memoryId}`, json("DELETE")); },
-  fileUrl: (threadId: number, fileId: number) => `/api/chat/threads/${threadId}/files/${fileId}`,
+  fileUrl: (threadId: string, fileId: string) => `/api/chat/threads/${threadId}/files/${fileId}`,
 };
 
 export const MAX_SEARCH_LENGTH = 200;

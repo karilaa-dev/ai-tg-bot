@@ -10,6 +10,7 @@ import type { SandboxThreadFile, SandboxThreadFileSyncResult } from "../sandbox/
 import { webFileSource, type WebFileSourceAdapter } from "../web/file-source.js";
 import type { FileResolver } from "../files/resolver.js";
 import { quoteShellToken, shellJoin } from "../util/shell.js";
+import { isUuid } from "../utils/uuid.js";
 import { type E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_FILE_SOURCES, E2B_TELEGRAM_FILES } from "./paths.js";
 import { MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
@@ -28,7 +29,7 @@ const FILE_RESTORE_RETRY_BASE_MS = 5 * 60_000;
 const FILE_RESTORE_RETRY_MAX_MS = 60 * 60_000;
 
 type ThreadFileIndexEntry = {
-  file_id: number;
+  file_id: string;
   message_id: number | null;
   original_name: string;
   sandbox_name: string;
@@ -49,7 +50,7 @@ type ThreadFileIndex = {
 };
 
 type TelegramRestoreResult = {
-  file_id: number;
+  file_id: string;
   status: "available" | "error";
   ref_id: number | null;
   size?: number;
@@ -67,7 +68,7 @@ type ThreadFileInventoryEntry = {
 
 export async function syncThreadFiles(context: MaterializerInput,
   state: { threadFilesSync?: ThreadFileSync },
-  scope: { userId: number; threadId: number },
+  scope: { userId: number; threadId: string },
   sandbox: E2BSandbox,
   files: SandboxThreadFile[],
   signal?: AbortSignal,
@@ -224,7 +225,7 @@ export async function syncThreadFiles(context: MaterializerInput,
 
     const next = [...nextById.values()]
       .filter((entry) => isSandboxThreadFileName(entry.sandbox_name))
-      .sort((left, right) => left.file_id - right.file_id);
+      .sort((left, right) => left.file_id.localeCompare(right.file_id));
     const index: ThreadFileIndex = {
       version: 2,
       generated_at: new Date().toISOString(),
@@ -270,7 +271,7 @@ export async function syncThreadFiles(context: MaterializerInput,
   }
   const next = [...nextById.values()]
     .filter((entry) => isSandboxThreadFileName(entry.sandbox_name))
-    .sort((left, right) => left.file_id - right.file_id);
+    .sort((left, right) => left.file_id.localeCompare(right.file_id));
   const result: SandboxThreadFileSyncResult = {
     directory: E2B_TELEGRAM_FILES,
     available: next.filter((entry) => entry.status === "available").length,
@@ -293,7 +294,7 @@ export async function syncThreadFiles(context: MaterializerInput,
 }
 
 async function restoreTelegramFiles(context: MaterializerInput,
-  scope: { userId: number; threadId: number },
+  scope: { userId: number; threadId: string },
   sandbox: E2BSandbox,
   pending: Array<{ file: SandboxThreadFile; sandboxName: string }>,
   signal?: AbortSignal,
@@ -330,7 +331,7 @@ async function restoreTelegramFiles(context: MaterializerInput,
 async function restoreTelegramFile(context: MaterializerInput,
   sandbox: E2BSandbox,
   item: { file: SandboxThreadFile; sandboxName: string },
-  webFileIds: Set<number>,
+  webFileIds: Set<string>,
   signal?: AbortSignal,
 ): Promise<TelegramRestoreResult> {
   const webUnavailable = {
@@ -349,7 +350,7 @@ async function restoreTelegramFile(context: MaterializerInput,
       return webUnavailable;
     }
     hasWebSource = sources.some((entry) => (entry.transport === "web" || entry.transport === "local")
-      && entry.connection_key === "default" && entry.remote_key === String(item.file.fileId));
+      && entry.connection_key === "default" && entry.remote_key === item.file.fileId);
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? error;
     if (isAbortError(error)) throw error;
@@ -523,7 +524,7 @@ async function restoreLocalFileSource(context: MaterializerInput,
 }
 
 async function recordRestoreStatus(context: MaterializerInput, input: {
-  threadId: number;
+  threadId: string;
   sandbox: E2BSandbox;
   file: SandboxThreadFile;
   sandboxName: string;
@@ -759,7 +760,10 @@ async function readThreadFileIndex(
       generated_at: typeof parsed.generated_at === "string"
         ? parsed.generated_at
         : new Date(0).toISOString(),
-      files: parsed.files.map((entry) => ({
+      files: parsed.files.filter((entry) => isUuid(entry.file_id)
+        && typeof entry.sandbox_name === "string"
+        && isSandboxThreadFileName(entry.sandbox_name)
+        && entry.sandbox_name.startsWith(`${entry.file_id}--`)).map((entry) => ({
         file_id: entry.file_id,
         message_id: entry.message_id,
         original_name: entry.original_name,
@@ -796,8 +800,8 @@ function sanitizeFileName(value: string): string {
   return normalized || "file";
 }
 
-function sandboxThreadFileName(fileId: number, originalName: string): string {
-  if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error("invalid Telegram file id");
+function sandboxThreadFileName(fileId: string, originalName: string): string {
+  if (!isUuid(fileId)) throw new Error("invalid Telegram file id");
   const sandboxName = `${fileId}--${sanitizeFileName(originalName)}`;
   const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, sandboxName);
   if (path.posix.dirname(candidate) !== E2B_TELEGRAM_FILES) {
@@ -808,10 +812,9 @@ function sandboxThreadFileName(fileId: number, originalName: string): string {
 
 function isSandboxThreadFileName(value: string): boolean {
   if (path.posix.basename(value) !== value) return false;
-  const match = /^([1-9]\d*)--([A-Za-z0-9][A-Za-z0-9._-]{0,119})$/.exec(value);
+  const match = /^(.{36})--([A-Za-z0-9][A-Za-z0-9._-]{0,119})$/.exec(value);
   if (!match) return false;
-  const fileId = Number(match[1]);
-  if (!Number.isSafeInteger(fileId) || fileId <= 0) return false;
+  if (!isUuid(match[1])) return false;
   const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, value);
   return path.posix.dirname(candidate) === E2B_TELEGRAM_FILES;
 }

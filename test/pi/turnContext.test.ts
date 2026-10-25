@@ -60,19 +60,24 @@ describe("turn prompt context extension", () => {
 
   it("persists bounded snapshots and emits only changes, including explicit file removals", async () => {
     const manager = SessionManager.inMemory();
-    const source = mutableSource("core", block({ current_time: "12:00", thread_title: "Old", files: [{ id: 1, name: "old" }, { id: 2, name: "keep" }] }));
+    const old = { id: "00000000-0000-4000-8000-000000000001", name: "old" };
+    const kept = { id: "00000000-0000-4000-8000-000000000002", name: "keep" };
+    const added = { id: "00000000-0000-4000-8000-000000000003", name: "new" };
+    const anotherAdded = { id: "00000000-0000-4000-8000-000000000004", name: "also new" };
+    const anotherOld = { id: "00000000-0000-4000-8000-000000000005", name: "also old" };
+    const source = mutableSource("core", block({ current_time: "12:00", thread_title: "Old", files: [anotherOld, old, kept] }));
     const handlers = await extensionHandlers(source, manager);
     const event = { systemPromptOptions: { skills: [] } };
     const first = (await handlers.before_agent_start(event)).message;
     manager.appendCustomMessageEntry(first.customType, first.content, first.display, first.details);
     expect(JSON.parse(first.content.split("\n").slice(1, -1).join("\n"))).toMatchObject({ kind: "snapshot", thread_title: "Old" });
     expect((await handlers.before_agent_start(event)).message).toBeUndefined();
-    source.sessionContext = block({ current_time: "12:01", files: [{ id: 2, name: "keep" }, { id: 3, name: "new" }] });
+    source.sessionContext = block({ current_time: "12:01", files: [anotherAdded, kept, added] });
     const second = (await handlers.before_agent_start(event)).message;
     expect(JSON.parse(second.content.split("\n").slice(1, -1).join("\n"))).toEqual({
-      kind: "update", set: { current_time: "12:01" }, unset: ["thread_title"], files: { upsert: [{ id: 3, name: "new" }], remove: [1] },
+      kind: "update", set: { current_time: "12:01" }, unset: ["thread_title"], files: { upsert: [added, anotherAdded], remove: [old.id, anotherOld.id] },
     });
-    expect(second.details.snapshot).toEqual({ current_time: "12:01", files: [{ id: 2, name: "keep" }, { id: 3, name: "new" }] });
+    expect(second.details.snapshot).toEqual({ current_time: "12:01", files: [anotherAdded, kept, added] });
     expect(manager.getBranch()[0]).toMatchObject({ content: first.content });
   });
 
@@ -303,6 +308,7 @@ describe("ThreadBridge turn prompt lifecycle", () => {
       const messages: AgentMessage[] = [{ role: "user", content: `Help me plan tomorrow. [[chat-file:${file.id}]]`, timestamp: 1 }];
       const result = await handlers.context({ messages });
       expect(JSON.stringify(result.messages)).toContain("Reuse the transcript");
+      expect(JSON.stringify(result.messages)).toContain(JSON.stringify(`file_id: "${file.id}"`).slice(1, -1));
       expect(JSON.stringify(result.messages)).not.toContain("docx");
       expect(resolve).not.toHaveBeenCalled();
       await bridge.endTurn();

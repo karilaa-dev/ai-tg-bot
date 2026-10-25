@@ -5,7 +5,7 @@ import { queryOne, type SqlExecutor } from "../sql.js";
 export class ThreadSandboxesRepo {
   constructor(private readonly db: SqlExecutor) {}
 
-  get(deploymentId: string, threadId: number): Promise<ThreadSandboxRow | undefined> {
+  get(deploymentId: string, threadId: string): Promise<ThreadSandboxRow | undefined> {
     return queryOne<ThreadSandboxRow>(this.db, sql`
       select * from thread_sandboxes
       where deployment_id = ${deploymentId} and thread_id = ${threadId}
@@ -15,7 +15,7 @@ export class ThreadSandboxesRepo {
   async insertIfAbsent(input: {
     deploymentId: string;
     userId: number;
-    threadId: number;
+    threadId: string;
     sandboxId: string;
   }): Promise<ThreadSandboxRow> {
     const now = Date.now();
@@ -37,14 +37,14 @@ export class ThreadSandboxesRepo {
     return winner;
   }
 
-  async remove(deploymentId: string, threadId: number): Promise<void> {
+  async remove(deploymentId: string, threadId: string): Promise<void> {
     await this.db.execute(sql`
       delete from thread_sandboxes
       where deployment_id = ${deploymentId} and thread_id = ${threadId}
     `);
   }
 
-  async removeIfMatches(deploymentId: string, threadId: number, sandboxId: string): Promise<void> {
+  async removeIfMatches(deploymentId: string, threadId: string, sandboxId: string): Promise<void> {
     await this.db.execute(sql`
       delete from thread_sandboxes
       where deployment_id = ${deploymentId}

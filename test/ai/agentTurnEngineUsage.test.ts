@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { expect, it, vi } from "vitest";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { runTurn } from "../../src/ai/agentTurnEngine.js";
@@ -16,7 +17,7 @@ it("saves usage from dropped attempts without double-counting the persisted repl
     chatId: 1, config: loadTestConfig(),
     repos: { messages: { insert: async () => ({ id: 1 }) }, files: { listForMessage: async () => [] } },
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    user: { tg_id: 1, stream_mode: false, lang: "en" }, thread: { id: 1 },
+    user: { tg_id: 1, stream_mode: false, lang: "en" }, thread: { id: fixtureUuid(1) },
     text: "test", t: (key: string) => key, onInferenceUsage,
     pi: { runtime: async () => ({
       bridge: { beginTurn: async () => undefined, endTurn: async () => undefined,

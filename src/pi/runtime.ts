@@ -63,7 +63,7 @@ export interface PiRuntimeService {
   ): Promise<void>;
   captionImage(bytes: Buffer, mimeType: string, signal?: AbortSignal): Promise<string>;
   generateThreadTitle(input: ThreadTitlePromptInput): Promise<string>;
-  abort(threadId: number): Promise<boolean>;
+  abort(threadId: string): Promise<boolean>;
   dispose(): Promise<void>;
 }
 
@@ -72,7 +72,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   modelRegistry!: ModelRegistry;
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
-  private readonly runtimes = new Map<number, PiThreadRuntime>();
+  private readonly runtimes = new Map<string, PiThreadRuntime>();
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
   private codexCredentials!: CodexCliCredentialStore;
@@ -351,7 +351,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     });
   }
 
-  async abort(threadId: number): Promise<boolean> {
+  async abort(threadId: string): Promise<boolean> {
     const runtime = this.runtimes.get(threadId);
     if (!runtime?.session.isStreaming) return false;
     void runtime.session.abort().catch((error) => {
@@ -462,7 +462,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     return SessionManager.create(process.cwd(), sessionDir);
   }
 
-  private async evictIdleRuntimes(keepThreadId: number): Promise<void> {
+  private async evictIdleRuntimes(keepThreadId: string): Promise<void> {
     while (this.runtimes.size > MAX_CACHED_RUNTIMES) {
       const candidates = [...this.runtimes.entries()]
         .filter(([threadId, runtime]) => threadId !== keepThreadId && !runtime.session.isStreaming)

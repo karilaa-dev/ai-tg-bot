@@ -4,8 +4,8 @@ import { queryOne, type SqlExecutor } from "../sql.js";
 
 export interface AudioTranscriptSource {
   userId: number;
-  threadId: number;
-  fileId?: number;
+  threadId: string;
+  fileId?: string;
   messageId?: number;
   telegramUpdateId?: number;
 }
@@ -13,8 +13,8 @@ export interface AudioTranscriptSource {
 export interface AudioTranscriptRow {
   id: string;
   user_id: number;
-  thread_id: number;
-  source_file_id: number | null;
+  thread_id: string;
+  source_file_id: string | null;
   source_message_id: number | null;
   telegram_update_id: number | null;
   visible_message_id: number | null;

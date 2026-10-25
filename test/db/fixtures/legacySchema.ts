@@ -1,0 +1,433 @@
+// Frozen pre-UUID schema, used to test upgrades from existing installations.
+import { sql } from "drizzle-orm";
+import type { SqlExecutor } from "../../../src/db/sql.js";
+import type { DialectName } from "../../../src/db/types.js";
+import { refreshPostgresUserSearch } from "../../../src/db/userSearch.js";
+
+export async function initializeLegacySchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
+  if (dialect === "sqlite") {
+    await db.execute(sql`pragma foreign_keys = on`);
+    await db.execute(sql`pragma journal_mode = wal`);
+  }
+  await db.transaction(async (tx) => {
+    if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
+    if (dialect === "sqlite") await initializeSqlite(tx);
+    else await initializePostgres(tx);
+    if (dialect === "postgres") await tx.execute(sql`alter table users add column if not exists memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
+    else {
+      const columns = await tx.query<{ name: string }>(sql`pragma table_info(users)`);
+      if (!columns.some(column => column.name === "memory_enabled")) {
+        await tx.execute(sql`alter table users add column memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
+      }
+    }
+    for (const table of ["threads", "turn_runs"]) {
+      const definition = "origin text not null default 'telegram' check(origin in ('telegram', 'web'))";
+      if (dialect === "postgres") await tx.execute(sql.raw(`alter table ${table} add column if not exists ${definition}`));
+      else {
+        const columns = await tx.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+        if (!columns.some(column => column.name === "origin")) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
+      }
+    }
+    if (dialect === "postgres") await tx.execute(sql`alter table turn_runs add column if not exists web_request_id text`);
+    else {
+      const columns = await tx.query<{ name: string }>(sql`pragma table_info(turn_runs)`);
+      if (!columns.some(column => column.name === "web_request_id")) await tx.execute(sql`alter table turn_runs add column web_request_id text`);
+    }
+    await tx.execute(sql`create unique index if not exists turn_runs_web_request_idx on turn_runs(user_id, thread_id, web_request_id) where web_request_id is not null`);
+    for (const [table, name, definition] of [
+      ["files", "requires_message", "requires_message integer not null default 0 check(requires_message in (0, 1))"],
+      ["optmem_notes", "deleted", "deleted integer not null default 0 check(deleted in (0, 1))"],
+      ["optmem_stores", "revision", "revision integer not null default 0"],
+      // An IANA time zone such as Europe/Berlin; tz_offset_min keeps its offset at save time for older readers.
+      ["users", "tz_name", "tz_name text"],
+    ]) {
+      if (dialect === "postgres") await tx.execute(sql.raw(`alter table ${table} add column if not exists ${definition}`));
+      else {
+        const columns = await tx.query<{ name: string }>(sql.raw(`pragma table_info(${table})`));
+        if (!columns.some(column => column.name === name)) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
+      }
+    }
+  });
+}
+
+async function initializeSqlite(db: SqlExecutor): Promise<void> {
+  await db.execute(sql`
+    create table if not exists users (
+      tg_id integer primary key,
+      first_name text,
+      username text,
+      lang text not null default 'en',
+      tz_offset_min integer,
+      stream_mode integer not null default 1,
+      created_at integer not null
+    )
+  `);
+  await initializeCommonTables(db, "integer primary key autoincrement", "integer", "blob");
+  await db.execute(sql`create virtual table if not exists messages_fts using fts5(text, message_id unindexed, thread_id unindexed)`);
+  await db.execute(sql`create virtual table if not exists chunks_fts using fts5(text, chunk_id unindexed, file_id unindexed)`);
+}
+
+async function initializePostgres(db: SqlExecutor): Promise<void> {
+  await db.execute(sql`
+    create table if not exists users (
+      tg_id bigint primary key,
+      first_name text,
+      username text,
+      lang text not null default 'en',
+      tz_offset_min integer,
+      stream_mode integer not null default 1,
+      created_at bigint not null
+    )
+  `);
+  await initializePostgresUserSearch(db);
+  await initializeCommonTables(db, "bigserial primary key", "bigint", "bytea");
+  await db.execute(sql`
+    create table if not exists message_search (
+      message_id bigint primary key references messages(id) on delete cascade,
+      thread_id bigint not null,
+      text text not null,
+      ts tsvector not null
+    )
+  `);
+  await db.execute(sql`create index if not exists message_search_ts_idx on message_search using gin(ts)`);
+  await db.execute(sql`create index if not exists message_search_thread_idx on message_search(thread_id)`);
+  await db.execute(sql`
+    create table if not exists chunk_search (
+      chunk_id bigint primary key references file_chunks(id) on delete cascade,
+      file_id bigint not null,
+      text text not null,
+      ts tsvector not null
+    )
+  `);
+  await db.execute(sql`create index if not exists chunk_search_ts_idx on chunk_search using gin(ts)`);
+  await db.execute(sql`create index if not exists chunk_search_file_idx on chunk_search(file_id)`);
+}
+
+async function initializePostgresUserSearch(db: SqlExecutor): Promise<void> {
+  await db.execute(sql`alter table users add column if not exists first_name_search text`);
+  await db.execute(sql`alter table users add column if not exists username_search text`);
+  await db.execute(sql`
+    create index if not exists users_search_pending_idx on users(tg_id)
+    where first_name_search is null or username_search is null
+  `);
+  // Older app versions update identities without updating their normalized
+  // fields. Mark those rows for repair without relying on PostgreSQL's locale.
+  await db.execute(sql`
+    create or replace function invalidate_user_search() returns trigger language plpgsql as $$
+    begin
+      if new.first_name is distinct from old.first_name
+        and new.first_name_search is not distinct from old.first_name_search then
+        new.first_name_search := null;
+      end if;
+      if new.username is distinct from old.username
+        and new.username_search is not distinct from old.username_search then
+        new.username_search := null;
+      end if;
+      return new;
+    end;
+    $$
+  `);
+  await db.execute(sql`
+    create or replace trigger users_invalidate_search before update of first_name, username on users
+    for each row execute function invalidate_user_search()
+  `);
+  await refreshPostgresUserSearch(db);
+}
+
+async function initializeCommonTables(
+  db: SqlExecutor,
+  idType: string,
+  intType: string,
+  blobType: string,
+): Promise<void> {
+  await db.execute(sql.raw(`
+    create table if not exists optmem_stores (
+      user_id ${intType} primary key references users(tg_id) on delete cascade,
+      next_id ${intType} not null default 0 check(next_id >= 0)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists optmem_notes (
+      user_id ${intType} not null references optmem_stores(user_id) on delete cascade,
+      id ${intType} not null check(id >= 0),
+      date text not null,
+      content ${blobType} not null,
+      primary key(user_id, id)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists optmem_summaries (
+      user_id ${intType} not null references optmem_stores(user_id) on delete cascade,
+      size ${intType} not null check(size >= 2),
+      block_index ${intType} not null check(block_index >= 0),
+      content ${blobType} not null,
+      primary key(user_id, size, block_index)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists threads (
+      id ${idType},
+      user_id ${intType} not null references users(tg_id),
+      topic_id integer,
+      parent_thread_id ${intType},
+      fork_point_message_id ${intType},
+      title text not null,
+      title_source text not null default 'explicit',
+      title_attempts integer not null default 0,
+      topic_title_synced integer not null default 1,
+      pi_session_file text,
+      pi_session_id text,
+      archived integer not null default 0,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists telegram_topic_titles (
+      chat_id ${intType} not null,
+      topic_id integer not null,
+      name text,
+      requested_activity_title text,
+      primary key(chat_id, topic_id)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists thread_sandboxes (
+      deployment_id text not null,
+      user_id ${intType} not null references users(tg_id),
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      sandbox_id text not null unique,
+      created_at ${intType} not null,
+      updated_at ${intType} not null,
+      primary key(deployment_id, thread_id)
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists browser_use_profiles (
+      deployment_id text not null,
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      provider_user_key text not null unique,
+      profile_id text,
+      created_at ${intType} not null,
+      updated_at ${intType} not null,
+      primary key(deployment_id, user_id)
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists browser_use_profiles_profile_idx on browser_use_profiles(profile_id) where profile_id is not null`));
+  await db.execute(sql.raw(`
+    create table if not exists messages (
+      id ${idType},
+      thread_id ${intType} not null references threads(id),
+      role text not null,
+      kind text not null,
+      content_json text not null,
+      text_plain text not null,
+      thinking text,
+      tg_message_id ${intType},
+      pi_entry_id text,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists messages_thread_id_idx on messages(thread_id, id)`));
+  await db.execute(sql.raw(`
+    create table if not exists thread_reads (
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      message_id ${intType} not null references messages(id),
+      primary key(user_id, thread_id)
+    )
+  `));
+  await db.execute(sql`create index if not exists messages_thread_activity_idx on messages(thread_id, created_at)`);
+  await db.execute(sql.raw(`
+    create table if not exists thread_operation_barriers (
+      thread_id ${intType} primary key references threads(id) on delete cascade,
+      owner_id text not null,
+      operation text not null,
+      snapshot_message_id ${intType},
+      lease_expires_at ${intType} not null,
+      created_at ${intType} not null,
+      updated_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists turn_runs (
+      id ${idType},
+      user_id ${intType} not null references users(tg_id),
+      thread_id ${intType} not null references threads(id),
+      user_message_id ${intType} not null unique references messages(id),
+      chat_id ${intType} not null,
+      message_thread_id ${intType},
+      locale text not null,
+      status text not null,
+      delivery_status text not null default 'pending',
+      result_message_id ${intType},
+      provider text,
+      model text,
+      usage_json text,
+      failure_code text,
+      owner_id text,
+      lease_expires_at ${intType},
+      cancel_requested_at ${intType},
+      accepted_at ${intType} not null,
+      started_at ${intType},
+      finished_at ${intType},
+      updated_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists turn_runs_thread_fifo_idx on turn_runs(thread_id, status, id)`));
+  await db.execute(sql.raw(`create index if not exists turn_runs_status_idx on turn_runs(status, id)`));
+  await db.execute(sql.raw(`create index if not exists turn_runs_result_message_idx on turn_runs(result_message_id)`));
+  await db.execute(sql.raw(`create unique index if not exists turn_runs_one_active_thread_idx on turn_runs(thread_id) where status in ('running', 'awaiting_delivery')`));
+  await db.execute(sql.raw(`
+    create table if not exists turn_run_sources (
+      turn_run_id ${intType} not null references turn_runs(id) on delete cascade,
+      telegram_update_id ${intType} not null unique,
+      telegram_message_id ${intType},
+      created_at ${intType} not null,
+      primary key(turn_run_id, telegram_update_id)
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists turn_run_sources_run_idx on turn_run_sources(turn_run_id)`));
+  await db.execute(sql.raw(`
+    create table if not exists turn_activity_sync (
+      turn_run_id ${intType} primary key references turn_runs(id) on delete cascade,
+      synced_working integer,
+      generation integer not null default 0,
+      owner_id text,
+      lease_expires_at ${intType},
+      retry_at ${intType} not null default 0
+    )
+  `));
+  // Existing turns may have indicators left by an earlier deployment.
+  await db.execute(sql`
+    insert into turn_activity_sync(turn_run_id)
+    select id from turn_runs where true on conflict(turn_run_id) do nothing
+  `);
+  await db.execute(sql.raw(`
+    create table if not exists files (
+      id ${idType},
+      user_id ${intType} not null references users(tg_id),
+      thread_id ${intType} not null references threads(id),
+      message_id ${intType},
+      type text not null,
+      content_sha256 text,
+      mime_type text,
+      extraction_status text not null default 'ready',
+      name text not null,
+      size integer not null,
+      content_md text,
+      summary text,
+      outline_json text,
+      is_inline integer not null,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists files_content_sha256_idx on files(content_sha256, type, size)`));
+  await db.execute(sql`create index if not exists files_message_id_idx on files(message_id)`);
+  await db.execute(sql.raw(`
+    create table if not exists audio_transcripts (
+      id text primary key,
+      user_id ${intType} not null references users(tg_id) on delete cascade,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      source_file_id ${intType} references files(id) on delete cascade,
+      source_message_id ${intType} references messages(id) on delete cascade,
+      telegram_update_id ${intType},
+      text text not null,
+      model text not null,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists file_sources (
+      id ${idType},
+      file_id ${intType} not null references files(id) on delete cascade,
+      transport text not null,
+      connection_key text not null,
+      remote_key text not null,
+      locator_json text not null,
+      mime_type text,
+      last_verified_at ${intType},
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists file_sources_file_id_idx on file_sources(file_id)`));
+  await db.execute(sql.raw(`create unique index if not exists file_sources_remote_idx on file_sources(transport, connection_key, remote_key)`));
+  await db.execute(sql.raw(`
+    create table if not exists telegram_file_refs (
+      id ${idType},
+      file_id ${intType} not null references files(id) on delete cascade,
+      telegram_file_id text not null,
+      telegram_file_unique_id text,
+      direction text not null,
+      media_kind text not null,
+      telegram_message_id ${intType},
+      width integer,
+      height integer,
+      telegram_size ${intType},
+      is_primary integer not null,
+      first_seen_at ${intType} not null,
+      last_seen_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists telegram_file_refs_file_tg_idx on telegram_file_refs(file_id, telegram_file_id)`));
+  await db.execute(sql.raw(`create index if not exists telegram_file_refs_unique_idx on telegram_file_refs(telegram_file_unique_id)`));
+  await db.execute(sql.raw(`create index if not exists telegram_file_refs_restore_idx on telegram_file_refs(file_id, is_primary, last_seen_at)`));
+  await db.execute(sql.raw(`
+    create table if not exists sandbox_file_restore_status (
+      deployment_id text not null,
+      thread_id ${intType} not null references threads(id) on delete cascade,
+      sandbox_id text not null,
+      file_id ${intType} not null references files(id) on delete cascade,
+      telegram_file_ref_id ${intType} references telegram_file_refs(id) on delete set null,
+      sandbox_name text not null,
+      status text not null,
+      restored_size ${intType},
+      restored_sha256 text,
+      error_code text,
+      error_detail text,
+      attempted_at ${intType} not null,
+      completed_at ${intType},
+      primary key(deployment_id, sandbox_id, file_id)
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists sandbox_file_restore_thread_idx on sandbox_file_restore_status(deployment_id, thread_id, attempted_at)`));
+  await db.execute(sql.raw(`
+    create table if not exists file_chunks (
+      id ${idType},
+      file_id ${intType} not null references files(id),
+      idx integer not null,
+      heading_path text,
+      content text not null,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists file_chunks_file_idx_idx on file_chunks(file_id, idx)`));
+  await db.execute(sql.raw(`
+    create table if not exists message_files (
+      message_id ${intType} not null references messages(id) on delete cascade,
+      file_id ${intType} not null references files(id) on delete cascade,
+      display_name text,
+      caption text,
+      created_at ${intType} not null,
+      primary key(message_id, file_id)
+    )
+  `));
+  await db.execute(sql.raw(`create index if not exists message_files_file_id_idx on message_files(file_id)`));
+  await db.execute(sql.raw(`
+    create table if not exists web_file_blobs (
+      file_id ${intType} primary key references files(id) on delete cascade,
+      bytes ${blobType} not null
+    )
+  `));
+  await db.execute(sql.raw(`
+    create table if not exists embeddings (
+      id ${idType},
+      kind text not null,
+      ref_id ${intType} not null,
+      model text,
+      dim integer not null,
+      vector ${blobType} not null,
+      created_at ${intType} not null
+    )
+  `));
+  await db.execute(sql.raw(`create unique index if not exists embeddings_kind_ref_idx on embeddings(kind, ref_id)`));
+}

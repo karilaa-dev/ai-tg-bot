@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
@@ -7,7 +8,7 @@ import type { MessageRow } from "../../src/db/types.js";
 import type { ToolCallDetail } from "../../src/ai/toolActivity.js";
 
 function row(content: unknown): MessageRow {
-  return { id: 1, thread_id: 1, role: "assistant", kind: "text", text_plain: "Result", content_json: JSON.stringify(content),
+  return { id: 1, thread_id: fixtureUuid(1), role: "assistant", kind: "text", text_plain: "Result", content_json: JSON.stringify(content),
     thinking: "Tool calls: 1\n\nOlder saved tool summary", created_at: 0, tg_message_id: null, pi_entry_id: null };
 }
 const call = { id: "test", name: "bash", status: "error", args: { format: "json", text: JSON.stringify({ script: 'printf "<test>\\n"\necho second' }), truncated: false },

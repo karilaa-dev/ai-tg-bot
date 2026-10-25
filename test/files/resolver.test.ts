@@ -80,7 +80,7 @@ describe("transport-neutral file resolver", () => {
     await repos.files.rememberSource(file.id, {
       transport: "e2b",
       connectionKey: "deployment",
-      remoteKey: "sandbox:file:1",
+      remoteKey: `sandbox:file:${file.id}`,
       locator: {},
       mimeType: "text/plain",
     });
@@ -116,7 +116,7 @@ describe("transport-neutral file resolver", () => {
     await repos.files.rememberSource(file.id, {
       transport: "e2b",
       connectionKey: "deployment",
-      remoteKey: "sandbox:file:integrity",
+      remoteKey: `sandbox:file:${file.id}`,
       locator: {},
       mimeType: "text/plain",
     });
@@ -170,7 +170,7 @@ describe("transport-neutral file resolver", () => {
     const expected = Buffer.from("remote content");
     const file = await insertFile(repos, 907, "original.bin", createHash("sha256").update(expected).digest("hex"));
     await repos.files.rememberSource(file.id, {
-      transport: "web", connectionKey: "default", remoteKey: String(file.id), locator: {},
+      transport: "web", connectionKey: "default", remoteKey: file.id, locator: {},
     });
     const resolver = createResolver(repos);
     resolver.registry.register({ transport: "web", connectionKey: "default",

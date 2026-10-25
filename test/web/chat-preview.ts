@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 /** Local design preview for the chat client. In-memory fixture data only; never used in production.
  * `--dev` bundles the client source on the fly. Otherwise it serves a prebuilt bundle from
  * CHAT_PREVIEW_ASSETS (default dist/web), so run a web build into that directory first.
@@ -30,14 +31,14 @@ const failedOnce = new Set<string>();
 const sent = new Map<string, { turnId: number; messageId: number; queued: boolean }>();
 let nextId = 1000;
 
-const thread = (id: number, title: string, origin: ChatThread["origin"], lastActivity: number, extra: Partial<ChatThread> = {}): ChatThread => ({
-  id, userId: 1001, title, archived: false, parentThreadId: null, forkPointMessageId: null, lastActivity, activity: null, origin, topicId: origin === "telegram" ? id * 10 : null,
+const thread = (index: number, title: string, origin: ChatThread["origin"], lastActivity: number, extra: Partial<ChatThread> = {}): ChatThread => ({
+  id: fixtureUuid(index), userId: 1001, title, archived: false, parentThreadId: null, forkPointMessageId: null, lastActivity, activity: null, origin, topicId: origin === "telegram" ? index * 10 : null,
   unread: false, lastMessageId: null, ...extra,
 });
 /** Read cursors per thread; threads 2 and 3 start with an unseen reply. */
-const readCursors = new Map<number, number>();
-const drafts = new Map<number, NonNullable<ChatHistory["draft"]>>();
-const message = (threadId: number, role: WebMessage["role"], text: string, createdAt: number, extra: Partial<WebMessage> = {}): WebMessage => ({
+const readCursors = new Map<string, number>();
+const drafts = new Map<string, NonNullable<ChatHistory["draft"]>>();
+const message = (threadId: string, role: WebMessage["role"], text: string, createdAt: number, extra: Partial<WebMessage> = {}): WebMessage => ({
   id: nextId++, threadId, role, text, thinking: null, createdAt, attachments: [], ...extra,
 });
 const daysAgo = (days: number, hour = 10) => { const date = new Date(now - days * day); date.setHours(hour, 15, 0, 0); return date.getTime(); };
@@ -60,7 +61,7 @@ const extraTitles = [
 ];
 const extraAges = [0.2, 1.4, 2, 3, 4, 6, 6.5, 8, 9, 12, 15, 20, 26, 29, 31, 34, 38, 45, 52, 61, 70, 84, 95, 110, 130, 150, 175, 200, 240, 300, 340, 400];
 extraTitles.forEach((title, index) => threads.push(thread(5 + index, title, index % 3 === 0 ? "web" : "telegram", now - extraAges[index]! * day - index * minute,
-  { parentThreadId: index === 4 ? 1 : null })));
+  { parentThreadId: index === 4 ? fixtureUuid(1) : null })));
 threads.sort((a, b) => b.lastActivity - a.lastActivity);
 
 const toolActivity: ToolActivity = {
@@ -85,31 +86,31 @@ const cancelled: ToolActivity = {
 };
 const picture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAHgAAABICAIAAACyfKYoAAADKUlEQVR42u3XR3baUBTG8buwjE2T4LmA0E6yA+OWzNJ7770X94J7L3u4GWSQBYQTHRTMZ8fmSboY557zG+vd7z8CujDKSgBdHGUlgC6NsRJAl8dYCaAr46wE0NVxVgLo2gQrAXR9gpUAujHJSgDdnGQlgG5NsRJAt6dYCaA706wE0N1pVgLo3gwrAXR/hpUAejDLSgA9nGUlgB7NsRJAj+dYCaAnVVYC6GmVlQB6Ns9KAD2fZyWAXiywEkAvF1gJoFeLrATQ60VWAujNEisB9HaJlQB6t8xKAL1fZiWAPqywEkAfV1gJoE+rrATQ51VWAujLGisB9HWNlQD6ts5KAH1fZyWARjdY2I+fvxrJH9CWvTS2wTKa+iKxS9qyl8Y3OVFH9kVJn9SWvTSxyUmw6IsSuq0te2lyi2MUS18U75Ft2UtTWxxdQn1RLNe2ZS9Nb3MUFk86/Sbk9huLL0S8WXiv329qaGabLVi8l2vo2xg6ZPFNu+Nl9gZ9QzS7w8dn07diQg5wQb5iU7ylFYnuLVdMjQ9oboePZPFetqFvq6FDFu8eZ04Se4O+oQNCV3f5MHZ9Q9FDBwpWxf+xK8a9XsV4+xMfGnp+l5tYvJcZMFmQAw5wQR4UGljchgOj7/UGTKMy8AEt7HHA7vdWLXFAJrR17ppwaZS9pf2JWwi9uMdR+rYltKmzuNxub61vyDJ0S++lB00gA7IgBxzggjwoAAMS+n9UHDQl4IEy8AG11PfEhu6ui6tvSCJ0atAEOih0lOJ9DX0lQqeGTJM0yIAsyAEHuCAPCsCAbtBTd3TfIRMqghLwQBn44G/oriET6OjQZ85Wo0sqdJi4Q0PHEvcwsYXuGjZNUiANMiALcsABLsiDAjB/JNr3gOLDJuCBMvBBp4YWrtzYWkOf8NAjpkkKpEEGZEEOOMAFeVAAZqRNoUdMjQfKwAedGlq+dVD5fwxtRIqHfSOHPmeapEAaZEAW5IADXJAHBWBAd108v6PPmVAJeKAMfHDaQod6QC/oA0WgoTsu9HnTJAXSIAOyIAcc4II8KAADukEP6AV9oAhKwANl4AMNraFPV+jfNCfbk4IrgtIAAAAASUVORK5CYII=", "base64");
 
-const messages = new Map<number, WebMessage[]>([
-  [1, [
-    message(1, "user", "Can you put together a short packing list for a week in the mountains?", now - 30 * minute),
-    message(1, "assistant", "Here's a starting point for a week away.\n\n- Waterproof jacket and warm layers\n- Comfortable walking shoes\n- Water bottle and a small daypack\n- Travel documents and a first-aid kit\n\n```json\n{ \"destination\": \"mountains\", \"duration\": \"7 days\" }\n```", now - 29 * minute, {
+const messages = new Map<string, WebMessage[]>([
+  [fixtureUuid(1), [
+    message(fixtureUuid(1), "user", "Can you put together a short packing list for a week in the mountains?", now - 30 * minute),
+    message(fixtureUuid(1), "assistant", "Here's a starting point for a week away.\n\n- Waterproof jacket and warm layers\n- Comfortable walking shoes\n- Water bottle and a small daypack\n- Travel documents and a first-aid kit\n\n```json\n{ \"destination\": \"mountains\", \"duration\": \"7 days\" }\n```", now - 29 * minute, {
       thinking: "Tool calls: 2 · Reasoning blocks: 1\n\nChecked typical October weather for alpine regions.", toolActivity, durationMs: 32_400,
       openui: 'root = Stack([Card("Pack by weather", [Table("Essentials", ["Item", "Why"], [["Rain shell", "Frequent showers"], ["Fleece", "Cold mornings"]]), Button("Add a checklist", "Turn this into a checklist I can tick off")])])',
     }),
-    message(1, "user", "Great. Also attach the route preview please.", now - 6 * minute, { attachments: [{ id: 501, name: "route-notes.txt", size: 812, mimeType: "text/plain", caption: null, kind: "file" }] }),
-    message(1, "assistant", "", now - 5 * minute, { toolActivity: cancelled, durationMs: 26_000 }),
-    message(1, "assistant", "Done — I've added the route notes and a preview of the map. The second day is the longest, about **14 km** with 600 m of climbing.", now - 4 * minute, {
+    message(fixtureUuid(1), "user", "Great. Also attach the route preview please.", now - 6 * minute, { attachments: [{ id: fixtureUuid(501), name: "route-notes.txt", size: 812, mimeType: "text/plain", caption: null, kind: "file" }] }),
+    message(fixtureUuid(1), "assistant", "", now - 5 * minute, { toolActivity: cancelled, durationMs: 26_000 }),
+    message(fixtureUuid(1), "assistant", "Done — I've added the route notes and a preview of the map. The second day is the longest, about **14 km** with 600 m of climbing.", now - 4 * minute, {
       durationMs: 74_000, thinking: "**Reading the route notes**\n\nThe notes list two days; the second is longer and climbs 600 m.",
-      attachments: [{ id: 502, name: "route-map.png", size: picture.length, mimeType: "image/png", caption: "Route overview", kind: "image" }],
-      openui: 'root = Stack([picture])\npicture = Image("file:502", "Map of the two-day lakeside route", "Day 2 is the longest stretch")',
+      attachments: [{ id: fixtureUuid(502), name: "route-map.png", size: picture.length, mimeType: "image/png", caption: "Route overview", kind: "image" }],
+      openui: `root = Stack([picture])\npicture = Image("file:${fixtureUuid(502)}", "Map of the two-day lakeside route", "Day 2 is the longest stretch")`,
     }),
   ]],
-  [2, [message(2, "user", "Milk, eggs, spinach", now - 3 * 60 * minute), message(2, "assistant", "Added. Want me to remind you on Saturday morning?", now - 3 * 60 * minute + 20_000, { durationMs: 4_200 })]],
-  [3, [message(3, "user", "Compare a 14-inch and a 16-inch laptop for travel.", daysAgo(1, 18)), message(3, "assistant", "For frequent travel the 14-inch wins on weight and battery life; the 16-inch is better for long editing sessions.", daysAgo(1, 18) + 40_000)]],
-  [4, []],
+  [fixtureUuid(2), [message(fixtureUuid(2), "user", "Milk, eggs, spinach", now - 3 * 60 * minute), message(fixtureUuid(2), "assistant", "Added. Want me to remind you on Saturday morning?", now - 3 * 60 * minute + 20_000, { durationMs: 4_200 })]],
+  [fixtureUuid(3), [message(fixtureUuid(3), "user", "Compare a 14-inch and a 16-inch laptop for travel.", daysAgo(1, 18)), message(fixtureUuid(3), "assistant", "For frequent travel the 14-inch wins on weight and battery life; the 16-inch is better for long editing sessions.", daysAgo(1, 18) + 40_000)]],
+  [fixtureUuid(4), []],
 ]);
 for (const item of threads) if (!messages.has(item.id)) messages.set(item.id, [
   message(item.id, "user", `Notes about ${item.title.toLowerCase()}.`, item.lastActivity - 60_000),
-  message(item.id, "assistant", item.id % 4 === 0 ? "Saved. I'll mention the spinach pie recipe next time." : "Saved for later.", item.lastActivity),
+  message(item.id, "assistant", item.title === "Recipe for mushroom soup" ? "Saved. I'll mention the spinach pie recipe next time." : "Saved for later.", item.lastActivity),
 ]);
 
-for (const [id, list] of messages) readCursors.set(id, id === 2 || id === 3 ? list.at(-2)?.id ?? 0 : list.at(-1)?.id ?? 0);
+for (const [id, list] of messages) readCursors.set(id, id === fixtureUuid(2) || id === fixtureUuid(3) ? list.at(-2)?.id ?? 0 : list.at(-1)?.id ?? 0);
 const withRead = (item: ChatThread): ChatThread => {
   const lastMessageId = messages.get(item.id)?.at(-1)?.id ?? null;
   return { ...item, lastMessageId, unread: lastMessageId !== null && lastMessageId > (readCursors.get(item.id) ?? 0) };
@@ -120,7 +121,7 @@ const memories = Array.from({ length: 53 }, (_, id) => ({ id, date: `2026-${Stri
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const requireWrite = (request: Request) => request.headers.get("X-Chat-Request") === "1";
-const find = (id: number) => threads.find(item => item.id === id);
+const find = (id: string) => threads.find(item => item.id === id);
 const touch = (item: ChatThread) => { item.lastActivity = Date.now(); threads.sort((a, b) => b.lastActivity - a.lastActivity); };
 const user = () => ({ id: 1001, name: "Alice Morgan", username: "alice_m", lastActivity: now, threadCount: threads.length });
 
@@ -194,14 +195,14 @@ const server = serve({
       },
       POST: request => {
         if (!requireWrite(request)) return json({ error: "Missing chat header." }, 403);
-        const created = thread(Math.max(...threads.map(item => item.id)) + 1, settings.language === "ru" ? "Новый чат" : "New chat", "web", Date.now());
+        const created = thread(threads.length + 1, settings.language === "ru" ? "Новый чат" : "New chat", "web", Date.now());
         threads.unshift(created); messages.set(created.id, []);
         return json(created, 201);
       },
     },
     "/api/chat/threads/:id/messages": {
       GET: request => {
-        const target = find(Number(request.params.id));
+        const target = find(request.params.id);
         if (!target) return json({ error: "Not found." }, 404);
         const url = new URL(request.url);
         const all = messages.get(target.id)!;
@@ -212,7 +213,7 @@ const server = serve({
       },
       POST: async request => {
         if (!requireWrite(request)) return json({ error: "Missing chat header." }, 403);
-        const target = find(Number(request.params.id));
+        const target = find(request.params.id);
         if (!target) return json({ error: "Not found." }, 404);
         const form = request.headers.get("content-type")?.includes("multipart") ? await request.formData() : null;
         const body: { text?: string; requestId?: string } = form ? { text: String(form.get("text") ?? ""), requestId: String(form.get("requestId") ?? "") } : await request.json();
@@ -222,7 +223,7 @@ const server = serve({
         const previous = sent.get(requestId);
         if (previous) return json(previous, 202);
         const files = form ? form.getAll("files").filter(item => item instanceof File) : [];
-        const saved = message(target.id, "user", text, Date.now(), { attachments: files.map((upload, index) => ({ id: nextId + 500 + index, name: upload.name, size: upload.size, mimeType: upload.type || null, caption: null, kind: "file" as const })) });
+        const saved = message(target.id, "user", text, Date.now(), { attachments: files.map((upload, index) => ({ id: fixtureUuid(nextId + 500 + index), name: upload.name, size: upload.size, mimeType: upload.type || null, caption: null, kind: "file" as const })) });
         messages.get(target.id)!.push(saved);
         if (/^(New chat|Новый чат)$/.test(target.title) && text) target.title = text.slice(0, 48);
         touch(target);
@@ -234,7 +235,7 @@ const server = serve({
     },
     "/api/chat/threads/:id/read": { POST: async request => {
       if (!requireWrite(request)) return json({ error: "Missing chat header." }, 403);
-      const target = find(Number(request.params.id));
+      const target = find(request.params.id);
       const { messageId } = await request.json() as { messageId?: unknown };
       if (!target || typeof messageId !== "number" || !Number.isSafeInteger(messageId) || messageId <= 0) return json({ error: "Invalid request." }, 400);
       if (!messages.get(target.id)!.some(item => item.id === messageId)) return json({ error: "Not found." }, 404);
@@ -243,15 +244,15 @@ const server = serve({
       console.log(`read thread=${target.id} message=${messageId} unread=${state.unread}`);
       return json({ readMessageId: readCursors.get(target.id) ?? null, unread: state.unread });
     } },
-    "/api/chat/threads/:id/stop": { POST: request => { const target = find(Number(request.params.id)); if (target) target.activity = { state: "interrupted", queuedTurns: 0 }; return new Response(null, { status: 204 }); } },
+    "/api/chat/threads/:id/stop": { POST: request => { const target = find(request.params.id); if (target) target.activity = { state: "interrupted", queuedTurns: 0 }; return new Response(null, { status: 204 }); } },
     "/api/chat/threads/:id/compact": { POST: () => new Response(null, { status: 204 }) },
     "/api/chat/threads/:id/fork": { POST: request => {
-      const source = find(Number(request.params.id))!;
-      const fork = thread(Math.max(...threads.map(item => item.id)) + 1, `${source.title} (fork)`, "web", Date.now(), { parentThreadId: source.id });
+      const source = find(request.params.id)!;
+      const fork = thread(threads.length + 1, `${source.title} (fork)`, "web", Date.now(), { parentThreadId: source.id });
       threads.unshift(fork); messages.set(fork.id, [...messages.get(source.id)!]);
       return json(fork, 201);
     } },
-    "/api/chat/threads/:id/files/:fileId": request => request.params.fileId === "502"
+    "/api/chat/threads/:id/files/:fileId": request => request.params.fileId === fixtureUuid(502)
       ? new Response(picture, { headers: { "Content-Type": "image/png" } })
       : new Response("Day 1: Valley trailhead → hut (9 km)\nDay 2: Hut → ridge → lake (14 km, +600 m)\n", { headers: { "Content-Type": "text/plain; charset=utf-8" } }),
     "/api/chat/settings": {

@@ -35,11 +35,11 @@ interface UsersTable {
 }
 
 interface ThreadsTable {
-  id: number;
+  id: string;
   origin: "telegram" | "web";
   user_id: number;
   topic_id: number | null;
-  parent_thread_id: number | null;
+  parent_thread_id: string | null;
   fork_point_message_id: number | null;
   title: string;
   title_source: ThreadTitleSource;
@@ -53,7 +53,7 @@ interface ThreadsTable {
 
 interface MessagesTable {
   id: number;
-  thread_id: number;
+  thread_id: string;
   role: MessageRole;
   kind: MessageKind;
   content_json: string;
@@ -69,7 +69,7 @@ interface TurnRunsTable {
   origin: "telegram" | "web";
   web_request_id: string | null;
   user_id: number;
-  thread_id: number;
+  thread_id: string;
   user_message_id: number;
   chat_id: number;
   message_thread_id: number | null;
@@ -91,9 +91,9 @@ interface TurnRunsTable {
 }
 
 interface FilesTable {
-  id: number;
+  id: string;
   user_id: number;
-  thread_id: number;
+  thread_id: string;
   message_id: number | null;
   type: StoredFileType;
   content_sha256: string | null;
@@ -111,7 +111,7 @@ interface FilesTable {
 interface ThreadSandboxesTable {
   deployment_id: string;
   user_id: number;
-  thread_id: number;
+  thread_id: string;
   sandbox_id: string;
   created_at: number;
   updated_at: number;
@@ -128,7 +128,7 @@ interface BrowserUseProfilesTable {
 
 interface FileSourcesTable {
   id: number;
-  file_id: number;
+  file_id: string;
   transport: string;
   connection_key: string;
   remote_key: string;
@@ -140,7 +140,7 @@ interface FileSourcesTable {
 
 interface TelegramFileRefsTable {
   id: number;
-  file_id: number;
+  file_id: string;
   telegram_file_id: string;
   telegram_file_unique_id: string | null;
   direction: "inbound" | "outbound";
@@ -156,9 +156,9 @@ interface TelegramFileRefsTable {
 
 interface SandboxFileRestoreStatusTable {
   deployment_id: string;
-  thread_id: number;
+  thread_id: string;
   sandbox_id: string;
-  file_id: number;
+  file_id: string;
   telegram_file_ref_id: number | null;
   sandbox_name: string;
   status: "available" | "error";
@@ -172,7 +172,7 @@ interface SandboxFileRestoreStatusTable {
 
 interface FileChunksTable {
   id: number;
-  file_id: number;
+  file_id: string;
   idx: number;
   heading_path: string | null;
   content: string;

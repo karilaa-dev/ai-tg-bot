@@ -56,7 +56,7 @@ interface BrowserUseApi {
 
 interface TabState {
   id: string;
-  ownerThreadId: number;
+  ownerThreadId: string;
   page: Page;
   refs: Map<string, { href?: string }>;
 }
@@ -82,7 +82,7 @@ interface SessionState {
 
 interface UserState {
   userId: number;
-  activeTurns: Map<number, number>;
+  activeTurns: Map<string, number>;
   lock: AsyncLock;
   profilePromise?: Promise<string>;
   session?: SessionState;
@@ -127,13 +127,13 @@ export class BrowserUseRuntimeManager {
     this.connect = input.connect ?? ((cdpUrl, timeoutMs) => chromium.connectOverCDP(cdpUrl, { timeout: timeoutMs }));
   }
 
-  async beginTurn(userId: number, threadId: number): Promise<void> {
+  async beginTurn(userId: number, threadId: string): Promise<void> {
     const state = this.state(userId);
     clearTimer(state, "idleTimer");
     state.activeTurns.set(threadId, (state.activeTurns.get(threadId) ?? 0) + 1);
   }
 
-  async endTurn(userId: number, threadId: number): Promise<void> {
+  async endTurn(userId: number, threadId: string): Promise<void> {
     const state = this.states.get(userId);
     if (!state) return;
     const count = state.activeTurns.get(threadId) ?? 0;
@@ -144,7 +144,7 @@ export class BrowserUseRuntimeManager {
     });
   }
 
-  forThread(userId: number, threadId: number): BrowserUseToolRuntime {
+  forThread(userId: number, threadId: string): BrowserUseToolRuntime {
     return {
       open: (url, timeout, signal) => this.open(userId, threadId, url, timeout, signal),
       listTabs: (signal) => this.listTabs(userId, threadId, signal),
@@ -200,7 +200,7 @@ export class BrowserUseRuntimeManager {
 
   private async open(
     userId: number,
-    threadId: number,
+    threadId: string,
     url: string,
     timeoutMinutes?: number,
     signal?: AbortSignal,
@@ -231,7 +231,7 @@ export class BrowserUseRuntimeManager {
     }, signal);
   }
 
-  private async listTabs(userId: number, threadId: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  private async listTabs(userId: number, threadId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return this.state(userId).lock.run(async () => {
       const state = this.state(userId);
       const session = state.session;
@@ -246,7 +246,7 @@ export class BrowserUseRuntimeManager {
 
   private async navigate(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     url: string,
     signal?: AbortSignal,
@@ -261,7 +261,7 @@ export class BrowserUseRuntimeManager {
 
   private async snapshot(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     offset: number,
     includeScreenshot: boolean,
@@ -276,7 +276,7 @@ export class BrowserUseRuntimeManager {
 
   private async click(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     target: { ref?: string; selector?: string; doubleClick?: boolean },
     signal?: AbortSignal,
@@ -292,7 +292,7 @@ export class BrowserUseRuntimeManager {
 
   private async type(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     target: { ref?: string; selector?: string; text: string; clear?: boolean; submit?: boolean },
     signal?: AbortSignal,
@@ -308,7 +308,7 @@ export class BrowserUseRuntimeManager {
 
   private async press(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     key: string,
     signal?: AbortSignal,
@@ -321,7 +321,7 @@ export class BrowserUseRuntimeManager {
 
   private async scroll(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     direction: "up" | "down" | "left" | "right",
     amount: number,
@@ -338,7 +338,7 @@ export class BrowserUseRuntimeManager {
 
   private async screenshot(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     fullPage: boolean,
     signal?: AbortSignal,
@@ -351,7 +351,7 @@ export class BrowserUseRuntimeManager {
 
   private async listDownloads(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
@@ -385,7 +385,7 @@ export class BrowserUseRuntimeManager {
 
   private async resolveDownload(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     downloadIndex: number,
     signal?: AbortSignal,
@@ -403,7 +403,7 @@ export class BrowserUseRuntimeManager {
 
   private async sessionRemaining(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     substantial: boolean,
     signal?: AbortSignal,
@@ -416,7 +416,7 @@ export class BrowserUseRuntimeManager {
 
   private async resolveLink(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     ref: string,
     signal?: AbortSignal,
@@ -430,7 +430,7 @@ export class BrowserUseRuntimeManager {
 
   private async closeTab(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
@@ -444,7 +444,7 @@ export class BrowserUseRuntimeManager {
 
   private async extendSession(
     userId: number,
-    threadId: number,
+    threadId: string,
     timeoutMinutes: number,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
@@ -496,7 +496,7 @@ export class BrowserUseRuntimeManager {
 
   private async closeSession(
     userId: number,
-    threadId: number,
+    threadId: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const state = this.state(userId);
@@ -514,7 +514,7 @@ export class BrowserUseRuntimeManager {
 
   private async withTab<T>(
     userId: number,
-    threadId: number,
+    threadId: string,
     tabId: string,
     signal: AbortSignal | undefined,
     operation: (session: SessionState, tab: TabState) => Promise<T>,
@@ -646,7 +646,7 @@ export class BrowserUseRuntimeManager {
     return page;
   }
 
-  private registerTab(session: SessionState, page: Page, ownerThreadId: number, id: string = randomUUID()): TabState {
+  private registerTab(session: SessionState, page: Page, ownerThreadId: string, id: string = randomUUID()): TabState {
     const tab: TabState = { id, ownerThreadId, page, refs: new Map() };
     session.tabs.set(id, tab);
     page.on("download", (download) => {
@@ -658,7 +658,7 @@ export class BrowserUseRuntimeManager {
     return tab;
   }
 
-  private async syncPages(session: SessionState, defaultThreadId: number): Promise<void> {
+  private async syncPages(session: SessionState, defaultThreadId: string): Promise<void> {
     const known = new Set([...session.tabs.values()].map((tab) => tab.page));
     for (const page of session.context.pages()) {
       if (known.has(page) || page.isClosed() || page.url() === "about:blank") continue;
@@ -686,7 +686,7 @@ export class BrowserUseRuntimeManager {
     }
   }
 
-  private assertNoOtherActiveThread(state: UserState, threadId: number): void {
+  private assertNoOtherActiveThread(state: UserState, threadId: string): void {
     if ([...state.activeTurns.keys()].some((activeThreadId) => activeThreadId !== threadId)) {
       throw new BrowserUseRuntimeError(
         "session_busy",

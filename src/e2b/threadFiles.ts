@@ -5,7 +5,7 @@ import type { SandboxThreadFile } from "../sandbox/types.js";
 export async function resolveThreadFileDescriptors(
   input: Pick<ToolBuildInput, "repos" | "thread" | "maxMessageId" | "currentScope">,
   _signal?: AbortSignal,
-  selectedFileIds?: number[],
+  selectedFileIds?: string[],
 ): Promise<SandboxThreadFile[]> {
   const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const selected = selectedFileIds
@@ -18,7 +18,7 @@ export async function resolveThreadFileDescriptors(
     input.repos.files.listByIdsWithSource(selected, "local", "default"),
   ]);
   const webFileIds = new Set([...webFiles, ...localFiles].map((file) => file.id));
-  const refsByFile = new Map<number, typeof refs>();
+  const refsByFile = new Map<string, typeof refs>();
   for (const ref of refs) {
     const list = refsByFile.get(ref.file_id) ?? [];
     list.push(ref);

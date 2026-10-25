@@ -13,12 +13,12 @@ import {
 const MAX_RELOADED_FILES = 5;
 
 export function createLoadMessageTool(input: ToolBuildInput) {
-  return defineBotTool<{ message_id: number; file_ids?: number[] }, LoadMessageResult>({
+  return defineBotTool<{ message_id: number; file_ids?: string[] }, LoadMessageResult>({
     description:
       "Load one previous chat message and its attachment metadata. Pass file_ids only for image bytes or legacy extracted document context. For source-only PDF/DOCX files, this selects their metadata without downloading bytes; call materialize_chat_files next.",
     inputSchema: z.object({
       message_id: z.number().int().positive(),
-      file_ids: z.array(z.number().int().positive()).max(MAX_RELOADED_FILES).optional(),
+      file_ids: z.array(z.string().uuid()).max(MAX_RELOADED_FILES).optional(),
     }),
     execute: async ({ message_id, file_ids = [] }, signal): Promise<LoadMessageResult> => {
       input.logger?.debug("tool load_message starting", { threadId: input.thread.id, messageId: message_id });
@@ -33,9 +33,9 @@ export function createLoadMessageTool(input: ToolBuildInput) {
       const byId = new Map(files.map((file) => [file.id, file]));
       const invalidIds = requestedIds.filter((fileId) => !byId.has(fileId));
       if (invalidIds.length) return { error: `files not attached to message #${row.id}: ${invalidIds.join(", ")}` };
-      const materializedIds: number[] = [];
-      const durableIds: number[] = [];
-      const sandboxIds: number[] = [];
+      const materializedIds: string[] = [];
+      const durableIds: string[] = [];
+      const sandboxIds: string[] = [];
       if (requestedIds.length) {
         for (const fileId of requestedIds) {
           const file = byId.get(fileId)!;

@@ -1,4 +1,5 @@
 import { AccessControl } from "../../src/access/control.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
@@ -132,16 +133,16 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await repos.users.ensure({ tgId: userId, firstName: `Person ${userId}`, username: userId === 1 ? "alice" : undefined });
     return repos.threads.create({ userId, title, topicId: null });
   }
-  async function message(threadId: number, text = "Hello") {
+  async function message(threadId: string, text = "Hello") {
     return repos.messages.insert({ threadId, role: "user", content: { text, hidden: "not in API" }, textPlain: text });
   }
-  async function attachment(threadId: number, messageId: number, size: number, mimeType = "text/plain") {
+  async function attachment(threadId: string, messageId: number, size: number, mimeType = "text/plain") {
     const file = await repos.files.insertFile({ userId: 1, threadId, messageId, name: "notes.txt", size, mimeType, type: "txt", isInline: true });
     await repos.files.rememberSource(file.id, { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: { secret: "hidden" } });
     return file;
   }
 
-  async function usageTurn(threadId: number, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
+  async function usageTurn(threadId: string, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
     const user = await message(threadId);
     const assistant = options.result === false ? null : await repos.messages.insert({ threadId, role: "assistant", content: {}, textPlain: "Reply" });
     const owner = (await repos.threads.get(threadId))!;
@@ -383,7 +384,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await thread(2);
     const bot = await thread(99);
     for (const query of ["days=-1", "days=8", "days=NaN", "days=", "user=0", "thread=1.5"]) expect((await request(`/api/usage?${query}`)).status).toBe(400);
-    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, "thread=9999"]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
+    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, `thread=${fixtureUuid(9999)}`]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
     expect((await request("/api/usage", { method: "POST" })).status).toBe(405);
     const head = await request("/api/usage", { method: "HEAD" });
     expect(head.status).toBe(200);
@@ -718,6 +719,17 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await request(`/api/threads/${unrelated.id}/files/${file.id}`)).status).toBe(404);
   });
 
+  it("orders attachments by creation time with UUIDs breaking timestamp ties", async () => {
+    const t = await thread();
+    const m = await message(t.id);
+    const files = [await attachment(t.id, m.id, 5), await attachment(t.id, m.id, 5), await attachment(t.id, m.id, 5)]
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const older = files[2]!;
+    await database.db.execute(sql`update files set created_at = case when id = ${older.id} then 10 else 20 end`);
+    const history = await repository.history(t.id);
+    expect(history.messages[0]?.attachments.map(file => file.id)).toEqual([older.id, files[0]!.id, files[1]!.id]);
+  });
+
   it("projects shared history metadata without losing each recipient message's names or captions", async () => {
     const owner = await thread(1);
     const original = await message(owner.id);
@@ -729,6 +741,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
       userId: 1, threadId: owner.id, messageId: original.id, type: "txt", name: "owner-private-project.txt",
       mimeType: "text/plain", size: 5, isInline: true,
     });
+    await database.db.execute(sql`update files set created_at = case when id = ${image.id} then 1 else 2 end`);
     const recipient = await thread(2);
     const first = await message(recipient.id, "My first caption");
     await repos.files.attachToMessage(first.id, image.id, { displayName: "my-first-image.png", caption: "My first caption" });
@@ -779,6 +792,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
       userId: 1, threadId: parent.id, messageId: later.id, type: "image", name: "private-after-fork.png",
       size: 5, summary: "Private description after fork", isInline: true,
     });
+    await database.db.execute(sql`update files set created_at = case when id = ${visible.id} then 1 else 2 end`);
     await repos.files.attachToMessage(later.id, visible.id, { displayName: "private-after-fork-rename.png" });
     await repos.files.attachToMessage(later.id, hidden.id, { displayName: "private-after-fork-display.png" });
     const child = await repos.threads.create({ userId: 1, topicId: 1, title: "Child", parentThreadId: parent.id, forkPointMessageId: later.id });
@@ -856,7 +870,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   it("rejects malformed requests, hides resolver errors, and respects shutdown", async () => {
     expect((await request("/api/users?offset=-1")).status).toBe(400);
     expect((await request("/api/threads/1e3/messages")).status).toBe(400);
-    expect((await request("/api/threads/1/messages?before=2&after=3")).status).toBe(400);
+    expect((await request(`/api/threads/${fixtureUuid(1)}/messages?before=2&after=3`)).status).toBe(400);
     expect((await request("/api/users", { method: "POST" })).status).toBe(405);
     expect((await request("/.env")).status).toBe(404);
     const t = await thread();

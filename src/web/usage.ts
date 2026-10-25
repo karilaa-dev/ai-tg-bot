@@ -4,9 +4,9 @@ import type { InferenceUsageCall } from "../pi/usage.js";
 import { estimateCallCost, usagePricing, type PricingCatalog, type UsagePricing } from "./usage-pricing.js";
 import type { WebMessageUsage, WebModelUsage, WebUsageReport, WebUsageTotals } from "./types.js";
 
-export interface UsageScope { userId?: number; threadId?: number; days?: number }
+export interface UsageScope { userId?: number; threadId?: string; days?: number }
 interface UsageRow {
-  rowId: number; id: number; userId: number; title: string; archived: number;
+  rowId: number; id: string; userId: number; title: string; archived: number;
   messageId: number | null; provider: string | null; model: string | null; usage: string | null; timestamp: number;
 }
 const tokenKeys = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
@@ -153,7 +153,7 @@ export class UsageRepository {
     const since = scope.days ? today - (scope.days - 1) * 86_400_000 : null;
     const totals = emptyUsage();
     const days = new Map<string, WebUsageReport["daily"][number]>();
-    const threads = new Map<number, WebUsageReport["threads"][number]>();
+    const threads = new Map<string, WebUsageReport["threads"][number]>();
     const models = new Map<string, WebModelUsage>();
     let firstDay = today, lastDay = scope.threadId !== undefined && since === null ? -Infinity : today;
     // Page each source by its primary key. Never retain historical usage JSON or
@@ -231,7 +231,7 @@ export class UsageRepository {
     }
     return { totals, daily: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)), dailyTruncated: start > (since ?? firstDay),
       models: [...models.values()].sort((a, b) => b.totalTokens - a.totalTokens),
-      threads: [...threads.values()].sort((a, b) => (b.estimatedCostUsd ?? 0) - (a.estimatedCostUsd ?? 0) || b.totalTokens - a.totalTokens || b.id - a.id),
+      threads: [...threads.values()].sort((a, b) => (b.estimatedCostUsd ?? 0) - (a.estimatedCostUsd ?? 0) || b.totalTokens - a.totalTokens || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)),
       pricing: { source: pricing.source, fetchedAt: pricing.fetchedAt, stale: pricing.stale }, since, until: now };
   }
 }

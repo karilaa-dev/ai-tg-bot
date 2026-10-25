@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it } from "vitest";
 import { resolveOpenUiLanguage } from "../../src/openui/language.js";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
@@ -6,7 +7,7 @@ import type { MessageRow } from "../../src/db/types.js";
 
 const openui = 'root = Stack([Text("Useful detail")])';
 const message: MessageRow = {
-  id: 1, thread_id: 2, role: "assistant", kind: "text", text_plain: "An English answer.", thinking: null,
+  id: 1, thread_id: fixtureUuid(2), role: "assistant", kind: "text", text_plain: "An English answer.", thinking: null,
   content_json: JSON.stringify({ openui }), tg_message_id: null, pi_entry_id: null, created_at: 1,
 };
 

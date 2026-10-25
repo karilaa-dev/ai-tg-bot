@@ -12,7 +12,7 @@ export function createMaterializeChatFilesTool(input: ToolBuildInput) {
     description:
       "Restore selected Telegram attachments into this thread's persistent E2B sandbox. Returns exact read-only paths and format-specific tool guidance. Call this before using bash, PDF Inspector, or docx-cli on an attachment. Pass only file ids shown in chat-file markers or load_message results.",
     inputSchema: z.object({
-      file_ids: z.array(z.number().int().positive()).min(1).max(MAX_FILES_PER_CALL),
+      file_ids: z.array(z.string().uuid()).min(1).max(MAX_FILES_PER_CALL),
     }),
     execute: async ({ file_ids }, signal) => {
       const startedAt = Date.now();
@@ -70,12 +70,12 @@ export function createMaterializeChatFilesTool(input: ToolBuildInput) {
 }
 
 function recommendedTools(file: FileRow): string[] {
-  if (file.type === "audio") return [`transcribe_audio({ file_id: ${file.id} })`];
+  if (file.type === "audio") return [`transcribe_audio({ file_id: ${JSON.stringify(file.id)} })`];
   if (file.type === "pdf") {
     return [
       "pdf-inspector detect <path> --json",
       "pdf-inspector <path> -o /home/user/workspace/<name>.md",
-      `render_pdf_pages({ file_id: ${file.id}, pages: [1] }) for scanned or image-only pages`,
+      `render_pdf_pages({ file_id: ${JSON.stringify(file.id)}, pages: [1] }) for scanned or image-only pages`,
     ];
   }
   if (file.type === "docx") {

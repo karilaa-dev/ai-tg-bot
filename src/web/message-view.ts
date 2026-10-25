@@ -6,7 +6,7 @@ import { asRecord } from "../util/records.js";
 import { savedToolActivity } from "../ai/toolActivity.js";
 import { resolveOpenUiLanguage } from "../openui/language.js";
 
-export interface SavedTranscript { id: string; messageId: number; fileId: number; text: string }
+export interface SavedTranscript { id: string; messageId: number; fileId: string; text: string }
 export interface SavedAttachment extends WebAttachment { inlineContent?: string | null }
 
 /** Separate the bot's saved media cards from the words a person actually sent. */
@@ -24,9 +24,9 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
   const captions = savedCaptions(message.content_json, files);
   const visible: string[] = [];
   let cursor = 0;
-  for (const marker of message.text_plain.matchAll(/^\[\[chat-file:(\d+)\]\] /gm)) {
+  for (const marker of message.text_plain.matchAll(/^\[\[chat-file:([\da-f-]+)\]\] /gm)) {
     if (marker.index < cursor) continue;
-    const file = files.find(file => file.id === Number(marker[1]));
+    const file = files.find(file => file.id === marker[1]);
     if (!file) continue;
     const tail = message.text_plain.slice(marker.index + marker[0].length);
     const prefix = message.text_plain.slice(cursor, marker.index);

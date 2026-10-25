@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWebExtractTool } from "../../src/ai/tools/webExtract.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -26,7 +27,7 @@ describe("web_extract", () => {
     const tool = createWebExtractTool({
       config: loadTestConfig({ TAVILY_API_KEY: "tavily-key", BROWSER_USE_API_KEY: "browser-key" }),
       user: { tg_id: 9 },
-      thread: { id: 10 },
+      thread: { id: fixtureUuid(10) },
     } as never);
 
     const result = await tool.execute({
@@ -72,7 +73,7 @@ describe("web_extract", () => {
     const tool = createWebExtractTool({
       config: loadTestConfig({ TAVILY_API_KEY: "tavily-key" }),
       user: { tg_id: 9 },
-      thread: { id: 10 },
+      thread: { id: fixtureUuid(10) },
     } as never);
 
     await tool.execute({
@@ -102,7 +103,7 @@ describe("web_extract", () => {
     const tool = createWebExtractTool({
       config: loadTestConfig({ TAVILY_API_KEY: "tavily-key" }),
       user: { tg_id: 9 },
-      thread: { id: 10 },
+      thread: { id: fixtureUuid(10) },
     } as never);
     const reason = new Error("turn cancelled");
 

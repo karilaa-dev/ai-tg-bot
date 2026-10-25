@@ -1,9 +1,10 @@
 import { createLibrary, defineComponent, generateSystemPrompt, type PromptOptions } from "@openuidev/lang-core";
 import { z } from "zod/v4";
+import { isUuid } from "../utils/uuid.js";
 
 export const OPENUI_MAX_SOURCE_CHARS = 24_000;
 export const OpenUiActionText = z.string().trim().min(1).max(2_000);
-export const OpenUiImageSource = z.string().regex(/^file:[1-9]\d{0,15}$/u).refine(value => Number.isSafeInteger(Number(value.slice(5))), "Use an existing chat file ID.");
+export const OpenUiImageSource = z.string().refine(value => value.startsWith("file:") && isUuid(value.slice(5)), "Use an existing chat file UUID.");
 const label = z.string().trim().min(1).max(200);
 const chartValue = z.string().regex(/^(0|[1-9]\d{0,11})(\.\d{1,6})?$/u);
 
@@ -24,7 +25,7 @@ export const UiTable = defineComponent({
   }), component: null,
 });
 export const UiImage = defineComponent({
-  name: "Image", description: "A picture from an existing chat file, using file:ID (not a URL or path). Supply meaningful alt text and a caption; the viewer loads it privately through the authenticated attachment endpoint.",
+  name: "Image", description: "A picture from an existing chat file, using file:UUID (not a URL or path). Supply meaningful alt text and a caption; the viewer loads it privately through the authenticated attachment endpoint.",
   props: z.object({ source: OpenUiImageSource, alt: z.string().trim().min(1).max(1_000), caption: z.string().max(1_000) }), component: null,
 });
 export const UiMetric = defineComponent({
@@ -66,7 +67,7 @@ export const UiLink = defineComponent({
   props: z.object({ label: z.string().trim().min(1).max(80), url: OpenUiLinkUrl }), component: null,
 });
 export const UiItem = defineComponent({
-  name: "Item", description: "One recommended option (place, product, book, tool) in an ItemList: name, thumbnail image as file:ID or \"\", short facts in meta (such as cuisine, price, area), a description of why it is worth considering, and up to 3 Links to its sources or official pages.",
+  name: "Item", description: "One recommended option (place, product, book, tool) in an ItemList: name, thumbnail image as file:UUID or \"\", short facts in meta (such as cuisine, price, area), a description of why it is worth considering, and up to 3 Links to its sources or official pages.",
   props: z.object({
     title: label, image: z.union([z.literal(""), OpenUiImageSource]), meta: z.array(z.string().trim().min(1).max(60)).max(4),
     description: z.string().max(800), links: z.array(UiLink.ref).max(3),
@@ -109,7 +110,7 @@ export const openUiLibrary = createLibrary({
 
 export const openUiExamples = [
   'root = Stack([chain, evidence])\nchain = Flow("How one expired certificate caused an outage", [FlowStep("Certificate expires", "The automatic renewal failed, leaving the service with an expired certificate.", "issue"), FlowStep("Clients reject the connection", "The certificate check fails before clients can send a request.", "warning"), FlowStep("Renewal restores access", "A valid certificate lets the same clients connect again.", "success")], "The failed renewal caused the outage; the application itself was still running.")\nevidence = StatGrid("Observed impact", [Stat("12 min", "Connection failures", "issue"), Stat("0", "Lost records", "default")], "Use only measurements established by the investigation.")',
-  'root = Stack([picks, next])\npicks = ItemList("Two different evenings", [Item("Example dumpling kitchen", "file:123", ["Dumplings", "Casual", "Near the station"], "A good fit for a quick shared meal; the photograph shows the dining room.", [Link("Restaurant website", "https://example.com/dumplings")]), Item("Example garden restaurant", "file:124", ["Seasonal menu", "Reservations"], "A quieter option for a longer dinner; the photograph shows its garden terrace.", [Link("Restaurant website", "https://example.org/garden")])])\nnext = Button("Compare vegetarian options", "Compare the vegetarian options at these restaurants.")',
+  'root = Stack([picks, next])\npicks = ItemList("Two different evenings", [Item("Example dumpling kitchen", "file:00000000-0000-4000-8000-000000000123", ["Dumplings", "Casual", "Near the station"], "A good fit for a quick shared meal; the photograph shows the dining room.", [Link("Restaurant website", "https://example.com/dumplings")]), Item("Example garden restaurant", "file:00000000-0000-4000-8000-000000000124", ["Seasonal menu", "Reservations"], "A quieter option for a longer dinner; the photograph shows its garden terrace.", [Link("Restaurant website", "https://example.org/garden")])])\nnext = Button("Compare vegetarian options", "Compare the vegetarian options at these restaurants.")',
   'root = Stack([chart, next])\nchart = BarChart("Walking distance", ["Valley", "Ridge"], ["9", "14"], "km")\nnext = Button("Compare the climbs", "Compare the elevation gain of these routes.")',
 ];
 
@@ -120,7 +121,7 @@ export const openUiPromptOptions = {
     "Use one complete assignment per line, with root = Stack([...]). Use JSON double-quoted strings, static arrays, components, and named references only; all arguments are required, in the documented order.",
     "No expressions, reactive variables, functions, Query, Mutation, Action, HTML, CSS, SVG markup, executable URL actions or scripts. Despite the general language reference below, only strings, static arrays, named component references and component calls are accepted; no number/boolean/null literals or objects. Buttons only submit plain chat messages when clicked. Link is the sole navigation component: use a verified public https source or place page, never invent a URL or include credentials or private tokens.",
     "No markdown fences. At most 64 statements, 12 root items, 12 items per card, 6 grid items, 12 images including Item thumbnails, 8 table columns and 40 rows. FlowStep belongs only inside Flow, Stat only inside StatGrid, Item only inside ItemList, and Link only inside Item. Every named statement must be reachable from root; no cycles.",
-    "Image source and nonempty Item image MUST be file: followed by a real file ID already returned by tools or listed in this thread's context. Never invent file IDs, copy example IDs unless they actually exist, or use remote URLs, API paths, data URLs or sandbox paths. Reuse relevant existing images when available. For retrieved or generated pictures saved in the workspace, call create_file BEFORE finish_response and use its returned file_id; keep the image attached. generate_image saves paths, not chat file IDs, and still requires the user's explicit synthesis/editing intent under the normal image rules. For web-sourced pictures, retrieve a suitable real image, inspect it and attach it first. An Item without a verified suitable picture uses image \"\". Never show the same photo in both an Image gallery and an Item thumbnail in one answer.",
+    "Image source and nonempty Item image MUST be file: followed by a real file UUID already returned by tools or listed in this thread's context. Never invent file IDs, copy example IDs unless they actually exist, or use remote URLs, API paths, data URLs or sandbox paths. Reuse relevant existing images when available. For retrieved or generated pictures saved in the workspace, call create_file BEFORE finish_response and use its returned file_id; keep the image attached. generate_image saves paths, not chat file IDs, and still requires the user's explicit synthesis/editing intent under the normal image rules. For web-sourced pictures, retrieve a suitable real image, inspect it and attach it first. An Item without a verified suitable picture uses image \"\". Never show the same photo in both an Image gallery and an Item thumbnail in one answer.",
     "BarChart values are quoted non-negative decimal strings (up to 12 integer and 6 fractional digits), with exactly one value per label. Steps titles and descriptions must have equal lengths. Table rows must match columns. Include units and avoid invented quantities; use a table when a bar chart would mislead.",
     "Compose text and UI as one website answer. Use text for the introduction, conclusions and essential qualifications; let the visualization carry structured detail, source links and image descriptions without repeating them as a second prose list. Do not duplicate visual content merely for Telegram compatibility. Keep a short meaningful answer in text so the conclusion remains readable if the visualization cannot render. All labels, captions and button messages must follow the language of the AI response, not the account or website language. Set finish_response.openui_language to en or ru to match the answer. The UI is rendered only after successful finish_response, never while streaming. Examples below are fictional syntax demonstrations, not factual evidence; use the actual facts, links and files from the current task.",
   ],

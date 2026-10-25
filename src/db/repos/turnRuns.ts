@@ -1,3 +1,4 @@
+import { isUuid } from "../../utils/uuid.js";
 import { sql } from "drizzle-orm";
 import { messageScopePredicate, type TextSearch } from "../search.js";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
@@ -24,7 +25,7 @@ export interface TelegramTurnSource {
 }
 
 export interface DurableTurnAttachment {
-  fileId: number;
+  fileId: string;
   displayName?: string | null;
   caption?: string | null;
   telegramMessageId?: number | null;
@@ -39,7 +40,7 @@ export interface AcceptedTurnRun {
 
 interface TurnAcceptanceInput {
   userId: number;
-  threadId: number;
+  threadId: string;
   chatId: number;
   messageThreadId: number | null;
   locale: Locale;
@@ -204,7 +205,7 @@ export class TurnRunsRepo {
     return queryOne<TurnRunRow>(this.db, sql`select * from turn_runs where id = ${id}`);
   }
 
-  async webRequest(userId: number, threadId: number, requestId: string): Promise<AcceptedTurnRun | undefined> {
+  async webRequest(userId: number, threadId: string, requestId: string): Promise<AcceptedTurnRun | undefined> {
     const run = await queryOne<TurnRunRow>(this.db, sql`
       select * from turn_runs where user_id = ${userId} and thread_id = ${threadId} and web_request_id = ${requestId}
     `);
@@ -214,18 +215,18 @@ export class TurnRunsRepo {
     return { turnRun: run, userMessage: message, created: false, queuedBehind: false };
   }
 
-  listForThread(threadId: number): Promise<TurnRunRow[]> {
+  listForThread(threadId: string): Promise<TurnRunRow[]> {
     return this.db.query<TurnRunRow>(sql`select * from turn_runs where thread_id = ${threadId} order by id asc`);
   }
 
-  nextQueued(threadId: number): Promise<TurnRunRow | undefined> {
+  nextQueued(threadId: string): Promise<TurnRunRow | undefined> {
     return queryOne<TurnRunRow>(this.db, sql`
       select * from turn_runs where thread_id = ${threadId} and status = 'queued' order by id asc limit 1
     `);
   }
 
-  async queuedThreadIds(): Promise<number[]> {
-    const rows = await this.db.query<{ thread_id: number }>(sql`
+  async queuedThreadIds(): Promise<string[]> {
+    const rows = await this.db.query<{ thread_id: string }>(sql`
       select distinct thread_id from turn_runs where status = 'queued' order by thread_id asc
     `);
     return rows.map((row) => row.thread_id);
@@ -238,7 +239,7 @@ export class TurnRunsRepo {
     legacyStaleBefore?: number,
   ): Promise<TurnRunRow | undefined> {
     return this.db.transaction(async (tx) => {
-      const candidate = await queryOne<{ thread_id: number }>(tx, sql`
+      const candidate = await queryOne<{ thread_id: string }>(tx, sql`
         select thread_id from turn_runs where id = ${id} and status = 'queued'
       `);
       if (!candidate) return undefined;
@@ -288,7 +289,7 @@ export class TurnRunsRepo {
   async interruptStaleRunning(input: {
     now?: number;
     legacyStaleBefore?: number;
-    threadId?: number;
+    threadId?: string;
   } = {}): Promise<number> {
     const now = input.now ?? Date.now();
     const legacyStaleBefore = input.legacyStaleBefore;
@@ -298,7 +299,7 @@ export class TurnRunsRepo {
           owner_id = null, lease_expires_at = null,
           finished_at = ${now}, updated_at = ${now}
       where status in ('running', 'awaiting_delivery')
-        and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? 0})
+        and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? null})
         and (
           (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
           or (${legacyStaleBefore === undefined ? 0 : 1} = 1
@@ -323,7 +324,7 @@ export class TurnRunsRepo {
     return Boolean(renewed);
   }
 
-  async hasUnfinished(threadId: number): Promise<boolean> {
+  async hasUnfinished(threadId: string): Promise<boolean> {
     return Boolean(await queryOne<{ present: number }>(this.db, sql`
       select 1 as present from turn_runs
       where thread_id = ${threadId}
@@ -333,7 +334,7 @@ export class TurnRunsRepo {
   }
 
   async requestCancellation(
-    threadId: number,
+    threadId: string,
     turnRunId?: number,
   ): Promise<Pick<TurnRunRow, "id" | "owner_id" | "status"> | undefined> {
     const now = Date.now();
@@ -382,7 +383,7 @@ export class TurnRunsRepo {
   }
 
   async tryAcquireThreadBarrier(input: {
-    threadId: number;
+    threadId: string;
     ownerId: string;
     operation: "fork" | "compact";
     leaseExpiresAt: number;
@@ -425,8 +426,8 @@ export class TurnRunsRepo {
     });
   }
 
-  async releaseThreadBarrier(threadId: number, ownerId: string): Promise<boolean> {
-    const released = await queryOne<{ thread_id: number }>(this.db, sql`
+  async releaseThreadBarrier(threadId: string, ownerId: string): Promise<boolean> {
+    const released = await queryOne<{ thread_id: string }>(this.db, sql`
       delete from thread_operation_barriers
       where thread_id = ${threadId} and owner_id = ${ownerId}
       returning thread_id
@@ -434,11 +435,11 @@ export class TurnRunsRepo {
     return Boolean(released);
   }
 
-  async renewThreadBarrier(threadId: number, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
+  async renewThreadBarrier(threadId: string, ownerId: string, leaseExpiresAt: number): Promise<boolean> {
     return this.db.transaction(async (tx) => {
       await lockThreadTransaction(tx, threadId);
       const now = Date.now();
-      const renewed = await queryOne<{ thread_id: number }>(tx, sql`
+      const renewed = await queryOne<{ thread_id: string }>(tx, sql`
         update thread_operation_barriers
         set lease_expires_at = ${leaseExpiresAt}, updated_at = ${now}
         where thread_id = ${threadId}
@@ -583,9 +584,9 @@ function uniqueSources(sources: TelegramTurnSource[]): TelegramTurnSource[] {
 }
 
 function uniqueAttachments(attachments: DurableTurnAttachment[]): DurableTurnAttachment[] {
-  const byId = new Map<number, DurableTurnAttachment>();
+  const byId = new Map<string, DurableTurnAttachment>();
   for (const attachment of attachments) {
-    if (!Number.isSafeInteger(attachment.fileId) || attachment.fileId <= 0) continue;
+    if (!isUuid(attachment.fileId)) continue;
     byId.set(attachment.fileId, attachment);
   }
   return [...byId.values()];
@@ -641,7 +642,7 @@ async function attachFilesToAcceptedMessage(
   attachments: DurableTurnAttachment[],
 ): Promise<void> {
   for (const attachment of attachments) {
-    const file = await queryOne<{ id: number; name: string }>(tx, sql`
+    const file = await queryOne<{ id: string; name: string }>(tx, sql`
       update files
       set message_id = coalesce(message_id, ${messageId})
       where id = ${attachment.fileId}

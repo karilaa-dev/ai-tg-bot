@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -27,29 +28,29 @@ it("scopes persisted drafts by verified user and removes legacy and other-user d
   const alice = new DraftStore(1);
   expect(alice.read("new")).toEqual(emptyDraft);
   alice.write("new", message);
-  alice.write(2, message);
+  alice.write(fixtureUuid(2), message);
   expect(sessionStorage.getItem("chat-draft:1:new")).toBe(message.text);
   const bob = new DraftStore(2);
   expect(bob.read("new")).toEqual(emptyDraft);
-  expect(bob.read(2)).toEqual(emptyDraft);
+  expect(bob.read(fixtureUuid(2))).toEqual(emptyDraft);
   expect(sessionStorage.getItem("chat-draft:1:new")).toBeNull();
   expect(sessionStorage.getItem("unrelated")).toBe("keep");
 });
 
 it("retains text across reloads only for the same account", () => {
-  new DraftStore(1).write(2, message);
-  expect(new DraftStore(1).read(2)).toEqual({ ...emptyDraft, text: message.text });
+  new DraftStore(1).write(fixtureUuid(2), message);
+  expect(new DraftStore(1).read(fixtureUuid(2))).toEqual({ ...emptyDraft, text: message.text });
 });
 
 it("revokes files, retry ids, queued starts and late writes on sign-out, even for the same account", async () => {
   const alice = new DraftStore(1);
   alice.write("new", message);
-  alice.queueStart(3, message);
+  alice.queueStart(fixtureUuid(3), message);
   const completion = deferred<void>();
   const lateFailure = completion.promise.then(() => {
-    alice.restore(2, message);
+    alice.restore(fixtureUuid(2), message);
     alice.write("new", message);
-    alice.queueStart(4, message);
+    alice.queueStart(fixtureUuid(4), message);
   });
   alice.close();
   const nextLogin = new DraftStore(1);
@@ -57,33 +58,33 @@ it("revokes files, retry ids, queued starts and late writes on sign-out, even fo
   await lateFailure;
   expect(alice.active).toBe(false);
   expect(alice.read("new")).toEqual(emptyDraft);
-  expect(alice.takeStart(3)).toBeUndefined();
-  expect(alice.takeStart(4)).toBeUndefined();
-  expect(nextLogin.read(2)).toEqual(emptyDraft);
+  expect(alice.takeStart(fixtureUuid(3))).toBeUndefined();
+  expect(alice.takeStart(fixtureUuid(4))).toBeUndefined();
+  expect(nextLogin.read(fixtureUuid(2))).toEqual(emptyDraft);
   expect(nextLogin.read("new")).toEqual(emptyDraft);
   expect(sessionStorage.length).toBe(0);
 });
 
 it("restores failed sends after navigation within a session without replacing newer typing", () => {
   const alice = new DraftStore(1);
-  alice.restore(2, message);
-  expect(alice.read(2)).toEqual(message);
+  alice.restore(fixtureUuid(2), message);
+  expect(alice.read(fixtureUuid(2))).toEqual(message);
   const newer = { ...emptyDraft, text: "newer draft" };
-  alice.write(2, newer);
-  alice.restore(2, message);
-  expect(alice.read(2)).toEqual(newer);
-  alice.queueStart(3, message);
-  expect(alice.takeStart(3)).toEqual(message);
-  expect(alice.takeStart(3)).toBeUndefined();
+  alice.write(fixtureUuid(2), newer);
+  alice.restore(fixtureUuid(2), message);
+  expect(alice.read(fixtureUuid(2))).toEqual(newer);
+  alice.queueStart(fixtureUuid(3), message);
+  expect(alice.takeStart(fixtureUuid(3))).toEqual(message);
+  expect(alice.takeStart(fixtureUuid(3))).toBeUndefined();
 });
 
 it("keeps in-memory drafts revocable when browser storage is unavailable", () => {
   vi.stubGlobal("sessionStorage", { get length() { throw new Error("Storage disabled"); }, getItem() { throw new Error("Storage disabled"); }, setItem() { throw new Error("Storage disabled"); } });
   const drafts = new DraftStore(1);
-  drafts.write(2, message);
-  expect(drafts.read(2)).toEqual(message);
+  drafts.write(fixtureUuid(2), message);
+  expect(drafts.read(fixtureUuid(2))).toEqual(message);
   drafts.close();
-  expect(drafts.read(2)).toEqual(emptyDraft);
+  expect(drafts.read(fixtureUuid(2))).toEqual(emptyDraft);
 });
 
 it("ignores expired responses from requests belonging to a revoked session", async () => {
@@ -91,7 +92,7 @@ it("ignores expired responses from requests belonging to a revoked session", asy
   const dispatchEvent = vi.fn();
   vi.stubGlobal("window", { dispatchEvent });
   vi.stubGlobal("fetch", () => response.promise);
-  const request = chatFetch("/api/chat/threads/2/messages");
+  const request = chatFetch(`/api/chat/threads/${fixtureUuid(2)}/messages`);
   invalidateChatRequests();
   response.resolve(new Response(null, { status: 401 }));
   await expect(request).rejects.toMatchObject({ status: 401 });

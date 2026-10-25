@@ -3,7 +3,7 @@ import { validateOpenUi, safeOpenUi } from "../../src/openui/validate.js";
 
 const flowStep = 'FlowStep("Root cause", "The invalid certificate rejected new connections.", "issue")';
 const stat = 'Stat("12 min", "Outage", "issue")';
-const item = 'Item("Restaurant", "file:42", ["Dumplings", "Downtown"], "A suitable shared meal.", [Link("Source", "https://example.com/place")])';
+const item = 'Item("Restaurant", "file:00000000-0000-4000-8000-000000000042", ["Dumplings", "Downtown"], "A suitable shared meal.", [Link("Source", "https://example.com/place")])';
 
 describe("trusted visual compositions", () => {
   it("accepts linked recommendation rows, causal chains and evidence panels together", () => {
@@ -28,13 +28,13 @@ describe("trusted visual compositions", () => {
     expect(safeOpenUi(source)).toBeUndefined();
   });
 
-  it.each(["javascript:alert(1)", "data:text/html,hello", "http://example.com", "https://user:secret@example.com", "/api/chat/session", "file:42"])("rejects unsafe nested link %s", url => {
+  it.each(["javascript:alert(1)", "data:text/html,hello", "http://example.com", "https://user:secret@example.com", "/api/chat/session", "file:00000000-0000-4000-8000-000000000042"])("rejects unsafe nested link %s", url => {
     expect(safeOpenUi(`root = Stack([ItemList("Places", [Item("Name", "", [], "", [Link("Source", ${JSON.stringify(url)})])])])`)).toBeUndefined();
   });
 
   it("counts thumbnails and gallery images together at the twelve-image limit", () => {
     const items = Array(8).fill(item).join(",");
-    const image = 'Image("file:43", "Photo", "")';
+    const image = 'Image("file:00000000-0000-4000-8000-000000000043", "Photo", "")';
     const source = (count: number) => `root = Stack([ItemList("Places", [${items}]),Grid([${Array(count).fill(image).join(",")}])])`;
     expect(safeOpenUi(source(4))).toBeDefined();
     expect(safeOpenUi(source(5))).toBeUndefined();

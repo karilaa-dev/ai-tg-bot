@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
@@ -55,7 +56,7 @@ it("renders accessible charts, metric grids and ordered steps from trusted visua
 });
 
 it("keeps image descriptions visible without an authenticated source and never puts file references in img URLs", () => {
-  const source = 'root = Stack([Image("file:42", "A lake <script>alert(1)</script>", "Trail photograph")])';
+  const source = `root = Stack([Image("file:${fixtureUuid(42)}", "A lake <script>alert(1)</script>", "Trail photograph")])`;
   const html = renderToStaticMarkup(createElement(GenerativeResponse, { source, language: "ru" }));
   expect(html).toContain("Trail photograph");
   expect(html).toContain("Изображение недоступно");

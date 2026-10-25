@@ -1,10 +1,11 @@
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 
+const fileId = Type.String({ format: "uuid" });
 const nullableString = Type.Union([Type.String(), Type.Null()]);
-const error = Type.Object({ error: Type.String(), file_id: Type.Optional(Type.Number()), message: Type.Optional(Type.String()) });
+const error = Type.Object({ error: Type.String(), file_id: Type.Optional(fileId), message: Type.Optional(Type.String()) });
 const snippet = { snippet: Type.String(), score: Type.Number() };
 const chunk = {
-  file_id: Type.Number(),
+  file_id: fileId,
   chunk_id: Type.Number(), chunk_index: Type.Optional(Type.Number()),
   heading_path: Type.Optional(nullableString), ...snippet,
 };
@@ -36,11 +37,11 @@ const schemas: Record<string, TSchema> = {
   load_message: Type.Object({
     message_id: Type.Number(), role: Type.String(), kind: nullableString, text: Type.String(), truncated: Type.Boolean(),
     files: Type.Array(Type.Object({
-      file_id: Type.Number(), marker: Type.String(), type: Type.String(), name: Type.String(), summary: nullableString,
-      inline: Type.Boolean(), bash_input_file_id: Type.Number(), source_only: Type.Boolean(), recommended_tool: Type.String(),
+      file_id: fileId, marker: Type.String(), type: Type.String(), name: Type.String(), summary: nullableString,
+      inline: Type.Boolean(), bash_input_file_id: fileId, source_only: Type.Boolean(), recommended_tool: Type.String(),
     })),
-    images: Type.Array(Type.Object({ file_id: Type.Number(), marker: Type.String(), name: Type.String(), caption: nullableString, note: Type.String() })),
-    materialized_file_ids: Type.Array(Type.Number()), durable_file_ids: Type.Array(Type.Number()), sandbox_file_ids: Type.Array(Type.Number()),
+    images: Type.Array(Type.Object({ file_id: fileId, marker: Type.String(), name: Type.String(), caption: nullableString, note: Type.String() })),
+    materialized_file_ids: Type.Array(fileId), durable_file_ids: Type.Array(fileId), sandbox_file_ids: Type.Array(fileId),
   }),
 };
 

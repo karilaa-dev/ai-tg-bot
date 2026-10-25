@@ -28,18 +28,18 @@ export interface WebThreadActivity {
 }
 
 export interface WebThread {
-  id: number;
+  id: string;
   userId: number;
   title: string;
   archived: boolean;
-  parentThreadId: number | null;
+  parentThreadId: string | null;
   forkPointMessageId: number | null;
   lastActivity: number;
   activity: WebThreadActivity | null;
 }
 
 export interface WebAttachment {
-  id: number;
+  id: string;
   name: string;
   size: number | null;
   mimeType: string | null;
@@ -52,7 +52,7 @@ export interface WebAttachment {
 
 export interface WebMessage {
   id: number;
-  threadId: number;
+  threadId: string;
   role: "user" | "assistant" | "system";
   text: string;
   thinking: string | null;
@@ -102,7 +102,7 @@ export interface WebUsageReport {
   dailyTruncated: boolean;
   daily: (WebUsageTotals & { date: string })[];
   models: WebModelUsage[];
-  threads: (WebUsageTotals & { id: number; userId: number; title: string; archived: boolean })[];
+  threads: (WebUsageTotals & { id: string; userId: number; title: string; archived: boolean })[];
   pricing: { source: "LiteLLM"; fetchedAt: number | null; stale: boolean };
   since: number | null;
   until: number;

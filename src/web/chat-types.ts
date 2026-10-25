@@ -49,14 +49,14 @@ export interface ChatService {
   /** The account's current Telegram profile photo, or null when it has none or hides it from bots. */
   avatar(userId: number): Promise<{ bytes: Uint8Array; mime: string } | null>;
   threads(userId: number, offset: number, search?: string): Promise<WebPage<ChatThread>>;
-  history(userId: number, threadId: number, before?: number, after?: number): Promise<ChatHistory>;
-  requireThread(userId: number, threadId: number): Promise<void>;
-  markRead(userId: number, threadId: number, messageId: number): Promise<{ readMessageId: number | null; unread: boolean }>;
+  history(userId: number, threadId: string, before?: number, after?: number): Promise<ChatHistory>;
+  requireThread(userId: number, threadId: string): Promise<void>;
+  markRead(userId: number, threadId: string, messageId: number): Promise<{ readMessageId: number | null; unread: boolean }>;
   createThread(userId: number, title?: string): Promise<ChatThread>;
-  send(userId: number, threadId: number, input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult>;
-  stop(userId: number, threadId: number): Promise<void>;
-  fork(userId: number, threadId: number, messageId?: number): Promise<ChatThread>;
-  compact(userId: number, threadId: number): Promise<void>;
+  send(userId: number, threadId: string, input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult>;
+  stop(userId: number, threadId: string): Promise<void>;
+  fork(userId: number, threadId: string, messageId?: number): Promise<ChatThread>;
+  compact(userId: number, threadId: string): Promise<void>;
   settings(userId: number): Promise<ChatSettings>;
   updateSettings(userId: number, patch: ChatSettingsPatch): Promise<ChatSettings>;
   memories(userId: number, offset: number): Promise<WebMemories>;

@@ -53,7 +53,7 @@ try {
   for (const scenario of cases) {
     const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, origin: "web", title: scenario.name });
     let photo: Buffer | undefined;
-    let fileId: number | undefined;
+    let fileId: string | undefined;
     const current = await repos.messages.insert({ threadId: thread.id, role: "user", content: scenario.prompt, textPlain: scenario.prompt });
     if (scenario.name === "recommendations") {
       const response = await fetch(photoUrl, { signal: AbortSignal.timeout(30_000) });

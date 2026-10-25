@@ -1,6 +1,6 @@
 /** `requestId` is kept while the content is unchanged so a retried send cannot post twice. */
 export interface Draft { text: string; files: File[]; requestId: string | null }
-export type DraftKey = number | "new";
+export type DraftKey = string;
 
 export const emptyDraft: Draft = { text: "", files: [], requestId: null };
 const storagePrefix = "chat-draft:";
@@ -26,7 +26,7 @@ export const isEmptyDraft = (draft: Draft) => !draft.text.trim() && !draft.files
 export class DraftStore {
   readonly id = newRequestId();
   private drafts = new Map<DraftKey, Draft>();
-  private starts = new Map<number, Draft>();
+  private starts = new Map<string, Draft>();
   private closed = false;
   private prefix: string;
 
@@ -59,8 +59,8 @@ export class DraftStore {
     if (isEmptyDraft(this.read(key))) this.write(key, draft);
   }
 
-  queueStart(threadId: number, draft: Draft) { if (!this.closed) this.starts.set(threadId, draft); }
-  takeStart(threadId: number): Draft | undefined {
+  queueStart(threadId: string, draft: Draft) { if (!this.closed) this.starts.set(threadId, draft); }
+  takeStart(threadId: string): Draft | undefined {
     const draft = this.starts.get(threadId);
     this.starts.delete(threadId);
     return draft;

@@ -4,6 +4,8 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes, type FileIngestProgress } from "../../src/files/ingest.js";
+import { chatFileIdsFromText } from "../../src/files/contextMarker.js";
+import { isUuid } from "../../src/utils/uuid.js";
 import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
 import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
 
@@ -101,7 +103,8 @@ describe("file ingestion", () => {
 
     expect(result.inline).toBe(true);
     expect(result.type).toBe("csv");
-    expect(result.card).toContain("[[chat-file:");
+    expect(isUuid(result.fileId)).toBe(true);
+    expect(chatFileIdsFromText(result.card)).toEqual([result.fileId]);
     expect(result.card).toContain('"JAN"');
     const file = await repos.files.get(result.fileId);
     expect(file?.content_md).toContain("1 rows");

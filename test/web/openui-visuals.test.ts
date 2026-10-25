@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -53,17 +54,17 @@ describe("ItemList", () => {
 
   it("keeps thumbnails behind the authenticated image renderer and rows without images compact", () => {
     const html = render(openUiVisualExamples.places);
-    expect(html).toContain('data-file-image="42"');
+    expect(html).toContain(`data-file-image="${fixtureUuid(42)}"`);
     expect(html.match(/data-file-image=/gu)).toHaveLength(1);
     expect(html).not.toContain("<img");
   });
 
   it("rejects unsafe link targets and malformed thumbnails at the schema boundary", () => {
-    for (const url of ["javascript:alert(1)", "http://example.org/", "https://user:pw@example.org/", "https://localhost/", "data:text/html,x", "/api/chat/threads/1", "file:42"]) {
+    for (const url of ["javascript:alert(1)", "http://example.org/", "https://user:pw@example.org/", "https://localhost/", "data:text/html,x", `/api/chat/threads/${fixtureUuid(1)}`, `file:${fixtureUuid(42)}`]) {
       expect(UiLink.props.safeParse({ label: "Source", url }).success, url).toBe(false);
     }
     expect(UiLink.props.safeParse({ label: "Source", url: "https://www.example.org/a?b=c#d" }).success).toBe(true);
-    for (const image of ["https://example.org/a.png", "file:0", "/tmp/a.png", "file:12abc"]) {
+    for (const image of ["https://example.org/a.png", "file:0", "/tmp/a.png", `file:${fixtureUuid(12)}abc`]) {
       expect(UiItem.props.safeParse({ title: "A", image, meta: [], description: "", links: [] }).success, image).toBe(false);
     }
   });

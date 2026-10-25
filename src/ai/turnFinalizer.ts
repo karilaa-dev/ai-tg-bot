@@ -20,7 +20,7 @@ export class TurnFinalizer {
     repos: Repos;
     logger: Logger;
     turnRunId: number;
-    threadId: number;
+    threadId: string;
     ownerId?: string;
   }) {}
 

@@ -24,13 +24,14 @@ import { useChatStrings, type ChatStrings } from "./strings.js";
 import { ThreadList } from "./thread-list.js";
 import { TimeZonePrompt } from "./time-zone-prompt.js";
 import { useThreads } from "./use-threads.js";
+import { isUuid } from "../../../utils/uuid.js";
 
-type Route = { view: "home" } | { view: "thread"; threadId: number } | { view: "settings" } | { view: "memories" };
+type Route = { view: "home" } | { view: "thread"; threadId: string } | { view: "settings" } | { view: "memories" };
 
 function readRoute(): Route {
   const params = new URLSearchParams(location.search);
-  const thread = Number(params.get("thread"));
-  if (Number.isSafeInteger(thread) && thread > 0) return { view: "thread", threadId: thread };
+  const thread = params.get("thread");
+  if (thread !== null && isUuid(thread)) return { view: "thread", threadId: thread };
   const view = params.get("view");
   return view === "settings" || view === "memories" ? { view } : { view: "home" };
 }

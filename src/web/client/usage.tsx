@@ -114,7 +114,7 @@ function UsageDetails({ usage, models, modelCalls }: {
   </>;
 }
 
-export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: number; initiallyOpen?: boolean }) {
+export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: string; initiallyOpen?: boolean }) {
   const [open, setOpen] = useState(initiallyOpen);
   useEffect(() => setOpen(initiallyOpen), [threadId, initiallyOpen]);
   const { report, error, retry } = useUsageReport(null, threadId, 0);
@@ -141,7 +141,7 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: num
   </Collapsible.Root></div>;
 }
 
-function useUsageReport(userId: number | null, threadId: number | null, days: number) {
+function useUsageReport(userId: number | null, threadId: string | null, days: number) {
   const [report, setReport] = useState<WebUsageReport | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -173,7 +173,7 @@ function useUsageReport(userId: number | null, threadId: number | null, days: nu
 
 export function UsageDashboard({ userId, title, back, all, openThread }: {
   userId: number | null; title: string; back: () => void; all: () => void;
-  openThread: (userId: number, threadId: number, showUsage: boolean) => void;
+  openThread: (userId: number, threadId: string, showUsage: boolean) => void;
 }) {
   const [days, setDays] = useState(30);
   const { report, error, busy, retry } = useUsageReport(userId, null, days);

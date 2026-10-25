@@ -1,6 +1,7 @@
 import { AccessControl } from "../../src/access/control.js";
 import { ConversationError } from "../../src/application/errors.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { serve, type Server } from "bun";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,7 +29,7 @@ let jwk: Awaited<ReturnType<typeof exportJWK>>;
 let nonce = "";
 let identity = 42;
 const profile = (id: number) => ({ id, name: `User ${id}`, username: null });
-const thread = (id: number): ChatThread => ({ id, userId: id === 1 ? 42 : 84, origin: "web", topicId: null, title: `Thread ${id}`, archived: false, parentThreadId: null, forkPointMessageId: null, activity: null, lastActivity: 1, unread: false, lastMessageId: null });
+const thread = (id: string): ChatThread => ({ id, userId: id === fixtureUuid(1) ? 42 : 84, origin: "web", topicId: null, title: `Thread ${id}`, archived: false, parentThreadId: null, forkPointMessageId: null, activity: null, lastActivity: 1, unread: false, lastMessageId: null });
 let chat: ChatService;
 const fileLookup = vi.fn();
 const resolver = vi.fn();
@@ -60,13 +61,13 @@ beforeEach(async () => {
   });
   chat = {
     profile: vi.fn(async id => { if (![42, 84].includes(id)) throw new WebNotFound(); return profile(id); }),
-    requireThread: vi.fn(async (userId, threadId) => { if (![1, 2].includes(threadId) || thread(threadId).userId !== userId) throw new WebNotFound(); }),
+    requireThread: vi.fn(async (userId, threadId) => { if (![fixtureUuid(1), fixtureUuid(2)].includes(threadId) || thread(threadId).userId !== userId) throw new WebNotFound(); }),
     markRead: vi.fn(async (_userId, _threadId, messageId) => ({ readMessageId: messageId, unread: false })),
-    threads: vi.fn(async userId => ({ items: [thread(userId === 42 ? 1 : 2)], nextOffset: null })),
+    threads: vi.fn(async userId => ({ items: [thread(fixtureUuid(userId === 42 ? 1 : 2))], nextOffset: null })),
     history: vi.fn(async (userId, threadId) => ({ thread: thread(threadId), user: { ...profile(userId), lastActivity: 1, threadCount: 1 }, chain: [], messages: [], olderCursor: null, newerCursor: null, autoLoadMaxBytes: 0, maxFileBytes: 0 })),
-    createThread: vi.fn(async () => thread(1)),
+    createThread: vi.fn(async () => thread(fixtureUuid(1))),
     send: vi.fn(async () => ({ turnId: 3, messageId: 4, queued: false })),
-    stop: vi.fn(async () => {}), fork: vi.fn(async () => thread(1)), compact: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}), fork: vi.fn(async () => thread(fixtureUuid(1))), compact: vi.fn(async () => {}),
     settings: vi.fn<ChatService["settings"]>(async () => ({ language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true })),
     updateSettings: vi.fn(async (_id, patch) => ({ language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true, ...patch })),
     memories: vi.fn(), deleteMemory: vi.fn(), usage: vi.fn(),
@@ -93,7 +94,7 @@ afterEach(async () => {
 
 it("refuses every private route before identity and keeps admin routes from ordinary accounts", async () => {
   expect(await (await request("/api/chat/session")).json()).toEqual({ authenticated: false, loginAvailable: true });
-  for (const path of ["/api/chat/threads", "/api/chat/settings", "/api/chat/memories", "/api/chat/usage", "/api/chat/threads/1/messages", "/api/chat/threads/1/files/1"]) {
+  for (const path of ["/api/chat/threads", "/api/chat/settings", "/api/chat/memories", "/api/chat/usage", `/api/chat/threads/${fixtureUuid(1)}/messages`, `/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`]) {
     expect((await request(path)).status).toBe(401);
   }
   expect(chat.profile).not.toHaveBeenCalled();
@@ -101,7 +102,7 @@ it("refuses every private route before identity and keeps admin routes from ordi
   const session = await request("/api/chat/session", { headers: { Cookie: cookie } });
   expect(await session.json()).toEqual({ authenticated: true, user: profile(42), botUsername: "test_bot", admin: false });
   expect(session.headers.get("Cache-Control")).toBe("no-store");
-  for (const path of ["/api/users", "/api/usage", "/api/admin/codex", "/api/threads/1/files/1"]) expect((await request(path, { headers: { Cookie: cookie } })).status).toBe(403);
+  for (const path of ["/api/users", "/api/usage", "/api/admin/codex", `/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`]) expect((await request(path, { headers: { Cookie: cookie } })).status).toBe(403);
   expect((await request("/api/auth/login", { method: "POST", headers: { "X-Admin-Request": "1", "Content-Type": "application/json" }, body: '{"token":"anything"}' })).status).toBe(405);
 });
 
@@ -170,10 +171,10 @@ it("rechecks database revocation before any private handler or attachment work",
   const cookie = await login();
   await access.revoke(42);
   vi.mocked(chat.profile).mockClear();
-  for (const pathname of ["/api/chat/threads", "/api/chat/threads/1/messages", "/api/chat/threads/1/files/1", "/api/chat/settings"]) {
+  for (const pathname of ["/api/chat/threads", `/api/chat/threads/${fixtureUuid(1)}/messages`, `/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`, "/api/chat/settings"]) {
     expect((await request(pathname, { headers: { Cookie: cookie, "X-Chat-User": "42" } })).status).toBe(401);
   }
-  expect((await request("/api/chat/threads/1/messages", { method: "POST", headers: { ...mutation, Cookie: cookie }, body: '{"text":"denied","requestId":"0123456789abcdef"}' })).status).toBe(401);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookie }, body: '{"text":"denied","requestId":"0123456789abcdef"}' })).status).toBe(401);
   expect(chat.profile).not.toHaveBeenCalled();
   expect(chat.send).not.toHaveBeenCalled();
   expect(fileLookup).not.toHaveBeenCalled();
@@ -233,29 +234,53 @@ it("rejects another user's thread on every read, mutation and download before re
     ["read", "POST", '{"messageId":1}'],
     ["files/10", "GET", undefined], ["files/10?mode=download&sandbox=start", "POST", undefined],
   ] as const) {
-    expect((await request(`/api/chat/threads/2/${path}`, { method, headers, body })).status).toBe(404);
+    expect((await request(`/api/chat/threads/${fixtureUuid(2)}/${path}`, { method, headers, body })).status).toBe(404);
   }
   for (const fn of [chat.history, chat.send, chat.stop, chat.fork, chat.compact, chat.markRead, fileLookup, resolver]) expect(fn).not.toHaveBeenCalled();
-  expect((await request("/api/chat/threads/1/messages", { headers })).status).toBe(200);
-  expect((await request("/api/chat/threads/2/messages", { headers: { Cookie: b, "X-Chat-User": "84" } })).status).toBe(200);
-  expect((await request("/api/chat/threads/1/messages", { headers: { Cookie: b, "X-Chat-User": "84" } })).status).toBe(404);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/messages`, { headers })).status).toBe(200);
+  expect((await request(`/api/chat/threads/${fixtureUuid(2)}/messages`, { headers: { Cookie: b, "X-Chat-User": "84" } })).status).toBe(200);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/messages`, { headers: { Cookie: b, "X-Chat-User": "84" } })).status).toBe(404);
+});
+
+it("rejects malformed thread and file UUIDs before looking up private data", async () => {
+  const headers = { ...mutation, Cookie: await login() };
+  for (const id of ["1", "not-a-uuid", "00000000-0000-4000-8000-00000000000g"]) {
+    for (const method of ["GET", "HEAD"]) {
+      expect((await request(`/api/chat/threads/${id}/messages`, { method, headers })).status).toBe(400);
+      expect((await request(`/api/chat/threads/${id}/files/${fixtureUuid(10)}`, { method, headers })).status).toBe(400);
+    }
+    expect((await request(`/api/chat/threads/${id}/read`, { method: "POST", headers, body: '{"messageId":1}' })).status).toBe(400);
+  }
+  expect(chat.requireThread).not.toHaveBeenCalled();
+  expect(chat.history).not.toHaveBeenCalled();
+  expect(chat.markRead).not.toHaveBeenCalled();
+  for (const id of ["1", "not-a-uuid", "00000000-0000-4000-8000-00000000000g"]) {
+    for (const method of ["GET", "HEAD"]) {
+      expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${id}`, { method, headers })).status).toBe(400);
+    }
+    expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${id}?mode=download&sandbox=start`, {
+      method: "POST", headers: { ...headers, "X-Conversation-Sandbox-Consent": "start" },
+    })).status).toBe(400);
+  }
+  expect(fileLookup).not.toHaveBeenCalled();
+  expect(resolver).not.toHaveBeenCalled();
 });
 
 it("reuses safe file retrieval only for the owner and keeps sandbox consent checks", async () => {
   const cookie = await login();
   const headers = { ...mutation, Cookie: cookie };
-  fileLookup.mockResolvedValue({ id: 10, size: 5, name: "note.txt", mime_type: "text/plain", type: "document" });
+  fileLookup.mockResolvedValue({ id: fixtureUuid(10), size: 5, name: "note.txt", mime_type: "text/plain", type: "document" });
   resolver.mockResolvedValue({ bytes: Buffer.from("hello"), size: 5 });
-  const download = await request("/api/chat/threads/1/files/10", { headers });
+  const download = await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}`, { headers });
   expect(download.status).toBe(200);
   expect(await download.text()).toBe("hello");
   expect(download.headers.get("Content-Disposition")).toContain("attachment");
-  expect(fileLookup).toHaveBeenCalledWith(1, 10);
+  expect(fileLookup).toHaveBeenCalledWith(fixtureUuid(1), fixtureUuid(10));
   resolver.mockClear();
-  expect((await request("/api/chat/threads/1/files/10?mode=download&sandbox=start", { headers })).status).toBe(400);
-  expect((await request("/api/chat/threads/1/files/10?mode=download&sandbox=start", { method: "POST", headers })).status).toBe(403);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { headers })).status).toBe(400);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { method: "POST", headers })).status).toBe(403);
   expect(resolver).not.toHaveBeenCalled();
-  const allowed = await request("/api/chat/threads/1/files/10?mode=download&sandbox=start", { method: "POST", headers: { ...headers, "X-Conversation-Sandbox-Consent": "start" } });
+  const allowed = await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { method: "POST", headers: { ...headers, "X-Conversation-Sandbox-Consent": "start" } });
   expect(allowed.status).toBe(200);
   expect(resolver.mock.calls[0]?.[3]).toEqual({ allowSandboxResume: true, pauseAfterRead: true });
 });
@@ -278,17 +303,17 @@ it("requires custom same-origin CSRF headers and rejects CORS preflight", async 
 it("parses bounded JSON and multipart uploads and rejects malformed input", async () => {
   const cookie = await login();
   const headers = { ...mutation, Cookie: cookie };
-  const path = "/api/chat/threads/1/messages";
+  const path = `/api/chat/threads/${fixtureUuid(1)}/messages`;
   expect((await request(path, { method: "POST", headers, body: '{"text":"hello","requestId":"request_retry_123"}' })).status).toBe(202);
-  expect(chat.send).toHaveBeenLastCalledWith(42, 1, { text: "hello", requestId: "request_retry_123" });
+  expect(chat.send).toHaveBeenLastCalledWith(42, fixtureUuid(1), { text: "hello", requestId: "request_retry_123" });
   const form = new FormData(); form.set("text", "file message"); form.set("requestId", "request_upload_1"); form.append("files", new File(["hello"], "note.txt", { type: "text/plain" }));
   expect((await request(path, { method: "POST", headers: { "X-Chat-Request": "1", "X-Chat-User": "42", Origin: publicOrigin, Cookie: cookie }, body: form })).status).toBe(202);
-  expect(chat.send).toHaveBeenLastCalledWith(42, 1, { text: "file message", requestId: "request_upload_1", files: [expect.objectContaining({ name: "note.txt", size: 5, type: expect.stringContaining("text/plain") })] });
+  expect(chat.send).toHaveBeenLastCalledWith(42, fixtureUuid(1), { text: "file message", requestId: "request_upload_1", files: [expect.objectContaining({ name: "note.txt", size: 5, type: expect.stringContaining("text/plain") })] });
   for (const body of ["{", "null", '{"text":"","requestId":"a"}', '{"text":"hello","requestId":"../bad"}', '{"text":"hello","requestId":"a","userId":84}', JSON.stringify({ text: "x".repeat(32_001), requestId: "a" })]) {
     expect((await request(path, { method: "POST", headers, body })).status).toBe(400);
   }
   expect((await request(path, { method: "POST", headers, body: "x".repeat(256 * 1024 + 1) })).status).toBe(413);
-  expect((await request("/api/chat/threads/1/messages?before=1&after=2", { headers })).status).toBe(400);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/messages?before=1&after=2`, { headers })).status).toBe(400);
   expect((await request("/api/chat/threads?offset=-1", { headers })).status).toBe(400);
   expect((await request("/api/chat/usage?days=31", { headers })).status).toBe(400);
 });
@@ -306,7 +331,7 @@ it("rate-limits user mutations independently and ignores spoofed forwarded addre
 it("protects and bounds read acknowledgements before passing a verified message cursor", async () => {
   const cookie = await login();
   const headers = { ...mutation, Cookie: cookie };
-  const path = "/api/chat/threads/1/read";
+  const path = `/api/chat/threads/${fixtureUuid(1)}/read`;
   expect((await request(path, { method: "POST", headers: mutation, body: '{"messageId":7}' })).status).toBe(401);
   expect((await request(path, { method: "POST", headers: { ...headers, Origin: "https://evil.example" }, body: '{"messageId":7}' })).status).toBe(403);
   expect((await request(path, { method: "POST", headers: { ...headers, "X-Chat-Request": "" }, body: '{"messageId":7}' })).status).toBe(403);
@@ -319,15 +344,15 @@ it("protects and bounds read acknowledgements before passing a verified message 
   const result = await request(path, { method: "POST", headers, body: '{"messageId":7}' });
   expect(result.status).toBe(200);
   expect(await result.json()).toEqual({ readMessageId: 7, unread: false });
-  expect(chat.markRead).toHaveBeenCalledExactlyOnceWith(42, 1, 7);
+  expect(chat.markRead).toHaveBeenCalledExactlyOnceWith(42, fixtureUuid(1), 7);
   expect(result.headers.get("Cache-Control")).toBe("no-store");
 });
 
 it("rate-limits read acknowledgements per verified account", async () => {
   const cookie = await login();
   const headers = { ...mutation, Cookie: cookie };
-  for (let i = 0; i < 30; i++) expect((await request("/api/chat/threads/1/read", { method: "POST", headers, body: '{"messageId":7}' })).status).toBe(200);
-  expect((await request("/api/chat/threads/1/read", { method: "POST", headers, body: '{"messageId":7}' })).status).toBe(429);
+  for (let i = 0; i < 30; i++) expect((await request(`/api/chat/threads/${fixtureUuid(1)}/read`, { method: "POST", headers, body: '{"messageId":7}' })).status).toBe(200);
+  expect((await request(`/api/chat/threads/${fixtureUuid(1)}/read`, { method: "POST", headers, body: '{"messageId":7}' })).status).toBe(429);
   expect(chat.markRead).toHaveBeenCalledTimes(30);
 });
 
@@ -342,17 +367,17 @@ it("holds a user's submission slot through ingestion while admitting another use
     if (userId === 42) { entered(); await held; }
     return { turnId: 1, messageId: 1, queued: false };
   });
-  const send = (cookie: string, threadId: number, requestId: string) => request(`/api/chat/threads/${threadId}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookie, "X-Chat-User": cookie === a ? "42" : "84" }, body: JSON.stringify({ text: "hello", requestId }) });
-  const first = send(a, 1, "request_first_123");
+  const send = (cookie: string, threadId: string, requestId: string) => request(`/api/chat/threads/${threadId}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookie, "X-Chat-User": cookie === a ? "42" : "84" }, body: JSON.stringify({ text: "hello", requestId }) });
+  const first = send(a, fixtureUuid(1), "request_first_123");
   try {
     await started;
-    const rejected = await send(a, 1, "request_second_12");
+    const rejected = await send(a, fixtureUuid(1), "request_second_12");
     expect(rejected.status).toBe(429);
     expect(rejected.headers.get("Retry-After")).toBe("1");
-    expect((await send(b, 2, "request_other_123")).status).toBe(202);
+    expect((await send(b, fixtureUuid(2), "request_other_123")).status).toBe(202);
   } finally { release(); }
   expect((await first).status).toBe(202);
-  expect((await send(a, 1, "request_after_123")).status).toBe(202);
+  expect((await send(a, fixtureUuid(1), "request_after_123")).status).toBe(202);
 });
 
 it("shares the read budget with authenticated session profile queries", async () => {
@@ -373,7 +398,7 @@ it("rejects stale-tab account assertions before reading, mutating, downloading o
     const headers = { ...mutation, Cookie: b, "X-Chat-User": expected };
     for (const [url, method] of [
       ["/api/chat/threads", "GET"], ["/api/chat/threads", "POST"],
-      ["/api/chat/settings", "PATCH"], ["/api/chat/threads/2/files/1", "GET"],
+      ["/api/chat/settings", "PATCH"], [`/api/chat/threads/${fixtureUuid(2)}/files/${fixtureUuid(1)}`, "GET"],
       ["/api/chat/session", "DELETE"],
     ]) {
       const result = await request(url!, { method, headers, ...(method === "POST" || method === "PATCH" ? { body: "{}" } : {}) });

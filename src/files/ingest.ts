@@ -335,7 +335,7 @@ export function cardForFile(
 ): string {
   const marker = chatFileMarker(file.id);
   if (file.type === "image") return `${marker} [image #${file.id}: ${file.summary ?? displayName}]`;
-  if (file.type === "audio") return `${marker} Audio file #${file.id}: ${displayName}. Use transcribe_audio with file_id: ${file.id}.`;
+  if (file.type === "audio") return `${marker} Audio file #${file.id}: ${displayName}. Use transcribe_audio with file_id: "${file.id}".`;
   if (file.type === "other") {
     return `${marker} File #${file.id}: ${displayName} (${file.size} bytes, original file). Use materialize_chat_files to access the original bytes in the sandbox.`;
   }

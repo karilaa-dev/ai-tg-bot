@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -34,7 +35,7 @@ try {
     if (url.pathname.startsWith("/api/")) requests.push({ path: url.pathname + url.search, method: request.method(), user: request.headers()["x-chat-user"], write: request.headers()["x-chat-request"] });
   });
   // Put real usage data in the response, so its absence in the UI is meaningful.
-  await page.route("**/api/chat/threads/1/messages*", async route => {
+  await page.route(`**/api/chat/threads/${fixtureUuid(1)}/messages*`, async route => {
     if (route.request().method() !== "GET") return route.continue();
     const response = await route.fetch();
     const history: ChatHistory = await response.json();
@@ -119,8 +120,8 @@ try {
   await picture.waitFor();
   await picture.evaluate(async image => { if (!(image instanceof HTMLImageElement)) throw new Error("Expected loaded OpenUI image"); await image.decode(); });
   assert((await picture.getAttribute("src"))?.startsWith("blob:"));
-  const images = requests.filter(request => request.path.includes("/files/502"));
-  assert(images.length > 0 && images.every(request => request.path === "/api/chat/threads/1/files/502?mode=auto" && request.method === "GET" && request.user === "1001"));
+  const images = requests.filter(request => request.path.includes(`/files/${fixtureUuid(502)}`));
+  assert(images.length > 0 && images.every(request => request.path === `/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(502)}?mode=auto` && request.method === "GET" && request.user === "1001"));
   console.log("PASS: groups/paging, source dots, no labels/usage, reply actions, Tabler, nested tools/cancellation, scoped OpenUI image");
 
   // Freeze only browser time: Enter must start the search without the 250 ms debounce.
@@ -153,13 +154,13 @@ try {
   await bodyMatch.waitFor();
   await bodyMatch.click();
   await page.getByRole("heading", { name: "Weekly grocery list", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).searchParams.get("thread"), "2");
+  assert.equal(new URL(page.url()).searchParams.get("thread"), fixtureUuid(2));
   // Viewing the latest reply in a focused tab clears its unread dot through one scoped acknowledgement.
   await page.waitForFunction(() => [...document.querySelectorAll(".chat-thread")].some(row => row.textContent?.includes("Weekly grocery list") && !row.querySelector(".chat-unread-dot")));
-  const acks = requests.filter(request => request.path === "/api/chat/threads/2/read");
+  const acks = requests.filter(request => request.path === `/api/chat/threads/${fixtureUuid(2)}/read`);
   assert.equal(acks.length, 1);
   assert(acks.every(request => request.method === "POST" && request.write === "1" && request.user === "1001"));
-  assert.equal(requests.filter(request => request.path === "/api/chat/threads/1/read").length, 0, "Already-read chats are not acknowledged again");
+  assert.equal(requests.filter(request => request.path === `/api/chat/threads/${fixtureUuid(1)}/read`).length, 0, "Already-read chats are not acknowledged again");
   await page.unroute("**/api/chat/threads?**");
   // This query matches message bodies in all 32 older chats, requiring remote pagination.
   await page.getByRole("button", { name: "Search chats", exact: true }).click();
@@ -322,8 +323,8 @@ try {
   await mobile.screenshot({ path: "/tmp/ai-tg-polish-mobile-sidebar.png" });
   await laptop.click();
   await mobile.getByRole("heading", { name: "Compare two laptop options", exact: true }).waitFor();
-  if (!mobileReads.length) await mobile.waitForRequest(request => request.url().endsWith("/api/chat/threads/3/read"), { timeout: 5_000 });
-  assert.deepEqual(mobileReads, ["/api/chat/threads/3/read"]);
+  if (!mobileReads.length) await mobile.waitForRequest(request => request.url().endsWith(`/api/chat/threads/${fixtureUuid(3)}/read`), { timeout: 5_000 });
+  assert.deepEqual(mobileReads, [`/api/chat/threads/${fixtureUuid(3)}/read`]);
   await mobile.getByRole("button", { name: "Открыть чаты", exact: true }).first().click();
   await laptop.waitFor();
   assert.equal(await laptop.locator(".chat-unread-dot").count(), 0);

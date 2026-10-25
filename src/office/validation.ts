@@ -78,7 +78,7 @@ export class OfficeValidation {
       runtime?: CommandRuntime;
       config: AppConfig;
       userId: number;
-      threadId: number;
+      threadId: string;
     },
   ) {}
   clear(): void {

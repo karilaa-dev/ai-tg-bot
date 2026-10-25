@@ -10,7 +10,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
     holdsCommandActivity: true,
     description: "Transcribe speech from a chat audio file or an absolute workspace path using OpenRouter. Supply exactly one of file_id, path, or transcript_id. Supports WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC up to 20 MB. Returns original-language text in bounded pages. When next_offset is non-null, read more with transcript_id and offset=next_offset; this reads the saved transcript without another provider request. Read only sections needed for the task. Telegram voice/audio prompts already contain a transcript or a preview with continuation instructions; reuse those unless asked to transcribe again.",
     inputSchema: z.object({
-      file_id: z.number().int().positive().optional(),
+      file_id: z.string().uuid().optional(),
       path: z.string().startsWith("/").optional(),
       transcript_id: z.string().uuid().optional().describe("Saved transcript ID returned by this tool or the audio prompt."),
       offset: z.number().int().nonnegative().optional().describe("Use the returned next_offset to read a saved transcript; defaults to zero."),

@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
 import path from "node:path";
 import tailwind from "bun-plugin-tailwind";
@@ -23,14 +24,14 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
   if (url.pathname.startsWith("/api/")) {
     requests.push({ path: url.pathname + url.search, method: request.method, user: request.headers.get("X-Chat-User") });
     if (request.headers.get("X-Chat-User") !== "1001") return Response.json({ error: "Wrong account" }, { status: 401 });
-    if (url.pathname === "/api/chat/threads/7/files/42") return new Response(picture, { headers: { "Content-Type": "image/png" } });
-    if (url.pathname.endsWith("/43")) return new Response('<svg xmlns="http://www.w3.org/2000/svg"><script>window.injected=true</script></svg>', { headers: { "Content-Type": "image/svg+xml" } });
-    if (url.pathname.endsWith("/44")) return Response.json({ error: "Not visible in this thread" }, { status: 404 });
-    if (url.pathname.endsWith("/45")) return Response.json({ error: "Account changed" }, { status: 401 });
-    if (url.pathname.endsWith("/46")) { await Bun.sleep(500); return new Response(picture, { headers: { "Content-Type": "image/png" } }); }
-    if (url.pathname.endsWith("/47")) return Response.json({ code: "sandbox_consent_required", error: "Manual consent required" }, { status: 409 });
-    if (url.pathname.endsWith("/48")) return Response.json({ error: "Load this attachment manually" }, { status: 413 });
-    if (url.pathname.endsWith("/49")) return new Response("not an image", { headers: { "Content-Type": "image/png" } });
+    if (url.pathname === `/api/chat/threads/${fixtureUuid(7)}/files/${fixtureUuid(42)}`) return new Response(picture, { headers: { "Content-Type": "image/png" } });
+    if (url.pathname.endsWith(`/${fixtureUuid(43)}`)) return new Response('<svg xmlns="http://www.w3.org/2000/svg"><script>window.injected=true</script></svg>', { headers: { "Content-Type": "image/svg+xml" } });
+    if (url.pathname.endsWith(`/${fixtureUuid(44)}`)) return Response.json({ error: "Not visible in this thread" }, { status: 404 });
+    if (url.pathname.endsWith(`/${fixtureUuid(45)}`)) return Response.json({ error: "Account changed" }, { status: 401 });
+    if (url.pathname.endsWith(`/${fixtureUuid(46)}`)) { await Bun.sleep(500); return new Response(picture, { headers: { "Content-Type": "image/png" } }); }
+    if (url.pathname.endsWith(`/${fixtureUuid(47)}`)) return Response.json({ code: "sandbox_consent_required", error: "Manual consent required" }, { status: 409 });
+    if (url.pathname.endsWith(`/${fixtureUuid(48)}`)) return Response.json({ error: "Load this attachment manually" }, { status: 413 });
+    if (url.pathname.endsWith(`/${fixtureUuid(49)}`)) return new Response("not an image", { headers: { "Content-Type": "image/png" } });
     return new Response("Not found", { status: 404 });
   }
   return new Response(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenUI fixture</title><link rel="stylesheet" href="/${path.basename(css.path)}"></head><body><div id="root"></div><script type="module" src="/${path.basename(javascript.path)}"></script></body></html>`, { headers: { "Content-Type": "text/html", "Content-Security-Policy": csp } });
@@ -138,7 +139,7 @@ if (process.argv.includes("--preview")) {
     await example.selectOption("expired");
     await page.getByText("Picture unavailable", { exact: true }).waitFor();
     assert.equal(await page.getByRole("status", { name: "Session status" }).textContent(), "expired");
-    const pending = page.waitForRequest(request => request.url().includes("/files/46"));
+    const pending = page.waitForRequest(request => request.url().includes(`/files/${fixtureUuid(46)}`));
     await example.selectOption("slow");
     await pending;
     await page.getByLabel("Show UI", { exact: true }).uncheck();
@@ -151,7 +152,7 @@ if (process.argv.includes("--preview")) {
     await page.getByLabel("Show UI", { exact: true }).check();
     await page.getByText("Picture unavailable", { exact: true }).waitFor();
     assert.equal(requests.length, beforeUnscoped, "No implicit admin file loader");
-    assert(requests.every(request => request.path.startsWith("/api/chat/threads/7/files/") && request.path.endsWith("?mode=auto") && request.method === "GET" && request.user === "1001"), "Images use scoped chat auth, bounded auto reads and no implicit sandbox startup");
+    assert(requests.every(request => request.path.startsWith(`/api/chat/threads/${fixtureUuid(7)}/files/`) && request.path.endsWith("?mode=auto") && request.method === "GET" && request.user === "1001"), "Images use scoped chat auth, bounded auto reads and no implicit sandbox startup");
     assert.deepEqual(remote, []);
     assert.deepEqual(errors, []);
     console.log("OpenUI browser smoke passed: visuals, actions, scoped image auth, CSP, failures, fallback, cleanup and responsive layout");

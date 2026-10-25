@@ -52,7 +52,7 @@ export function useThreads() {
   const more = useCallback(() => { pages.current++; setRevision(v => v + 1); }, []);
   /** Shows a new or forked thread before the next poll returns it. */
   const remember = useCallback((thread: ChatThread) => setThreads(list => [thread, ...list.filter(item => item.id !== thread.id)]), []);
-  const markRead = useCallback((threadId: number, result: ChatReadResult) => {
+  const markRead = useCallback((threadId: string, result: ChatReadResult) => {
     readGeneration.current++;
     setThreads(list => list.map(thread => {
       if (thread.id !== threadId || thread.unread === result.unread) return thread;

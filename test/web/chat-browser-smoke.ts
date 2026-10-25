@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -37,11 +38,11 @@ try {
   let holdLogout: ReturnType<typeof deferred<Route>> | undefined;
   const profile = (id: number) => ({ id, name: id === 1001 ? "Alice" : "Bob", username: null });
   const settings = new Map<number, ChatSettings>();
-  const reads: Array<{ userId: number; threadId: number; messageId: number }> = [];
-  const thread = (id: number, owner: number): ChatThread => ({
-    id, userId: owner, title: `Chat ${id}`, origin: "web", topicId: null, parentThreadId: null, forkPointMessageId: null,
+  const reads: Array<{ userId: number; threadId: string; messageId: number }> = [];
+  const thread = (index: number, owner: number): ChatThread => ({
+    id: fixtureUuid(index), userId: owner, title: `Chat ${index}`, origin: "web", topicId: null, parentThreadId: null, forkPointMessageId: null,
     archived: false, lastActivity: Date.now(), activity: null,
-    unread: id === 1 && !reads.some(read => read.userId === owner && read.messageId >= 284), lastMessageId: id === 1 ? 284 : null,
+    unread: index === 1 && !reads.some(read => read.userId === owner && read.messageId >= 284), lastMessageId: index === 1 ? 284 : null,
   });
   const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   await page.route("**/api/chat/**", async route => {
@@ -80,7 +81,7 @@ try {
       assert.equal(request.headers()["x-chat-request"], "1");
       const { messageId } = request.postDataJSON() as { messageId: number };
       assert.ok(Number.isSafeInteger(messageId) && messageId > 0 && messageId <= 284, `Acknowledged an unrendered message: ${messageId}`);
-      reads.push({ userId, threadId: Number(url.pathname.split("/")[4]), messageId });
+      reads.push({ userId, threadId: url.pathname.split("/")[4]!, messageId });
       return json(route, { readMessageId: messageId, unread: messageId < 284 });
     }
     if (url.pathname.endsWith("/fork")) {
@@ -98,8 +99,8 @@ try {
       const history: ChatHistory = {
         user: { ...profile(userId), lastActivity: Date.now(), threadCount: 1 }, thread: thread(1, userId), chain: [],
         messages: [
-          { id: 1, threadId: 1, role: "user", text: "A saved message", thinking: null, attachments: [], createdAt: Date.now(), telegramSyncFailed: true },
-          { id: 284, threadId: 1, role: "assistant", text: "Restaurant comparison fallback", thinking: null, attachments: [], createdAt: Date.now(), openui: savedRestaurantOpenUi },
+          { id: 1, threadId: fixtureUuid(1), role: "user", text: "A saved message", thinking: null, attachments: [], createdAt: Date.now(), telegramSyncFailed: true },
+          { id: 284, threadId: fixtureUuid(1), role: "assistant", text: "Restaurant comparison fallback", thinking: null, attachments: [], createdAt: Date.now(), openui: savedRestaurantOpenUi },
         ],
         olderCursor: null, newerCursor: null, autoLoadMaxBytes: 0, maxFileBytes: MAX_FILE_BYTES,
         draft: { text: "**Live answer** <script>window.leaked = true</script>", thinking: "Thinking about the answer", toolActivity: { version: 1, omittedCalls: 0, reasoning: [],
@@ -152,7 +153,7 @@ try {
   assert.equal(await live.getByText("web_search", { exact: true }).count(), 0);
   // Opening the chat in a focused tab acknowledges only the newest rendered stored message, for this account.
   await page.waitForFunction(() => !document.querySelector(".chat-thread.is-unread"));
-  assert.deepEqual(reads.filter(read => read.userId === 1001), [{ userId: 1001, threadId: 1, messageId: 284 }]);
+  assert.deepEqual(reads.filter(read => read.userId === 1001), [{ userId: 1001, threadId: fixtureUuid(1), messageId: 284 }]);
   holdSend = deferred<Route>();
   await composer.fill("Alice delayed message");
   await page.getByRole("button", { name: "Send message", exact: true }).click();

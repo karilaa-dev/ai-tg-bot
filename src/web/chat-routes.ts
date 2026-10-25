@@ -6,6 +6,7 @@ import { WebHttpError } from "./auth.js";
 import { chatClientAddress, ChatRateLimit, readBoundedBody, requireChatMutation, WebChatAuth } from "./chat-auth.js";
 import type { ChatService, ChatSession } from "./chat-types.js";
 import { WebNotFound } from "./repository.js";
+import { uuid } from "./ids.js";
 import type { WebServerOptions } from "./server.js";
 
 import { readChatUpload } from "./chat-upload.js";
@@ -86,7 +87,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
     return { GET: handle, HEAD: handle };
   }
   async function owned(request: Request & { params: { threadId: string } }, userId: number, chat: ChatService) {
-    const id = integer(request.params.threadId);
+    const id = uuid(request.params.threadId);
     await chat.requireThread(userId, id);
     return id;
   }

@@ -26,7 +26,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const repos = createRepos(db.db, db.search);
         const user = await repos.users.ensure({ tgId: 777, firstName: "Scope" });
         const parent = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Parent" });
-        const message = (threadId: number, text: string) => repos.messages.insert({ threadId, role: "user", content: { text }, textPlain: text });
+        const message = (threadId: string, text: string) => repos.messages.insert({ threadId, role: "user", content: { text }, textPlain: text });
         const beforeFork = await message(parent.id, "before fork empty __empty__");
         const child = await repos.threads.create({ userId: user.tg_id, topicId: 1, title: "Child", parentThreadId: parent.id, forkPointMessageId: beforeFork.id });
         const afterFork = await message(parent.id, "after fork");
@@ -34,7 +34,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const queued = await message(child.id, "queued");
         const other = await repos.threads.create({ userId: user.tg_id, topicId: 2, title: "Other" });
         const otherMessage = await message(other.id, "other");
-        const file = (threadId: number, messageId?: number) => repos.files.insertFile({
+        const file = (threadId: string, messageId?: number) => repos.files.insertFile({
           userId: user.tg_id, threadId, messageId, type: "txt", name: "notes.txt", size: 5, contentMd: "notes", isInline: true,
         });
         const visible = await file(parent.id, beforeFork.id);
@@ -60,7 +60,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
 
         const scope = await threadVisibilityScope(repos, child, accepted.id);
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
-        expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
+        expect(new Set(scope.fileIds)).toEqual(new Set([visible.id, reused.id, reusedPending.id, outgoing.id]));
         for (const name of ["upload.txt", "upload.png", "upload.zip"]) {
           const pending = await ingestFileBytes({ config: loadTestConfig(), repo: repos.files,
             userId: user.tg_id, threadId: child.id, name, bytes: Buffer.from("pending upload"), requireMessage: true });

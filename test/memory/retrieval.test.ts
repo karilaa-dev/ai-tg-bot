@@ -4,6 +4,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
 import { hybridSearch, threadChainScope } from "../../src/memory/retrieval.js";
+import { isUuid } from "../../src/utils/uuid.js";
 
 describe("Pi retrieval tools backend", () => {
   let db: AppDatabase;
@@ -39,6 +40,16 @@ describe("Pi retrieval tools backend", () => {
     });
     const chunk = await repos.files.insertChunk({ fileId: file.id, idx: 0, content: "orchid deployment detail" });
     const scope = await threadChainScope(repos, thread);
+    expect(isUuid(thread.id)).toBe(true);
+    expect(isUuid(file.id)).toBe(true);
+    expect(scope).toEqual({
+      threadIds: [thread.id],
+      messageScopes: [{ threadId: thread.id }],
+      messageIds: [message.id],
+      fileIds: [file.id],
+    });
+    expect(message.id).toEqual(expect.any(Number));
+    expect(chunk.id).toEqual(expect.any(Number));
 
     const hits = await hybridSearch({
       search: db.search,

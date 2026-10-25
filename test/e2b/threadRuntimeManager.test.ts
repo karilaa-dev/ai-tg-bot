@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { SandboxNotFoundError, TimeoutError } from "e2b";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,7 @@ import {
   type E2BSandbox,
 } from "../../src/e2b/client.js";
 import { E2B_FILE_SOURCES, E2B_TELEGRAM_FILES, E2B_WORKSPACE } from "../../src/e2b/paths.js";
-import { e2bFileSource } from "../../src/e2b/fileSource.js";
+import { E2BFileSourceAdapter, e2bFileSource } from "../../src/e2b/fileSource.js";
 import { ThreadE2BSandboxRuntimeManager } from "../../src/e2b/threadRuntimeManager.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
 import { MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "../../src/files/limits.js";
@@ -23,6 +23,9 @@ import { WebFileSourceAdapter, webFileSource } from "../../src/web/file-source.j
 import { deferred } from "../helpers/async.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "../../src/e2b/officeBundle.js";
 
+const FIRST_FILE_ID = "123e4567-e89b-42d3-a456-426614178002";
+const SECOND_FILE_ID = "123e4567-e89b-42d3-a456-426614178001";
+
 describe("thread E2B runtime manager", () => {
   let config: AppConfig;
   let db: AppDatabase;
@@ -30,7 +33,7 @@ describe("thread E2B runtime manager", () => {
   let client: FakeClient;
   let runtime: ThreadE2BSandboxRuntimeManager;
   let userId: number;
-  let threadId: number;
+  let threadId: string;
 
   beforeEach(async () => {
     config = loadTestConfig();
@@ -321,22 +324,22 @@ describe("thread E2B runtime manager", () => {
     client.telegramFiles.set("tg-first", Buffer.from("first"));
     client.telegramFiles.set("tg-second", Buffer.from("second"));
     const files: SandboxThreadFile[] = [
-      descriptor(8_001, "first.txt", "tg-first", 9_001, 5),
-      descriptor(8_002, "second.txt", "tg-second", 9_002, 6),
+      descriptor(FIRST_FILE_ID, "first.txt", "tg-first", 9_001, 5),
+      descriptor(SECOND_FILE_ID, "second.txt", "tg-second", 9_002, 6),
     ];
 
     const first = await runtime.materializeFiles({ userId, threadId, files: [files[0]!] });
     const second = await runtime.materializeFiles({ userId, threadId, files: [files[1]!] });
     const command = await runtime.execute(commandRequest(userId, threadId));
 
-    expect(first.files).toEqual([expect.objectContaining({ fileId: 8_001, status: "available" })]);
-    expect(second.files).toEqual([expect.objectContaining({ fileId: 8_002, status: "available" })]);
+    expect(first.files).toEqual([expect.objectContaining({ fileId: FIRST_FILE_ID, status: "available" })]);
+    expect(second.files).toEqual([expect.objectContaining({ fileId: SECOND_FILE_ID, status: "available" })]);
     expect(client.telegramDownloadCalls).toBe(2);
     const sandbox = client.onlySandbox();
-    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/8001--first.txt`)?.toString()).toBe("first");
-    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/8002--second.txt`)?.toString()).toBe("second");
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${FIRST_FILE_ID}--first.txt`)?.toString()).toBe("first");
+    expect(sandbox.files.get(`${E2B_TELEGRAM_FILES}/${SECOND_FILE_ID}--second.txt`)?.toString()).toBe("second");
     const index = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
-    expect(index.files.map((file: { file_id: number }) => file.file_id)).toEqual([8_001, 8_002]);
+    expect(index.files.map((file: { file_id: string }) => file.file_id)).toEqual([SECOND_FILE_ID, FIRST_FILE_ID]);
     expect(command.threadFiles.available).toBe(2);
   });
 
@@ -680,7 +683,7 @@ describe("thread E2B runtime manager", () => {
       version: 2,
       generated_at: new Date().toISOString(),
       files: [{
-        file_id: 999,
+        file_id: randomUUID(),
         message_id: null,
         original_name: "hosts",
         sandbox_name: "../../etc/hosts",
@@ -698,6 +701,41 @@ describe("thread E2B runtime manager", () => {
     expect(sandbox.files.get(outsidePath)?.toString()).toBe("must survive");
     const rewritten = JSON.parse(await sandbox.readText(`${E2B_TELEGRAM_FILES}/INDEX.json`));
     expect(rewritten.files).toEqual([]);
+  });
+
+  it("drops invalid or mismatched file IDs from the sandbox index while retaining UUID entries", async () => {
+    client.telegramFiles.set("tg-first", Buffer.from("first"));
+    const file = descriptor(FIRST_FILE_ID, "first.txt", "tg-first", 9_001, 5);
+    await runtime.materializeFiles({ userId, threadId, files: [file] });
+    const sandbox = client.onlySandbox();
+    const indexPath = `${E2B_TELEGRAM_FILES}/INDEX.json`;
+    const index = JSON.parse(await sandbox.readText(indexPath));
+    const valid = index.files[0];
+    index.files.push(
+      { ...valid, file_id: 123, sandbox_name: "123--legacy.txt" },
+      { ...valid, file_id: "123", sandbox_name: `${SECOND_FILE_ID}--numeric.txt` },
+      { ...valid, file_id: "not-a-uuid", sandbox_name: `${SECOND_FILE_ID}--invalid.txt` },
+      { ...valid, file_id: SECOND_FILE_ID, sandbox_name: `${FIRST_FILE_ID}--mismatch.txt` },
+      { ...valid, file_id: SECOND_FILE_ID, sandbox_name: "123--numeric-prefix.txt" },
+    );
+    sandbox.files.set(indexPath, Buffer.from(JSON.stringify(index)));
+    await runtime.dispose();
+    runtime = createRuntime();
+
+    const result = await runtime.execute(commandRequest(userId, threadId));
+
+    expect(result.threadFiles.files).toEqual([
+      expect.objectContaining({ fileId: FIRST_FILE_ID, status: "available" }),
+    ]);
+    expect(JSON.parse(await sandbox.readText(indexPath)).files).toEqual([valid]);
+  });
+
+  it.each(["123", "not-a-uuid", "../escape"])("rejects invalid UUID file descriptors: %s", async (fileId) => {
+    const file = descriptor(fileId, "file.txt", "tg-file", 9_001, 5);
+
+    await expect(runtime.materializeFiles({ userId, threadId, files: [file] }))
+      .rejects.toThrow("invalid Telegram file id");
+    expect(client.telegramDownloadCalls).toBe(0);
   });
 
   it("records a partial restore failure without surfacing failure details in the command result", async () => {
@@ -860,7 +898,7 @@ describe("thread E2B runtime manager", () => {
     const updated = Buffer.from("updated");
     client.telegramFiles.set("tg-changing", original);
     const base: SandboxThreadFile = {
-      fileId: 2_900,
+      fileId: randomUUID(),
       messageId: 90,
       name: "changing.txt",
       mimeType: "text/plain",
@@ -920,7 +958,7 @@ describe("thread E2B runtime manager", () => {
 
   it("scales the sandbox operation window by projected restore batches", async () => {
     const files: SandboxThreadFile[] = Array.from({ length: 9 }, (_, index) => ({
-      fileId: 3_000 + index,
+      fileId: randomUUID(),
       messageId: null,
       name: `${index}.txt`,
       mimeType: "text/plain",
@@ -940,7 +978,7 @@ describe("thread E2B runtime manager", () => {
 
   it("does not repeatedly rotate a file-heavy sandbox when synchronization is cached", async () => {
     const files: SandboxThreadFile[] = Array.from({ length: 40 }, (_, index) => ({
-      fileId: 4_000 + index,
+      fileId: randomUUID(),
       messageId: null,
       name: `${index}.txt`,
       mimeType: "text/plain",
@@ -964,7 +1002,7 @@ describe("thread E2B runtime manager", () => {
     sandbox.failIndexWrite = true;
     sandbox.failSeal = true;
     const file: SandboxThreadFile = {
-      fileId: 991,
+      fileId: randomUUID(),
       messageId: null,
       name: "broken.txt",
       mimeType: "text/plain",
@@ -1004,7 +1042,7 @@ describe("thread E2B runtime manager", () => {
       },
     });
     const files: SandboxThreadFile[] = ["abort-first", "delay-second"].map((telegramFileId, index) => ({
-      fileId: 1_200 + index,
+      fileId: randomUUID(),
       messageId: null,
       name: `${index}.txt`,
       mimeType: "text/plain",
@@ -1221,7 +1259,7 @@ describe("thread E2B runtime manager", () => {
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
 
-    const snapshots: Array<{ fileId: number; path: string }> = [];
+    const snapshots: Array<{ fileId: string; path: string }> = [];
     for (const [index, value] of ["first!", "second"].entries()) {
       const bytes = Buffer.from(value);
       const hash = createHash("sha256").update(bytes).digest("hex");
@@ -1630,6 +1668,30 @@ describe("thread E2B runtime manager", () => {
     })).rejects.toThrow("outside this thread's durable file roots");
   });
 
+  it("reads E2B sources with UUID thread locators and rejects numeric or malformed IDs", async () => {
+    await runtime.execute(commandRequest(userId, threadId));
+    const sandbox = client.onlySandbox();
+    const bytes = Buffer.from("saved");
+    const canonicalPath = `${E2B_WORKSPACE}/saved.txt`;
+    sandbox.files.set(canonicalPath, bytes);
+    const source = e2bFileSource(config, {
+      fileId: FIRST_FILE_ID,
+      sandboxId: sandbox.id,
+      userId,
+      threadId,
+      sourceCanonicalPath: canonicalPath,
+      size: bytes.length,
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const adapter = new E2BFileSourceAdapter(config, runtime);
+
+    await expect(adapter.fetch(source)).resolves.toEqual(bytes);
+    for (const invalidId of [123, "123", "not-a-uuid", null]) {
+      expect(() => adapter.fetch({ ...source, locator: { ...source.locator, thread_id: invalidId } }))
+        .toThrow("E2B source has no valid thread_id.");
+    }
+  });
+
   it("requires browser consent before reconnecting and immediately pauses after retrieval", async () => {
     await runtime.execute(commandRequest(userId, threadId));
     const sandbox = client.onlySandbox();
@@ -1878,7 +1940,7 @@ describe("thread E2B runtime manager", () => {
       deployment: config.E2B_DEPLOYMENT_ID,
       template_ref: config.E2B_TEMPLATE,
       telegram_user_id: String(userId),
-      thread_id: String(threadId),
+      thread_id: threadId,
     };
     const discovered = await client.create(metadata);
     let winnerId = "";
@@ -1965,7 +2027,7 @@ describe("thread E2B runtime manager", () => {
 
 function commandRequest(
   userId: number,
-  threadId: number,
+  threadId: string,
   threadFiles: SandboxThreadFile[] = [],
 ): SandboxCommandRequest {
   return {
@@ -1983,7 +2045,7 @@ function commandRequest(
 }
 
 function descriptor(
-  fileId: number,
+  fileId: string,
   name: string,
   telegramFileId: string,
   refId: number,

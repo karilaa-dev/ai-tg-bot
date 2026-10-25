@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
 import path from "node:path";
 import tailwind from "bun-plugin-tailwind";
@@ -15,8 +16,8 @@ const assets = new Map(build.outputs.map(output => [`/${path.basename(output.pat
 const html = build.outputs.find(output => output.path.endsWith(".html"));
 assert(html);
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAHgAAABICAIAAACyfKYoAAADKUlEQVR42u3XR3baUBTG8buwjE2T4LmA0E6yA+OWzNJ7770X94J7L3u4GWSQBYQTHRTMZ8fmSboY557zG+vd7z8CujDKSgBdHGUlgC6NsRJAl8dYCaAr46wE0NVxVgLo2gQrAXR9gpUAujHJSgDdnGQlgG5NsRJAt6dYCaA706wE0N1pVgLo3gwrAXR/hpUAejDLSgA9nGUlgB7NsRJAj+dYCaAnVVYC6GmVlQB6Ns9KAD2fZyWAXiywEkAvF1gJoFeLrATQ60VWAujNEisB9HaJlQB6t8xKAL1fZiWAPqywEkAfV1gJoE+rrATQ51VWAujLGisB9HWNlQD6ts5KAH1fZyWARjdY2I+fvxrJH9CWvTS2wTKa+iKxS9qyl8Y3OVFH9kVJn9SWvTSxyUmw6IsSuq0te2lyi2MUS18U75Ft2UtTWxxdQn1RLNe2ZS9Nb3MUFk86/Sbk9huLL0S8WXiv329qaGabLVi8l2vo2xg6ZPFNu+Nl9gZ9QzS7w8dn07diQg5wQb5iU7ylFYnuLVdMjQ9oboePZPFetqFvq6FDFu8eZ04Se4O+oQNCV3f5MHZ9Q9FDBwpWxf+xK8a9XsV4+xMfGnp+l5tYvJcZMFmQAw5wQR4UGljchgOj7/UGTKMy8AEt7HHA7vdWLXFAJrR17ppwaZS9pf2JWwi9uMdR+rYltKmzuNxub61vyDJ0S++lB00gA7IgBxzggjwoAAMS+n9UHDQl4IEy8AG11PfEhu6ui6tvSCJ0atAEOih0lOJ9DX0lQqeGTJM0yIAsyAEHuCAPCsCAbtBTd3TfIRMqghLwQBn44G/oriET6OjQZ85Wo0sqdJi4Q0PHEvcwsYXuGjZNUiANMiALcsABLsiDAjB/JNr3gOLDJuCBMvBBp4YWrtzYWkOf8NAjpkkKpEEGZEEOOMAFeVAAZqRNoUdMjQfKwAedGlq+dVD5fwxtRIqHfSOHPmeapEAaZEAW5IADXJAHBWBAd108v6PPmVAJeKAMfHDaQod6QC/oA0WgoTsu9HnTJAXSIAOyIAcc4II8KAADukEP6AV9oAhKwANl4AMNraFPV+jfNCfbk4IrgtIAAAAASUVORK5CYII=", "base64");
-const ids = [168, 169, 170, 171];
-const gallery = `root = Stack([Grid([${ids.map(id => `Image("file:${id}", "Restaurant ${id}", "Bellevue")`).join(",")}])])`;
+const fileIndices = [168, 169, 170, 171];
+const gallery = `root = Stack([Grid([${fileIndices.map(index => `Image("file:${fixtureUuid(index)}", "Restaurant ${index}", "Bellevue")`).join(",")}])])`;
 let source = gallery;
 // "shared" adds a separate ordinary message with the same file, the only remaining second view of a gallery image.
 type RecoveryScenario = { name: string; view: "ordinary" | "gallery" | "shared"; failure: "temporary" | "oversized" | "disabled" | "sandbox"; trigger: "gallery" | "attachment" };
@@ -29,16 +30,16 @@ let maxActive = 0;
 let rejected = 0;
 let firstBackoff = true;
 let slow = false;
-const requests: { user: string | null; fileId: number; url: string; method: string }[] = [];
+const requests: { user: string | null; fileId: string; url: string; method: string }[] = [];
 const profile = (id: number) => ({ id, name: id === 1001 ? "Alice" : "Bob", username: null });
-const thread = (id: number): ChatThread => ({ id, userId: userId ?? 1001, title: id === 157 ? "Bellevue gallery" : "Other conversation", origin: "web", topicId: null,
-  parentThreadId: null, forkPointMessageId: null, archived: false, lastActivity: 1, activity: null, unread: false, lastMessageId: id === 157 ? 320 : null });
-const attachment = (id: number) => ({ id, name: `restaurant-${id}.png`, size: recovery?.failure === "oversized" ? 3 * 1024 * 1024 : png.length, mimeType: "image/png", kind: "image" as const, caption: null });
-const message = (id: number, text: string): WebMessage => ({ id, threadId: 157, role: "assistant", text, thinking: null, createdAt: 1, attachments: [] });
-const history = (id: number): ChatHistory => ({ user: { ...profile(userId ?? 1001), lastActivity: 1, threadCount: 2 }, thread: thread(id), chain: [],
-  messages: id !== 157 ? [] : [{ ...message(291, recovery ? `Recovery revision ${historyRevision}` : "Four Bellevue restaurant photographs."),
-    openui: recovery ? recovery.view !== "ordinary" ? 'root = Stack([Image("file:168", "Restaurant 168", "Bellevue")])' : undefined : source,
-    attachments: (recovery ? [168] : ids).map(attachment) },
+const thread = (id: string): ChatThread => ({ id, userId: userId ?? 1001, title: id === fixtureUuid(157) ? "Bellevue gallery" : "Other conversation", origin: "web", topicId: null,
+  parentThreadId: null, forkPointMessageId: null, archived: false, lastActivity: 1, activity: null, unread: false, lastMessageId: id === fixtureUuid(157) ? 320 : null });
+const attachment = (index: number) => ({ id: fixtureUuid(index), name: `restaurant-${index}.png`, size: recovery?.failure === "oversized" ? 3 * 1024 * 1024 : png.length, mimeType: "image/png", kind: "image" as const, caption: null });
+const message = (id: number, text: string): WebMessage => ({ id, threadId: fixtureUuid(157), role: "assistant", text, thinking: null, createdAt: 1, attachments: [] });
+const history = (id: string): ChatHistory => ({ user: { ...profile(userId ?? 1001), lastActivity: 1, threadCount: 2 }, thread: thread(id), chain: [],
+  messages: id !== fixtureUuid(157) ? [] : [{ ...message(291, recovery ? `Recovery revision ${historyRevision}` : "Four Bellevue restaurant photographs."),
+    openui: recovery ? recovery.view !== "ordinary" ? `root = Stack([Image("file:${fixtureUuid(168)}", "Restaurant 168", "Bellevue")])` : undefined : source,
+    attachments: (recovery ? [168] : fileIndices).map(attachment) },
     ...recovery?.view === "shared" ? [{ ...message(292, "The same photograph as an ordinary attachment."), attachments: [attachment(168)] }] : [],
     ...Array.from({ length: 20 }, (_, index) => message(300 + index, `Later message ${index}.\n\nA paragraph that keeps the older gallery outside the current viewport.`)),
     message(320, "Latest conversation message.")], draft: null, olderCursor: null, newerCursor: null, autoLoadMaxBytes: recovery?.failure === "disabled" ? 0 : 2 * 1024 * 1024, maxFileBytes: 50 * 1024 * 1024 });
@@ -54,11 +55,11 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
     if (userId === null || request.headers.get("X-Chat-User") !== String(userId)) return Response.json({ error: "Session ended" }, { status: 401 });
     if (url.pathname === "/api/chat/settings") return Response.json({ language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true });
     if (url.pathname === "/api/chat/avatar") return new Response(null, { status: 204 });
-    if (url.pathname === "/api/chat/threads") return Response.json({ items: [thread(157), thread(158)], nextOffset: null });
-    if (url.pathname.endsWith("/messages")) { historyRevision++; return Response.json(history(Number(url.pathname.split("/")[4]))); }
+    if (url.pathname === "/api/chat/threads") return Response.json({ items: [thread(fixtureUuid(157)), thread(fixtureUuid(158))], nextOffset: null });
+    if (url.pathname.endsWith("/messages")) { historyRevision++; return Response.json(history(url.pathname.split("/")[4]!)); }
     if (url.pathname.endsWith("/read")) return Response.json({ readMessageId: 320, unread: false });
     if (url.pathname.includes("/files/")) {
-      const fileId = Number(url.pathname.split("/").at(-1));
+      const fileId = url.pathname.split("/").at(-1)!;
       requests.push({ user: request.headers.get("X-Chat-User"), fileId, url: url.pathname + url.search, method: request.method });
       if (recovery) {
         if (url.searchParams.get("mode") === "auto") {
@@ -82,7 +83,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
       active++; maxActive = Math.max(active, maxActive);
       await Bun.sleep(slow ? 1_000 : 120);
       active--;
-      if (fileId === 170 && firstBackoff) { firstBackoff = false; return Response.json({ error: "Temporary busy" }, { status: 429, headers: { "Retry-After": "0.1" } }); }
+      if (fileId === fixtureUuid(170) && firstBackoff) { firstBackoff = false; return Response.json({ error: "Temporary busy" }, { status: 429, headers: { "Retry-After": "0.1" } }); }
       return new Response(png, { headers: { "Content-Type": "image/png" } });
     }
     return Response.json({ error: "Unexpected fixture request" }, { status: 404 });
@@ -91,7 +92,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
 } });
 
 if (process.argv.includes("--preview")) {
-  console.log(`Chat media preview: ${server.url}?thread=157`);
+  console.log(`Chat media preview: ${server.url}?thread=${fixtureUuid(157)}`);
 } else {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -105,7 +106,7 @@ if (process.argv.includes("--preview")) {
       URL.revokeObjectURL = value => { revoked.push(value); revoke(value); };
       Reflect.set(window, "mediaBlobs", { created, revoked });
     });
-    await page.goto(`${server.url}?thread=157`);
+    await page.goto(`${server.url}?thread=${fixtureUuid(157)}`);
     await page.getByText("Latest conversation message.", { exact: true }).waitFor();
     const viewport = page.locator(".chat-viewport");
     await page.waitForTimeout(300);
@@ -115,7 +116,7 @@ if (process.argv.includes("--preview")) {
     const images = page.locator('.chat-openui img');
     await page.waitForFunction(() => [...document.querySelectorAll('.chat-openui img')].filter(image => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0).length === 4);
     assert.equal(await images.count(), 4);
-    assert.deepEqual(await page.locator(".chat-openui a[download]").evaluateAll(links => links.map(link => link.getAttribute("download"))), ids.map(id => `restaurant-${id}.png`));
+    assert.deepEqual(await page.locator(".chat-openui a[download]").evaluateAll(links => links.map(link => link.getAttribute("download"))), fileIndices.map(index => `restaurant-${index}.png`));
     assert.equal(await page.locator('[data-message-id="291"] .chat-attachments').count(), 0, "Images the generated view mounted have no duplicate attachment rows or empty container");
     assert.equal(rejected, 0, "Four images never overflow the shared three-request server limit");
     assert.equal(maxActive, 3);
@@ -134,7 +135,7 @@ if (process.argv.includes("--preview")) {
     assert(await page.evaluate(() => { const blobs = Reflect.get(window, "mediaBlobs"); return blobs.revoked.length === 0; }), "Remount does not revoke cached URLs");
 
     // A valid but unreferenced definition must not hide its corresponding ordinary attachment.
-    source = 'root = Stack([Text("An ordinary reply")])\nunused = Image("file:168", "Unused", "")';
+    source = `root = Stack([Text("An ordinary reply")])\nunused = Image("file:${fixtureUuid(168)}", "Unused", "")`;
     await open("Other conversation"); await open("Bellevue gallery");
     await page.getByText("Latest conversation message.", { exact: true }).waitFor(); await top();
     await page.waitForFunction(() => document.querySelectorAll('.chat-attachments img').length === 4);
@@ -214,14 +215,14 @@ if (process.argv.includes("--preview")) {
         await recoveryPage.getByText(`Recovery revision ${next}`, { exact: true }).waitFor();
         await recoveryPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       };
-      await recoveryPage.goto(`${server.url}?thread=157`);
+      await recoveryPage.goto(`${server.url}?thread=${fixtureUuid(157)}`);
       await recoveryPage.getByText("Latest conversation message.", { exact: true }).waitFor();
       await scrollTop();
       const trigger = recoveryPage.locator(scenario.trigger === "gallery" ? ".chat-openui" : ".chat-attachments");
       const button = trigger.getByRole("button", { name: scenario.failure === "sandbox" ? "Start sandbox and load" : scenario.trigger === "gallery" ? "Try again" : "Retry", exact: true });
       await button.waitFor();
-      assert.deepEqual(requests.map(item => item.method + " " + item.url), ["GET /api/chat/threads/157/files/168?mode=auto"], `${scenario.name}: first request respects auto policy`);
-      const manualRequest = recoveryPage.waitForRequest(request => request.url().includes("/files/168?mode=download"));
+      assert.deepEqual(requests.map(item => item.method + " " + item.url), [`GET /api/chat/threads/${fixtureUuid(157)}/files/${fixtureUuid(168)}?mode=auto`], `${scenario.name}: first request respects auto policy`);
+      const manualRequest = recoveryPage.waitForRequest(request => request.url().includes(`/files/${fixtureUuid(168)}?mode=download`));
       await button.click();
       await manualRequest;
       await refreshHistory();

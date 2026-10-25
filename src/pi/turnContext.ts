@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { formatSkillsForPrompt, type InlineExtension, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { asRecord } from "../util/records.js";
+import { isUuid } from "../utils/uuid.js";
 
 export const TURN_CONTEXT_TYPE = "telegram-turn-context";
 export const CONTEXT_BASELINE_TYPE = "telegram-context-baseline";
@@ -51,11 +52,11 @@ function update(previous: Snapshot | undefined, next: Snapshot): Snapshot | unde
   }
   const files = (value: unknown) => new Map((Array.isArray(value) ? value : []).flatMap(item => {
     const file = asRecord(item);
-    return typeof file?.id === "number" ? [[file.id, file] as const] : [];
+    return file && isUuid(file.id) ? [[file.id, file] as const] : [];
   }));
   const before = files(previous.files), after = files(next.files);
-  const upsert = [...after].filter(([id, file]) => JSON.stringify(before.get(id)) !== JSON.stringify(file)).sort(([a], [b]) => a - b).map(([, file]) => file);
-  const remove = [...before.keys()].filter(id => !after.has(id)).sort((a, b) => a - b);
+  const upsert = [...after].filter(([id, file]) => JSON.stringify(before.get(id)) !== JSON.stringify(file)).sort(([a], [b]) => a.localeCompare(b)).map(([, file]) => file);
+  const remove = [...before.keys()].filter(id => !after.has(id)).sort();
   if (!Object.keys(set).length && !unset.length && !upsert.length && !remove.length) return;
   return { kind: "update", ...(Object.keys(set).length ? { set } : {}), ...(unset.length ? { unset } : {}),
     ...(upsert.length || remove.length ? { files: { upsert, remove } } : {}) };

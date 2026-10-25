@@ -17,6 +17,7 @@ import { cn } from "./lib/utils.js";
 import { ThinkingDetails } from "./thinking-details.js";
 import { ThreadActivity, activityLabel } from "./thread-activity.js";
 import { MessageUsage, ThreadUsage, UsageDashboard } from "./usage.js";
+import { isUuid } from "../../utils/uuid.js";
 
 async function get<T>(url: string, signal: AbortSignal): Promise<T> {
   return apiJson<T>(url, { signal });
@@ -35,13 +36,14 @@ function Failure({ message, retry }: { message: string; retry?: () => void }) {
 function selection() {
   const params = new URLSearchParams(location.search);
   const parse = (name: string) => { const value = Number(params.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
-  const threadId = parse("thread");
+  const thread = params.get("thread");
+  const threadId = thread !== null && isUuid(thread) ? thread : null;
   const usage = params.get("view") === "usage";
   return { userId: parse("user"), threadId, memories: Boolean(parse("user") && !threadId && params.get("view") === "memories"), codex: params.get("view") === "codex", allowedUsers: params.get("view") === "allowed-users", usage: !threadId && usage,
     threadUsage: Boolean(threadId && (params.get("usage") === "thread" || usage)) };
 }
 
-function usePages<T extends { id: number }>(url: string | null) {
+function usePages<T extends Pick<WebUser, "id"> | Pick<WebThread, "id">>(url: string | null) {
   const [items, setItems] = useState<T[]>([]);
   const [next, setNext] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -98,7 +100,7 @@ function App() {
   const user = users.items.find(u => u.id === selected.userId);
   useEffect(() => { const timeout = setTimeout(() => setQuery(search), 250); return () => clearTimeout(timeout); }, [search]);
   useEffect(() => { const pop = () => setSelected(selection()); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
-  const navigate = (userId: number | null, threadId: number | null, usage = false) => {
+  const navigate = (userId: number | null, threadId: string | null, usage = false) => {
     const params = new URLSearchParams();
     if (userId) params.set("user", String(userId));
     if (threadId) params.set("thread", String(threadId));
@@ -160,13 +162,13 @@ function App() {
   </div>;
 }
 
-function Transcript({ threadId, back, showUsage }: { threadId: number; back: () => void; showUsage: boolean }) {
+function Transcript({ threadId, back, showUsage }: { threadId: string; back: () => void; showUsage: boolean }) {
   const [data, setData] = useState<WebHistory | null>(null);
   const dataRef = useRef<WebHistory | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [files, setFiles] = useState(new Map<number, LoadedAttachment>());
+  const [files, setFiles] = useState(new Map<string, LoadedAttachment>());
   const [loader] = useState(() => new AttachmentLoader(threadId, setFiles));
   const controller = useRef<AbortController | null>(null);
   const fetching = useRef(false);

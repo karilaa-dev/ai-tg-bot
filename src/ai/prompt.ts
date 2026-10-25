@@ -19,7 +19,7 @@ const PLACEHOLDER_RE = /\{\{([a-z_]+)\}\}/gu;
 let templatePromise: Promise<string> | undefined;
 
 export interface PromptFileContext {
-  id: number;
+  id: string;
   name: string;
   type: string;
   mode: "chat reference" | "inline" | "searchable" | "sandbox source";
@@ -31,7 +31,7 @@ export async function renderThreadSessionContext(input: {
   user: UserRow;
   thread: ThreadRow;
   maxMessageId?: number;
-  fileIds?: number[];
+  fileIds?: string[];
   messageScopes?: MessageSearchScope[];
   now?: Date;
 }): Promise<string> {
@@ -119,8 +119,7 @@ function formatSessionContext(input: {
   threadTitle: string;
   files: PromptFileContext[];
 }): string {
-  const ordered = [...input.files].sort((a, b) => a.id - b.id);
-  const included = ordered.slice(-MAX_SYSTEM_PROMPT_FILES);
+  const included = input.files.slice(-MAX_SYSTEM_PROMPT_FILES);
   const json = JSON.stringify({
     user_name: truncate(input.userName, MAX_PROMPT_USER_NAME_CHARS),
     current_time: input.timedate,
@@ -135,7 +134,7 @@ function formatSessionContext(input: {
         ? truncate(singleLine(file.summary), MAX_PROMPT_FILE_SUMMARY_CHARS)
         : null,
     })),
-    omitted_file_count: ordered.length - included.length,
+    omitted_file_count: input.files.length - included.length,
   }, null, 2)
     .replaceAll("<", "\\u003c")
     .replaceAll(">", "\\u003e")

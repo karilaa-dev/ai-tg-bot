@@ -18,11 +18,11 @@ interface ActiveTurn {
 }
 
 export class ThreadTurnCoordinator {
-  private readonly draining = new Map<number, Promise<void>>();
-  private readonly active = new Map<number, ActiveTurn>();
-  private readonly drafts = new Map<number, TurnDraft>();
+  private readonly draining = new Map<string, Promise<void>>();
+  private readonly active = new Map<string, ActiveTurn>();
+  private readonly drafts = new Map<string, TurnDraft>();
   private readonly activity: TurnFrontend["activity"];
-  private readonly recovery: Promise<number[]>;
+  private readonly recovery: Promise<string[]>;
   private readonly ownerId = randomUUID();
   private readonly lifecycle = new AbortController();
   private recoveryPollTimer: NodeJS.Timeout | undefined;
@@ -50,7 +50,7 @@ export class ThreadTurnCoordinator {
     fileResolver: FileResolver;
     t(locale: Locale, key: string, params?: Record<string, string | number>): string;
     canUse?(userId: number): Promise<boolean>;
-    scheduleThreadTitle?(input: { threadId: number; chatId: number }): void;
+    scheduleThreadTitle?(input: { threadId: string; chatId: number }): void;
     awaitProcessingOnAccept?: boolean;
   }) {
     this.activity = input.frontend.activity;
@@ -65,7 +65,7 @@ export class ThreadTurnCoordinator {
 
   async accept(input: {
     userId: number;
-    threadId: number;
+    threadId: string;
     chatId: number;
     messageThreadId: number | null;
     locale: Locale;
@@ -107,7 +107,7 @@ export class ThreadTurnCoordinator {
     return accepted;
   }
 
-  async cancelActive(threadId: number): Promise<boolean> {
+  async cancelActive(threadId: string): Promise<boolean> {
     await this.recovery;
     const active = this.active.get(threadId);
     if (active && !active.finalizer.canCancel()) return false;
@@ -134,11 +134,11 @@ export class ThreadTurnCoordinator {
     return true;
   }
 
-  draft(threadId: number): TurnDraft | null {
+  draft(threadId: string): TurnDraft | null {
     return this.drafts.get(threadId) ?? null;
   }
 
-  async waitForIdle(threadId?: number, includeActivity = true): Promise<void> {
+  async waitForIdle(threadId?: string, includeActivity = true): Promise<void> {
     await this.recovery;
     while (true) {
       const tasks = threadId === undefined
@@ -169,7 +169,7 @@ export class ThreadTurnCoordinator {
   }
 
   async withThreadBarrier<T>(
-    threadId: number,
+    threadId: string,
     operation: "fork" | "compact",
     callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
@@ -291,7 +291,7 @@ export class ThreadTurnCoordinator {
     await this.activity.shutdown();
   }
 
-  private async recoverUntilReady(): Promise<number[]> {
+  private async recoverUntilReady(): Promise<string[]> {
     let consecutiveFailures = 0;
     while (this.accepting) {
       try {
@@ -313,7 +313,7 @@ export class ThreadTurnCoordinator {
     return [];
   }
 
-  private async recover(): Promise<number[]> {
+  private async recover(): Promise<string[]> {
     const now = Date.now();
     const interrupted = await this.input.repos.turnRuns.interruptStaleRunning({
       now,
@@ -358,7 +358,7 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private schedule(threadId: number): void {
+  private schedule(threadId: string): void {
     if (this.draining.has(threadId)) return;
     const task = this.drainThread(threadId);
     this.draining.set(threadId, task);
@@ -381,7 +381,7 @@ export class ThreadTurnCoordinator {
     });
   }
 
-  private async drainThread(threadId: number): Promise<void> {
+  private async drainThread(threadId: string): Promise<void> {
     let consecutiveFailures = 0;
     while (this.accepting) {
       try {
@@ -419,7 +419,7 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private async finishDrain(threadId: number, retry = false): Promise<void> {
+  private async finishDrain(threadId: string, retry = false): Promise<void> {
     this.draining.delete(threadId);
     if (!this.accepting) return;
     try {
@@ -611,7 +611,7 @@ export class ThreadTurnCoordinator {
   }
 
   private async releaseThreadBarrierWithRetry(
-    threadId: number,
+    threadId: string,
     ownerId: string,
     operation: "fork" | "compact",
   ): Promise<boolean | undefined> {

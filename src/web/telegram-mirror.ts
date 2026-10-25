@@ -26,7 +26,7 @@ export function replyToWebMessage(api: Api, chatId: number, messageId: number): 
       : payload, signal));
 }
 
-const webContent = z.object({ webText: z.string(), files: z.array(z.object({ id: z.number().int().positive() })).optional() });
+const webContent = z.object({ webText: z.string(), files: z.array(z.object({ id: z.uuid() })).optional() });
 
 export async function mirrorWebMessage(input: {
   api: Api; run: TurnRunRow; message: MessageRow; title: string; repos: Repos; resolver: FileResolver; signal: AbortSignal;

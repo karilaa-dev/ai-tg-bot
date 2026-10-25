@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { GenerativeResponse } from "../../src/web/client/openui-response.js";
@@ -6,21 +7,21 @@ import { savedRestaurantOpenUi } from "./openui-saved-fixture.js";
 import { openUiVisualExamples } from "./openui-visual-fixtures.js";
 import "../../src/web/client/style.css";
 
-const imageSource = { threadId: 7, source: { url: chatApi.fileUrl, fetch: chatFetch } };
-const visuals = 'root = Stack([Grid([Image("file:42", "A saved route photograph", "Photograph attached to this chat"), Card("At a glance", [Metric("Distance", "9 km", "Valley route"), Metric("Time", "3 hours", "With breaks")])]), BarChart("Walking distance", ["Valley", "Ridge"], ["9", "14"], "km"), Steps("Day plan", ["09:00 · Trailhead", "12:00 · Lake"], ["Start the walk", "Pause for lunch"]), Button("Compare the climbs", "Compare the elevation gain of these routes.")])';
+const imageSource = { threadId: fixtureUuid(7), source: { url: chatApi.fileUrl, fetch: chatFetch } };
+const visuals = `root = Stack([Grid([Image("file:${fixtureUuid(42)}", "A saved route photograph", "Photograph attached to this chat"), Card("At a glance", [Metric("Distance", "9 km", "Valley route"), Metric("Time", "3 hours", "With breaks")])]), BarChart("Walking distance", ["Valley", "Ridge"], ["9", "14"], "km"), Steps("Day plan", ["09:00 · Trailhead", "12:00 · Lake"], ["Start the walk", "Pause for lunch"]), Button("Compare the climbs", "Compare the elevation gain of these routes.")])`;
 const examples: Record<string, string> = {
   visuals,
   restaurants: savedRestaurantOpenUi,
   explanation: openUiVisualExamples.combined,
-  unsafe: 'root = Stack([Image("file:43", "Unsafe format", "Description remains available")])',
-  denied: 'root = Stack([Image("file:44", "Private picture", "Description remains available")])',
-  expired: 'root = Stack([Image("file:45", "Expired account", "Description remains available")])',
-  slow: 'root = Stack([Image("file:46", "Slow picture", "Description remains available")])',
-  sandbox: 'root = Stack([Image("file:47", "Sleeping sandbox", "Description remains available")])',
-  large: 'root = Stack([Image("file:48", "Large picture", "Description remains available")])',
-  broken: 'root = Stack([Image("file:49", "Broken picture", "Description remains available")])',
+  unsafe: `root = Stack([Image("file:${fixtureUuid(43)}", "Unsafe format", "Description remains available")])`,
+  denied: `root = Stack([Image("file:${fixtureUuid(44)}", "Private picture", "Description remains available")])`,
+  expired: `root = Stack([Image("file:${fixtureUuid(45)}", "Expired account", "Description remains available")])`,
+  slow: `root = Stack([Image("file:${fixtureUuid(46)}", "Slow picture", "Description remains available")])`,
+  sandbox: `root = Stack([Image("file:${fixtureUuid(47)}", "Sleeping sandbox", "Description remains available")])`,
+  large: `root = Stack([Image("file:${fixtureUuid(48)}", "Large picture", "Description remains available")])`,
+  broken: `root = Stack([Image("file:${fixtureUuid(49)}", "Broken picture", "Description remains available")])`,
   malicious: 'root = Stack([Image("https://outside.invalid/track.png", "External picture", "Never load this")])',
-  partial: 'root = Stack([Image("file:42",',
+  partial: `root = Stack([Image("file:${fixtureUuid(42)}",`,
   literal: 'root = Stack([Text("<script>window.injected = true</script>")])',
 };
 

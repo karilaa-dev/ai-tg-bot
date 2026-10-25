@@ -31,7 +31,7 @@ describe.each(["workspace", "bytes", "spooled bytes"])("saved assistant %s files
   let routes: ReturnType<typeof createWebRoutes>;
   let controller: AbortController;
   let cookie: string;
-  let generatedFileId: number;
+  let generatedFileId: string;
   let runs: number;
 
   beforeEach(async () => {
@@ -178,7 +178,7 @@ describe.each([false, true])("workspace photos with OpenUI=%s", withOpenUi => {
   let routes: ReturnType<typeof createWebRoutes>;
   let controller: AbortController;
   let cookie: string;
-  let generatedFileId: number;
+  let generatedFileId: string;
   let openui: string | undefined;
   let disposed: boolean;
   let runtime: ReturnType<typeof workspaceRuntime>;

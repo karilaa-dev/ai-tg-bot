@@ -106,7 +106,7 @@ export class ConversationRepository {
     })), offset, limit);
   }
 
-  async scope(threadId: number) {
+  async scope(threadId: string) {
     const thread = await this.repos.threads.get(threadId);
     if (!thread || thread.user_id === this.botUserId) throw new WebNotFound();
     const chain = await this.repos.threads.chain(thread);
@@ -114,7 +114,7 @@ export class ConversationRepository {
     return { thread, chain, scopes };
   }
 
-  async history(threadId: number, before?: number, after?: number) {
+  async history(threadId: string, before?: number, after?: number) {
     const { thread, chain, scopes } = await this.scope(threadId);
     // Capture the acknowledgement bound before rendering. A delivery that
     // completes during projection must be acknowledged on a subsequent read.
@@ -132,7 +132,7 @@ export class ConversationRepository {
     const transcripts = selected.some(m => m.text_plain.includes("[Audio transcript preview;"))
       ? await this.savedTranscripts(selected.map(m => m.id)) : [];
     const pendingTurnIds = selected.flatMap(m => attachmentDeliveryTurnId(m) ?? []);
-    const delivering = pendingTurnIds.length ? await this.db.query<{ id: number; thread_id: number }>(sql`
+    const delivering = pendingTurnIds.length ? await this.db.query<{ id: number; thread_id: string }>(sql`
       select id, thread_id from turn_runs where id in (${valueList(pendingTurnIds)})
         and status in ('running', 'awaiting_delivery') and lease_expires_at > ${Date.now()}
     `) : [];
@@ -169,10 +169,10 @@ export class ConversationRepository {
     return new Map(rows.map(row => [Number(row.id), Number(row.started)]));
   }
 
-  private async threadActivities(threadIds: number[]): Promise<Map<number, WebThreadActivity>> {
+  private async threadActivities(threadIds: string[]): Promise<Map<string, WebThreadActivity>> {
     if (!threadIds.length) return new Map();
     const rows = await this.db.query<{
-      id: number; queued: number; status: string | null; cancelled: number | null; lease: number | null; started: number | null;
+      id: string; queued: number; status: string | null; cancelled: number | null; lease: number | null; started: number | null;
     }>(sql`
       select r.thread_id as id,
         sum(case when r.status = 'queued' then 1 else 0 end) as queued,
@@ -200,7 +200,7 @@ export class ConversationRepository {
     if (!messageIds.length) return result;
     const visibleOwner = messageScopePredicate(sql`owner.thread_id`, sql`owner.id`, scopes.map(scope => scope.threadId), scopes);
     const rows = await this.db.query<{
-      messageId: number; fileId: number; name: string | null; caption: string | null; description: string | null;
+      messageId: number; fileId: string; name: string | null; caption: string | null; description: string | null;
     }>(sql`
       select m.id as "messageId", f.id as "fileId", mf.caption,
         coalesce(mf.display_name, case when ${visibleOwner} then f.name else null end) as name,
@@ -210,7 +210,7 @@ export class ConversationRepository {
       )
       left join message_files mf on mf.file_id = f.id and mf.message_id = m.id
       left join messages owner on owner.id = f.message_id
-      where m.id in (${valueList(messageIds)}) order by m.id, f.id
+      where m.id in (${valueList(messageIds)}) order by m.id, f.created_at, f.id
     `);
     // Empty scopes provide generic fallback names without borrowing another message's alias.
     const projected = await this.repos.files.listByIds([...new Set(rows.map(row => row.fileId))], []);
@@ -243,9 +243,9 @@ export class ConversationRepository {
     `);
   }
 
-  async file(threadId: number, fileId: number) {
+  async file(threadId: string, fileId: string) {
     const { chain, scopes } = await this.scope(threadId);
-    const rows = await this.db.query<{ id: number }>(sql`
+    const rows = await this.db.query<{ id: string }>(sql`
       select f.id from files f join messages m on f.message_id = m.id or exists (
         select 1 from message_files mf where mf.file_id = f.id and mf.message_id = m.id
       ) where f.id = ${fileId}

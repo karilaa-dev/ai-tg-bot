@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it } from "vitest";
 import { finishResponseOpenUi } from "../../src/ai/openui.js";
 import { openUiExamples, openUiInstructions } from "../../src/openui/library.js";
@@ -24,7 +25,7 @@ describe("OpenUI admission", () => {
 
   it("keeps every rich visual prompt example valid against the real SDK and validator", () => {
     for (const example of openUiExamples) expect(validateOpenUi(validateOpenUi(example))).toBe(validateOpenUi(example));
-    expect(validateOpenUi('root = Stack([Grid([Card("Lake", [Image("file:42", "Lake at sunrise", "Trail photo")]), Metric("Distance", "9 km", "Valley route")])])')).toContain('Image("file:42"');
+    expect(validateOpenUi('root = Stack([Grid([Card("Lake", [Image("file:00000000-0000-4000-8000-000000000042", "Lake at sunrise", "Trail photo")]), Metric("Distance", "9 km", "Valley route")])])')).toContain('Image("file:00000000-0000-4000-8000-000000000042"');
   });
 
   it.each([
@@ -33,10 +34,12 @@ describe("OpenUI admission", () => {
     'root = Stack([Image("data:image/svg+xml,evil", "Alt", "Caption")])',
     'root = Stack([Image("blob:https://example.com/fake", "Alt", "Caption")])',
     'root = Stack([Image("file:0", "Alt", "Caption")])',
+    'root = Stack([Image("file:42", "Alt", "Caption")])',
+    'root = Stack([Image("file:not-a-uuid", "Alt", "Caption")])',
     'root = Stack([Image("file:9007199254740992", "Alt", "Caption")])',
-    'root = Stack([Image("file:42?token=secret", "Alt", "Caption")])',
-    'root = Stack([Image("file:42", "", "Caption")])',
-    'root = Stack([Image("file:42", "Alt")])',
+    'root = Stack([Image("file:00000000-0000-4000-8000-000000000042?token=secret", "Alt", "Caption")])',
+    'root = Stack([Image("file:00000000-0000-4000-8000-000000000042", "", "Caption")])',
+    'root = Stack([Image("file:00000000-0000-4000-8000-000000000042", "Alt")])',
     'root = Stack([Text("visible", "silently ignored extra argument")])',
     'root = Stack([Metric("Count", "12", "Context", "red")])',
     'root = Stack([BarChart("Distance", ["A", "B"], ["5"], "km")])',
@@ -46,10 +49,10 @@ describe("OpenUI admission", () => {
     'root = Stack([BarChart("Distance", ["A"], ["1e999"], "km")])',
     'root = Stack([Steps("Plan", ["First", "Second"], ["Only one" ])])',
     'root = Stack([Grid([Grid([Metric("Count", "12", "Context")])])])',
-    'root = Stack([Card("Nested", [Grid([Image("file:1", "Alt", "")])])])',
+    'root = Stack([Card("Nested", [Grid([Image("file:00000000-0000-4000-8000-000000000001", "Alt", "")])])])',
     'root = Stack([Grid([Text("Wrong child")])])',
     'root = Stack([constructor])\nconstructor = Text("Reserved")',
-    `root = Stack([Grid([${Array.from({ length: 6 }, () => 'Image("file:1", "Alt", "")').join(",")}]),Grid([${Array.from({ length: 6 }, () => 'Image("file:2", "Alt", "")').join(",")}]),Image("file:3","Alt","")])`,
+    `root = Stack([Grid([${Array.from({ length: 6 }, () => 'Image("file:00000000-0000-4000-8000-000000000001", "Alt", "")').join(",")}]),Grid([${Array.from({ length: 6 }, () => 'Image("file:00000000-0000-4000-8000-000000000002", "Alt", "")').join(",")}]),Image("file:00000000-0000-4000-8000-000000000003","Alt","")])`,
   ])("rejects unsafe images, malformed visuals and discarded arguments: %.85s", value => {
     expect(safeOpenUi(value)).toBeUndefined();
   });
@@ -122,7 +125,7 @@ describe("OpenUI admission", () => {
 
   it("serves saved assistant UI while preserving fallback text and ignoring user payloads", () => {
     const message: MessageRow = {
-      id: 1, thread_id: 2, role: "assistant", kind: "text", text_plain: "Summary", thinking: null,
+      id: 1, thread_id: fixtureUuid(2), role: "assistant", kind: "text", text_plain: "Summary", thinking: null,
       content_json: JSON.stringify({ text: "Summary", openui: source }), tg_message_id: null, pi_entry_id: null, created_at: 1,
     };
     expect(messageView(message, [])).toMatchObject({ text: "Summary", openui: validateOpenUi(source) });

@@ -1,5 +1,6 @@
 import { AccessControl } from "../../src/access/control.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { serve, type Server } from "bun";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
@@ -27,7 +28,7 @@ type StatusMock = ReturnType<typeof vi.fn<() => Promise<CodexStatus>>>;
 let codex: { status: StatusMock; start: StatusMock; cancel: StatusMock; stop: ReturnType<typeof vi.fn<() => Promise<void>>> };
 const request = (pathname: string, init?: RequestInit) => fetch(new URL(pathname, server.url), init);
 const signIn = (userId = adminId) => login.signIn(server.url, userId);
-const adminPaths = ["/api/users", "/api/users/1/threads", "/api/users/1/memories", "/api/threads/1/messages", "/api/usage", "/api/threads/1/files/1", "/api/admin/codex", "/api/admin/allowed-users"];
+const adminPaths = ["/api/users", "/api/users/1/threads", "/api/users/1/memories", `/api/threads/${fixtureUuid(1)}/messages`, "/api/usage", `/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`, "/api/admin/codex", "/api/admin/allowed-users"];
 
 beforeAll(async () => { login = await fakeTelegramLogin(); });
 beforeEach(async () => {
@@ -74,7 +75,7 @@ it("blocks every conversation, attachment and account method before reading priv
       if (method === "HEAD") expect(await response.text()).toBe("");
     }
   }
-  for (const pathname of ["/api/threads/1/files/1?mode=download&sandbox=start", "/api/admin/codex/login"]) {
+  for (const pathname of [`/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}?mode=download&sandbox=start`, "/api/admin/codex/login"]) {
     expect((await request(pathname, { method: "POST", headers: mutationHeaders })).status).toBe(401);
   }
   expect((await request("/api/admin/codex/login", { method: "DELETE", headers: mutationHeaders })).status).toBe(401);
@@ -104,6 +105,19 @@ it("admits only listed Telegram accounts and tells the client who is an admin", 
   expect((await request("/api/auth/session", { headers: { Cookie: admin } })).status).toBe(404);
 });
 
+it("rejects non-UUID thread and file IDs before querying admin data", async () => {
+  const headers = { ...mutationHeaders, Cookie: await signIn() };
+  for (const id of ["1", "not-a-uuid", "00000000-0000-4000-8000-00000000000g"]) {
+    for (const pathname of [`/api/threads/${id}/messages`, `/api/threads/${id}/files/${fixtureUuid(1)}`, `/api/threads/${fixtureUuid(1)}/files/${id}`, `/api/usage?thread=${id}`]) {
+      for (const method of ["GET", "HEAD"]) expect((await request(pathname, { method, headers })).status).toBe(400);
+    }
+  }
+  expect(repository.history).not.toHaveBeenCalled();
+  expect(repository.usageReport).not.toHaveBeenCalled();
+  expect(repository.file).not.toHaveBeenCalled();
+  expect(resolver).not.toHaveBeenCalled();
+});
+
 it("ends admin access when the Telegram session signs out or expires", async () => {
   const cookie = await signIn();
   const signOut = await request("/api/chat/session", { method: "DELETE", headers: { "X-Chat-Request": "1", "X-Chat-User": String(adminId), Cookie: cookie } });
@@ -131,7 +145,7 @@ it("sends a finished admin sign-in back to the admin page", async () => {
 describe("same-origin mutations", () => {
   it("rejects cross-site or same-site requests and requires the custom header", async () => {
     const cookie = await signIn();
-    const paths = [["/api/admin/codex/login", "POST"], ["/api/admin/codex/login", "DELETE"], ["/api/admin/allowed-users", "POST"], ["/api/admin/allowed-users/42", "DELETE"], ["/api/threads/1/files/1?mode=download&sandbox=start", "POST"]] as const;
+    const paths = [["/api/admin/codex/login", "POST"], ["/api/admin/codex/login", "DELETE"], ["/api/admin/allowed-users", "POST"], ["/api/admin/allowed-users/42", "DELETE"], [`/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}?mode=download&sandbox=start`, "POST"]] as const;
     for (const [pathname, method] of paths) {
       for (const extra of [{ "X-Admin-Request": "" }, { "Sec-Fetch-Site": "cross-site" }, { "Sec-Fetch-Site": "same-site" }, { Origin: "https://attacker.test" }, { Origin: "null" }, { Origin: "https://attacker.test", "X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "https" }] as Record<string, string>[]) {
         const response = await request(pathname, { method, headers: { ...mutationHeaders, Cookie: cookie, ...extra } });
@@ -209,7 +223,7 @@ it("revokes existing member sessions for reads, mutations and attachments, even 
   const admin = await signIn();
   expect((await request(`/api/admin/allowed-users/${memberId}`, { method: "DELETE", headers: { ...mutationHeaders, Cookie: admin } })).status).toBe(200);
   expect(await (await request("/api/chat/session", { headers: { Cookie: member } })).json()).toMatchObject({ authenticated: false });
-  for (const path of ["/api/chat/threads", "/api/chat/settings", "/api/chat/threads/1/files/1"]) {
+  for (const path of ["/api/chat/threads", "/api/chat/settings", `/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`]) {
     expect((await request(path, { headers: { Cookie: member, "X-Chat-User": String(memberId) } })).status).toBe(401);
   }
   expect((await request("/api/chat/threads", { method: "POST", headers: { "X-Chat-Request": "1", "X-Chat-User": String(memberId), Cookie: member, "Content-Type": "application/json" }, body: '{}' })).status).toBe(401);

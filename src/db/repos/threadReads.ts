@@ -14,12 +14,12 @@ export interface ThreadReadState {
 export class ThreadReadsRepo {
   constructor(private readonly db: SqlExecutor) {}
 
-  async states(userId: number, threadIds: number[]): Promise<Map<number, ThreadReadState>> {
+  async states(userId: number, threadIds: string[]): Promise<Map<string, ThreadReadState>> {
     if (!threadIds.length) return new Map();
     const whitespace = " \t\n\r\v\f";
     const text = this.db.dialect === "sqlite" ? sql`trim(m.text_plain, ${whitespace})` : sql`btrim(m.text_plain, ${whitespace})`;
     const rows = await this.db.query<{
-      id: number; readMessageId: number | null; lastMessageId: number | null; unread: number;
+      id: string; readMessageId: number | null; lastMessageId: number | null; unread: number;
       pendingId: number | null; priorMessageId: number | null; turnId: number | null; lease: number | null;
       content: string | null; hasText: number | null; hasFiles: number | null;
     }>(sql`
@@ -62,7 +62,7 @@ export class ThreadReadsRepo {
           where previous.root_id = s.id and previous.id < p.id) as "priorMessageId"
       from summaries s left join visible_messages p on p.root_id = s.id and p.turn_id is not null
     `);
-    const result = new Map<number, ThreadReadState>();
+    const result = new Map<string, ThreadReadState>();
     const now = Date.now();
     for (const row of rows) {
       const state = result.get(row.id) ?? {
@@ -88,7 +88,7 @@ export class ThreadReadsRepo {
     return result;
   }
 
-  async markRead(userId: number, threadId: number, messageId: number): Promise<ThreadReadState | undefined> {
+  async markRead(userId: number, threadId: string, messageId: number): Promise<ThreadReadState | undefined> {
     if (!Number.isSafeInteger(messageId) || messageId <= 0) return undefined;
     return this.db.transaction(async tx => {
       const threads = new ThreadsRepo(tx);
@@ -113,7 +113,7 @@ export class ThreadReadsRepo {
     });
   }
 
-  async markCurrentRead(userId: number, threadId: number): Promise<void> {
+  async markCurrentRead(userId: number, threadId: string): Promise<void> {
     const state = (await this.states(userId, [threadId])).get(threadId);
     if (state && state.lastMessageId !== null) {
       await this.markRead(userId, threadId, state.lastMessageId);

@@ -40,7 +40,7 @@ async function fixture(options: {
   const inference = options.inference ?? { openui: OPENUI };
   const calls: Array<{ method: string; payload: unknown }> = [];
   const initialRows: MessageRow[] = [];
-  const fileIds: number[] = [];
+  const fileIds: string[] = [];
   const uploadBytes: Buffer[] = [];
   const pendingHistory: Awaited<ReturnType<BotChatService["history"]>>[] = [];
   const confirmed = vi.fn();

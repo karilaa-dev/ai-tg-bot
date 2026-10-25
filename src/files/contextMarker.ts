@@ -1,14 +1,16 @@
-const FILE_MARKER_RE = /\[\[chat-file:(\d+)\]\]/g;
+import { isUuid } from "../utils/uuid.js";
 
-export function chatFileMarker(fileId: number): string {
+const FILE_MARKER_RE = /\[\[chat-file:([^\[\]\r\n]+)\]\]/g;
+
+export function chatFileMarker(fileId: string): string {
   return `[[chat-file:${fileId}]]`;
 }
 
-export function chatFileIdsFromText(text: string): number[] {
-  const ids: number[] = [];
+export function chatFileIdsFromText(text: string): string[] {
+  const ids: string[] = [];
   for (const match of text.matchAll(FILE_MARKER_RE)) {
-    const id = Number(match[1]);
-    if (Number.isSafeInteger(id) && id > 0) ids.push(id);
+    const id = match[1];
+    if (isUuid(id)) ids.push(id);
   }
   return [...new Set(ids)];
 }

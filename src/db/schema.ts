@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "./sql.js";
 import type { DialectName } from "./types.js";
 import { refreshPostgresUserSearch } from "./userSearch.js";
+import { migrateUuidIdentifiers } from "./uuidMigration.js";
 
 export async function initializeSchema(db: SqlExecutor, dialect: DialectName): Promise<void> {
   if (dialect === "sqlite") {
@@ -10,6 +11,7 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
   }
   await db.transaction(async (tx) => {
     if (dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472615)`);
+    await migrateUuidIdentifiers(tx);
     if (dialect === "sqlite") await initializeSqlite(tx);
     else await initializePostgres(tx);
     if (dialect === "postgres") await tx.execute(sql`alter table users add column if not exists memory_enabled integer not null default 1 check(memory_enabled in (0, 1))`);
@@ -46,7 +48,7 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
         if (!columns.some(column => column.name === name)) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
       }
     }
-  });
+  }, { rebuildSqliteTables: true });
 }
 
 async function initializeSqlite(db: SqlExecutor): Promise<void> {
@@ -83,7 +85,7 @@ async function initializePostgres(db: SqlExecutor): Promise<void> {
   await db.execute(sql`
     create table if not exists message_search (
       message_id bigint primary key references messages(id) on delete cascade,
-      thread_id bigint not null,
+      thread_id text not null,
       text text not null,
       ts tsvector not null
     )
@@ -93,7 +95,7 @@ async function initializePostgres(db: SqlExecutor): Promise<void> {
   await db.execute(sql`
     create table if not exists chunk_search (
       chunk_id bigint primary key references file_chunks(id) on delete cascade,
-      file_id bigint not null,
+      file_id text not null,
       text text not null,
       ts tsvector not null
     )
@@ -165,10 +167,10 @@ async function initializeCommonTables(
   `));
   await db.execute(sql.raw(`
     create table if not exists threads (
-      id ${idType},
+      id text primary key not null,
       user_id ${intType} not null references users(tg_id),
       topic_id integer,
-      parent_thread_id ${intType},
+      parent_thread_id text,
       fork_point_message_id ${intType},
       title text not null,
       title_source text not null default 'explicit',
@@ -193,7 +195,7 @@ async function initializeCommonTables(
     create table if not exists thread_sandboxes (
       deployment_id text not null,
       user_id ${intType} not null references users(tg_id),
-      thread_id ${intType} not null references threads(id) on delete cascade,
+      thread_id text not null references threads(id) on delete cascade,
       sandbox_id text not null unique,
       created_at ${intType} not null,
       updated_at ${intType} not null,
@@ -215,7 +217,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists messages (
       id ${idType},
-      thread_id ${intType} not null references threads(id),
+      thread_id text not null references threads(id),
       role text not null,
       kind text not null,
       content_json text not null,
@@ -230,7 +232,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists thread_reads (
       user_id ${intType} not null references users(tg_id) on delete cascade,
-      thread_id ${intType} not null references threads(id) on delete cascade,
+      thread_id text not null references threads(id) on delete cascade,
       message_id ${intType} not null references messages(id),
       primary key(user_id, thread_id)
     )
@@ -238,7 +240,7 @@ async function initializeCommonTables(
   await db.execute(sql`create index if not exists messages_thread_activity_idx on messages(thread_id, created_at)`);
   await db.execute(sql.raw(`
     create table if not exists thread_operation_barriers (
-      thread_id ${intType} primary key references threads(id) on delete cascade,
+      thread_id text primary key references threads(id) on delete cascade,
       owner_id text not null,
       operation text not null,
       snapshot_message_id ${intType},
@@ -251,7 +253,7 @@ async function initializeCommonTables(
     create table if not exists turn_runs (
       id ${idType},
       user_id ${intType} not null references users(tg_id),
-      thread_id ${intType} not null references threads(id),
+      thread_id text not null references threads(id),
       user_message_id ${intType} not null unique references messages(id),
       chat_id ${intType} not null,
       message_thread_id ${intType},
@@ -303,9 +305,9 @@ async function initializeCommonTables(
   `);
   await db.execute(sql.raw(`
     create table if not exists files (
-      id ${idType},
+      id text primary key not null,
       user_id ${intType} not null references users(tg_id),
-      thread_id ${intType} not null references threads(id),
+      thread_id text not null references threads(id),
       message_id ${intType},
       type text not null,
       content_sha256 text,
@@ -326,8 +328,8 @@ async function initializeCommonTables(
     create table if not exists audio_transcripts (
       id text primary key,
       user_id ${intType} not null references users(tg_id) on delete cascade,
-      thread_id ${intType} not null references threads(id) on delete cascade,
-      source_file_id ${intType} references files(id) on delete cascade,
+      thread_id text not null references threads(id) on delete cascade,
+      source_file_id text references files(id) on delete cascade,
       source_message_id ${intType} references messages(id) on delete cascade,
       telegram_update_id ${intType},
       text text not null,
@@ -338,7 +340,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists file_sources (
       id ${idType},
-      file_id ${intType} not null references files(id) on delete cascade,
+      file_id text not null references files(id) on delete cascade,
       transport text not null,
       connection_key text not null,
       remote_key text not null,
@@ -353,7 +355,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists telegram_file_refs (
       id ${idType},
-      file_id ${intType} not null references files(id) on delete cascade,
+      file_id text not null references files(id) on delete cascade,
       telegram_file_id text not null,
       telegram_file_unique_id text,
       direction text not null,
@@ -373,9 +375,9 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists sandbox_file_restore_status (
       deployment_id text not null,
-      thread_id ${intType} not null references threads(id) on delete cascade,
+      thread_id text not null references threads(id) on delete cascade,
       sandbox_id text not null,
-      file_id ${intType} not null references files(id) on delete cascade,
+      file_id text not null references files(id) on delete cascade,
       telegram_file_ref_id ${intType} references telegram_file_refs(id) on delete set null,
       sandbox_name text not null,
       status text not null,
@@ -392,7 +394,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists file_chunks (
       id ${idType},
-      file_id ${intType} not null references files(id),
+      file_id text not null references files(id),
       idx integer not null,
       heading_path text,
       content text not null,
@@ -403,7 +405,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`
     create table if not exists message_files (
       message_id ${intType} not null references messages(id) on delete cascade,
-      file_id ${intType} not null references files(id) on delete cascade,
+      file_id text not null references files(id) on delete cascade,
       display_name text,
       caption text,
       created_at ${intType} not null,
@@ -413,7 +415,7 @@ async function initializeCommonTables(
   await db.execute(sql.raw(`create index if not exists message_files_file_id_idx on message_files(file_id)`));
   await db.execute(sql.raw(`
     create table if not exists web_file_blobs (
-      file_id ${intType} primary key references files(id) on delete cascade,
+      file_id text primary key references files(id) on delete cascade,
       bytes ${blobType} not null
     )
   `));

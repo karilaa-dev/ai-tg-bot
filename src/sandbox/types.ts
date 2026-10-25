@@ -1,5 +1,5 @@
 export interface SandboxThreadFile {
-  fileId: number;
+  fileId: string;
   messageId: number | null;
   name: string;
   mimeType: string | null;
@@ -20,7 +20,7 @@ export interface SandboxThreadFile {
 
 export interface SandboxCommandRequest {
   userId: number;
-  threadId: number;
+  threadId: string;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -44,7 +44,7 @@ export interface SandboxCommandResult {
 }
 
 interface SandboxMaterializedFile {
-  fileId: number;
+  fileId: string;
   originalName: string;
   mimeType: string | null;
   path: string | null;
@@ -60,14 +60,14 @@ export interface SandboxThreadFileSyncResult {
 
 export interface SandboxFileMaterializeRequest {
   userId: number;
-  threadId: number;
+  threadId: string;
   files: SandboxThreadFile[];
   signal?: AbortSignal;
 }
 
 export interface SandboxFileReadRequest {
   userId: number;
-  threadId: number;
+  threadId: string;
   virtualPath: string;
   maxBytes: number;
   preserveSource?: boolean;
@@ -86,7 +86,7 @@ export interface SandboxFileReadResult {
 
 export interface SandboxFileWriteRequest {
   userId: number;
-  threadId: number;
+  threadId: string;
   virtualPath: string;
   bytes: Buffer;
   signal?: AbortSignal;
@@ -96,7 +96,7 @@ export interface SandboxSourceFileReadRequest {
   policy?: import("../files/source.js").FileReadPolicy;
   sandboxId: string;
   userId: number;
-  threadId: number;
+  threadId: string;
   canonicalPath: string;
   maxBytes: number;
   signal?: AbortSignal;
@@ -104,7 +104,7 @@ export interface SandboxSourceFileReadRequest {
 
 export interface PublishWebsiteRequest {
   userId: number;
-  threadId: number;
+  threadId: string;
   port: number;
   siteDirectory: string;
   path?: string;
@@ -126,7 +126,7 @@ export interface SandboxActivityLease {
 }
 
 export interface CommandRuntime {
-  acquireActivityLease?(userId: number, threadId: number): SandboxActivityLease;
+  acquireActivityLease?(userId: number, threadId: string): SandboxActivityLease;
   materializeFiles(request: SandboxFileMaterializeRequest): Promise<SandboxThreadFileSyncResult>;
   execute(request: SandboxCommandRequest): Promise<SandboxCommandResult>;
   readWorkspaceFile(request: SandboxFileReadRequest): Promise<SandboxFileReadResult>;

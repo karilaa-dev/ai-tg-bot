@@ -65,7 +65,7 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
     return cookieValue(response, "__Host-ai_tg_bot_chat_session=");
   }
 
-  async function upload(threadId: number, files: Array<{ name: string; mime: string; bytes: Buffer }>, requestId = randomUUID()) {
+  async function upload(threadId: string, files: Array<{ name: string; mime: string; bytes: Buffer }>, requestId = randomUUID()) {
     const form = new FormData();
     form.set("text", "Keep these exact files");
     form.set("requestId", requestId);

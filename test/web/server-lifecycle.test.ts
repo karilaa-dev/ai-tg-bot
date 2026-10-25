@@ -1,4 +1,5 @@
 import { AccessControl } from "../../src/access/control.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { copyFile, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -98,9 +99,9 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
 
 it("canonicalizes the admin URL so relative assets resolve at the website root", async () => {
   for (const method of ["GET", "HEAD"]) {
-    const response = await fetch(new URL("/admin/?user=1&thread=2", web!.url), { method, redirect: "manual" });
+    const response = await fetch(new URL(`/admin/?user=1&thread=${fixtureUuid(2)}`, web!.url), { method, redirect: "manual" });
     expect(response.status).toBe(308);
-    expect(response.headers.get("location")).toBe("/admin?user=1&thread=2");
+    expect(response.headers.get("location")).toBe(`/admin?user=1&thread=${fixtureUuid(2)}`);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("");
   }

@@ -119,11 +119,11 @@ describe("Pi runtime barrier operations", () => {
       });
       vi.spyOn(manager, "runtime").mockResolvedValue({ session: { sessionManager: source }, bridge: {}, lastUsedAt: 0 } as never);
 
-      await manager.fork({ id: 1 } as never, { id: 2 } as never, {} as never, branchPoint);
+      await manager.fork({ id: "00000000-0000-4000-8000-000000000001" } as never, { id: "00000000-0000-4000-8000-000000000002" } as never, {} as never, branchPoint);
 
       expect(source.getSessionFile()).toBe(sourceFile);
       expect(source.getSessionId()).toBe(sourceId);
-      const [, targetFile, targetId] = setPiSession.mock.calls[0] as unknown as [number, string, string];
+      const [, targetFile, targetId] = setPiSession.mock.calls[0] as unknown as [string, string, string];
       const target = SessionManager.open(targetFile, directory);
       expect(targetId).not.toBe(sourceId);
       source.appendMessage({ role: "user", content: "Original continuation", timestamp: 3 });

@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { runTurn } from "../../src/ai/agentTurnEngine.js";
@@ -40,7 +41,7 @@ describe("turn streaming", () => {
       },
       logger,
       user: { tg_id: 1, stream_mode: true, lang: "en" },
-      thread: { id: 2, title: "Adapter" },
+      thread: { id: fixtureUuid(2), title: "Adapter" },
       text: "Create an adapter",
       onDeliveryConfirmed,
       onDraft,

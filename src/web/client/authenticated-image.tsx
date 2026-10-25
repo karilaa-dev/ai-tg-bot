@@ -3,15 +3,16 @@ import { Button, buttonVariants, Text } from "@cloudflare/kumo";
 import { IconDownload, IconPhoto, IconRefresh, IconPlayerPlay } from "@tabler/icons-react";
 import { AttachmentLoader, type AttachmentSource, type LoadedAttachment } from "./attachments.js";
 import { imageMimeTypes } from "../media.js";
+import { isUuid } from "../../utils/uuid.js";
 
-export interface OpenUiImageSource { threadId: number; source: AttachmentSource; fileNames?: ReadonlyMap<number, string> }
+export interface OpenUiImageSource { threadId: string; source: AttachmentSource; fileNames?: ReadonlyMap<string, string> }
 interface ImageResources {
   loader: AttachmentLoader;
-  states: Map<number, LoadedAttachment>;
-  rendered: (fileId: number) => () => void;
+  states: Map<string, LoadedAttachment>;
+  rendered: (fileId: string) => () => void;
 }
 const ImageContext = createContext<ImageResources | null>(null);
-const FileNamesContext = createContext<ReadonlyMap<number, string> | undefined>(undefined);
+const FileNamesContext = createContext<ReadonlyMap<string, string> | undefined>(undefined);
 
 /** Observe the placeholder itself, before a private request or a blob URL exists. */
 export function useFirstVisible<T extends HTMLElement>() {
@@ -31,15 +32,15 @@ export function useFirstVisible<T extends HTMLElement>() {
 }
 
 export function ImageProvider({ imageSource, onImagesRendered, children }: {
-  imageSource?: OpenUiImageSource; onImagesRendered?: (ids: ReadonlySet<number>) => void; children: ReactNode;
+  imageSource?: OpenUiImageSource; onImagesRendered?: (ids: ReadonlySet<string>) => void; children: ReactNode;
 }) {
   const [resources, setResources] = useState<ImageResources | null>(null);
   const threadId = imageSource?.threadId;
   const source = imageSource?.source;
   useEffect(() => {
     if (threadId === undefined || !source) { setResources(null); return; }
-    const mounted = new Map<number, number>();
-    const rendered = (fileId: number) => {
+    const mounted = new Map<string, number>();
+    const rendered = (fileId: string) => {
       mounted.set(fileId, (mounted.get(fileId) ?? 0) + 1);
       onImagesRendered?.(new Set(mounted.keys()));
       return () => {
@@ -63,8 +64,8 @@ export function AuthenticatedImage({ source, alt, caption, className = "", langu
   const fileNames = useContext(FileNamesContext);
   const [failedUrl, setFailedUrl] = useState<string>();
   const { ref, visible } = useFirstVisible<HTMLElement>();
-  const fileId = /^file:[1-9]\d*$/.test(source) ? Number(source.slice(5)) : NaN;
-  const valid = Number.isSafeInteger(fileId);
+  const fileId = source.startsWith("file:") ? source.slice(5) : "";
+  const valid = isUuid(fileId);
   const loader = resources?.loader;
   const rendered = resources?.rendered;
   const file = useMemo(() => ({ id: fileId, name: alt, size: 0, mimeType: null, caption: null }), [fileId, alt]);

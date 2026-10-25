@@ -8,7 +8,7 @@ export class MessagesRepo {
   constructor(private readonly db: SqlExecutor) {}
 
   async insert(input: {
-    threadId: number;
+    threadId: string;
     role: MessageRole;
     kind?: MessageKind;
     content: unknown;
@@ -79,7 +79,7 @@ export class MessagesRepo {
     `);
   }
 
-  listThread(threadId: number): Promise<MessageRow[]> {
+  listThread(threadId: string): Promise<MessageRow[]> {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }
 
@@ -101,7 +101,7 @@ export class MessagesRepo {
     return rows.map((row) => row.id);
   }
 
-  latest(threadId: number): Promise<MessageRow | undefined> {
+  latest(threadId: string): Promise<MessageRow | undefined> {
     return queryOne<MessageRow>(this.db, sql`select * from messages where thread_id = ${threadId} order by id desc limit 1`);
   }
 

@@ -1,4 +1,5 @@
 import { telegramTurnFrontend } from "../../src/telegram/turnFrontend.js";
+import { fixtureUuid } from "./uuid.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import { ThreadTurnCoordinator } from "../../src/ai/threadTurnCoordinator.js";
@@ -411,7 +412,7 @@ describe("ThreadTurnCoordinator", () => {
         { updateId: 15_001, messageId: 25_001 },
         { updateId: 15_002, messageId: 25_002 },
       ],
-      attachments: [{ fileId: 999_999, telegramMessageId: 25_002 }],
+      attachments: [{ fileId: fixtureUuid(999_999), telegramMessageId: 25_002 }],
     })).rejects.toThrow("does not exist");
 
     expect(transaction).toHaveBeenCalledTimes(1);
@@ -1066,13 +1067,13 @@ function createCoordinator(
   });
 }
 
-async function ownership(repos: Repos, id: number): Promise<{ userId: number; threadId: number }> {
+async function ownership(repos: Repos, id: number): Promise<{ userId: number; threadId: string }> {
   const user = await repos.users.ensure({ tgId: id, firstName: "Queue", lang: "en" });
   const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
   return { userId: user.tg_id, threadId: thread.id };
 }
 
-function request(userId: number, threadId: number, updateId: number, textPlain: string) {
+function request(userId: number, threadId: string, updateId: number, textPlain: string) {
   return {
     userId,
     threadId,

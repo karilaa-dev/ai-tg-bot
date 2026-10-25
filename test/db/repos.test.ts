@@ -84,7 +84,7 @@ describe("repository round-trip on sqlite", () => {
       messageId: message.id,
       content: {
         text: `delivered-${tgId}`,
-        attachment_failures: [{ file_id: 7, status: "source_unavailable" }],
+        attachment_failures: [{ file_id: "00000000-0000-4000-8000-000000000007", status: "source_unavailable" }],
       },
       textPlain: `delivered-${tgId}`,
       tgMessageId: 1234,
@@ -96,7 +96,7 @@ describe("repository round-trip on sqlite", () => {
     });
     expect(JSON.parse(updated!.content_json)).toEqual({
       text: `delivered-${tgId}`,
-      attachment_failures: [{ file_id: 7, status: "source_unavailable" }],
+      attachment_failures: [{ file_id: "00000000-0000-4000-8000-000000000007", status: "source_unavailable" }],
     });
     await expect(db.search.searchMessages([thread.id], `delivered-${tgId}`, 5))
       .resolves.toEqual([expect.objectContaining({ id: message.id })]);

@@ -65,7 +65,7 @@ const GridComponent = defineComponent({ ...UiGrid, component: ({ props, renderNo
 
 const library = createLibrary({ components: [StackComponent, CardComponent, TextComponent, TableComponent, ButtonComponent, ImageComponent, MetricComponent, BarChartComponent, StepsComponent, GridComponent, ...visualComponents], root: "Stack" });
 
-interface GenerativeResponseProps { source: string; onAction?: (text: string) => void; imageSource?: OpenUiImageSource; language?: OpenUiLanguage; onImagesRendered?: (ids: ReadonlySet<number>) => void }
+interface GenerativeResponseProps { source: string; onAction?: (text: string) => void; imageSource?: OpenUiImageSource; language?: OpenUiLanguage; onImagesRendered?: (ids: ReadonlySet<string>) => void }
 
 /** The message's accessible text fallback lives outside this optional renderer. */
 export function GenerativeResponse({ source, onAction, imageSource, language = "en", onImagesRendered }: GenerativeResponseProps) {

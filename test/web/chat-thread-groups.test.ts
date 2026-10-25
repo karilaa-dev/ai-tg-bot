@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { describe, expect, it } from "vitest";
 import { chatFormat, chatStrings } from "../../src/web/client/chat/strings.js";
 import { groupLabel, groupThreads, recencyGroup } from "../../src/web/client/chat/thread-groups.js";
@@ -22,17 +23,17 @@ describe("chat thread recency groups", () => {
 
   it("orders groups newest first and keeps the incoming order inside each group", () => {
     const threads = [
-      { id: 1, lastActivity: at(9, 23, 9) },
-      { id: 2, lastActivity: at(6, 2) },
-      { id: 3, lastActivity: at(9, 23, 8) },
-      { id: 4, lastActivity: at(8, 1) },
-      { id: 5, lastActivity: at(9, 22) },
-      { id: 6, lastActivity: at(9, 1) },
-      { id: 7, lastActivity: at(10, 30, 12, 2025) },
+      { id: fixtureUuid(1), lastActivity: at(9, 23, 9) },
+      { id: fixtureUuid(2), lastActivity: at(6, 2) },
+      { id: fixtureUuid(3), lastActivity: at(9, 23, 8) },
+      { id: fixtureUuid(4), lastActivity: at(8, 1) },
+      { id: fixtureUuid(5), lastActivity: at(9, 22) },
+      { id: fixtureUuid(6), lastActivity: at(9, 1) },
+      { id: fixtureUuid(7), lastActivity: at(10, 30, 12, 2025) },
     ];
     const groups = groupThreads(threads, now);
     expect(groups.map(group => [group.key, group.threads.map(thread => thread.id)])).toEqual([
-      ["today", [1, 3]], ["yesterday", [5]], ["month", [6]], ["2026-09", [4]], ["2026-07", [2]], ["2025-11", [7]],
+      ["today", [fixtureUuid(1), fixtureUuid(3)]], ["yesterday", [fixtureUuid(5)]], ["month", [fixtureUuid(6)]], ["2026-09", [fixtureUuid(4)]], ["2026-07", [fixtureUuid(2)]], ["2025-11", [fixtureUuid(7)]],
     ]);
   });
 

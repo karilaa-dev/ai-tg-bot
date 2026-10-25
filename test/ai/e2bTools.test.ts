@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it, vi } from "vitest";
 import { appendPublishedWebsiteNotice } from "../../src/ai/agentTurnEngine.js";
 import { createPublishWebsiteTool } from "../../src/ai/tools/publishWebsite.js";
@@ -18,7 +19,7 @@ describe("E2B-backed agent tools", () => {
     const tool = createPublishWebsiteTool({
       config: loadTestConfig(),
       user: { tg_id: 9, lang: "en" },
-      thread: { id: 10 },
+      thread: { id: fixtureUuid(10) },
       commandRuntime: runtime,
       registerPublishedWebsite: register,
     } as never);

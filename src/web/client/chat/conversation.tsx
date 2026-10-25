@@ -52,11 +52,11 @@ function newestVisibleMessage(viewport: HTMLElement, cap: number): number | null
 }
 
 export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, onRead, notice }: {
-  threadId: number;
+  threadId: string;
   drafts: DraftStore;
   onThreadChange: () => void;
   onOpenThread: (thread: ChatThread) => void;
-  onRead: (threadId: number, result: ChatReadResult) => void;
+  onRead: (threadId: string, result: ChatReadResult) => void;
   /** Shown above the composer, such as the time zone question. */
   notice?: ReactNode;
 }) {
@@ -76,7 +76,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const [compactOpen, setCompactOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dropProblem, setDropProblem] = useState<FileProblem | null>(null);
-  const [files, setFiles] = useState(new Map<number, LoadedAttachment>());
+  const [files, setFiles] = useState(new Map<string, LoadedAttachment>());
   const [chatFiles] = useState(getChatAttachmentSource);
   const [loader] = useState(() => new AttachmentLoader(threadId, setFiles, chatFiles));
   const imageSource = useMemo(() => ({ threadId, source: chatFiles }), [threadId, chatFiles]);
@@ -417,15 +417,15 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
 
 /** Messages re-render only when their own data, files, or language change. */
 const MessageView = memo(function MessageView({ message, web, files, maxBytes, autoLoadMaxBytes, autoLoad, language, imageSource, load, onFork, onAction }: {
-  message: ChatMessage; web: boolean; files: Map<number, LoadedAttachment>; maxBytes: number; autoLoadMaxBytes: number; autoLoad: (file: WebAttachment) => void; language: UiLanguage;
-  imageSource: { threadId: number; source: AttachmentSource };
+  message: ChatMessage; web: boolean; files: Map<string, LoadedAttachment>; maxBytes: number; autoLoadMaxBytes: number; autoLoad: (file: WebAttachment) => void; language: UiLanguage;
+  imageSource: { threadId: string; source: AttachmentSource };
   load: (file: WebAttachment, sandbox: boolean) => void; onFork: (message: ChatMessage) => void; onAction: (text: string) => void;
 }) {
   const t = useChatStrings();
   const format = useMemo(() => chatFormat(language), [language]);
-  const [renderedImages, setRenderedImages] = useState<{ source: ChatMessage["openui"]; ids: ReadonlySet<number> }>({ source: undefined, ids: new Set() });
+  const [renderedImages, setRenderedImages] = useState<{ source: ChatMessage["openui"]; ids: ReadonlySet<string> }>({ source: undefined, ids: new Set() });
   const messageImageSource = useMemo(() => ({ ...imageSource, fileNames: new Map(message.attachments.map(file => [file.id, file.name])) }), [imageSource, message.attachments]);
-  const imagesRendered = useCallback((ids: ReadonlySet<number>) => setRenderedImages({ source: message.openui, ids }), [message.openui]);
+  const imagesRendered = useCallback((ids: ReadonlySet<string>) => setRenderedImages({ source: message.openui, ids }), [message.openui]);
   if (message.role === "system") return <div className="chat-system" role="note" data-message-id={message.id}><RichText text={message.text} /></div>;
   const assistant = message.role === "assistant";
   const openui = assistant && web && message.openui ? message.openui : null;

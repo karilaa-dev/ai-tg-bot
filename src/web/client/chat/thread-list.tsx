@@ -27,7 +27,7 @@ export function ThreadDate({ thread, format, now }: { thread: ChatThread; format
   </span>;
 }
 
-export function ThreadList({ threads, activeId, onSelect }: { threads: ChatThread[]; activeId: number | null; onSelect: (thread: ChatThread) => void }) {
+export function ThreadList({ threads, activeId, onSelect }: { threads: ChatThread[]; activeId: string | null; onSelect: (thread: ChatThread) => void }) {
   const t = useChatStrings();
   const language = useUiLanguage();
   const format = useMemo(() => chatFormat(language), [language]);

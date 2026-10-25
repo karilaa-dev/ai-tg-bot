@@ -338,7 +338,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.sendCommand(env.user, env.chat, "/fork").catch(() => undefined);
 
     const [child] = await env.db.db.query<ThreadRow>(sql`
-      select * from threads where parent_thread_id = ${parent.id} order by id desc limit 1
+      select * from threads where parent_thread_id = ${parent.id} limit 1
     `);
     expect(child).toMatchObject({ archived: 1, topic_id: 2 });
     expect(env.bot.server.chatState.get(env.chat.id)?.forumTopics.has(2)).toBe(false);
@@ -346,12 +346,13 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("waits for the thread to become idle before compacting Pi history", async () => {
     await startBot();
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();
     const compact = vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
 
     await env.bot.sendCommand(env.user, env.chat, "/compact");
 
-    expect(waitForIdle).toHaveBeenCalledWith(expect.any(Number), false);
+    expect(waitForIdle).toHaveBeenCalledWith(thread.id, false);
     expect(compact).toHaveBeenCalledOnce();
     expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
   });

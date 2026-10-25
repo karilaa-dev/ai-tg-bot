@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
@@ -17,7 +18,7 @@ it("rechecks the admin session when a private request is no longer signed in", a
   vi.stubGlobal("window", { dispatchEvent });
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
   try {
-    await expect(apiFetch("/api/threads/1/files/2")).rejects.toMatchObject({ status: 401 });
+    await expect(apiFetch(`/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(2)}`)).rejects.toMatchObject({ status: 401 });
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(SESSION_EXPIRED_EVENT);
   } finally { vi.unstubAllGlobals(); }
 });
@@ -26,7 +27,7 @@ it("sends the admin mutation guard alongside explicit sandbox consent", async ()
   const fetch = vi.fn(async () => new Response(null, { status: 200 }));
   vi.stubGlobal("fetch", fetch);
   try {
-    await apiFetch("/api/threads/1/files/2?sandbox=start", { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } });
+    await apiFetch(`/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(2)}?sandbox=start`, { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } });
     const options = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1];
     const headers = new Headers(options.headers);
     expect(headers.get("X-Admin-Request")).toBe("1");
@@ -150,7 +151,7 @@ it("renders message formatting without active HTML, unsafe links, or external im
 
 it("renders image information as a closed disclosure without a filename card", () => {
   const html = renderToStaticMarkup(createElement(FileAttachment, {
-    file: { id: 1, kind: "image", name: "long-telegram-file-id.jpg", mimeType: "image/jpeg", size: 50, caption: null, description: "A cat <script>unsafe</script>" },
+    file: { id: fixtureUuid(1), kind: "image", name: "long-telegram-file-id.jpg", mimeType: "image/jpeg", size: 50, caption: null, description: "A cat <script>unsafe</script>" },
     maxBytes: 20 * 1024 * 1024, load: () => {},
   }));
   expect(html).toContain('class="image-frame"');
@@ -162,7 +163,7 @@ it("renders image information as a closed disclosure without a filename card", (
 
 it("provides an audio player without autoplay and an expandable escaped transcription", () => {
   const html = renderToStaticMarkup(createElement(FileAttachment, {
-    file: { id: 2, kind: "audio", name: "voice.ogg", mimeType: "audio/ogg", size: 50, caption: null, transcription: '<script>speech</script> & text' },
+    file: { id: fixtureUuid(2), kind: "audio", name: "voice.ogg", mimeType: "audio/ogg", size: 50, caption: null, transcription: '<script>speech</script> & text' },
     state: { status: "ready", url: "blob:test", mime: "audio/ogg; codecs=opus" }, maxBytes: 20 * 1024 * 1024, load: () => {},
   }));
   expect(html).toContain('<audio');
@@ -176,7 +177,7 @@ it("provides an audio player without autoplay and an expandable escaped transcri
 
 it.each(["image", "audio"] as const)("shows a %s caption unless it is already in the message", kind => {
   const props = {
-    file: { id: 1, kind, name: "media", mimeType: `${kind}/test`, size: 50, caption: "A separate <script>caption</script>" },
+    file: { id: fixtureUuid(1), kind, name: "media", mimeType: `${kind}/test`, size: 50, caption: "A separate <script>caption</script>" },
     messageText: "Here is the answer.", maxBytes: 20 * 1024 * 1024, load: () => {},
   };
   const html = renderToStaticMarkup(createElement(FileAttachment, props));
@@ -185,7 +186,7 @@ it.each(["image", "audio"] as const)("shows a %s caption unless it is already in
   const duplicated = renderToStaticMarkup(createElement(FileAttachment, { ...props, messageText: props.file.caption }));
   expect(duplicated).not.toContain('class="file-caption"');
   for (const label of ["Generated image", "Attached file", "Attached files"]) {
-    for (const messageAttachments of [[props.file], [props.file, { ...props.file, id: 2, caption: "Second, with comma" }]]) {
+    for (const messageAttachments of [[props.file], [props.file, { ...props.file, id: fixtureUuid(2), caption: "Second, with comma" }]]) {
       const messageText = `${label}: ${messageAttachments.map(f => f.caption).join(", ")}`;
       const fallback = renderToStaticMarkup(createElement(FileAttachment, { ...props, messageText, messageAttachments }));
       expect(fallback).not.toContain('class="file-caption"');
