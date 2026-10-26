@@ -1,0 +1,7 @@
+Pillow==12.3.0
+requests
+numpy
+pandas
+matplotlib
+beautifulsoup4
+PyYAML

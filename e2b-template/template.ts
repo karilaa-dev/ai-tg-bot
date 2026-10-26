@@ -113,6 +113,13 @@ export function createE2BToolboxTemplate(): TemplateClass {
     .runCmd(installImageMagickCommand(), { user: "root" })
     .runCmd("bash /usr/local/share/ai-tg-bot/office/install.sh", { user: "root" })
     .runCmd(installPdfInspectorCommand(), { user: "root" })
+    .copyItems([
+      { src: "assets/python", dest: "/usr/local/share/ai-tg-bot/python", user: "root" },
+    ])
+    .runCmd(
+      "python3 -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r /usr/local/share/ai-tg-bot/python/requirements.txt && python3 -m pip check",
+      { user: "root" },
+    )
     .runCmd("/usr/local/bin/tool-contract.sh", { user: "user" })
     .setWorkdir("/home/user/workspace")
     .setUser("user");

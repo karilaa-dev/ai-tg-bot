@@ -27,6 +27,8 @@ python3 -m venv "${tmp_dir}/venv"
 "${tmp_dir}/venv/bin/python" -c 'import json, pathlib, sqlite3, tarfile, zipfile'
 "${tmp_dir}/venv/bin/python" -m pip --version >/dev/null
 [[ "$(python -c 'import sys; print(sys.version_info[:2])')" == "$(python3 -c 'import sys; print(sys.version_info[:2])')" ]]
+python /usr/local/share/ai-tg-bot/python/contract.py
+python3 /usr/local/share/ai-tg-bot/python/contract.py
 
 node --version >/dev/null
 npm --version >/dev/null

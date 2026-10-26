@@ -4,9 +4,21 @@ This directory defines the private `ai-tg-bot-tools` template used by thread san
 
 The image contains the shell tools listed in `template.ts`, ImageMagick, docx-cli `0.26.0`, PptxGenJS `4.0.1`, python-pptx `1.0.2`, openpyxl `3.1.5`, headless LibreOffice Writer/Impress/Calc and compatible fonts, the pinned OpenSCAD `2026.09.29` Node/WebAssembly engine, POV-Ray `3.7.0.10`, `openscad-build`, PDF Inspector `1.25.2`, and Poppler PDF rendering tools. The OpenSCAD pipeline exports binary STL and exact rendered PNG files without Xvfb, an X server, or OpenGL. Python, Node.js, and npm come from E2B Base and are checked by the contract. Chromium and browser automation packages are absent because Browser Use Cloud handles browser work.
 
+## Default Python libraries
+
+Both `python` and `python3` include Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML. Scripts can import these packages directly without activating the Office environment or installing dependencies. The Office tools retain their separate Python environment.
+
+Direct dependencies are listed in `assets/python/requirements.in`; `requirements.txt` pins the full dependency graph with SHA-256 hashes. Pillow uses the same version as the Office bundle. To refresh the lock for E2B Base's Python 3.11:
+
+```sh
+uv pip compile --python-version 3.11 --generate-hashes --output-file e2b-template/assets/python/requirements.txt e2b-template/assets/python/requirements.in
+```
+
+The toolbox contract runs `assets/python/contract.py` with both default interpreters as the sandbox user. It checks package versions, PNG creation and resizing, a local HTTP request, NumPy calculations, pandas CSV processing, headless chart rendering, HTML parsing, and YAML round trips. The package installer also runs `pip check`.
+
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.0.24` uses `ai-tg-bot-tools:v2.0.24`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.1.1` uses `ai-tg-bot-tools:v2.1.1`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
