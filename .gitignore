@@ -13,3 +13,13 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+# Local agent tooling
+/.agents/skills/impeccable/
+/.claude/agents/impeccable-*.md
+/.claude/settings.local.json
+/.claude/skills/impeccable/
+/.codex/hooks.json
+/.github/agents/impeccable-*.agent.md
+/.github/hooks/impeccable.json
+/.github/skills/impeccable/
