@@ -60,6 +60,7 @@ try {
     }
     if (userId === null || request.headers()["x-chat-user"] !== String(userId)) return json(route, { error: "Account changed." }, 401);
     if (url.pathname === "/api/chat/avatar") return route.fulfill({ status: 204 });
+    if (url.pathname === "/api/chat/schedules") return route.fulfill({ json: { items: [] } });
     if (url.pathname === "/api/chat/settings") {
       const current = settings.get(userId) ?? { language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true };
       if (request.method() === "PATCH") {

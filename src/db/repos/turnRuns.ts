@@ -49,6 +49,7 @@ interface TurnAcceptanceInput {
   textPlain: string;
   sources: TelegramTurnSource[];
   webRequestId?: string;
+  scheduled?: { id: string; origin: "web" | "telegram" };
   attachments?: DurableTurnAttachment[];
   signal?: AbortSignal;
 }
@@ -123,10 +124,10 @@ export class TurnRunsRepo {
         const turnRun = await insertReturning<TurnRunRow>(tx, sql`
           insert into turn_runs(
             user_id, thread_id, user_message_id, chat_id, message_thread_id, locale,
-            status, delivery_status, accepted_at, updated_at, origin, web_request_id
+            status, delivery_status, accepted_at, updated_at, origin, web_request_id, schedule_id
           ) values (
             ${input.userId}, ${input.threadId}, ${userMessage.id}, ${input.chatId}, ${input.messageThreadId}, ${input.locale},
-            'queued', 'pending', ${now}, ${now}, ${web ? "web" : "telegram"}, ${input.webRequestId ?? null}
+            'queued', 'pending', ${now}, ${now}, ${input.scheduled?.origin ?? (web ? "web" : "telegram")}, ${input.webRequestId ?? null}, ${input.scheduled?.id ?? null}
           ) returning *
         `);
         await tx.execute(sql`insert into turn_activity_sync(turn_run_id) values (${turnRun.id})`);

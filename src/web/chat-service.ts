@@ -1,3 +1,4 @@
+import type { ChatScheduleInput, ChatSchedulePatch } from "../scheduling/types.js";
 import type { Api } from "grammy";
 import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
@@ -33,6 +34,15 @@ export class BotChatService implements ChatService {
   private async user(userId: number): Promise<UserRow> {
     return this.conversations.user(userId);
   }
+
+  async schedules(userId: number) { await this.user(userId); return { items: await this.repos.schedules.list(userId) }; }
+  async createSchedule(userId: number, input: ChatScheduleInput) {
+    await this.user(userId); return this.repos.schedules.create(userId, input);
+  }
+  async updateSchedule(userId: number, id: string, patch: ChatSchedulePatch) {
+    await this.user(userId); return this.repos.schedules.update(userId, id, patch);
+  }
+  async deleteSchedule(userId: number, id: string) { await this.user(userId); await this.repos.schedules.delete(userId, id); }
 
   async profile(userId: number) {
     const user = await this.user(userId);

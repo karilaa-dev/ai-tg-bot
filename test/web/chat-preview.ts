@@ -181,6 +181,7 @@ const server = serve({
     },
     "/api/auth/telegram/start": () => { signedIn = true; return Response.redirect("/", 302); },
     "/api/chat/avatar": () => !signedIn ? json({ error: "Sign in" }, 401) : avatar ? new Response(avatar, { headers: { "Content-Type": "image/svg+xml" } }) : new Response(null, { status: 204 }),
+    "/api/chat/schedules": { GET: () => Response.json({ items: [] }) },
     "/api/chat/threads": {
       GET: async request => {
         if (!signedIn) return json({ error: "Sign in" }, 401);

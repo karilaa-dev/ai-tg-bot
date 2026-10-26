@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button } from "@cloudflare/kumo/components/button";
 import { DropdownMenu } from "@cloudflare/kumo/components/dropdown";
 import { Sidebar, useSidebar } from "@cloudflare/kumo/components/sidebar";
 import { SkeletonLine } from "@cloudflare/kumo/components/loader";
 import { TooltipProvider } from "@cloudflare/kumo/components/tooltip";
-import { IconAlertCircle, IconBrain, IconBrandTelegram, IconEdit, IconLayoutDashboard, IconLogout, IconMoon, IconSearch, IconSelector, IconSettings, IconSun } from "@tabler/icons-react";
+import { IconAlertCircle, IconBrain, IconBrandTelegram, IconCalendarClock, IconEdit, IconLayoutDashboard, IconLogout, IconMoon, IconSearch, IconSelector, IconSettings, IconSun } from "@tabler/icons-react";
 import type { ChatThread } from "../../chat-types.js";
 import { MAX_FILE_BYTES } from "../../../files/limits.js";
 import { BrandMark } from "../brand.js";
@@ -17,6 +17,7 @@ import { Conversation } from "./conversation.js";
 import { emptyDraft, type Draft, type DraftStore } from "./drafts.js";
 import { WorkspaceLoading, type SignedIn } from "./gate.js";
 import { ChatPreferences } from "./preferences.js";
+import { SchedulesView, useSchedules } from "./schedules.js";
 import { ChatSearch } from "./search.js";
 import { ChatSettingsView } from "./settings.js";
 import { MobileNavButton, useTheme } from "./shell-parts.js";
@@ -26,14 +27,14 @@ import { TimeZonePrompt } from "./time-zone-prompt.js";
 import { useThreads } from "./use-threads.js";
 import { isUuid } from "../../../utils/uuid.js";
 
-type Route = { view: "home" } | { view: "thread"; threadId: string } | { view: "settings" } | { view: "memories" };
+type Route = { view: "home" } | { view: "thread"; threadId: string } | { view: "settings" } | { view: "memories" } | { view: "schedules" };
 
 function readRoute(): Route {
   const params = new URLSearchParams(location.search);
   const thread = params.get("thread");
   if (thread !== null && isUuid(thread)) return { view: "thread", threadId: thread };
   const view = params.get("view");
-  return view === "settings" || view === "memories" ? { view } : { view: "home" };
+  return view === "settings" || view === "memories" || view === "schedules" ? { view } : { view: "home" };
 }
 const routeUrl = (route: Route) => route.view === "thread" ? `/?thread=${route.threadId}` : route.view === "home" ? "/" : `/?view=${route.view}`;
 const sameRoute = (a: Route, b: Route) => routeUrl(a) === routeUrl(b);
@@ -81,6 +82,8 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
   const [signOutError, setSignOutError] = useState<unknown>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const threads = useThreads();
+  const schedules = useSchedules();
+  const scheduledThreads = useMemo(() => new Set(schedules.items.filter(item => item.enabled).map(item => item.threadId)), [schedules.items]);
   const { isMobile, setOpenMobile } = useSidebar();
 
   useEffect(() => {
@@ -93,7 +96,7 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
   const current = route.view === "thread" ? threads.threads.find(thread => thread.id === route.threadId) : undefined;
   useEffect(() => {
     // Tabs show the chat's own name; only the home screen names the app.
-    const titles = { home: t.appName, settings: t.settings, memories: t.memories };
+    const titles = { home: t.appName, settings: t.settings, memories: t.memories, schedules: t.schedules };
     document.title = route.view === "thread" ? current?.title ?? t.chat : titles[route.view];
   }, [route, current?.title, t]);
 
@@ -161,12 +164,13 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
           action={<Button size="sm" variant="ghost" onClick={threads.refresh}>{t.retry}</Button>} />}
         {threads.status === "ready" && threads.error === null && !threads.threads.length && <p className="chat-sidebar-empty">{t.noChats}</p>}
         <nav aria-label={t.chats}>
-          <ThreadList threads={threads.threads} activeId={route.view === "thread" ? route.threadId : null} onSelect={thread => navigate({ view: "thread", threadId: thread.id })} />
+          <ThreadList threads={threads.threads} activeId={route.view === "thread" ? route.threadId : null} scheduled={scheduledThreads} onSelect={thread => navigate({ view: "thread", threadId: thread.id })} />
         </nav>
         {threads.next !== null && <div className="chat-sidebar-more"><Button variant="ghost" size="sm" onClick={threads.more}>{t.showMore}</Button></div>}
       </Sidebar.Content>
       <Sidebar.Footer className="chat-sidebar-foot h-auto! px-2! py-2!">
         <div className="chat-sidebar-pages">
+          <button type="button" className="chat-side-action" aria-current={route.view === "schedules" ? "page" : undefined} onClick={() => navigate({ view: "schedules" })}><IconCalendarClock size={18} aria-hidden="true" /><span>{t.schedules}</span></button>
           <button type="button" className="chat-side-action" aria-current={route.view === "memories" ? "page" : undefined} onClick={() => navigate({ view: "memories" })}><IconBrain size={18} aria-hidden="true" /><span>{t.memories}</span></button>
           <button type="button" className="chat-side-action" aria-current={route.view === "settings" ? "page" : undefined} onClick={() => navigate({ view: "settings" })}><IconSettings size={18} aria-hidden="true" /><span>{t.settings}</span></button>
         </div>
@@ -191,8 +195,9 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
       </Sidebar.Footer>
     </Sidebar>
     <main id="chat-main" className="chat-main" tabIndex={-1}>
-      {route.view === "thread" && <Conversation key={route.threadId} threadId={route.threadId} drafts={session.drafts} onThreadChange={threads.refresh} onOpenThread={openThread} onRead={threads.markRead} notice={zonePrompt} />}
+      {route.view === "thread" && <Conversation key={route.threadId} threadId={route.threadId} drafts={session.drafts} onThreadChange={threads.refresh} onOpenThread={openThread} onRead={threads.markRead} notice={zonePrompt} schedules={schedules} />}
       {route.view === "home" && <Home name={session.user.name} drafts={session.drafts} onStarted={openThread} notice={zonePrompt} />}
+      {route.view === "schedules" && <SchedulesView schedules={schedules} threads={threads.threads} onOpenThread={threadId => navigate({ view: "thread", threadId })} />}
       {route.view === "settings" && <ChatSettingsView onOpenMemories={() => navigate({ view: "memories" })} />}
       {route.view === "memories" && <div className="chat-view chat-legacy-view"><Memories page load={chatApi.memories} onDelete={deleteMemory} subtitle={t.memoriesSubtitle}
         describeError={(error, fallback) => describeError(error, fallback, language)} leading={<MobileNavButton />} /></div>}

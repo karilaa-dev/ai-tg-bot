@@ -19,6 +19,7 @@ import type { ThreadTurnCoordinator } from "./ai/threadTurnCoordinator.js";
 import { AccessControl } from "./access/control.js";
 import { FileResolver } from "./files/resolver.js";
 import { LocalFileStore } from "./files/localStore.js";
+import { ChatScheduler } from "./scheduling/runner.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -27,6 +28,7 @@ let web: Awaited<ReturnType<typeof startWebServer>>;
 let pi: PiRuntimeManager | undefined;
 let codexLogin: CodexLoginManager | undefined;
 let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
+let scheduler: ChatScheduler | undefined;
 let turnCoordinator: ThreadTurnCoordinator | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
@@ -77,6 +79,8 @@ try {
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
   await bot.init();
+  scheduler = new ChatScheduler({ schedules: repos.schedules, access, logger, wake: id => services.turnCoordinator.wake(id) });
+  scheduler.start();
   const repository = new ConversationRepository(db.db, repos, bot.botInfo.id);
   web = await startWebServer({
     development: process.argv.includes("--web-dev"), config, repository,
@@ -101,6 +105,7 @@ try {
   logger.error("bot stopped", { err: String(err) });
   process.exitCode = 1;
 } finally {
+  await scheduler?.stop();
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
   await codexLogin?.stop().catch(() => logger.warn("Codex login shutdown failed"));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));

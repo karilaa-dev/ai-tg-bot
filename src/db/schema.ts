@@ -34,6 +34,26 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
       const columns = await tx.query<{ name: string }>(sql`pragma table_info(turn_runs)`);
       if (!columns.some(column => column.name === "web_request_id")) await tx.execute(sql`alter table turn_runs add column web_request_id text`);
     }
+    if (dialect === "postgres") await tx.execute(sql`alter table turn_runs add column if not exists schedule_id text`);
+    else {
+      const columns = await tx.query<{ name: string }>(sql`pragma table_info(turn_runs)`);
+      if (!columns.some(column => column.name === "schedule_id")) await tx.execute(sql`alter table turn_runs add column schedule_id text`);
+    }
+    await tx.execute(sql`create index if not exists turn_runs_schedule_thread_idx on turn_runs(thread_id, accepted_at) where schedule_id is not null`);
+    const timeType = dialect === "postgres" ? sql`bigint` : sql`integer`;
+    await tx.execute(sql`
+      create table if not exists chat_schedules (
+        id text primary key, user_id ${timeType} not null references users(tg_id),
+        thread_id text not null unique references threads(id) on delete cascade,
+        title text not null, prompt text not null,
+        interval_minutes integer check(interval_minutes is null or interval_minutes between 60 and 525600),
+        next_run_at ${timeType} not null, enabled integer not null default 1 check(enabled in (0, 1)),
+        last_run_at ${timeType}, last_turn_id ${timeType} references turn_runs(id),
+        created_at ${timeType} not null, updated_at ${timeType} not null
+      )
+    `);
+    await tx.execute(sql`create index if not exists chat_schedules_due_idx on chat_schedules(next_run_at) where enabled = 1`);
+    await tx.execute(sql`create index if not exists chat_schedules_user_idx on chat_schedules(user_id)`);
     await tx.execute(sql`create unique index if not exists turn_runs_web_request_idx on turn_runs(user_id, thread_id, web_request_id) where web_request_id is not null`);
     for (const [table, name, definition] of [
       ["files", "requires_message", "requires_message integer not null default 0 check(requires_message in (0, 1))"],

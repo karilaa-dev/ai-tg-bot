@@ -11,7 +11,9 @@ export function botToolPolicy(name: string): Pick<ToolDefinition, "exposure" | "
   return {
     exposure: readOnly ? "deferred" : "model-only",
     defaultActive: CORE_TOOLS.has(name),
-    namespace: name === "memo"
+    namespace: name === "schedule_chat"
+      ? { name: "scheduling", description: "Scheduled chat checks, reminders, and recurring tasks" }
+      : name === "memo"
       ? { name: "memory", description: "OptMem permanent notes, summaries and recall" }
       : name.startsWith("browser_")
       ? { name: "browser", description: "Interactive browser tabs, navigation, screenshots, downloads and session management" }

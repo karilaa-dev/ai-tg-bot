@@ -28,7 +28,7 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
     repos = createRepos(db.db, db.search);
     await repos.users.ensure({ tgId: 42 });
     await repos.users.ensure({ tgId: 84 });
-    thread = await repos.threads.create({ userId: 42, title: "Read state", topicId: null });
+    thread = await repos.threads.create({ origin: "web", userId: 42, title: "Read state", topicId: null });
   });
   afterEach(async () => {
     await db?.destroy();
@@ -40,17 +40,17 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
   const message = (text: string, threadId = thread.id) => repos.messages.insert({ threadId, role: "assistant", textPlain: text, content: { text } });
   const state = async (threadId = thread.id) => (await repos.threadReads.states(42, [threadId])).get(threadId);
 
-  it.each(["web", "telegram"] as const)("makes new %s assistant content unread and persists acknowledgement", async origin => {
+  it.each(["web", "telegram"] as const)("limits unread to web-origin chats and persists acknowledgement (%s)", async origin => {
     await db.db.execute(sql`update threads set origin = ${origin} where id = ${thread.id}`);
     expect(await state()).toEqual({ unread: false, lastMessageId: null, readMessageId: null });
     const first = await message("First response");
-    expect(await state()).toEqual({ unread: true, lastMessageId: first.id, readMessageId: null });
+    expect(await state()).toEqual({ unread: origin === "web", lastMessageId: first.id, readMessageId: null });
     expect(await repos.threadReads.markRead(42, thread.id, first.id)).toMatchObject({ unread: false, readMessageId: first.id });
     await db.initialize();
     repos = createRepos(db.db, db.search);
     expect(await state()).toMatchObject({ unread: false, readMessageId: first.id });
     const second = await message("Another response");
-    expect(await state()).toEqual({ unread: true, lastMessageId: second.id, readMessageId: first.id });
+    expect(await state()).toEqual({ unread: origin === "web", lastMessageId: second.id, readMessageId: first.id });
   });
 
   it("keeps delayed and concurrent acknowledgements monotonic without swallowing later messages", async () => {
@@ -82,7 +82,7 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
       .then(value => { accepted = true; return value; });
     try {
       // Another thread can allocate and commit while this thread's writer waits.
-      const other = await repos.threads.create({ userId: 42, topicId: 42, title: "Independent" });
+      const other = await repos.threads.create({ origin: "web", userId: 42, topicId: 42, title: "Independent" });
       await message("Independent response", other.id);
       await new Promise(resolve => setTimeout(resolve, 100));
       expect(accepted).toBe(false);
@@ -111,10 +111,10 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
 
   it("respects inherited fork cutoffs and keeps sibling and owner cursors independent", async () => {
     const inherited = await message("Inherited");
-    const fork = await repos.threads.create({ userId: 42, title: "Fork", topicId: 2, parentThreadId: thread.id, forkPointMessageId: inherited.id });
+    const fork = await repos.threads.create({ origin: "web", userId: 42, title: "Fork", topicId: 2, parentThreadId: thread.id, forkPointMessageId: inherited.id });
     const outside = await message("Past fork cutoff");
     const forkOwn = await message("Only in first fork", fork.id);
-    const nested = await repos.threads.create({ userId: 42, title: "Nested", topicId: 3, parentThreadId: fork.id, forkPointMessageId: inherited.id });
+    const nested = await repos.threads.create({ origin: "web", userId: 42, title: "Nested", topicId: 3, parentThreadId: fork.id, forkPointMessageId: inherited.id });
     expect(await state(nested.id)).toEqual({ unread: true, readMessageId: null, lastMessageId: inherited.id });
     for (const id of [outside.id, forkOwn.id]) expect(await repos.threadReads.markRead(42, nested.id, id)).toBeUndefined();
     await repos.threadReads.markRead(42, nested.id, inherited.id);
@@ -122,9 +122,9 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
     expect(await state(fork.id)).toMatchObject({ unread: true, readMessageId: null });
     expect(await state()).toMatchObject({ unread: true, readMessageId: null });
     expect(await repos.threadReads.markRead(84, thread.id, inherited.id)).toBeUndefined();
-    const foreign = await repos.threads.create({ userId: 84, title: "Foreign", topicId: null });
+    const foreign = await repos.threads.create({ origin: "web", userId: 84, title: "Foreign", topicId: null });
     const secret = await message("Foreign message", foreign.id);
-    const malformed = await repos.threads.create({ userId: 42, title: "Cross-owner parent", topicId: 4, parentThreadId: foreign.id, forkPointMessageId: secret.id });
+    const malformed = await repos.threads.create({ origin: "web", userId: 42, title: "Cross-owner parent", topicId: 4, parentThreadId: foreign.id, forkPointMessageId: secret.id });
     expect(await state(malformed.id)).toMatchObject({ unread: false, lastMessageId: null });
     expect(await repos.threadReads.markRead(42, malformed.id, secret.id)).toBeUndefined();
     expect(await repos.threadReads.markRead(42, thread.id, secret.id)).toBeUndefined();

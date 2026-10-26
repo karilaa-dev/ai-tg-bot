@@ -12,7 +12,10 @@ import { TurnActivityRepo } from "./turnActivity.js";
 import { AudioTranscriptsRepo } from "./audioTranscripts.js";
 import { ThreadReadsRepo } from "./threadReads.js";
 
+import { SchedulesRepo } from "./schedules.js";
+
 export interface Repos {
+  schedules: SchedulesRepo;
   users: UsersRepo;
   threads: ThreadsRepo;
   messages: MessagesRepo;
@@ -28,6 +31,7 @@ export interface Repos {
 
 export function createRepos(db: SqlExecutor, search: TextSearch): Repos {
   return {
+    schedules: new SchedulesRepo(db),
     users: new UsersRepo(db),
     threads: new ThreadsRepo(db),
     messages: new MessagesRepo(db),
