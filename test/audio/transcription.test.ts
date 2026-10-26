@@ -43,9 +43,9 @@ describe("OpenRouter transcription", () => {
     expect(url).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
     expect(request).toMatchObject({ method: "POST", headers: { Authorization: "Bearer test-openrouter" } });
     expect(JSON.parse(request.body)).toEqual({
-      model: "qwen/qwen3-asr-1.7b", input_audio: { data: bytes.toString("base64"), format: "ogg" },
+      model: "microsoft/mai-transcribe-2", input_audio: { data: bytes.toString("base64"), format: "ogg" },
     });
-    expect(result).toEqual({ text: "Please help me plan tomorrow.", model: "qwen/qwen3-asr-1.7b", usage: { seconds: 4.2, cost: 0.001 } });
+    expect(result).toEqual({ text: "Please help me plan tomorrow.", model: "microsoft/mai-transcribe-2", usage: { seconds: 4.2, cost: 0.001 } });
   });
 
   it("honors model overrides and language hints", async () => {
@@ -55,6 +55,59 @@ describe("OpenRouter transcription", () => {
       bytes: audioFixture("mp3"), format: "mp3", language: "ru",
     });
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({ model: "vendor/custom-stt", language: "ru" });
+  });
+
+  const diarized = {
+    text: "Hello there. Hi, how are you? Fine.",
+    segments: [
+      { id: 0, start: 0, end: 1.2, text: " Hello there.", speaker: 0 },
+      { id: 1, start: 1.5, end: 3.1, text: "Hi, how are you?", speaker: 1 },
+      { id: 2, start: 3.2, end: 3725.9, text: "Fine.", speaker: 1 },
+    ],
+  };
+
+  it("requests segments with diarization and formats speaker labels and timestamps", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(diarized));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", speakers: true, timestamps: true });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+      response_format: "verbose_json", timestamp_granularities: ["segment"],
+      provider: { options: { azure: { diarization: { enabled: true } } } },
+    });
+    expect(result).toMatchObject({
+      text: "[0:00-0:01] Speaker 1: Hello there.\n[0:01-0:03] Speaker 2: Hi, how are you?\n[0:03-1:02:05] Speaker 2: Fine.",
+      speaker_labels: true, timestamps: true,
+    });
+  });
+
+  it("merges speaker turns without timestamps and skips diarization without speakers", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json(diarized));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", speakers: true, timestamps: false }))
+      .resolves.toMatchObject({ text: "Speaker 1: Hello there.\nSpeaker 2: Hi, how are you? Fine.", speaker_labels: true, timestamps: false });
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", timestamps: true }))
+      .resolves.toMatchObject({ text: "[0:00-0:01] Hello there.\n[0:01-0:03] Hi, how are you?\n[0:03-1:02:05] Fine.", speaker_labels: false });
+    const body = JSON.parse(fetchMock.mock.calls[1]![1].body);
+    expect(body).toMatchObject({ response_format: "verbose_json" });
+    expect(body).not.toHaveProperty("provider");
+  });
+
+  it("falls back to plain text when the provider returns no usable segments or speakers", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ text: "Just text." }))
+      .mockResolvedValueOnce(Response.json({ text: "Just text.", segments: "not a list" }))
+      .mockResolvedValueOnce(Response.json({ text: "One voice.", segments: [{ start: 0, end: 2, text: "One voice." }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const options = { bytes: audioFixture(), format: "ogg", speakers: true, timestamps: false } as const;
+    await expect(transcribeAudio(loadTestConfig(), options)).resolves.toMatchObject({ text: "Just text.", speaker_labels: false, timestamps: false });
+    await expect(transcribeAudio(loadTestConfig(), options)).resolves.toMatchObject({ text: "Just text.", speaker_labels: false });
+    await expect(transcribeAudio(loadTestConfig(), options)).resolves.toMatchObject({ text: "One voice.", speaker_labels: false });
+  });
+
+  it("keeps requested timestamps when no speaker labels come back", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ text: "One voice.", segments: [{ start: 0, end: 2, text: "One voice." }] })));
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", speakers: true, timestamps: true }))
+      .resolves.toMatchObject({ text: "[0:00-0:02] One voice.", speaker_labels: false, timestamps: true });
   });
 
   it.each([null, {}, { text: 12 }, { error: { message: "provider failed" } }])("rejects malformed provider responses: %j", async (body) => {
@@ -80,7 +133,7 @@ describe("OpenRouter transcription", () => {
       .mockResolvedValue(Response.json({ text: "Recovered transcript" }));
     vi.stubGlobal("fetch", fetchMock);
     const assertion = expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", language: "en" }))
-      .resolves.toMatchObject({ text: "Recovered transcript", model: "qwen/qwen3-asr-1.7b" });
+      .resolves.toMatchObject({ text: "Recovered transcript", model: "microsoft/mai-transcribe-2" });
     await vi.advanceTimersByTimeAsync(999);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);

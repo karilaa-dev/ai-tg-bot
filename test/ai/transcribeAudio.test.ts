@@ -54,9 +54,21 @@ describe("transcribe_audio", () => {
 
   it("transcribes a scoped chat attachment without a sandbox", async () => {
     const result = await createTranscribeAudioTool(input).execute({ file_id: fileId });
-    expect(result).toMatchObject({ text: "Words from the recording.", model: "qwen/qwen3-asr-1.7b" });
+    expect(result).toMatchObject({ text: "Words from the recording.", model: "microsoft/mai-transcribe-2" });
     expect(input.resolveFile).toHaveBeenCalledWith(expect.objectContaining({ id: fileId }), undefined);
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body).input_audio.format).toBe("ogg");
+  });
+
+  it("asks for speaker labels and timestamps by default and lets the model turn them off", async () => {
+    const tool = createTranscribeAudioTool(input);
+    await tool.execute({ file_id: fileId });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+      response_format: "verbose_json", provider: { options: { azure: { diarization: { enabled: true } } } },
+    });
+    await tool.execute({ file_id: fileId, speaker_labels: false, timestamps: false });
+    const plain = JSON.parse(fetchMock.mock.calls[1]![1].body);
+    expect(plain).not.toHaveProperty("response_format");
+    expect(plain).not.toHaveProperty("provider");
   });
 
   it("bounds long transcripts in both Pi content and tool details", async () => {
@@ -162,10 +174,12 @@ describe("transcribe_audio", () => {
       { transcript_id, file_id: fileId }, { transcript_id, path: "/audio.wav" }, { transcript_id, language: "en" },
       { transcript_id, format: "ogg" }, { transcript_id, offset: -1 }, { transcript_id, offset: 1.5 },
       { file_id: fileId, offset: 0 }, { transcript_id: "invalid" },
+      { transcript_id, speaker_labels: false }, { transcript_id, timestamps: true }, { file_id: fileId, timestamps: "yes" },
     ]) {
       expect(schema.safeParse(value).success).toBe(false);
     }
     expect(schema.safeParse({ path: "/recording", format: "ogg" }).success).toBe(true);
+    expect(schema.safeParse({ file_id: fileId, speaker_labels: false, timestamps: false }).success).toBe(true);
     expect(schema.safeParse({ transcript_id, offset: 8000 }).success).toBe(true);
   });
 

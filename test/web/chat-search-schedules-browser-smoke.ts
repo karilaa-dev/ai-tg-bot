@@ -96,6 +96,7 @@ try {
     await search.waitFor();
     const box = await palette.boundingBox();
     assert(box && box.width > 1000, `Search should be a wide dialog, got ${box?.width}`);
+    assert(Math.abs(box.y + box.height / 2 - 450) <= 2, `Search should be centered vertically, got top ${box.y} and height ${box.height}`);
     // Recent chats preview the highlighted row; arrow keys move the preview.
     const preview = palette.locator(".chat-search-preview");
     await preview.getByRole("heading", { name: "Preview of “Planning the autumn trip”" }).waitFor();

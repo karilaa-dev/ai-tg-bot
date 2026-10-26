@@ -319,7 +319,7 @@ function SearchPreview({ thread, query, cache, narrow, canOpen, onOpen, onBack }
       {thread && <>
         <h2 id={titleId} className="chat-search-preview-title"><span className="sr-only">{t.searchPreviewLabel(thread.title)}</span><span aria-hidden="true">{thread.title}</span></h2>
         <span className="chat-search-origin">{t.originLabel(thread.origin)}</span>
-        <Button variant="secondary" size="sm" disabled={!canOpen} onClick={onOpen}>{t.searchOpen}</Button>
+        <Button variant="primary" size="sm" disabled={!canOpen} onClick={onOpen}>{t.searchOpen}</Button>
       </>}
     </div>
     <div ref={viewport} className="chat-search-preview-body" tabIndex={thread ? 0 : -1} aria-busy={preview?.status === "loading"}>
