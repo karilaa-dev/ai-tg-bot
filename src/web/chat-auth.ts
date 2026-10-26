@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import type { AccessControl } from "../access/control.js";
 import { WebHttpError } from "./auth.js";
+import { loginReturnPath } from "./login-return.js";
 
 const ISSUER = "https://oauth.telegram.org";
 const SESSION_MS = 12 * 60 * 60_000;
@@ -20,8 +21,6 @@ type TelegramFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fe
 export interface TelegramAuthDependencies { jwks?: JWTVerifyGetKey; fetch?: TelegramFetch; authorizeUrl?: string }
 
 type AuthConfig = Pick<AppConfig, "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_ADMIN_USER_IDS">;
-/** Pages a finished sign-in may return to; anything else lands on the chat. */
-const RETURN_PATHS = new Set(["/", "/admin"]);
 interface Transaction { browser: string; verifier: string; nonce: string; returnTo: string; expires: number }
 interface Session { userId: number; expires: number }
 
@@ -156,7 +155,7 @@ export class WebChatAuth {
     const verifier = token();
     const nonce = token();
     const requested = new URL(request.url).searchParams.get("return") ?? "/";
-    const returnTo = RETURN_PATHS.has(requested) ? requested : "/";
+    const returnTo = loginReturnPath(requested);
     this.transactions.set(key(state), { browser, verifier, nonce, returnTo, expires: Date.now() + TRANSACTION_MS });
     const location = new URL(this.authorizeUrl);
     location.search = new URLSearchParams({

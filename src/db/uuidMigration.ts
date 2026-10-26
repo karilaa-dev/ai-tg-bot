@@ -271,7 +271,6 @@ async function migratePayloads(db: SqlExecutor, tables: Set<string>, maps: IdMap
   if (!maps.file.size && !maps.thread.size) return;
   for (const [table, jsonColumns, textColumns] of [
     ["messages", ["content_json"], ["text_plain", "thinking"]],
-    ["files", ["outline_json"], ["content_md", "summary"]],
     ["turn_runs", ["usage_json"], []],
   ] as const) {
     if (!tables.has(table)) continue;

@@ -29,7 +29,7 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   page.on("request", request => { if (!request.url().startsWith(root)) remoteRequests.push(request.url()); });
 
-  let userId: number | null = 1001;
+  let userId: number | null = null;
   let sessionReads = 0;
   let posts = 0;
   let holdSend: ReturnType<typeof deferred<Route>> | undefined;
@@ -110,7 +110,7 @@ try {
     }
     throw new Error(`Unexpected fixture request: ${request.method()} ${url.pathname}`);
   });
-  await page.goto(root);
+  await page.goto(`${root}?thread=${fixtureUuid(1)}`);
   const account = (name: string) => page.getByRole("button", { name: `Account: ${name}`, exact: true });
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   const signOut = async (name: string) => {
@@ -122,7 +122,12 @@ try {
     await page.evaluate(() => window.dispatchEvent(new Event("chat-session-expired")));
     await account(profile(id).name).waitFor();
   };
-  await account("Alice").waitFor();
+  const login = page.getByRole("link", { name: "Sign in with Telegram", exact: true });
+  await login.waitFor();
+  assert.equal(new URL((await login.getAttribute("href"))!, root).searchParams.get("return"), `/?thread=${fixtureUuid(1)}`);
+  await recheck(1001);
+  await page.getByRole("heading", { name: "Chat 1", exact: true }).waitFor();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   assert.equal(await page.evaluate(() => typeof Reflect.get(globalThis, "process")), "undefined");
   assert.equal(await page.locator("[data-openui-devtools-auto-mount]").count(), 0);
   const scripts = await page.locator("script[src]").evaluateAll(nodes => nodes.map(node => node.getAttribute("src")!));
@@ -154,6 +159,49 @@ try {
   // Opening the chat in a focused tab acknowledges only the newest rendered stored message, for this account.
   await page.waitForFunction(() => !document.querySelector(".chat-thread.is-unread"));
   assert.deepEqual(reads.filter(read => read.userId === 1001), [{ userId: 1001, threadId: fixtureUuid(1), messageId: 284 }]);
+  // Failed sends retain their files and retry identity when the conversation unmounts.
+  holdSend = deferred<Route>();
+  await composer.fill("Recover this failed message");
+  await page.locator('input[type="file"]').setInputFiles({ name: "recover-me.txt", mimeType: "text/plain", buffer: Buffer.from("Recover these original bytes") });
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const failedSend = await holdSend.promise;
+  const formFor = async (route: Route) => {
+    const body = route.request().postDataBuffer();
+    assert.ok(body);
+    return new Request(route.request().url(), { method: "POST", headers: route.request().headers(), body: new Uint8Array(body) }).formData();
+  };
+  const original = await formFor(failedSend);
+  await json(failedSend, { error: "Upload failed. Please retry." }, 500);
+  await page.getByRole("alert").filter({ hasText: "Upload failed. Please retry." }).waitFor();
+  await composer.fill("A newer unsent draft");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Chat 1", exact: false }).click();
+  await page.locator('[data-pending="failed"]').waitFor({ timeout: 5_000 });
+  assert.equal(await page.getByText("recover-me.txt", { exact: true }).count(), 1);
+  assert.equal(await composer.inputValue(), "A newer unsent draft");
+  holdSend = deferred<Route>();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  const retrySend = await holdSend.promise;
+  const retried = await formFor(retrySend);
+  assert.equal(retried.get("requestId"), original.get("requestId"));
+  assert.equal(retried.get("text"), "Recover this failed message");
+  const recoveredFile = retried.get("files");
+  assert.ok(recoveredFile instanceof File);
+  assert.equal(recoveredFile.name, "recover-me.txt");
+  assert.equal(await recoveredFile.text(), "Recover these original bytes");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Chat 1", exact: false }).click();
+  await page.locator('[data-pending="sending"]').waitFor();
+  await json(retrySend, { error: "Retry failed after navigation." }, 500);
+  holdSend = undefined;
+  await page.getByRole("alert").filter({ hasText: "Retry failed after navigation." }).waitFor();
+  await page.getByRole("button", { name: "Discard message", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Chat 1", exact: false }).click();
+  await composer.waitFor();
+  assert.equal(await page.getByText("recover-me.txt", { exact: true }).count(), 0);
+  assert.equal(await page.locator('[data-pending="failed"]').count(), 0);
+  assert.equal(await composer.inputValue(), "A newer unsent draft");
   holdSend = deferred<Route>();
   await composer.fill("Alice delayed message");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -198,7 +246,7 @@ try {
   holdCreate = undefined;
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(page.url(), bobUrl);
-  assert.equal(posts, 1);
+  assert.equal(posts, 3);
   assert.equal(await composer.inputValue(), "");
 
   // A completed fork must not navigate the next user's workspace either.
@@ -226,11 +274,11 @@ try {
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await account("Bob").waitFor();
   assert.equal(await composer.inputValue(), "");
-  assert.equal(posts, 1);
+  assert.equal(posts, 3);
 
   assert.deepEqual(errors, []);
   assert.deepEqual(remoteRequests, []);
-  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion`);
+  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, deep-link sign-in, failed-send navigation/retry/files, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion`);
 } finally {
   server.kill("SIGTERM");
   await stopped;

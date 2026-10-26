@@ -89,6 +89,27 @@ it("returns to the admin page only when asked, and never to another site", async
   expect(auth.isAdmin(42)).toBe(false);
 });
 
+it("preserves only validated conversation selections through the OAuth callback", async () => {
+  const threadId = "7798a181-b22c-5cdc-8cc3-46cea27d1130";
+  let nonce = "";
+  for (const [requested, expected] of [
+    [`/?thread=${threadId}`, `/?thread=${threadId}`],
+    [`/?thread=${threadId}&tracking=ignored`, `/?thread=${threadId}`],
+    ["/?thread=123", "/"],
+    ["/?thread=https://evil.example", "/"],
+    [`/?thread=${threadId}&thread=${threadId}`, "/"],
+    [`//evil.example/?thread=${threadId}`, "/"],
+    [`https://evil.example/?thread=${threadId}`, "/"],
+    [`/admin?thread=${threadId}`, "/"],
+  ] satisfies Array<[string, string]>) {
+    const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+    const start = begin(auth, undefined, `?return=${encodeURIComponent(requested)}`);
+    nonce = start.location.searchParams.get("nonce")!;
+    const complete = await auth.callback(callback(start), async () => {});
+    expect(complete.headers.get("Location")).toBe(expected);
+  }
+});
+
 it("binds single-use transactions to the browser and rejects expired or duplicate state", async () => {
   const exchange = vi.fn<(...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>>();
   const auth = new WebChatAuth(config, access, { jwks, fetch: exchange });

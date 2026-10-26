@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type ReactNode } from "react";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button } from "@cloudflare/kumo/components/button";
@@ -21,14 +21,13 @@ import { activityLabel } from "../thread-activity.js";
 import { ResponseChain, type LiveChainState } from "../tool-details.js";
 import { chatApi, getChatAttachmentSource, describeError, type ChatMessage, type ChatReadResult } from "./api.js";
 import { acceptFiles, Composer, fileProblemText, type FileProblem } from "./composer.js";
-import { emptyDraft, newRequestId, type Draft, type DraftStore } from "./drafts.js";
+import { emptyDraft, newRequestId, type Draft, type DraftStore, type PendingSend } from "./drafts.js";
 import { hasDraftContent, LiveDraft } from "./live-draft.js";
 import { MobileNavButton } from "./shell-parts.js";
 import { chatFormat, useChatStrings } from "./strings.js";
 import type { ChatHistory, ChatThread } from "../../chat-types.js";
 import { CompactionStatus } from "./compaction-status.js";
 
-interface PendingSend { requestId: string; text: string; files: File[]; status: "sending" | "sent" | "failed"; error?: unknown; messageId?: number; sentAt?: number }
 type ActionKind = "stop" | "fork" | "compact";
 
 const excerpt = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 140) + (text.length > 140 ? "…" : "");
@@ -68,7 +67,9 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const historyRef = useRef<ChatHistory | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [olderBusy, setOlderBusy] = useState(false);
-  const [pending, setPending] = useState<PendingSend[]>([]);
+  const pendingSnapshot = useCallback(() => drafts.pending(threadId), [drafts, threadId]);
+  const pending = useSyncExternalStore(drafts.subscribe, pendingSnapshot, pendingSnapshot);
+  const setPending = useCallback((update: (current: readonly PendingSend[]) => readonly PendingSend[]) => drafts.updatePending(threadId, update), [drafts, threadId]);
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
   const [draft, setDraftState] = useState<Draft>(() => drafts.read(threadId));
@@ -120,7 +121,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
         setHistory(merged);
         setLoadError(null);
         const ids = new Set(messages.map(message => message.id));
-        setPending(list => list.some(item => item.messageId !== undefined && ids.has(item.messageId)) ? list.filter(item => item.messageId === undefined || !ids.has(item.messageId)) : list);
+        setPending(list => list.some(item => item.status === "sent" && ids.has(item.messageId)) ? list.filter(item => item.status !== "sent" || !ids.has(item.messageId)) : list);
         older = false;
       } while (again.current && !signal.aborted);
     } catch (error) {
@@ -129,7 +130,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       fetching.current = false;
       if (!signal.aborted) setOlderBusy(false);
     }
-  }, [threadId, drafts]);
+  }, [threadId, drafts, setPending]);
 
   useEffect(() => {
     mounted.current = true;
@@ -240,16 +241,16 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     stickToBottom.current = true;
     try {
       const result = await chatApi.send(threadId, { text: item.text, requestId, files: item.files });
-      if (!mounted.current || !drafts.active) return;
+      if (!drafts.active) return;
       setPending(list => list.map(entry => entry.requestId === requestId ? { ...entry, status: "sent", messageId: result.messageId, sentAt: Date.now() } : entry));
+      if (!mounted.current) return;
       void load();
       onThreadChange();
     } catch (error) {
       if (!drafts.active) return;
-      if (!mounted.current) { drafts.restore(threadId, { text: item.text, files: item.files, requestId }); return; }
       setPending(list => list.map(entry => entry.requestId === requestId ? { ...entry, status: "failed", error: error ?? new Error() } : entry));
     }
-  }, [threadId, drafts, load, onThreadChange]);
+  }, [threadId, drafts, load, onThreadChange, setPending]);
 
   useEffect(() => {
     const start = drafts.takeStart(threadId);

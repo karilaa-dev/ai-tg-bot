@@ -3,6 +3,7 @@ import { Button, LinkButton } from "@cloudflare/kumo/components/button";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { IconAlertCircle, IconBrandTelegram, IconLock, IconRefresh } from "@tabler/icons-react";
 import type { ChatProfile } from "../../chat-types.js";
+import { loginReturnPath } from "../../login-return.js";
 import { logo } from "../brand.js";
 import { UiLanguageContext } from "../i18n.js";
 import { CHAT_SESSION_EXPIRED_EVENT, ChatApiError, bindChatRequests, chatApi, invalidateChatRequests } from "./api.js";
@@ -125,6 +126,8 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
 
 function SignedOut({ state, retry }: { state: Exclude<GateState, { kind: "signed-in" }>; retry: () => void }) {
   const t = useChatStrings();
+  const returnTo = loginReturnPath(window.location.pathname + window.location.search);
+  const signInUrl = `/api/auth/telegram/start${returnTo === "/" ? "" : `?return=${encodeURIComponent(returnTo)}`}`;
   return <AccessFrame busy={state.kind === "checking"}>
     {state.kind === "checking" && <p className="chat-access-status" role="status"><Loader size="sm" /> {t.checkingSession}</p>}
     {state.kind === "unreachable" && <>
@@ -134,7 +137,7 @@ function SignedOut({ state, retry }: { state: Exclude<GateState, { kind: "signed
     {state.kind === "signed-out" && <>
       {state.notice !== "none" && <p className="chat-access-note" role="status">{state.notice === "signed-out" ? t.signedOutNotice : t.sessionEnded}</p>}
       {state.loginAvailable
-        ? <LinkButton variant="primary" size="lg" className="chat-access-button" href="/api/auth/telegram/start"><IconBrandTelegram size={18} aria-hidden="true" />{t.signInWithTelegram}</LinkButton>
+        ? <LinkButton variant="primary" size="lg" className="chat-access-button" href={signInUrl}><IconBrandTelegram size={18} aria-hidden="true" />{t.signInWithTelegram}</LinkButton>
         : <p className="chat-access-note" role="note"><IconLock size={16} aria-hidden="true" /><span><strong>{t.signInUnavailable}.</strong> {t.signInNotConfigured}</span></p>}
     </>}
   </AccessFrame>;

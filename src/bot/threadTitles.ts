@@ -22,7 +22,7 @@ export class ThreadTitleCoordinator {
 
   constructor(private readonly input: {
     repos: Repos;
-    pi: PiRuntimeService;
+    pi: Pick<PiRuntimeService, "generateThreadTitle">;
     logger: Logger;
   }) {}
 
@@ -73,7 +73,7 @@ export class ThreadTitleCoordinator {
 
   private async run(input: ThreadTitleScheduleInput): Promise<void> {
     const thread = await this.input.repos.threads.get(input.threadId);
-    if (!isEligibleTopic(thread)) return;
+    if (!thread || (thread.origin !== "web" && !isEligibleTopic(thread))) return;
 
     if (thread.title_source === "generated") {
       if (!thread.topic_title_synced) await this.syncActivity(input);

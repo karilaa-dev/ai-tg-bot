@@ -49,6 +49,23 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       if (directory) await fs.rm(directory, { recursive: true, force: true });
     });
 
+    it("preserves document contents, headings and summaries containing reference-like text", async () => {
+      await legacyDatabase();
+      const document = '# Image #7\nLiteral file_id: 12345 and [[chat-file:7]].\n{"file_id":7}\n';
+      const summary = 'The document explains file_id: 12345 and Image #7.';
+      const outline = JSON.stringify([{ chunk_index: 0, heading_path: "Image #7" }]);
+      await database.db.execute(sql`update files set content_md = ${document}, summary = ${summary}, outline_json = ${outline} where id = 7`);
+      await database.db.execute(sql`update file_chunks set content = ${document}, heading_path = 'Image #7' where id = 13`);
+      await database.initialize();
+      const repos = createRepos(database.db, database.search);
+      expect(await repos.files.get(legacyUuid("file", "7"))).toMatchObject({
+        content_md: document, summary, outline_json: outline,
+      });
+      expect(await database.db.query(sql`select content, heading_path from file_chunks where id = 13`))
+        .toEqual([{ content: document, heading_path: "Image #7" }]);
+      expect(await database.db.query(sql`select legacy_id from legacy_uuid_ids where legacy_id = '12345'`)).toEqual([]);
+    });
+
     it("preserves the complete graph, blobs, search and serialized references across repeated initialization", async () => {
       await legacyDatabase();
       const session = path.join(directory, "session.jsonl");

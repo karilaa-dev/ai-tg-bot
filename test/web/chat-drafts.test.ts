@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { bindChatRequests, chatFetch, invalidateChatRequests } from "../../src/web/client/chat/api.js";
-import { DraftStore, emptyDraft, type Draft } from "../../src/web/client/chat/drafts.js";
+import { DraftStore, emptyDraft, type Draft, type PendingSend } from "../../src/web/client/chat/drafts.js";
 import { LiveDraft } from "../../src/web/client/chat/live-draft.js";
 import { acceptFiles, fileProblemText } from "../../src/web/client/chat/composer.js";
 import { deferred } from "../helpers/async.js";
@@ -21,6 +21,7 @@ beforeEach(() => {
 afterEach(() => { invalidateChatRequests(); vi.unstubAllGlobals(); });
 
 const message: Draft = { text: "Alice's private message", files: [new File(["private"], "private.txt")], requestId: "same-request" };
+const failedMessage: PendingSend = { ...message, requestId: "same-request", status: "failed", error: new Error("Send failed") };
 
 it("scopes persisted drafts by verified user and removes legacy and other-user drafts", () => {
   sessionStorage.setItem("chat-draft:new", "unscoped legacy text");
@@ -46,9 +47,10 @@ it("revokes files, retry ids, queued starts and late writes on sign-out, even fo
   const alice = new DraftStore(1);
   alice.write("new", message);
   alice.queueStart(fixtureUuid(3), message);
+  alice.updatePending(fixtureUuid(2), () => [failedMessage]);
   const completion = deferred<void>();
   const lateFailure = completion.promise.then(() => {
-    alice.restore(fixtureUuid(2), message);
+    alice.updatePending(fixtureUuid(2), () => [failedMessage]);
     alice.write("new", message);
     alice.queueStart(fixtureUuid(4), message);
   });
@@ -60,22 +62,43 @@ it("revokes files, retry ids, queued starts and late writes on sign-out, even fo
   expect(alice.read("new")).toEqual(emptyDraft);
   expect(alice.takeStart(fixtureUuid(3))).toBeUndefined();
   expect(alice.takeStart(fixtureUuid(4))).toBeUndefined();
+  expect(alice.pending(fixtureUuid(2))).toEqual([]);
+  expect(nextLogin.pending(fixtureUuid(2))).toEqual([]);
   expect(nextLogin.read(fixtureUuid(2))).toEqual(emptyDraft);
   expect(nextLogin.read("new")).toEqual(emptyDraft);
   expect(sessionStorage.length).toBe(0);
 });
 
-it("restores failed sends after navigation within a session without replacing newer typing", () => {
+it("keeps failed sends separate from newer drafts, scoped to their thread and session", () => {
   const alice = new DraftStore(1);
-  alice.restore(fixtureUuid(2), message);
-  expect(alice.read(fixtureUuid(2))).toEqual(message);
   const newer = { ...emptyDraft, text: "newer draft" };
   alice.write(fixtureUuid(2), newer);
-  alice.restore(fixtureUuid(2), message);
+  alice.updatePending(fixtureUuid(2), () => [failedMessage]);
+  expect(alice.pending(fixtureUuid(2))).toEqual([failedMessage]);
+  expect(alice.pending(fixtureUuid(3))).toEqual([]);
+  expect(new DraftStore(2).pending(fixtureUuid(2))).toEqual([]);
   expect(alice.read(fixtureUuid(2))).toEqual(newer);
   alice.queueStart(fixtureUuid(3), message);
   expect(alice.takeStart(fixtureUuid(3))).toEqual(message);
   expect(alice.takeStart(fixtureUuid(3))).toBeUndefined();
+});
+
+it("notifies the current subscriber when an in-flight send finishes after navigation", () => {
+  const drafts = new DraftStore(1);
+  const previousView = vi.fn();
+  const unsubscribe = drafts.subscribe(previousView);
+  drafts.updatePending(fixtureUuid(2), () => [{ ...message, requestId: "same-request", status: "sending" }]);
+  unsubscribe();
+  const currentView = vi.fn();
+  drafts.subscribe(currentView);
+  drafts.updatePending(fixtureUuid(2), () => [failedMessage]);
+  expect(previousView).toHaveBeenCalledTimes(1);
+  expect(currentView).toHaveBeenCalledTimes(1);
+  expect(drafts.pending(fixtureUuid(2))).toEqual([failedMessage]);
+  drafts.close();
+  drafts.updatePending(fixtureUuid(2), () => [failedMessage]);
+  expect(currentView).toHaveBeenCalledTimes(2);
+  expect(drafts.pending(fixtureUuid(2))).toEqual([]);
 });
 
 it("keeps in-memory drafts revocable when browser storage is unavailable", () => {

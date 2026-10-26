@@ -1,8 +1,14 @@
 /** `requestId` is kept while the content is unchanged so a retried send cannot post twice. */
 export interface Draft { text: string; files: File[]; requestId: string | null }
 export type DraftKey = string;
+export type PendingSend = Omit<Draft, "requestId"> & { requestId: string } & (
+  | { status: "sending" }
+  | { status: "sent"; messageId: number; sentAt: number }
+  | { status: "failed"; error: unknown }
+);
 
 export const emptyDraft: Draft = { text: "", files: [], requestId: null };
+const noPendingSends: readonly PendingSend[] = [];
 const storagePrefix = "chat-draft:";
 
 export function clearStoredDrafts(keepPrefix?: string) {
@@ -27,6 +33,8 @@ export class DraftStore {
   readonly id = newRequestId();
   private drafts = new Map<DraftKey, Draft>();
   private starts = new Map<string, Draft>();
+  private sends = new Map<DraftKey, readonly PendingSend[]>();
+  private listeners = new Set<() => void>();
   private closed = false;
   private prefix: string;
 
@@ -54,10 +62,24 @@ export class DraftStore {
     } catch { /* Keep the draft in memory only. */ }
   }
 
-  /** A failed send after navigation must not overwrite newer typing. */
-  restore(key: DraftKey, draft: Draft) {
-    if (isEmptyDraft(this.read(key))) this.write(key, draft);
+  pending(key: DraftKey): readonly PendingSend[] {
+    return this.closed ? noPendingSends : this.sends.get(key) ?? noPendingSends;
   }
+
+  updatePending(key: DraftKey, update: (current: readonly PendingSend[]) => readonly PendingSend[]) {
+    if (this.closed) return;
+    const current = this.pending(key);
+    const next = update(current);
+    if (next === current) return;
+    if (next.length) this.sends.set(key, next); else this.sends.delete(key);
+    for (const listener of this.listeners) listener();
+  }
+
+  subscribe = (listener: () => void): (() => void) => {
+    if (this.closed) return () => {};
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
 
   queueStart(threadId: string, draft: Draft) { if (!this.closed) this.starts.set(threadId, draft); }
   takeStart(threadId: string): Draft | undefined {
@@ -71,6 +93,9 @@ export class DraftStore {
     this.closed = true;
     this.drafts.clear();
     this.starts.clear();
+    this.sends.clear();
+    for (const listener of this.listeners) listener();
+    this.listeners.clear();
     clearStoredDrafts();
   }
 }
