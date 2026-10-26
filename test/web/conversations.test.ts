@@ -91,12 +91,31 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.threads(1, 0, 50, "after-cutoff")).items.map(item => item.id)).toEqual([parent.id]);
     const first = await repository.threads(1, 0, 2, "100%_literal");
     expect(first.items).toHaveLength(2);
+    expect(first.items.every(item => item.searchMatch?.messageId === before.id && item.searchMatch.text.includes("100%_literal"))).toBe(true);
     expect(first.nextOffset).toBe(2);
     const second = await repository.threads(1, first.nextOffset!, 2, "100%_literal");
     expect(second.items).toHaveLength(1);
+    expect(second.items[0]?.searchMatch).toEqual({ messageId: before.id, text: "НАЙДИ 100%_literal" });
     expect(second.nextOffset).toBeNull();
     expect(new Set([...first.items, ...second.items].map(item => item.id)).size).toBe(3);
     expect((await repository.threads(1, 0, 50, "100___literal")).items).toEqual([]);
+  });
+
+  it("returns bounded snippets around body matches without leaking thinking, system messages or another owner's history", async () => {
+    const own = await thread(1, "Title only");
+    const other = await thread(2, "Foreign");
+    const text = "prefix ".repeat(1500) + "needle in the middle " + "suffix ".repeat(1500);
+    const hit = await repos.messages.insert({ threadId: own.id, role: "assistant", content: { text }, textPlain: text, thinking: "private thinking" });
+    await repos.messages.insert({ threadId: own.id, role: "system", content: {}, textPlain: "system-secret" });
+    await repos.messages.insert({ threadId: other.id, role: "assistant", content: {}, textPlain: "foreign-secret needle" });
+    const result = (await repository.threads(1, 0, 50, "needle")).items;
+    expect(result).toHaveLength(1);
+    expect(result[0]?.searchMatch).toMatchObject({ messageId: hit.id, text: expect.stringContaining("needle in the middle") });
+    expect(result[0]!.searchMatch!.text.length).toBeLessThanOrEqual(362);
+    expect(JSON.stringify(result)).not.toContain("private thinking");
+    expect(JSON.stringify(result)).not.toContain("foreign-secret");
+    expect((await repository.threads(1, 0, 50, "system-secret")).items).toEqual([]);
+    expect((await repository.threads(1, 0, 50, "Title only")).items[0]?.searchMatch).toBeNull();
   });
 
   it("serves private, paginated memories without enabling or changing them", async () => {

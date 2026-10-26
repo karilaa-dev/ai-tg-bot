@@ -91,6 +91,14 @@ Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_U
 
 Set the required Telegram, E2B, and OpenRouter keys in Dokploy. Tavily and Browser Use remain optional. For Codex primary inference and search, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
+## Scheduled chats
+
+Ask the bot to check something later or periodically, or choose **Schedule…** in a web chat's menu. The **Scheduled** page lets you edit, pause, resume, or delete schedules. Each conversation can have one schedule, either once at a future time or repeating every 60 minutes or longer. Repeating intervals measure elapsed time; an every-24-hours schedule can move by an hour on the local clock when daylight saving changes.
+
+Schedules are stored in the database and run while the bot process is online, even if the website is closed. Results appear in the same conversation and its Telegram topic. After downtime, the bot runs one overdue check and advances to a future occurrence. Checks never overlap another turn in their chat and start at most once per hour per chat, including after edits or deletion and recreation. Archived chats do not run; revoked accounts have their schedules paused. Pausing or deleting stops future runs; use **Stop** in the conversation to cancel an already queued or running check.
+
+Chat search shows message snippets and a conversation preview without marking the chat read. Unread indicators apply only to conversations originally created on the website.
+
 ## E2B sandbox behavior
 
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
@@ -112,7 +120,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.1` uses `ai-tg-bot-tools:v2.1.1`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.2` uses `ai-tg-bot-tools:v2.1.2`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -128,8 +136,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.1 is ai-tg-bot-tools:v2.1.1.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.1
+# Optional override. The default for version 2.1.2 is ai-tg-bot-tools:v2.1.2.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.2
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648

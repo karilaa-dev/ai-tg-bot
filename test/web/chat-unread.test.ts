@@ -25,6 +25,16 @@ describe("shared web and Telegram read state", () => {
     await expect(chat.markRead(env.user.id, thread.id, saved.id + 1)).rejects.toThrow();
   });
 
+  it("never marks Telegram-origin chats unread, including subsequent messages sent from the website", async () => {
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    await env.repos.messages.insert({ threadId: thread.id, role: "assistant", textPlain: "Telegram reply", content: {} });
+    expect((await chat.threads(env.user.id, 0)).items.find(t => t.id === thread.id)?.unread).toBe(false);
+    expect((await chat.history(env.user.id, thread.id)).thread.unread).toBe(false);
+    await chat.send(env.user.id, thread.id, { text: "Reply from web", requestId: "telegram_origin_web_send" });
+    await env.services.turnCoordinator.waitForIdle(thread.id);
+    expect((await chat.history(env.user.id, thread.id)).thread).toMatchObject({ origin: "telegram", unread: false });
+  });
+
   it("marks prior replies read on Telegram input but leaves the new assistant reply unread", async () => {
     const thread = await chat.createThread(env.user.id, "Shared topic");
     const prior = await env.repos.messages.insert({ threadId: thread.id, role: "assistant", textPlain: "Earlier reply", content: {} });

@@ -1,6 +1,9 @@
 import type { WebHistory, WebMemories, WebPage, WebThread, WebUsageReport } from "./types.js";
 import type { TurnDraft } from "../ai/types.js";
 
+import type { ChatSchedule, ChatScheduleInput, ChatSchedulePatch } from "../scheduling/types.js";
+export type { ChatSchedule, ChatScheduleInput, ChatSchedulePatch } from "../scheduling/types.js";
+
 export interface ChatProfile {
   id: number;
   name: string | null;
@@ -24,6 +27,7 @@ export interface ChatSettings {
 export type ChatSettingsPatch = Partial<Omit<ChatSettings, "timezoneOffsetMinutes">>;
 
 export interface ChatThread extends WebThread {
+  searchMatch?: { messageId: number; text: string } | null;
   origin: "telegram" | "web";
   topicId: number | null;
   unread: boolean;
@@ -45,6 +49,10 @@ export type ChatUploadFile = Pick<File, "name" | "size" | "type" | "arrayBuffer"
 
 /** User ids here always come from the verified session, never a request body. */
 export interface ChatService {
+  schedules(userId: number): Promise<{ items: ChatSchedule[] }>;
+  createSchedule(userId: number, input: ChatScheduleInput): Promise<ChatSchedule>;
+  updateSchedule(userId: number, id: string, patch: ChatSchedulePatch): Promise<ChatSchedule>;
+  deleteSchedule(userId: number, id: string): Promise<void>;
   profile(userId: number): Promise<ChatProfile>;
   /** The account's current Telegram profile photo, or null when it has none or hides it from bots. */
   avatar(userId: number): Promise<{ bytes: Uint8Array; mime: string } | null>;

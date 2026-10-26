@@ -60,6 +60,7 @@ beforeEach(async () => {
     return originalFetch(input, init);
   });
   chat = {
+    schedules: vi.fn(async () => ({ items: [] })), createSchedule: vi.fn(), updateSchedule: vi.fn(), deleteSchedule: vi.fn(),
     profile: vi.fn(async id => { if (![42, 84].includes(id)) throw new WebNotFound(); return profile(id); }),
     requireThread: vi.fn(async (userId, threadId) => { if (![fixtureUuid(1), fixtureUuid(2)].includes(threadId) || thread(threadId).userId !== userId) throw new WebNotFound(); }),
     markRead: vi.fn(async (_userId, _threadId, messageId) => ({ readMessageId: messageId, unread: false })),
@@ -420,4 +421,32 @@ it("rejects stale-tab account assertions before reading, mutating, downloading o
   expect(await (await request("/api/chat/session", { headers: { Cookie: b } })).json()).toMatchObject({ authenticated: true, user: { id: 84 } });
   expect((await request("/api/chat/threads", { headers: { Cookie: b, "X-Chat-User": "84" } })).status).toBe(200);
   expect(chat.threads).toHaveBeenCalledWith(84, 0, "");
+});
+
+it("authenticates schedule endpoints, binds ownership to the session, and validates cadence on create and edit", async () => {
+  const id = fixtureUuid(90);
+  const input = { threadId: fixtureUuid(1), title: "Forecast", prompt: "Check the forecast", intervalMinutes: 60, nextRunAt: Date.now() + 3_600_000 };
+  const saved = { ...input, id, enabled: true, lastRunAt: null, lastTurnId: null, createdAt: Date.now(), updatedAt: Date.now() };
+  vi.mocked(chat.createSchedule).mockResolvedValue(saved);
+  vi.mocked(chat.updateSchedule).mockResolvedValue({ ...saved, enabled: false });
+  expect((await request("/api/chat/schedules")).status).toBe(401);
+  expect((await request(`/api/chat/schedules/${id}`, { method: "DELETE", headers: mutation })).status).toBe(401);
+  const cookie = await login();
+  const headers = { ...mutation, Cookie: cookie };
+  expect((await request("/api/chat/schedules", { headers })).status).toBe(200);
+  expect(chat.schedules).toHaveBeenCalledWith(42);
+  for (const body of [{ ...input, intervalMinutes: 59 }, { ...input, userId: 84 }, { ...input, nextRunAt: "tomorrow" }]) {
+    expect((await request("/api/chat/schedules", { method: "POST", headers, body: JSON.stringify(body) })).status).toBe(400);
+  }
+  expect(chat.createSchedule).not.toHaveBeenCalled();
+  expect((await request("/api/chat/schedules", { method: "POST", headers, body: JSON.stringify(input) })).status).toBe(201);
+  expect(chat.createSchedule).toHaveBeenCalledWith(42, input);
+  expect((await request(`/api/chat/schedules/${id}`, { method: "PATCH", headers, body: JSON.stringify({ intervalMinutes: 1 }) })).status).toBe(400);
+  expect((await request(`/api/chat/schedules/${id}`, { method: "PATCH", headers, body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+  expect(chat.updateSchedule).toHaveBeenCalledWith(42, id, { enabled: false });
+  const { "X-Chat-Request": _csrf, ...noMarker } = headers;
+  expect((await request(`/api/chat/schedules/${id}`, { method: "DELETE", headers: noMarker })).status).toBe(403);
+  expect(chat.deleteSchedule).not.toHaveBeenCalled();
+  expect((await request(`/api/chat/schedules/${id}`, { method: "DELETE", headers })).status).toBe(200);
+  expect(chat.deleteSchedule).toHaveBeenCalledWith(42, id);
 });

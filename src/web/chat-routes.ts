@@ -1,4 +1,5 @@
 import type { BunRequest, Server } from "bun";
+import { ScheduleError, ScheduleInputSchema, SchedulePatchSchema } from "../scheduling/types.js";
 import { z } from "zod";
 import { ConversationError } from "../application/errors.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
@@ -53,9 +54,9 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           for (const [key, value] of Object.entries(responseHeaders)) if (!headers.has(key)) headers.set(key, value);
           return new Response(request.method === "HEAD" ? null : result.body, { status: result.status, headers });
         } catch (error) {
-          const status = request.signal.aborted ? 499 : error instanceof WebHttpError || error instanceof ConversationError ? error.status : error instanceof WebNotFound ? 404 : error instanceof z.ZodError ? 400 : 500;
+          const status = request.signal.aborted ? 499 : error instanceof WebHttpError || error instanceof ConversationError || error instanceof ScheduleError ? error.status : error instanceof WebNotFound ? 404 : error instanceof z.ZodError ? 400 : 500;
           if (status === 500) options.logger.error("web chat request failed", { error: error instanceof Error ? error.name : "unknown" });
-          return new Response(request.method === "HEAD" || status === 499 ? null : JSON.stringify({ error: error instanceof WebHttpError || error instanceof ConversationError ? error.message : status === 400 ? "Invalid request." : status === 404 ? "Not found." : "Could not complete the request. Try again." }), {
+          return new Response(request.method === "HEAD" || status === 499 ? null : JSON.stringify({ error: error instanceof WebHttpError || error instanceof ConversationError || error instanceof ScheduleError ? error.message : status === 400 ? "Invalid request." : status === 404 ? "Not found." : "Could not complete the request. Try again." }), {
             status, headers: { ...responseHeaders, ...(error instanceof WebHttpError ? error.headers : {}), "Content-Type": "application/json" },
           });
         }
@@ -109,6 +110,17 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           catch (error) { if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) throw new WebHttpError(403, "Send /start to the bot in Telegram before signing in here."); throw error; }
         }, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS));
       }) },
+      "/api/chat/schedules": {
+        ...read(async (_request, userId, chat) => Response.json(await chat.schedules(userId))),
+        POST: user(async (request, userId, chat) => Response.json(await chat.createSchedule(userId, ScheduleInputSchema.parse(await json(request))), { status: 201 })),
+      },
+      "/api/chat/schedules/:scheduleId": {
+        PATCH: user<"/api/chat/schedules/:scheduleId">(async (request, userId, chat) =>
+          Response.json(await chat.updateSchedule(userId, uuid(request.params.scheduleId), SchedulePatchSchema.parse(await json(request))))),
+        DELETE: user<"/api/chat/schedules/:scheduleId">(async (request, userId, chat) => {
+          await chat.deleteSchedule(userId, uuid(request.params.scheduleId)); return Response.json({ deleted: true });
+        }),
+      },
       "/api/chat/threads": {
         ...read(async (request, userId, chat) => {
           const query = new URL(request.url).searchParams;

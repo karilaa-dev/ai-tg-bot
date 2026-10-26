@@ -76,7 +76,7 @@ try {
     assert.equal(row.dot, row.sr.includes("unread"), `${row.title}: blue dot only when unread`);
     assert(row.dotBeforeTime);
   }
-  assert.deepEqual(rows.filter(row => row.dot).map(row => row.title).sort(), ["Compare two laptop options", "Weekly grocery list"]);
+  assert.deepEqual(rows.filter(row => row.dot).map(row => row.title).sort(), ["Compare two laptop options"]);
   assert(rows.some(row => !row.telegram) && rows.some(row => row.telegram));
 
   await sidebar.getByRole("button", { name: /Planning the autumn trip/ }).click();
@@ -94,7 +94,7 @@ try {
   }), "Copy/fork actions render below all reply content");
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Fork chat", exact: true }).waitFor();
-  assert.deepEqual(await page.getByRole("menuitem").allTextContents(), ["Fork chat", "Compact context"]);
+  assert.deepEqual(await page.getByRole("menuitem").allTextContents(), ["Fork chat", "Compact context", "Schedule…"]);
   await page.keyboard.press("Escape");
   // One chain line with the reply's duration opens reasoning and calls in the order they happened.
   const chain = reply.getByRole("button", { name: "Worked for 32s", exact: true });
@@ -134,7 +134,8 @@ try {
   const palette = page.getByRole("dialog", { name: "Search chats", exact: true });
   const search = palette.getByRole("combobox");
   await search.waitFor();
-  await page.clock.pauseAt(new Date());
+  // Use the browser's own clock, with room for command delivery, so clock drift cannot make the target stale.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 60_000));
   const beforeSearch = page.url();
   await search.fill("spinach");
   const submitted = page.waitForRequest(request => new URL(request.url()).searchParams.get("q") === "spinach");
@@ -155,10 +156,10 @@ try {
   await bodyMatch.click();
   await page.getByRole("heading", { name: "Weekly grocery list", exact: true }).waitFor();
   assert.equal(new URL(page.url()).searchParams.get("thread"), fixtureUuid(2));
-  // Viewing the latest reply in a focused tab clears its unread dot through one scoped acknowledgement.
+  // Telegram-origin chats never display unread status or send web acknowledgements.
   await page.waitForFunction(() => [...document.querySelectorAll(".chat-thread")].some(row => row.textContent?.includes("Weekly grocery list") && !row.querySelector(".chat-unread-dot")));
   const acks = requests.filter(request => request.path === `/api/chat/threads/${fixtureUuid(2)}/read`);
-  assert.equal(acks.length, 1);
+  assert.equal(acks.length, 0);
   assert(acks.every(request => request.method === "POST" && request.write === "1" && request.user === "1001"));
   assert.equal(requests.filter(request => request.path === `/api/chat/threads/${fixtureUuid(1)}/read`).length, 0, "Already-read chats are not acknowledged again");
   await page.unroute("**/api/chat/threads?**");

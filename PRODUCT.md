@@ -12,7 +12,7 @@ The owner and a small invited group of family and friends who already use the pr
 
 ## Product Purpose
 
-A personal AI assistant that lives in Telegram and is mirrored on the web. Each conversation has persistent model sessions, a sandbox with tools (shell, files, web search, browser), and long-term memory. The website lets a signed-in user chat, upload any file, stop, fork, or compact a conversation, search their chats, manage memories, and change settings. Success means the web chat feels as immediate and trustworthy as a mainstream AI chat app while staying in sync with Telegram.
+A personal AI assistant that lives in Telegram and is mirrored on the web. Each conversation has persistent model sessions, a sandbox with tools (shell, files, web search, browser), and long-term memory. The website lets a signed-in user chat, upload any file, stop, fork, or compact a conversation, search their chats with conversation previews, schedule future or recurring checks, manage memories, and change settings. Success means the web chat feels as immediate and trustworthy as a mainstream AI chat app while staying in sync with Telegram.
 
 ## Positioning
 
@@ -29,7 +29,8 @@ One assistant, two frontends: every website conversation is also a Telegram topi
 
 - Built with React, Tailwind, Cloudflare Kumo components, and Tabler icons; bundled by Bun. The user asked to keep Kumo and Tabler, and to keep the Kumo blue accent.
 - Attachments accept every file type within the server's size and count limits.
-- Read status, unread dots, and the Telegram origin icon carry meaning and must stay accurate.
+- Read status and unread dots apply only to chats created on the web. The Telegram origin icon identifies chats started in Telegram. Search previews never mark messages read.
+- Scheduled checks persist across restarts and run at most once an hour per conversation. Users can manage them through chat or the Scheduled page.
 - Admin and user chat are separate apps on the same origin (`/admin` vs `/`).
 
 ## Brand Commitments

@@ -6,7 +6,7 @@ import { Dialog } from "@cloudflare/kumo/components/dialog";
 import { DropdownMenu } from "@cloudflare/kumo/components/dropdown";
 import { Loader, SkeletonLine } from "@cloudflare/kumo/components/loader";
 import { Tooltip } from "@cloudflare/kumo/components/tooltip";
-import { IconAlertCircle, IconArchive, IconArrowDown, IconBrandTelegram, IconCheck, IconCopy, IconDots, IconFile, IconFold, IconGitFork, IconPencil, IconRefresh, IconTrash } from "@tabler/icons-react";
+import { IconAlertCircle, IconArchive, IconArrowDown, IconBrandTelegram, IconCalendarClock, IconCheck, IconClock, IconCopy, IconDots, IconFile, IconFold, IconGitFork, IconPencil, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { MAX_FILE_BYTES } from "../../../files/limits.js";
 import { resolveOpenUiLanguage } from "../../../openui/language.js";
 import { attachmentKind } from "../../media.js";
@@ -27,6 +27,7 @@ import { MobileNavButton } from "./shell-parts.js";
 import { chatFormat, useChatStrings } from "./strings.js";
 import type { ChatHistory, ChatThread } from "../../chat-types.js";
 import { CompactionStatus } from "./compaction-status.js";
+import { ScheduleDialog, scheduleState, type Schedules } from "./schedules.js";
 
 type ActionKind = "stop" | "fork" | "compact";
 
@@ -51,7 +52,7 @@ function newestVisibleMessage(viewport: HTMLElement, cap: number): number | null
   return null;
 }
 
-export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, onRead, notice }: {
+export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, onRead, notice, schedules }: {
   threadId: string;
   drafts: DraftStore;
   onThreadChange: () => void;
@@ -59,6 +60,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   onRead: (threadId: string, result: ChatReadResult) => void;
   /** Shown above the composer, such as the time zone question. */
   notice?: ReactNode;
+  schedules: Schedules;
 }) {
   const t = useChatStrings();
   const language = useUiLanguage();
@@ -76,6 +78,8 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const [action, setAction] = useState<{ kind: ActionKind; busy: boolean; error: unknown } | null>(null);
   const [forkTarget, setForkTarget] = useState<{ open: boolean; message: ChatMessage | null }>({ open: false, message: null });
   const [compactOpen, setCompactOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const schedule = schedules.byThread.get(threadId) ?? null;
   const [dragging, setDragging] = useState(false);
   const [dropProblem, setDropProblem] = useState<FileProblem | null>(null);
   const [files, setFiles] = useState(new Map<string, LoadedAttachment>());
@@ -178,6 +182,8 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     const node = viewport.current;
     const signal = controller.current.signal;
     if (!current || !node || signal.aborted || !drafts.active || document.hidden || !document.hasFocus()) return;
+    // Telegram chats keep their read state in Telegram; only web chats are acknowledged here.
+    if (current.thread.origin !== "web") return;
     const cap = current.thread.lastMessageId;
     if (cap === null || current.newerCursor !== null || node.scrollHeight - node.scrollTop - node.clientHeight > 80) return;
     const target = newestVisibleMessage(node, cap);
@@ -329,6 +335,8 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
           {!web && <Tooltip content={thread.topicId !== null ? t.telegramTopic : t.telegram} render={<span className="chat-view-mark" tabIndex={0} aria-label={thread.topicId !== null ? t.telegramTopic : t.telegram}><IconBrandTelegram size={16} aria-hidden="true" /></span>} />}
           {thread.parentThreadId !== null && <Tooltip content={t.fork} render={<span className="chat-view-mark" tabIndex={0} aria-label={t.fork}><IconGitFork size={16} aria-hidden="true" /></span>} />}
           {thread.archived && <Badge variant="secondary">{t.archived}</Badge>}
+          {schedule && <Tooltip content={schedule.enabled ? scheduleState(schedule, t, format, Date.now()) : t.scheduledPausedMark} render={<button type="button" className="chat-view-mark chat-view-schedule" data-enabled={schedule.enabled}
+            aria-label={schedule.enabled ? t.scheduledMark(format.when(schedule.nextRunAt)) : t.scheduledPausedMark} onClick={() => setScheduleOpen(true)}><IconClock size={16} aria-hidden="true" /></button>} />}
         </span>}
         <span className="sr-only" role="status" aria-live="polite">{activity ? activityLabel(activity, language) : ""}</span>
       </div>
@@ -338,6 +346,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
           <DropdownMenu.Content align="end" sideOffset={6}>
             <DropdownMenu.Item icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setForkTarget({ open: true, message: null })}>{t.forkChat}</DropdownMenu.Item>
             <DropdownMenu.Item disabled={compacting || (action?.kind === "compact" && action.busy)} icon={<IconFold size={16} aria-hidden="true" />} onClick={() => setCompactOpen(true)}>{t.compactContext}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={!schedule && thread?.archived} icon={<IconCalendarClock size={16} aria-hidden="true" />} onClick={() => setScheduleOpen(true)}>{schedule ? t.editSchedule : t.scheduleChat}</DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu>
       </div>
@@ -416,6 +425,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
         </div>
       </Dialog>
     </Dialog.Root>
+    <ScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} thread={thread ?? null} schedule={schedule} schedules={schedules} />
     <Dialog.Root open={compactOpen} onOpenChange={setCompactOpen}>
       <Dialog size="lg" className="chat-dialog">
         <Dialog.Title>{t.compactTitle}</Dialog.Title>

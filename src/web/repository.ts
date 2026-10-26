@@ -92,16 +92,32 @@ export class ConversationRepository {
       or exists (select 1 from visible_threads v join messages m on m.thread_id = v.source_id
         where v.root_id = t.id and (v.max_message_id is null or m.id <= v.max_message_id)
         and m.role in ('user', 'assistant') and ${lower(sql`m.text_plain`)} like ${pattern} escape ${"\\"}))` : sql``;
-    const rows = await this.db.query<ThreadRow & { lastActivity: number }>(sql`
+    const matchId = search ? sql`(select m.id from visible_threads v join messages m on m.thread_id = v.source_id
+      where v.root_id = t.id and (v.max_message_id is null or m.id <= v.max_message_id)
+        and m.role in ('user', 'assistant') and ${lower(sql`m.text_plain`)} like ${pattern} escape ${"\\"}
+      order by m.id desc limit 1)` : sql`null`;
+    const rows = await this.db.query<ThreadRow & { lastActivity: number; searchMessageId: number | null }>(sql`
       ${ancestry}
-      select t.*, coalesce((select max(m.created_at) from messages m where m.thread_id = t.id), t.created_at) as "lastActivity"
+      select t.*, ${matchId} as "searchMessageId", coalesce((select max(m.created_at) from messages m where m.thread_id = t.id), t.created_at) as "lastActivity"
       from threads t where t.user_id = ${userId} ${matches}
       order by "lastActivity" desc, t.id desc limit ${limit + 1} offset ${offset}
     `);
+    const matchIds = rows.slice(0, limit).flatMap(row => row.searchMessageId === null ? [] : [row.searchMessageId]);
+    const position = this.db.dialect === "sqlite" ? sql`instr(${lower(sql`text_plain`)}, ${search.toLowerCase()})`
+      : sql`strpos(${lower(sql`text_plain`)}, ${search.toLowerCase()})`;
+    const snippets = matchIds.length ? await this.db.query<{ id: number; text: string; position: number }>(sql`
+      select id, ${position} as position,
+        substr(text_plain, case when ${position} > 80 then ${position} - 80 else 1 end, 360) as text
+      from messages where id in (${valueList(matchIds)})
+    `) : [];
+    const matchesById = new Map(snippets.map(row => [row.id, {
+      messageId: row.id, text: `${row.position > 80 ? "…" : ""}${row.text.replace(/\s+/g, " ")}${row.text.length === 360 ? "…" : ""}`,
+    }]));
     const activities = await this.threadActivities(rows.map(row => row.id));
     const reads = await this.repos.threadReads.states(userId, rows.map(row => row.id));
     return page(rows.map(row => ({ ...threadView(row, activities.get(row.id)),
       origin: row.origin, topicId: row.topic_id,
+      searchMatch: row.searchMessageId === null ? null : matchesById.get(row.searchMessageId) ?? null,
       unread: reads.get(row.id)?.unread ?? false, lastMessageId: reads.get(row.id)?.lastMessageId ?? null,
     })), offset, limit);
   }

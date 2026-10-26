@@ -1,3 +1,4 @@
+import { createScheduleChatTool } from "./scheduleChat.js";
 import { createSearchThreadTool } from "./searchThread.js";
 import { createLoadMessageTool } from "./loadMessage.js";
 import { createSearchInFileTool } from "./searchInFile.js";
@@ -27,6 +28,7 @@ export type {
 export function buildToolRegistry(input: ToolBuildInput): BotToolRegistry {
   return {
     memo: createMemoTool(input),
+    schedule_chat: createScheduleChatTool(input),
     search_thread: createSearchThreadTool(input),
     load_message: createLoadMessageTool(input),
     search_in_file: createSearchInFileTool(input),

@@ -107,6 +107,11 @@ export class ThreadTurnCoordinator {
     return accepted;
   }
 
+  /** Wake work that another producer has already committed to the durable queue. */
+  wake(threadId: string): void {
+    if (this.accepting) this.schedule(threadId);
+  }
+
   async cancelActive(threadId: string): Promise<boolean> {
     await this.recovery;
     const active = this.active.get(threadId);

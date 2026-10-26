@@ -19,7 +19,7 @@ export class ThreadReadsRepo {
     const whitespace = " \t\n\r\v\f";
     const text = this.db.dialect === "sqlite" ? sql`trim(m.text_plain, ${whitespace})` : sql`btrim(m.text_plain, ${whitespace})`;
     const rows = await this.db.query<{
-      id: string; readMessageId: number | null; lastMessageId: number | null; unread: number;
+      id: string; origin: "web" | "telegram"; readMessageId: number | null; lastMessageId: number | null; unread: number;
       pendingId: number | null; priorMessageId: number | null; turnId: number | null; lease: number | null;
       content: string | null; hasText: number | null; hasFiles: number | null;
     }>(sql`
@@ -46,16 +46,16 @@ export class ThreadReadsRepo {
           and m.id > r.user_message_id and m.content_json like ${'%"attachmentDeliveryTurnId"%'}
         where v.max_message_id is null or m.id <= v.max_message_id
       ), summaries as (
-        select t.id, r.message_id as read_message_id, max(m.id) as last_message_id,
+        select t.id, t.origin, r.message_id as read_message_id, max(m.id) as last_message_id,
           max(case when m.role = 'assistant' and m.turn_id is null
             and m.id > coalesce(r.message_id, 0) and (m.has_text = 1 or m.has_files = 1)
             then 1 else 0 end) as unread
         from threads t left join thread_reads r on r.thread_id = t.id and r.user_id = ${userId}
         left join visible_messages m on m.root_id = t.id
         where t.user_id = ${userId} and t.id in (${valueList(threadIds)})
-        group by t.id, r.message_id
+        group by t.id, t.origin, r.message_id
       )
-      select s.id, s.read_message_id as "readMessageId", s.last_message_id as "lastMessageId", s.unread,
+      select s.id, s.origin, s.read_message_id as "readMessageId", s.last_message_id as "lastMessageId", s.unread,
         p.id as "pendingId", p.turn_id as "turnId", p.lease, p.content,
         p.has_text as "hasText", p.has_files as "hasFiles",
         (select max(previous.id) from visible_messages previous
@@ -83,6 +83,7 @@ export class ThreadReadsRepo {
         const hidden = pending && row.lease !== null && row.lease > now;
         state.unread ||= Boolean(row.hasText || (!hidden && row.hasFiles));
       }
+      if (row.origin !== "web") state.unread = false;
       result.set(row.id, state);
     }
     return result;

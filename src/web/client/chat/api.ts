@@ -1,5 +1,5 @@
 import { AttachmentCache, type AttachmentSource } from "../attachments.js";
-import type { ChatHistory, ChatSendResult, ChatSession, ChatSettings, ChatSettingsPatch, ChatThread } from "../../chat-types.js";
+import type { ChatHistory, ChatSchedule, ChatScheduleInput, ChatSchedulePatch, ChatSendResult, ChatSession, ChatSettings, ChatSettingsPatch, ChatThread } from "../../chat-types.js";
 import type { WebMemories, WebMessage, WebPage } from "../../types.js";
 import { localizeServerError, type UiLanguage } from "../i18n.js";
 
@@ -114,7 +114,13 @@ export const chatApi = {
   memories: (offset: number, signal: AbortSignal) => chatJson<WebMemories>(`/api/chat/memories?offset=${offset}`, { signal }),
   deleteMemory: async (memoryId: number) => { await chatJson<{ deleted: true }>(`/api/chat/memories/${memoryId}`, json("DELETE")); },
   fileUrl: (threadId: string, fileId: string) => `/api/chat/threads/${threadId}/files/${fileId}`,
+  schedules: (signal?: AbortSignal) => chatJson<{ items: ChatSchedule[] }>("/api/chat/schedules", { signal }),
+  createSchedule: (input: ChatScheduleInput) => chatJson<ChatSchedule>("/api/chat/schedules", json("POST", input)),
+  updateSchedule: (scheduleId: string, patch: ChatSchedulePatch) => chatJson<ChatSchedule>(`/api/chat/schedules/${encodeURIComponent(scheduleId)}`, json("PATCH", patch)),
+  deleteSchedule: async (scheduleId: string) => { await chatJson<{ deleted: true }>(`/api/chat/schedules/${encodeURIComponent(scheduleId)}`, json("DELETE")); },
 };
+
+export type { ChatSchedulePatch } from "../../chat-types.js";
 
 export const MAX_SEARCH_LENGTH = 200;
 
