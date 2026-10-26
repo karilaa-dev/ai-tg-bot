@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { runTurn } from "../../src/ai/agentTurnEngine.js";
@@ -11,6 +12,7 @@ describe("turn streaming", () => {
     const releaseStarted = deferred<void>();
     const releaseCommandActivity = deferred<void>();
     const onDeliveryConfirmed = vi.fn(async () => undefined);
+    const onDraft = vi.fn();
     let emit: ((event: AgentSessionEvent) => void) | undefined;
     const drafts: string[] = [];
     const sent: string[] = [];
@@ -39,9 +41,10 @@ describe("turn streaming", () => {
       },
       logger,
       user: { tg_id: 1, stream_mode: true, lang: "en" },
-      thread: { id: 2, title: "Adapter" },
+      thread: { id: fixtureUuid(2), title: "Adapter" },
       text: "Create an adapter",
       onDeliveryConfirmed,
+      onDraft,
       t: (key: string, params?: Record<string, string | number>) => {
         if (key === "thinking-summary-running") return `Thinking for ${params?.time}`;
         if (key === "thinking-summary-final") return `Thought for ${params?.time}`;
@@ -86,15 +89,30 @@ describe("turn streaming", () => {
       expect(drafts.at(-1)).toContain("Thinking for");
       expect(drafts.at(-1)).not.toContain("I'll use 3");
       expect(sent).toEqual([]);
+      expect(onDraft.mock.calls.at(-1)?.[0]?.toolActivity.calls[0]).toMatchObject({ name: "bash", status: "running" });
+      emit!({ type: "tool_execution_update", toolCallId: "build", toolName: "bash", args: { command: "build" },
+        partialResult: { content: [{ type: "text", text: "Partial precise result: 123.4500" }] } });
+      expect(onDraft.mock.calls.at(-1)?.[0]?.toolActivity.calls[0]).toMatchObject({ status: "running", result: { text: "Partial precise result: 123.4500" } });
       emit!({
         type: "tool_execution_end", toolCallId: "build", toolName: "bash",
         result: { content: [{ type: "text", text: "Build complete" }], details: {} }, isError: false,
+      });
+      const openui = 'root = Stack([Text("Private DSL")])';
+      update("toolcall_delta", JSON.stringify({ openui }));
+      emit!({ type: "tool_execution_start", toolCallId: "finish", toolName: "finish_response", args: { text: "Fallback", openui } });
+      emit!({
+        type: "tool_execution_end", toolCallId: "finish", toolName: "finish_response",
+        result: { content: [{ type: "text", text: JSON.stringify({ openui }) }], details: { completed: true, text: "Fallback", openui } }, isError: false,
       });
       update("text_delta", "Created and validated the STL.");
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect([...sent]).toEqual([]);
       expect(drafts.at(-1)).toContain("Thinking for");
       expect(drafts.at(-1)).toContain("Created and validated the STL.");
+      expect(onDraft).toHaveBeenLastCalledWith(expect.objectContaining({ text: "Created and validated the STL.", thinking: expect.any(String),
+        toolActivity: expect.objectContaining({ calls: [expect.objectContaining({ name: "bash", status: "succeeded" })] }) }));
+      expect(JSON.stringify(onDraft.mock.calls)).not.toContain("Private DSL");
+      expect(JSON.stringify(drafts)).not.toContain("Private DSL");
     } finally {
       prompt.resolve();
       await releaseStarted.promise;
@@ -106,5 +124,6 @@ describe("turn streaming", () => {
     expect(logger.error).not.toHaveBeenCalled();
     expect(sent[0]).toContain("Thought for");
     expect(sent.at(-1)).toBe("Created and validated the STL.");
+    expect(JSON.stringify(sent)).not.toContain("Private DSL");
   });
 });

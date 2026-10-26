@@ -27,13 +27,15 @@ import { TurnBudget, type TurnBudgetSource } from "./turnBudget.js";
 import { OutgoingFiles } from "../files/outgoingFiles.js";
 import { OfficeValidation } from "../office/validation.js";
 import { searchCodexWeb } from "./codexWebSearch.js";
+import type { FileResolver } from "../files/resolver.js";
 
 interface PiTurnTransport {
+  fileResolver?: FileResolver;
   api: Api;
   chatId: number;
   messageThreadId?: number;
   resolveFile(file: FileRow, signal?: AbortSignal): Promise<ResolvedChatFile>;
-  currentFileIds?: number[];
+  currentFileIds?: string[];
   userMessageId?: number;
 }
 
@@ -55,9 +57,9 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   get outgoingBuffers() { return this.outgoingFiles.buffers; }
   private visibilityScope?: ThreadScope;
   private transport?: PiTurnTransport;
-  private readonly turnFileCache = new Map<number, ResolvedChatFile>();
-  private readonly contextFileIds = new Set<number>();
-  private readonly durableContextFileIds = new Set<number>();
+  private readonly turnFileCache = new Map<string, ResolvedChatFile>();
+  private readonly contextFileIds = new Set<string>();
+  private readonly durableContextFileIds = new Set<string>();
   private commandActivityLease?: SandboxActivityLease;
   private commandActivityRelease?: Promise<void>;
   private turnActive = false;
@@ -98,6 +100,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       config: this.config, repos: this.repos, user: this.user, thread: this.thread,
       commandRuntime: this.commandRuntime, logger: this.logger,
       officeValidation: this.officeValidation,
+      fileResolver: this.transport?.fileResolver,
       selectContextFiles: (ids) => this.selectContextFiles(ids),
     });
   }
@@ -112,7 +115,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
     const fileIds = await this.repos.files.listRecoverableIds(this.visibilityScope.fileIds);
     const [turnSystemPrompt, turnSessionContext] = await Promise.all([
-      renderSystemPrompt({ user: this.user, config: this.config }),
+      renderSystemPrompt({ user: this.user, thread: this.thread, config: this.config }),
       renderThreadSessionContext({
         repos: this.repos,
         user: this.user,
@@ -238,7 +241,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
         source: {
           transport: "memory",
           connectionKey: "current-turn",
-          remoteKey: String(file.id),
+          remoteKey: file.id,
           locator: {},
           mimeType: currentAttachment.mimeType ?? file.mime_type,
         },
@@ -262,22 +265,22 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
     return { bytes: resolved.bytes, mimeType: resolved.mimeType ?? "image/jpeg" };
   }
 
-  selectContextFiles(fileIds: number[]): void {
+  selectContextFiles(fileIds: string[]): void {
     for (const fileId of fileIds) this.contextFileIds.add(fileId);
   }
 
-  selectDurableContextFiles(fileIds: number[]): void {
+  selectDurableContextFiles(fileIds: string[]): void {
     for (const fileId of fileIds) {
       this.contextFileIds.add(fileId);
       this.durableContextFileIds.add(fileId);
     }
   }
 
-  selectedContextFileIds(): ReadonlySet<number> {
+  selectedContextFileIds(): ReadonlySet<string> {
     return this.contextFileIds;
   }
 
-  selectedDurableContextFileIds(): ReadonlySet<number> {
+  selectedDurableContextFileIds(): ReadonlySet<string> {
     return this.durableContextFileIds;
   }
 }
@@ -296,7 +299,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
           ...bridge.attachments.map((attachment) => attachment.fileId),
         ]);
         let changed = false;
-        const injectedIds = new Set<number>();
+        const injectedIds = new Set<string>();
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
           if (!message || (message.role !== "user" && message.role !== "toolResult")) continue;
@@ -316,7 +319,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               injectedIds.add(file.id);
               additions.push({
                 type: "text",
-                text: `\n\n[Audio attachment #${file.id}. Reuse the transcript in the message when present, following its continuation instructions for long recordings; otherwise call transcribe_audio with file_id: ${file.id}.]`,
+                text: `\n\n[Audio attachment #${file.id}. Reuse the transcript in the message when present, following its continuation instructions for long recordings; otherwise call transcribe_audio with file_id: "${file.id}".]`,
               });
               continue;
             }
@@ -427,7 +430,7 @@ function sandboxDocumentContext(file: FileRow): TextContent {
   };
 }
 
-function containsInlineAttachment(parts: TextContent[], fileId: number): boolean {
+function containsInlineAttachment(parts: TextContent[], fileId: string): boolean {
   return parts.some((part) => part.text.includes(`<attachment id="${fileId}"`));
 }
 

@@ -2,12 +2,13 @@ import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import { createTextSearch, messageScopePredicate, type MessageSearchScope } from "../search.js";
 import type { MessageKind, MessageRole, MessageRow, ThreadRow } from "../types.js";
+import { lockThreadTransaction } from "../threadLock.js";
 
 export class MessagesRepo {
   constructor(private readonly db: SqlExecutor) {}
 
   async insert(input: {
-    threadId: number;
+    threadId: string;
     role: MessageRole;
     kind?: MessageKind;
     content: unknown;
@@ -17,6 +18,7 @@ export class MessagesRepo {
     piEntryId?: string | null;
   }): Promise<MessageRow> {
     return this.db.transaction(async (tx) => {
+      await lockThreadTransaction(tx, input.threadId);
       const inserted = await insertReturning<MessageRow>(
         tx,
         sql`
@@ -77,7 +79,7 @@ export class MessagesRepo {
     `);
   }
 
-  listThread(threadId: number): Promise<MessageRow[]> {
+  listThread(threadId: string): Promise<MessageRow[]> {
     return this.db.query<MessageRow>(sql`select * from messages where thread_id = ${threadId} order by id asc`);
   }
 
@@ -99,7 +101,7 @@ export class MessagesRepo {
     return rows.map((row) => row.id);
   }
 
-  latest(threadId: number): Promise<MessageRow | undefined> {
+  latest(threadId: string): Promise<MessageRow | undefined> {
     return queryOne<MessageRow>(this.db, sql`select * from messages where thread_id = ${threadId} order by id desc limit 1`);
   }
 

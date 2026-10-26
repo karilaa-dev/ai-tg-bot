@@ -1,5 +1,6 @@
 import type { Page } from "playwright-core";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+
+const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
 
 export const SCREEN = { width: 2560, height: 1440 } as const;
 export const DEFAULT_VIEWPORT = { width: 1920, height: 1080 } as const;
@@ -43,7 +44,7 @@ export async function inspectPage(page: Page, offset: number, includeScreenshot:
   };
   if (includeScreenshot) {
     const screenshot = await page.screenshot({ type: "png", fullPage: false });
-    if (screenshot.length <= MAX_FILE_BYTES) {
+    if (screenshot.length <= MAX_SCREENSHOT_BYTES) {
       output.screenshot_base64 = screenshot.toString("base64");
       output.screenshot_media_type = "image/png";
       output.screenshot_size = screenshot.length;
@@ -56,7 +57,7 @@ export async function capturePage(page: Page, fullPage: boolean) {
   const viewport = await chooseScreenshotViewport(page);
   let bytes = await page.screenshot({ type: "png", fullPage });
   let mediaType = "image/png";
-  if (bytes.length > MAX_FILE_BYTES && fullPage) {
+  if (bytes.length > MAX_SCREENSHOT_BYTES && fullPage) {
     bytes = await page.screenshot({ type: "jpeg", quality: 85, fullPage: true });
     mediaType = "image/jpeg";
   }
@@ -118,7 +119,7 @@ async function chooseScreenshotViewport(page: Page): Promise<{ width: number; he
 }
 
 function assertImageSize(bytes: Buffer): void {
-  if (bytes.length > MAX_FILE_BYTES) throw new Error("Browser screenshot is too large to attach.");
+  if (bytes.length > MAX_SCREENSHOT_BYTES) throw new Error("Browser screenshot is too large to attach.");
 }
 
 export async function withinTimeout<T>(

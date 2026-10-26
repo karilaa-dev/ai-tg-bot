@@ -10,14 +10,40 @@ const required = {
 };
 
 describe("website access configuration", () => {
-  it("requires an admin token only when the website is enabled", () => {
-    expect(loadConfig(required).WEB_ADMIN_TOKEN).toBeUndefined();
-    expect(loadConfig({ ...required, WEB_ENABLED: "false", WEB_ADMIN_TOKEN: " " }).WEB_ADMIN_TOKEN).toBeUndefined();
-    for (const token of [undefined, "", " \n "]) {
-      expect(() => loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: token })).toThrow("WEB_ADMIN_TOKEN");
+  it("requires Telegram login only when the website is enabled", () => {
+    expect(loadConfig(required).WEB_ENABLED).toBe(false);
+    expect(() => loadConfig({ ...required, WEB_ENABLED: "true" })).toThrow("WEB_ENABLED=true requires Telegram login");
+    // The retired admin token neither satisfies the requirement nor breaks startup.
+    expect(() => loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: "old-secret" })).toThrow("WEB_ENABLED=true requires Telegram login");
+    expect(loadConfig({ ...required, WEB_ADMIN_TOKEN: "old-secret" })).not.toHaveProperty("WEB_ADMIN_TOKEN");
+  });
+  it("reads admin Telegram IDs and normalizes the canonical origin", () => {
+    const config = loadConfig({ ...required, WEB_ENABLED: "true", WEB_TELEGRAM_CLIENT_ID: "123456", WEB_TELEGRAM_CLIENT_SECRET: "dedicated-oauth-secret", WEB_PUBLIC_URL: "https://chat.example/", BOT_ALLOWED_USER_IDS: "123, 456", WEB_ADMIN_USER_IDS: " 456 " });
+    expect(config.WEB_ADMIN_USER_IDS).toEqual([456]);
+    expect(config.WEB_PUBLIC_URL).toBe("https://chat.example");
+    expect(config).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
+    expect(loadConfig(required).WEB_ADMIN_USER_IDS).toEqual([]);
+    for (const WEB_ADMIN_USER_IDS of ["0", "@karilaa", "1,", "9007199254740992"]) {
+      expect(() => loadConfig({ ...required, WEB_ADMIN_USER_IDS })).toThrow("WEB_ADMIN_USER_IDS");
     }
-    expect(loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: " test-secret " }).WEB_ADMIN_TOKEN).toBe("test-secret");
-    expect(() => loadConfig({ ...required, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: "x".repeat(1025) })).toThrow("WEB_ADMIN_TOKEN");
+  });
+  it("requires complete dedicated OAuth credentials, never deriving a secret from the bot token", () => {
+    const oauth = { ...required, WEB_ENABLED: "true", WEB_TELEGRAM_CLIENT_ID: "123456", WEB_TELEGRAM_CLIENT_SECRET: "dedicated-oauth-secret", WEB_PUBLIC_URL: "https://chat.example" };
+    for (const field of ["WEB_TELEGRAM_CLIENT_ID", "WEB_TELEGRAM_CLIENT_SECRET", "WEB_PUBLIC_URL"] as const) {
+      expect(() => loadConfig({ ...oauth, [field]: "" })).toThrow("Telegram login requires");
+    }
+    for (const WEB_PUBLIC_URL of ["http://chat.example", "https://user:pass@chat.example", "https://chat.example/subpath", "https://chat.example?query=1", "https://chat.example/#hash"]) {
+      expect(() => loadConfig({ ...oauth, WEB_PUBLIC_URL })).toThrow("WEB_PUBLIC_URL");
+    }
+    expect(loadConfig({ ...oauth, WEB_PUBLIC_URL: "http://localhost:3000" }).WEB_PUBLIC_URL).toBe("http://localhost:3000");
+    expect(loadConfig(required)).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
+    expect(loadConfig({ ...required, WEB_TRUSTED_PROXY_IPS: "127.0.0.1, ::1" }).WEB_TRUSTED_PROXY_IPS).toEqual(["127.0.0.1", "::1"]);
+    for (const WEB_TRUSTED_PROXY_IPS of ["proxy.example", "127.0.0.0/8", "invalid"]) {
+      expect(() => loadConfig({ ...required, WEB_TRUSTED_PROXY_IPS })).toThrow("WEB_TRUSTED_PROXY_IPS");
+    }
+    for (const BOT_ALLOWED_USER_IDS of ["0", "-1", "1.5", "1,", "1,nope", "9007199254740992"]) {
+      expect(loadConfig({ ...required, BOT_ALLOWED_USER_IDS })).not.toHaveProperty("BOT_ALLOWED_USER_IDS");
+    }
   });
 });
 

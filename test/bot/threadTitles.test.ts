@@ -13,6 +13,7 @@ describe("thread activity titles", () => {
   let titles: ThreadTitleCoordinator;
   const editForumTopic = vi.fn(async (_payload: unknown) => true);
   const api = { raw: { editForumTopic } } as unknown as Api;
+  const generateThreadTitle = vi.fn(async () => "A useful web conversation");
 
   beforeEach(async () => {
     const config = loadTestConfig();
@@ -20,13 +21,29 @@ describe("thread activity titles", () => {
     await db.initialize();
     repos = createRepos(db.db, db.search);
     await repos.users.ensure({ tgId: 1001, firstName: "Alice", lang: "en" });
-    titles = new ThreadTitleCoordinator({ repos, pi: {} as never, logger: createLogger(config) });
+    titles = new ThreadTitleCoordinator({ repos, pi: { generateThreadTitle }, logger: createLogger(config) });
+    generateThreadTitle.mockClear();
     editForumTopic.mockClear();
   });
 
   afterEach(async () => {
     await titles.waitForIdle();
     await db.destroy();
+  });
+
+  it("generates a web conversation title without a Telegram topic", async () => {
+    const thread = await repos.threads.create({ userId: 1001, topicId: null, origin: "web", title: "New conversation", titleSource: "placeholder" });
+    await repos.messages.insert({ threadId: thread.id, role: "user", content: {}, textPlain: "Help plan my trip" });
+    await repos.messages.insert({ threadId: thread.id, role: "assistant", content: {}, textPlain: "Here is a trip plan" });
+    const input = { api, chatId: 1001, threadId: thread.id };
+    titles.schedule(input);
+    await titles.waitForIdle();
+    expect(await repos.threads.get(thread.id)).toMatchObject({ title: "A useful web conversation", title_source: "generated", title_attempts: 1 });
+    expect(generateThreadTitle).toHaveBeenCalledWith({ userText: "Help plan my trip", assistantText: "Here is a trip plan" });
+    expect(editForumTopic).not.toHaveBeenCalled();
+    titles.schedule(input);
+    await titles.waitForIdle();
+    expect(generateThreadTitle).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the placeholder marker across repeated syncs and coordinator restarts", async () => {

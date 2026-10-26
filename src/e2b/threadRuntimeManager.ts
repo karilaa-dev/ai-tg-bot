@@ -1,4 +1,5 @@
 import { SandboxConsentRequired } from "../files/source.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { officeBundle, OFFICE_BUNDLE_PATH } from "./officeBundle.js";
 import { executeSandboxCommand, runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 import { threadFilesRevision, syncThreadFiles, requestedFileSyncResult, type ThreadFileSync } from "./telegramFileMaterializer.js";
@@ -14,6 +15,8 @@ import { throwIfAborted, raceWithAbort } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import { downloadTelegramFile } from "../files/telegram.js";
 import type { Logger } from "../logger.js";
+import type { WebFileSourceAdapter } from "../web/file-source.js";
+import type { FileResolver } from "../files/resolver.js";
 import type {
   CommandRuntime,
   PublishWebsiteRequest,
@@ -33,7 +36,7 @@ import { quoteShellToken, shellJoin } from "../util/shell.js";
 import { createE2BClient, E2B_IDLE_PAUSE_MS, E2B_WEBSITE_IDLE_PAUSE_MS, FileType, type E2BClient, type E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_FILE_SOURCES, E2B_RUNTIME_TMP, E2B_TELEGRAM_FILES, E2B_WORKSPACE, isSameOrDescendant, sandboxWorkspaceFile } from "./paths.js";
 
-type SandboxScope = { userId: number; threadId: number };
+type SandboxScope = { userId: number; threadId: string };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
@@ -86,6 +89,8 @@ interface ThreadE2BSandboxRuntimeInput {
   logger?: Logger;
   client?: E2BClient;
   downloadTelegramBytes?: (fileId: string, signal?: AbortSignal) => Promise<Buffer>;
+  webFileSource?: Pick<WebFileSourceAdapter, "fetch">;
+  fileResolver?: FileResolver;
 }
 
 export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
@@ -111,7 +116,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     }
   }
 
-  acquireActivityLease(userId: number, threadId: number): SandboxActivityLease {
+  acquireActivityLease(userId: number, threadId: string): SandboxActivityLease {
     if (this.shuttingDown) throw new Error("E2B runtime is shutting down");
     const scope = { userId, threadId };
     const state = this.stateFor(scope);
@@ -328,6 +333,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     forcePrune = false,
   ): Promise<{ sandbox: E2BSandbox; threadFiles: SandboxThreadFileSyncResult }> {
     throwIfAborted(signal);
+    const thread = await this.input.repos.threads.get(scope.threadId);
+    if (thread?.user_id !== scope.userId) throw new Error("Sandbox thread does not belong to this user");
     const previousSync = state.threadFilesSync;
     const filesRevision = threadFilesRevision(files);
     const synchronizationCached = previousSync !== undefined
@@ -560,7 +567,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const refs = await this.input.repos.files.listTelegramFileRefs(
       [...new Set(sources.map((source) => source.file_id))],
     );
-    const telegramBacked = new Set(refs.map((ref) => ref.file_id));
+    const telegramBacked = new Set(refs.filter(ref => ref.is_primary === 1
+      && ref.telegram_size !== null && ref.telegram_size <= TG_DOWNLOAD_MAX_BYTES).map(ref => ref.file_id));
     const byCanonicalPath = new Map<string, typeof sources>();
     for (const source of sources) {
       const canonicalPath = e2bSnapshotPath(source.locator_json);
@@ -977,7 +985,7 @@ function sandboxMetadata(config: AppConfig, scope: SandboxScope): Record<string,
     deployment: config.E2B_DEPLOYMENT_ID,
     template_ref: config.E2B_TEMPLATE,
     telegram_user_id: String(scope.userId),
-    thread_id: String(scope.threadId),
+    thread_id: scope.threadId,
   };
 }
 

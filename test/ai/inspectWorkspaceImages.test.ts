@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it, vi } from "vitest";
 import { createInspectWorkspaceImagesTool } from "../../src/ai/tools/inspectWorkspaceImages.js";
 import { createBashTool } from "../../src/ai/tools/bash.js";
@@ -128,7 +129,7 @@ function buildInput(commandRuntime: CommandRuntime) {
     config: loadTestConfig(),
     repos: {},
     user: { tg_id: 9 },
-    thread: { id: 10 },
+    thread: { id: fixtureUuid(10) },
     commandRuntime,
   } as never;
 }

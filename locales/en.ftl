@@ -14,11 +14,11 @@ tz-ask =
     🕒 *Set timezone*
 
     What time is it for you right now?
-    Example: `14:30` or `2:30 PM`
+    Example: `14:30` or `2:30 PM`. You can also send a time zone name like `Europe/Berlin`.
 tz-bad-format =
     ⚠️ *I could not parse that time.*
 
-    Send it like `14:30` or `2:30 PM`.
+    Send it like `14:30` or `2:30 PM`, or a time zone name like `Europe/Berlin`.
 tz-set =
     ✅ *Timezone saved*
 
@@ -90,6 +90,8 @@ fork-created = 🌱 Fork created. Context was carried into the new topic.
 fork-need-topics = 🧵 Topics are not enabled for this bot. Enable Topics in BotFather first.
 help = 🧭 Commands: /lang, /timezone, /stream, /memory, /stop, /fork, /compact, /help. Start a new Telegram topic for a clean thread; use /fork to carry Pi context into a new topic. Use /stop to cancel the active agent turn or file processing. View saved notes with /memory view.
 private-only = 🔒 I only work in private chats.
+access-denied = Access is restricted. Ask an administrator to add your Telegram ID to the allowed users list.
+registration-required = Send /start in this chat to register before using the bot.
 unknown-command = ❓ Unknown command. Try /help.
 
 memory-on = 🧠 Memory is on. Use /memory off to disable it for yourself. View saved notes with /memory view.

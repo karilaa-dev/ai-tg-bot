@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
-import { FileTooLargeError, MAX_FILE_BYTES } from "./limits.js";
+import { FileTooLargeError, TG_DOWNLOAD_MAX_BYTES } from "./limits.js";
 import { throwIfAborted } from "./cancel.js";
 
 interface DownloadedTelegramFile {
@@ -23,7 +23,7 @@ export const downloadTelegramFile: TelegramFileDownloader = async (input) => {
   );
   if (!file.file_path) throw new Error("Telegram did not return file_path");
   throwIfAborted(input.signal);
-  const maxBytes = Math.min(input.maxBytes ?? MAX_FILE_BYTES, MAX_FILE_BYTES);
+  const maxBytes = Math.min(input.maxBytes ?? TG_DOWNLOAD_MAX_BYTES, TG_DOWNLOAD_MAX_BYTES);
   if (file.file_size !== undefined && file.file_size > maxBytes) throw new FileTooLargeError();
   const url = `https://api.telegram.org/file/bot${input.config.BOT_TOKEN}/${file.file_path}`;
   const res = await fetch(url, { signal: input.signal });

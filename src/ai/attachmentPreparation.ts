@@ -29,7 +29,7 @@ export class AttachmentPreparation {
     load(file: CreatedFileAttachment, signal: AbortSignal): Promise<Buffer>;
     onPrepared?(file: CreatedFileAttachment, ms: number, error?: unknown): void;
   }) {
-    this.batches = orderedAttachmentBatches(input.attachments);
+    this.batches = orderedAttachmentBatches(input.attachments.filter(file => file.telegramDeliveryFailure !== "source_unavailable"));
     this.signal = input.signal ? AbortSignal.any([input.signal, this.controller.signal]) : this.controller.signal;
   }
 

@@ -63,7 +63,7 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-To use Codex as the primary provider, enable the [admin website](#conversation-website), sign in with your admin token, and open **Codex connection**. Choose **Connect Codex**, open the OpenAI link, and enter the one-time code. Enable device code login in your ChatGPT security settings first. This uses [OpenAI's headless device-code flow](https://developers.openai.com/codex/auth#login-on-headless-devices) and needs no terminal login. You can use the same page to sign in again when credentials expire or to switch accounts.
+To use Codex as the primary provider, enable the [admin website](#conversation-website), sign in with a Telegram account listed in `WEB_ADMIN_USER_IDS`, and open **Codex connection**. Choose **Connect Codex**, open the OpenAI link, and enter the one-time code. Enable device code login in your ChatGPT security settings first. This uses [OpenAI's headless device-code flow](https://developers.openai.com/codex/auth#login-on-headless-devices) and needs no terminal login. You can use the same page to sign in again when credentials expire or to switch accounts.
 
 Existing credentials from `codex login` still work.
 
@@ -77,11 +77,17 @@ Set `CODEX_FAST_MODE=true` to request the priority service tier for Codex main, 
 
 The default database is `sqlite:./data/bot.db`. PostgreSQL URLs use the usual `postgresql://` form.
 
+Threads and files have UUID identifiers, including API paths and attachment markers. Telegram user/chat/topic IDs remain Telegram IDs; message, turn and chunk IDs stay numeric for ordering. Startup migrates existing thread/file IDs and their relationships, search indexes and saved references in a transaction. The migration is recorded and does not repeat. Existing Pi session files are preserved while migrated copies use the new references.
+
+External bookmarks using old numeric thread or file IDs need to be refreshed. Saved sandbox mappings are migrated; orphan remote E2B metadata whose database mapping was already lost cannot be reconciled during the offline migration.
+
+The shared backend in `src/application` owns conversation authorization, turn acceptance, forking, compaction and settings. The durable turn coordinator receives a frontend adapter; Telegram mirroring and reactions live in the Telegram adapter. Both frontends use the same stored messages, model sessions and attachment resolver.
+
 ## Dokploy
 
 Dokploy can deploy this repository with Railpack auto-detection. The `packageManager` field pins Bun 1.4.2, and `bun.lock` fixes dependency versions. Railpack runs `bun run build` and starts the bot with `bun run start`.
 
-Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
+Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi` and `FILE_STORAGE_PATH=/app/data/files`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
 Set the required Telegram, E2B, and OpenRouter keys in Dokploy. Tavily and Browser Use remain optional. For Codex primary inference and search, keep the credential directory on persistent storage and make it writable so token refresh can replace `auth.json`.
 
@@ -100,13 +106,13 @@ Set the required Telegram, E2B, and OpenRouter keys in Dokploy. Tavily and Brows
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
 - Public traffic does not resume a paused sandbox. A later bot operation reconnects it.
 
-There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Temporary outgoing spools last only for the current turn. Telegram bytes pass through the bot during intake, sandbox restoration, and delivery.
+Sandbox workspaces are isolated and have no host bind mount or shared E2B volume. User-visible attachment bytes are retained separately in the bot's local file store. Temporary outgoing spools last only for the current turn.
 
 The implementation follows E2B's current documentation for [sandboxes](https://e2b.dev/docs/sandbox), [persistence](https://e2b.dev/docs/sandbox/persistence), and [auto-resume](https://e2b.dev/docs/sandbox/auto-resume).
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.0.24` uses `ai-tg-bot-tools:v2.0.24`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.0` uses `ai-tg-bot-tools:v2.1.0`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Release the versioned image before deploying a bot version that can create new sandboxes:
 
@@ -114,14 +120,14 @@ Release the versioned image before deploying a bot version that can create new s
 bun run e2b:release
 ```
 
-The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. If a configured image is missing, sandbox creation fails once with this release command in the error. The bot does not build images during a user turn. Existing thread mappings still reconnect their original sandboxes.
+The command reads `package.json`, builds or reuses the corresponding `v<version>` tag, validates it, runs the full live runtime smoke, and prints the exact deployment reference. Startup checks the managed image tag and stops with this release command if the tag is missing, before accepting messages. If the availability check cannot reach E2B, startup logs a warning and sandbox creation retries normally. Explicit third-party templates and template IDs are checked when creating a sandbox. The bot does not build images during a user turn. Existing thread mappings still reconnect their original sandboxes.
 
 ### E2B settings
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.0.24 is ai-tg-bot-tools:v2.0.24.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.0.24
+# Optional override. The default for version 2.1.0 is ai-tg-bot-tools:v2.1.0.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.0
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -142,17 +148,21 @@ The bot creates secure sandboxes with outbound internet and public port traffic 
 
 ## Files and retrieval
 
-- Telegram is the durable source for inbound files and outbound files that Telegram accepted.
+- Original Telegram uploads, website uploads and generated files are saved in `FILE_STORAGE_PATH` (default `./data/files`). Each filename is the file UUID; display names stay in the database. Writes are atomic and downloads verify byte size and SHA-256. Back up this folder alongside the database, including when using PostgreSQL.
 - `[[chat-file:<id>]]` markers are persistent Pi references.
 - `load_message` can add selected attachment bytes to model context.
-- `materialize_chat_files` restores explicitly selected, visible Telegram files into `/home/user/telegram-files` for sandbox work.
-- Agent-created files get an E2B source locator. Delivery reuses buffered export bytes when available and reloads the durable source after eviction.
+- `materialize_chat_files` restores explicitly selected, visible files from either frontend into `/home/user/telegram-files` for sandbox work.
+- Agent-created files retain local bytes before they enter the outgoing queue. Final delivery verifies and repairs that copy before publishing the attachment. Reused gallery images and recommendation thumbnails are also retained before the visual response is published. Downloading these files does not require a running sandbox.
 - CSV and text content is placed inline or split into searchable chunks. DOCX and PDF uploads retain their original source and are inspected in the sandbox with the document tools. Images receive model-generated descriptions that exclude private attachment captions.
-- The per-file limit is 20 MiB. One answer can attach at most 25 created files.
+- Website uploads and created files support 50 MiB per file, matching the Telegram cloud Bot API multipart sending limit. Telegram-only downloads and audio transcription retain their separate 20 MiB limits. One answer can attach at most 25 created files.
+
+Existing Telegram-only attachments and legacy database upload blobs are cached locally when read. New uploads are downloaded eagerly; no file extension is blocked. Keep the local storage folder accessible to every app instance using the same database.
+
+Run `bun scripts/cache-visible-files.ts` against an initialized database to cache existing visible attachments in advance. It verifies each file, downloads recoverable originals from Telegram or legacy web blobs with two workers, and reports UUIDs it could not recover. By default it never starts a sandbox. Add `--recover-sandbox-sources` for a one-time recovery of older originals from saved sandbox snapshots; sandboxes resumed for a read are paused afterward. The command exits with status 1 if any original remains unavailable. Rerunning it safely reuses verified local copies.
 
 The bot retries partial Telegram restoration with exponential delays from five minutes to one hour. Recreating a sandbox or changing a file descriptor triggers an immediate retry. Ambiguous send results are stored separately from confirmed deliveries.
 
-Immutable outbound snapshots live under `/home/user/.ai-tg-bot/file-sources` until a durable Telegram source exists or the retention limit requires eviction. Orphan snapshots are removed automatically.
+Immutable outbound snapshots live under `/home/user/.ai-tg-bot/file-sources` until a downloadable Telegram source exists or the retention limit requires eviction. Generated files retain a durable local copy before delivery. Orphan snapshots are removed automatically.
 
 ## Browser Use Cloud
 
@@ -171,7 +181,7 @@ Browser creation passes no custom proxy, sets `proxyCountryCode` to `null`, and 
 
 `browser_open` accepts 5 to 240 minutes for a new session. `browser_extend_session` replaces the active session with a longer one, using the same profile and restoring owned URLs, scroll positions, and tab IDs. Form values and other transient JavaScript state do not survive that replacement. `browser_close_session` stops billing and saves profile state.
 
-Screenshots normally use a desktop viewport and go to Telegram as photos. Full-page capture and document delivery happen only when the user asks for them. Browser downloads bypass E2B, reject executable files, enforce size limits, and refuse URLs that resolve to private or local addresses.
+Screenshots normally use a desktop viewport and go to Telegram as photos. Full-page capture and document delivery happen only when the user asks for them. Browser downloads bypass E2B, accept all file formats, enforce size limits, and refuse URLs that resolve to private or local addresses.
 
 Keep the Browser Use key in `.env`. Client errors redact it.
 
@@ -198,6 +208,8 @@ The bot rejects the workspace root and Telegram-file directory. It also verifies
 Normal turns keep the core system prompt and Office skill index stable. The bot persists a bounded `<session_context>` snapshot for current time, timezone, user metadata, thread title, and inherited files, then appends only changed fields and explicit file removals. Earlier messages remain unchanged, preserving the common request prefix for prompt caching. Each update also saves the full bounded state in local session details without sending that duplicate state to the model. After compaction, the app restores a full baseline from the state saved at that boundary; later turns append updates to it. Restart and fork replay use the same persisted state. Metadata remains untrusted data, and attachment tools still check current availability. Other context changes, such as tool-result pruning, tool definitions, or model changes, can still reduce cache reuse.
 
 Manual `/compact` and automatic compaction use Codex's `remote_compaction_v2` protocol: send the full active history, current instructions, tools, reasoning effort and fast-mode setting, append a compaction trigger, and require a completed response with exactly one encrypted checkpoint. The new native window retains bounded user requests followed by that checkpoint and a fresh metadata baseline. Later requests replay this window plus new messages, without duplicating Pi's retained tail. Checkpoints survive restarts, forks and repeated compaction, and are replayed only for the same Codex model. Existing version-1 checkpoints remain readable.
+
+Manual compaction records a chat action with queued/running status, elapsed time, and a saved completion or failure result. The website returns `202` with its message ID immediately and polls progress; Telegram `/compact` updates its status message. Both wait for the current reply before compacting. Guards inspect the current model context, including the retained summary and edited messages: at least 8,000 estimated tokens and 2,048 tokens beyond the configured retained tail are required. After any compaction, manual requests also require a 60-second cooldown and at least 2,048 tokens of new context. These checks survive restarts and forks. Message history remains visible, and an interrupted action stops showing as active when its heartbeat expires.
 
 Pi also produces a readable summary for OpenRouter and model changes. Failed server compaction uses this portable summary; cancellation does not save a partial checkpoint. The automatic provider is registered as a Pi virtual model so context-limit errors trigger Pi's normal compact-and-retry flow. Set `CODEX_SERVER_COMPACTION=false` to use only Pi summaries. The implementation uses Pi's Codex transport directly and does not install the [example extension](https://github.com/algal/pi-openai-server-compaction).
 
@@ -280,15 +292,45 @@ bun scripts/benchmark-harness.ts --provider openrouter --runs 3 --out data/bench
 
 ## Conversation website
 
-Set `WEB_ENABLED=true` and a private `WEB_ADMIN_TOKEN` to run the admin website alongside the bot. The website refuses to start without a token:
+Set `WEB_ENABLED=true` to serve user chat at `/` and the separate admin viewer at `/admin`. Everyone, admins included, signs in with Telegram, so the website requires Telegram login. Obtain dedicated **Client ID** and **Client Secret** values from BotFather's Telegram Login settings, register the exact callback `https://chat.example.com/api/auth/telegram/callback`, then configure:
 
 ```dotenv
 WEB_ENABLED=true
-WEB_ADMIN_TOKEN=replace-with-a-long-random-secret
+WEB_TELEGRAM_CLIENT_ID=your-numeric-client-id
+WEB_TELEGRAM_CLIENT_SECRET=your-dedicated-oauth-client-secret
+WEB_PUBLIC_URL=https://chat.example.com
+# Telegram accounts that also get the admin dashboard:
+WEB_ADMIN_USER_IDS=123456789
 WEB_HOST=0.0.0.0
 WEB_PORT=3000
 WEB_AUTOLOAD_MAX_BYTES=5242880
 ```
+
+`WEB_ADMIN_USER_IDS` is a comma-separated list of numeric Telegram IDs; leave it empty to keep the admin dashboard closed. The retired `WEB_ADMIN_TOKEN` and `BOT_ALLOWED_USER_IDS` settings are ignored.
+
+Admins manage membership at **Admin → Allowed users**. Add a numeric Telegram user ID there before inviting that person to send `/start` to the bot. Ordinary messages never register a new account. The website requires the same approval and registered account. Removing an ID blocks subsequent bot activity and website requests, including downloads; existing website sessions lose chat access. The allowlist is readable and editable only through authenticated admin endpoints. On the first upgrade, existing registered users are added once; later restarts do not restore revoked access. Configured admins can open the dashboard before bot registration, so they can add the first user. Admin status alone does not grant chat access.
+
+The chat shows all of the signed-in user's conversations already stored by the bot, including Telegram topics and inherited fork history. It uses the same durable turn queue, model sessions, files, memories, language, timezone, and streaming preference as Telegram. Users can send attachments, stop a reply, fork or compact a conversation, view and delete memories, search conversations, and change settings. Time zones are named IANA zones such as `America/Los_Angeles`, so daylight saving time follows the zone. A user without a time zone is asked above the composer to use the browser's zone or pick another in Settings, which searches zones by city or region and shows each zone's current time and offset; "Not now" is remembered on that device. An offset saved earlier in Telegram keeps working, and Settings offers to replace it with a named zone. The profile menu shows the user's Telegram profile photo, fetched through the Bot API (accounts without a visible photo show their initial), and an **Admin** link for accounts in `WEB_ADMIN_USER_IDS`. The chat interface supports English and Russian using the same language preference as Telegram; usage and cost reports remain in the admin dashboard at `/admin`. Creating a chat or fork on the website links a Telegram topic when private-chat topics are enabled and Telegram is available. If linking fails, the website conversation still works. Creating a fork from Telegram requires topics to provide a separate place to continue it.
+
+Website messages are echoed by the bot in the linked Telegram topic as plain text after a globe icon. Bot responses reply to that echoed message, including file replies. Every message the bot sends to Telegram is silent, so neither echoes nor replies make a notification sound. Website turns use one static Telegram “Thinking…” message, edited into the final answer, while the website shows each reply's reasoning and tool calls as one chronological, collapsible chain with friendly English or Russian names. While a reply generates, the collapsed chain shows the current step and elapsed time; finished replies show how long they took (for example, “Worked for 32s”). The website uses the same chain during generation and after completion. Both frontends show the same saved replies. A deleted Telegram topic uses the existing titled-message fallback, and a rejected echo is marked in the web transcript without preventing the assistant from answering there.
+
+Attachments accept every file format, including archives, videos, legacy Office documents, executables, and files without extensions. Unknown or binary formats are stored unchanged and made available to the sandbox; supported text and media keep their richer handling. Uploads allow at most 10 files of 50 MiB each (500 MiB total). Multipart uploads stream into private temporary files and are ingested one at a time; temporary files are removed on completion, rejection or cancellation. A reverse proxy may impose a lower total request limit. Native Telegram video and animation messages are accepted too. A durable local copy remains available when Telegram mirroring fails, and uploads only become visible to the bot after their message is accepted.
+
+Telegram-created chats have a Telegram icon before their title. Blue dots indicate unread assistant replies. Read status is shared across website sessions and advances when the latest response is visible in a focused tab or the user interacts with the thread in Telegram. The [Telegram Bot API](https://core.telegram.org/bots/api) does not expose passive read receipts for ordinary bot chats or let bots clear the user's native unread badge.
+
+[OpenUI](https://www.openui.com/) responses are available only in threads created on the website. That origin remains fixed when the conversation continues in Telegram. The assistant uses a trusted Kumo component library through `finish_response.openui`: connected causal flows with emphasized failure points, key-value panels, thumbnail recommendation rows with verified source links, photo galleries, charts and comparison tables. Guidance favors visuals that explain relationships or help a choice, and avoids merely repeating prose as a numbered list. Verified map links are supported; embedded maps are not. Its instructions use the OpenUI SDK prompt generator with the same validated component schemas. Pictures reference authenticated chat files; generated UI cannot fetch arbitrary image URLs. Source links accept HTTPS pages only and open without referrer information. Images actually rendered in a gallery or recommendation row replace their separate attachment rows; the visual keeps its own named download control. Unrepresented files and failed visual renders keep their ordinary attachments. Images load when first visible, share a three-request queue, and retry temporary busy responses automatically. Loaded images are cached in memory for the verified browser session (32 MiB of idle blobs, with displayed blobs retained until released); logout revokes the cache. Buttons submit ordinary chat messages. Website tool details separately show expandable arguments, results, status, and code; Telegram keeps its existing concise tool summaries. Generated UI labels follow the answer language, independently of website settings; new responses save that language and older responses infer it from their prose. Web-created conversations prioritize the website composition: text supplies the narrative while visuals carry structured detail without a duplicate prose list. Telegram keeps the text and important files with a localized placeholder linking to the website visualization. The UI is rendered after completion, and invalid payloads are suppressed while the accompanying text remains readable. Existing Telegram-created threads keep text and attachment replies.
+
+`BOT_TOKEN` remains the bot's API credential; it is not an OAuth client secret and no secret is derived from it. All three OAuth settings are required together. `WEB_PUBLIC_URL` must be the canonical HTTPS origin, without a path or query (explicit loopback HTTP is supported for local setup). The user must already have started this bot in Telegram. Membership comes from the database allowlist managed on the admin page. Login uses authorization code with S256 PKCE, a browser-bound single-use state, nonce, and verified Telegram signatures, issuer, audience, expiry, and numeric `id` claim. Username and OIDC `sub` never authorize access.
+
+User login creates a 12-hour HttpOnly, SameSite=Lax cookie, Secure over HTTPS. Each user may retain eight sessions; another sign-in revokes their oldest session. Logout revokes the current session immediately; restarting the process invalidates all user sessions and pending logins. The same session opens `/admin` only for accounts in `WEB_ADMIN_USER_IDS`; other accounts receive 403 from every admin API. The API always derives identity from the session and checks thread ownership before history, mutations, or downloads.
+
+Behind a reverse proxy, set `WEB_TRUSTED_PROXY_IPS` to the comma-separated exact IP addresses of your trusted proxy hops (for example, `127.0.0.1,::1` for a local proxy). The proxy must overwrite `X-Forwarded-For` with the real client address or append the actual connecting peer. OAuth rate limits then use the first untrusted hop, walking from the socket toward the client. Forwarded headers from other peers are ignored. Without this setting, clients behind a proxy share its OAuth rate limits. CIDRs and hostnames are not accepted.
+
+Admin membership APIs are `GET /api/admin/session`, `GET/POST /api/admin/allowed-users` and `DELETE /api/admin/allowed-users/:telegramId`. Adding an ID accepts `{telegramId}`; writes require the existing admin same-origin and CSRF headers.
+
+The user API exposes `GET /api/chat/session`, `DELETE /api/chat/session`, `GET /api/auth/telegram/start`, and its callback. Authenticated routes are `GET /api/chat/avatar` (the profile photo, or 204 without one), `GET/POST /api/chat/threads`, `GET/POST /api/chat/threads/:threadId/messages`, `POST /api/chat/threads/:threadId/{stop,fork,compact,read}`, `GET/PATCH /api/chat/settings`, `GET /api/chat/memories?offset=0`, `DELETE /api/chat/memories/:memoryId`, and `GET /api/chat/usage?days=30` (days: 0, 7, 30, or 90). Lists use `offset`; thread search accepts `q` (up to 200 characters), matching titles and visible message text across fork boundaries. History accepts either `before` or `after`. Memory IDs are zero-based; deletion removes the saved text, clears cached summaries, and works while memory is disabled. Deleted IDs are never reassigned. Read acknowledgement accepts `{messageId}` for a visible message and advances a shared cursor monotonically. Thread creation accepts `{title?}` (up to 128 characters), fork accepts `{messageId?}`, and message submission accepts `{text,requestId}` JSON or multipart fields `text`, `requestId`, and repeated `files`. A request ID is 16–128 ASCII letters, digits, underscores, or hyphens; reuse it when retrying the same send. Uploads allow up to 10 files of 50 MiB each (500 MiB total), and text is limited to 32,000 characters. Settings accept `language` (`en`/`ru`), `timeZone` (an IANA name, or `null` to clear it), `streaming`, and `memoryEnabled`. The session response includes `admin`.
+
+Every authenticated chat request, including downloads and logout, requires `X-Chat-User` matching the signed-in Telegram ID returned by the public session endpoint. This is an account assertion, never authentication: a tab left open for another account receives 401 before reading or changing the current account's data. Every user API write also requires `X-Chat-Request: 1`. Browser Origin and Sec-Fetch-Site must identify the same origin; CORS is not enabled. Download `GET /api/chat/threads/:threadId/files/:fileId?mode=download` uses the existing bounded resolver. Resuming a sandbox additionally requires a POST with `mode=download&sandbox=start` and `X-Conversation-Sandbox-Consent: start`. OAuth starts and API requests are rate-limited; oversized or slow bodies are rejected.
 
 Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both modes use Bun 1.4.2, pinned in `package.json`. The website defaults to disabled and opens no listener in that mode.
 
@@ -298,9 +340,9 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 
 `bun-plugin-tailwind` 0.1.2 embeds a Tailwind 4.1.14 compiler, separately from the installed `tailwindcss` styles. The existing UI and HMR have been checked with this combination; newer Tailwind compiler features require an updated plugin.
 
-Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Terminate HTTPS at the proxy, preserve the original `Host`, and set `X-Forwarded-Proto: https`. The login screen exchanges the admin token for a 12-hour, HttpOnly, SameSite=Strict session cookie. The token is never stored in browser storage or URLs. Conversation APIs, usage reports, file downloads, and Codex controls all require a valid session. Signing out revokes the session; restarting the app invalidates all sessions. To rotate access, change `WEB_ADMIN_TOKEN` and restart the app. Login attempts are rate-limited.
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Terminate HTTPS at the proxy, preserve the original `Host`, and set `X-Forwarded-Proto: https`. `/admin` signs in with Telegram and returns to the dashboard afterward. Conversation APIs, usage reports, file downloads, and Codex controls all require a Telegram session for an account in `WEB_ADMIN_USER_IDS`. Signing out of the chat ends admin access too; restarting the app invalidates all sessions. To revoke an admin, remove their ID and restart the app.
 
-Persist the existing bot data volume as before; there is no separate website database. Allow GET, HEAD, POST, and DELETE through the proxy. POST is used for sign-in, starting Codex login, and **Start sandbox and load**; DELETE signs out or cancels Codex login.
+Persist the existing bot data volume as before; there is no separate website database. Allow GET, HEAD, POST, PATCH, and DELETE through the proxy. PATCH updates user settings. Admin mutations keep their separate `X-Admin-Request: 1` contract.
 
 Open **Codex connection** to check saved credentials and start or cancel a headless login. The page shows a one-time code and an OpenAI verification link, then confirms when the bot has connected. Existing credentials remain in use until a new login succeeds. Persist the credential directory and keep it writable so login and refresh survive restarts. For Dokploy, set `PI_CODING_AGENT_DIR=/app/data/pi` so website logins are saved on the data volume. No Codex CLI installation is needed for website login.
 
@@ -316,10 +358,12 @@ Cost estimates follow [ccusage's token calculation method](https://ccusage.com/g
 
 Use the sun/moon button to switch between light and dark themes. The initial theme follows your system setting; an explicit choice is saved in your browser. Image attachments reserve preview space while loading. Expand **Image details** to see the saved description, filename, size, format, and loaded dimensions.
 
-Attachments up to 5 MiB load into the page automatically with at most three concurrent downloads. Raster images and plain text have previews. Audio loads into a player without autoplay, with saved speech under **Transcription**. Photo descriptions and audio transcripts are separated from the message caption. Other files have a **Save** link. Larger or unknown-size files require **Load file** first. `WEB_AUTOLOAD_MAX_BYTES=0` disables automatic loading. The existing 20 MiB file resolver limit still applies. Files whose Telegram or E2B sources are unavailable show a retry action. The browser tries Telegram and other non-sandbox copies before E2B. If an E2B file needs a connection, the page asks before starting or resuming its sandbox. A sandbox resumed for retrieval pauses immediately after success, failure, or cancellation; sandboxes already serving bot work stay available to it. Browsing never starts an AI turn. HTML and SVG attachments are downloads, and external Markdown images are not fetched.
+Attachments up to 5 MiB load into the page automatically with at most three concurrent downloads. Raster images and plain text have previews. Audio loads into a player without autoplay, with saved speech under **Transcription**. Photo descriptions and audio transcripts are separated from the message caption. Other files have a **Save** link. Larger or unknown-size files require **Load file** first. `WEB_AUTOLOAD_MAX_BYTES=0` disables automatic loading. The 50 MiB file resolver limit applies; Telegram cloud sources retain their separate 20 MiB download cap. Files whose Telegram or E2B sources are unavailable show a retry action. The browser tries Telegram and other non-sandbox copies before E2B. If an E2B file needs a connection, the page asks before starting or resuming its sandbox. A sandbox resumed for retrieval pauses immediately after success, failure, or cancellation; sandboxes already serving bot work stay available to it. Browsing never starts an AI turn. HTML and SVG attachments are downloads, and external Markdown images are not fetched.
 
 The frontend uses React, Tailwind, [Kumo](https://kumo-ui.com/) design tokens and button styles, and [Base UI](https://base-ui.com/) for accessible controls. The conversation archive, usage reports, memories, and account pages share light and dark themes and responsive layouts. Code blocks use Prism syntax highlighting with the same theme and controls.
 
-For a local preview with synthetic conversations and files, run `bun test/web/http-smoke.ts --preview --web-dev`, then open `http://127.0.0.1:3005` and sign in with `preview-admin-token`. The preview simulates Codex login with `DEMO-CODE` and completes after 30 seconds; do not enter that code on OpenAI. To preview production assets, run `bun run build:web` and omit `--web-dev`. This uses an in-memory database and does not contact Telegram or E2B. `bun run test` includes real Bun route and HTTP lifecycle tests. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
+For a local preview with synthetic conversations and files, run `bun test/web/http-smoke.ts --preview --web-dev`, then open `http://127.0.0.1:3005/admin` and sign in with `preview-admin-token`. The preview simulates Codex login with `DEMO-CODE` and completes after 30 seconds; do not enter that code on OpenAI. To preview production assets, run `bun run build:web` and omit `--web-dev`. This uses an in-memory database and does not contact Telegram or E2B. `bun run test` includes real Bun route and HTTP lifecycle tests. Set `TEST_POSTGRES_URL` to include the PostgreSQL repository tests; they use isolated schemas.
 
-For browser interaction checks, install Chromium once with `bun node_modules/playwright-core/cli.js install --with-deps chromium`, then run `bun run build:web && bun run test:web:browser`. The browser test uses the same synthetic fixture on a temporary local port and checks rejected-token retry, mobile input sizing, chart label readability, and keyboard day selection. CI runs it after the production build.
+To preview the user chat with synthetic data, run `bun run build:web`, then `bun test/web/chat-preview.ts`, and open `http://127.0.0.1:3006`. This fixture provides a signed-in demo account, OpenUI replies, uploads, and settings without real Telegram login or model calls.
+
+For browser interaction checks, install Chromium once with `bun node_modules/playwright-core/cli.js install --with-deps chromium`, then run `bun run build:web && bun run test:web:browser`. The admin checks cover rejected-token retry, mobile input sizing, chart label readability, and keyboard day selection. The chat checks use the real application bundle with controlled API responses to cover live drafts, sign-out races, account switching, and delayed send/create/fork callbacks. CI runs both after the production build. Run `bun test/web/chat-browser-smoke.ts` to check Bun's development bundle too.

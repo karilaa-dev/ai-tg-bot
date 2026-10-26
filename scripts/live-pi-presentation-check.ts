@@ -37,6 +37,7 @@ const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
 let commands: ThreadE2BSandboxRuntimeManager | undefined;
 let sandboxId: string | undefined;
+let threadId: string | undefined;
 try {
   await db.initialize();
   const repos = createRepos(db.db, db.search);
@@ -50,6 +51,7 @@ try {
     topicId: null,
     title: "Presentation smoke",
   });
+  threadId = thread.id;
   commands = new ThreadE2BSandboxRuntimeManager({ config, repos, logger });
   pi = new PiRuntimeManager({
     config,
@@ -200,10 +202,10 @@ try {
 } finally {
   await pi?.dispose();
   await commands?.dispose();
-  if (!sandboxId)
+  if (!sandboxId && threadId !== undefined)
     sandboxId = (
       await createRepos(db.db, db.search)
-        .threadSandboxes.get(config.E2B_DEPLOYMENT_ID, 1)
+        .threadSandboxes.get(config.E2B_DEPLOYMENT_ID, threadId)
         .catch(() => undefined)
     )?.sandbox_id;
   if (sandboxId)

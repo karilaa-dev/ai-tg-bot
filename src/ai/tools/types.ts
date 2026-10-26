@@ -31,8 +31,8 @@ export interface ToolBuildInput {
   commandRuntime?: CommandRuntime;
   browserRuntime?: BrowserUseToolRuntime;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
-  selectContextFiles?: (fileIds: number[]) => void;
-  selectDurableContextFiles?: (fileIds: number[]) => void;
+  selectContextFiles?: (fileIds: string[]) => void;
+  selectDurableContextFiles?: (fileIds: string[]) => void;
   publishedWebsites?: PublishedWebsite[];
   registerPublishedWebsite?: (website: PublishedWebsite) => void;
 }
@@ -57,19 +57,19 @@ export function defineBotTool<Input, Output>(definition: BotToolDefinition<Input
 }
 
 interface LoadMessageFileEntry {
-  file_id: number;
+  file_id: string;
   marker: string;
   type: StoredFileType;
   name: string;
   summary: string | null;
   inline: boolean;
-  bash_input_file_id: number;
+  bash_input_file_id: string;
   source_only: boolean;
   recommended_tool: "materialize_chat_files" | "load_message" | "transcribe_audio";
 }
 
 interface LoadMessageImageEntry {
-  file_id: number;
+  file_id: string;
   marker: string;
   name: string;
   caption: string | null;
@@ -86,7 +86,7 @@ export type LoadMessageResult =
       truncated: boolean;
       files: LoadMessageFileEntry[];
       images: LoadMessageImageEntry[];
-      materialized_file_ids: number[];
-      durable_file_ids: number[];
-      sandbox_file_ids: number[];
+      materialized_file_ids: string[];
+      durable_file_ids: string[];
+      sandbox_file_ids: string[];
     };

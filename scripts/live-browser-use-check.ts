@@ -13,7 +13,7 @@ const database = createDatabase({ ...config, DB_URL: "sqlite::memory:" });
 await database.initialize();
 const repos = createRepos(database.db, database.search);
 const userId = randomInt(1_000_000_000, 2_000_000_000);
-const threadId = 1;
+const threadId = randomUUID();
 const deploymentId = `live-check-${randomUUID()}`;
 const runtimeConfig = { ...config, BROWSER_USE_DEPLOYMENT_ID: deploymentId };
 const manager = new BrowserUseRuntimeManager({ config: runtimeConfig, repos });

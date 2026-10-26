@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import type { ChatFileSource, ChatFileSourceAdapter, FileReadPolicy } from "../files/source.js";
 import type { CommandRuntime, SandboxFileReadResult } from "../sandbox/types.js";
+import { isUuid } from "../utils/uuid.js";
 
 function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): string {
   return config.E2B_DEPLOYMENT_ID;
@@ -10,10 +11,10 @@ function e2bConnectionKey(config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">): string 
 export function e2bFileSource(
   config: Pick<AppConfig, "E2B_DEPLOYMENT_ID">,
   input: Pick<SandboxFileReadResult, "sandboxId" | "size" | "contentSha256"> & {
-    fileId: number;
+    fileId: string;
     sourceCanonicalPath: string;
     userId: number;
-    threadId: number;
+    threadId: string;
     mimeType?: string | null;
   },
 ): ChatFileSource {
@@ -51,13 +52,13 @@ export class E2BFileSourceAdapter implements ChatFileSourceAdapter {
     const canonicalPath = source.locator.path;
     if (typeof sandboxId !== "string" || !sandboxId) throw new Error("E2B source has no sandbox_id.");
     if (typeof canonicalPath !== "string" || !canonicalPath) throw new Error("E2B source has no path.");
-    if (!Number.isSafeInteger(userId) || Number(userId) <= 0) throw new Error("E2B source has no valid user_id.");
-    if (!Number.isSafeInteger(threadId) || Number(threadId) <= 0) throw new Error("E2B source has no valid thread_id.");
+    if (typeof userId !== "number" || !Number.isSafeInteger(userId) || userId <= 0) throw new Error("E2B source has no valid user_id.");
+    if (!isUuid(threadId)) throw new Error("E2B source has no valid thread_id.");
     return this.runtime.readSourceFile({
       sandboxId,
       policy,
-      userId: Number(userId),
-      threadId: Number(threadId),
+      userId,
+      threadId,
       canonicalPath,
       maxBytes: Math.min(maxBytes, MAX_FILE_BYTES),
       signal,

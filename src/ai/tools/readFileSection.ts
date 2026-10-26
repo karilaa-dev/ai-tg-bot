@@ -8,7 +8,7 @@ export function createReadFileSectionTool(input: ToolBuildInput) {
     description:
       "Read one or more chunks from an attached file by file_id and chunk_index. Use after search_in_file identifies a chunk, or use chunk_index -1 to inspect the file outline.",
     inputSchema: z.object({
-      file_id: z.number().int().positive(),
+      file_id: z.string().uuid(),
       chunk_index: z.number().int().min(-1),
       count: z.number().int().min(1).max(8).default(1),
     }),

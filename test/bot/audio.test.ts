@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import { audioFixture } from "../helpers/audio.js";
 import { deferred } from "../helpers/async.js";
-import { MAX_FILE_BYTES } from "../../src/files/limits.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../../src/files/limits.js";
 import { createTranscribeAudioTool } from "../../src/ai/tools/transcribeAudio.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { sql } from "drizzle-orm";
@@ -255,8 +255,8 @@ describe("Telegram audio prompts", () => {
 
   it.each(["metadata", "download", "missing metadata"])("rejects oversized audio from %s before transcription", async (source) => {
     const update = voiceUpdate(source === "metadata"
-      ? { fileSize: MAX_FILE_BYTES + 1 }
-      : { fileSize: 1, content: Buffer.alloc(MAX_FILE_BYTES + 1) });
+      ? { fileSize: TG_DOWNLOAD_MAX_BYTES + 1 }
+      : { fileSize: 1, content: Buffer.alloc(TG_DOWNLOAD_MAX_BYTES + 1) });
     if (source === "missing metadata") delete update.message!.voice!.file_size;
     const res = await processUpdate(update);
     const surface = JSON.stringify([...res.messages, ...res.editedMessages]);
@@ -355,6 +355,8 @@ describe("Telegram audio prompts", () => {
     await started.promise;
     const other = env.bot.createUser({ id: 1002, first_name: "Bob", language_code: "en" });
     const otherChat = env.bot.createChat({ id: other.id, type: "private", first_name: "Bob" });
+    await env.services.access.allow(other.id);
+    await env.repos.users.ensure({ tgId: other.id, firstName: other.first_name });
     await processUpdate(env.bot.server.updateFactory.createVoiceMessage(other, otherChat, original.message!.voice!));
     const source = telegramFileSource({ fileId: original.message!.voice!.file_id, fileUniqueId: original.message!.voice!.file_unique_id });
     const shared = await env.repos.files.findBySource(source);
@@ -368,7 +370,8 @@ describe("Telegram audio prompts", () => {
 
   it("batches an audio album into one prompt with its transcripts and caption", async () => {
     const updates = [1, 2].map((n) => {
-      const audio = env.bot.server.fileState.storeAudio(4, { fileName: `part-${n}.mp3`, content: audioFixture("mp3") });
+      const content = Buffer.concat([audioFixture("mp3"), Buffer.from(`part ${n}`)]);
+      const audio = env.bot.server.fileState.storeAudio(4, { fileName: `part-${n}.mp3`, content });
       const update = env.bot.server.updateFactory.createAudioMessage(env.user, env.chat, audio, { caption: n === 1 ? "Use both parts" : undefined });
       update.message!.media_group_id = "audio-album";
       return update;

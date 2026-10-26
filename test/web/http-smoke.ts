@@ -1,3 +1,4 @@
+import { AccessControl } from "../../src/access/control.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -17,13 +18,17 @@ import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
 import { UsagePricing } from "../../src/web/usage-pricing.js";
 import { createCodexLoginPreview } from "./codex-preview.js";
+import { fakeTelegramLogin, signInOnlyChat, telegramLoginConfig } from "../helpers/telegram-login.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 
 const browser = process.argv.includes("--browser");
 const preview = browser || process.argv.includes("--preview");
 assert.ok(process.versions.bun, "The HTTP smoke test must run under Bun");
 const temp = await mkdtemp(path.join(os.tmpdir(), "conversation-browser-"));
-const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: preview ? "preview-admin-token" : "test-admin-token", WEB_PORT: preview && !browser ? 3005 : 0, WEB_HOST: preview && !browser ? "0.0.0.0" : "127.0.0.1" });
+const ADMIN_ID = 1001;
+// Browsers keep the session cookie on plain HTTP only when the public URL is loopback HTTP too.
+const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, ...(preview ? { WEB_PUBLIC_URL: "http://127.0.0.1" } : {}),
+  WEB_ADMIN_USER_IDS: [ADMIN_ID], WEB_PORT: preview && !browser ? 3005 : 0, WEB_HOST: preview && !browser ? "0.0.0.0" : "127.0.0.1" });
 const postgres = process.argv.includes("--postgres");
 const schema = `web_smoke_${randomUUID().replaceAll("-", "")}`;
 const admin = postgres ? createDatabase({ DB_URL: process.env.TEST_POSTGRES_URL! }) : undefined;
@@ -40,7 +45,7 @@ const repos = createRepos(db.db, db.search);
 const resolver = new FileResolver(repos.files);
 const payloads = new Map<string, Buffer>();
 resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async source => { if (preview && source.mimeType === "image/png") await new Promise(resolve => setTimeout(resolve, 2500)); return payloads.get(source.remoteKey)!; } });
-const user = await repos.users.ensure({ tgId: 1001, firstName: "Alice Morgan", username: "alice_m" });
+const user = await repos.users.ensure({ tgId: ADMIN_ID, firstName: "Alice Morgan", username: "alice_m" });
 const memory = new DatabaseMemoryStore(db.db, user.tg_id);
 await memory.initialize();
 await memory.append(Array.from({ length: 51 }, (_, index) => ["2026-10-10", index === 0
@@ -100,20 +105,21 @@ if (preview) {
 const pricing = new UsagePricing(async () => Response.json({ "gpt-6-astra": {
   input_cost_per_token: 10 / 1e6, output_cost_per_token: 50 / 1e6, cache_read_input_token_cost: 1 / 1e6,
 } }));
-const options = { development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined };
+const telegram = await fakeTelegramLogin();
+// In the preview, "Sign in with Telegram" goes to a local page that approves Alice straight away.
+const consent = preview ? telegram.serveAuthorizePage(ADMIN_ID, (): URL => new URL(`http://127.0.0.1:${web.url.port}`)) : undefined;
+const access = new AccessControl(db.db);
+await access.initialize();
+const options = { access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
+  chat: signInOnlyChat("archive_test_bot"), telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
 const web = (await startWebServer(options))!;
 if (preview) {
-  console.log(`Preview: ${web.url}?user=${user.tg_id}&thread=${thread.id}`);
-  const stop = async () => { await web.stop(); await db.destroy(); await rm(temp, { recursive: true, force: true }); process.exit(0); };
+  console.log(`Preview: http://127.0.0.1:${web.url.port}/admin?user=${user.tg_id}&thread=${thread.id}`);
+  const stop = async () => { await web.stop(); await consent?.stop(); await db.destroy(); await rm(temp, { recursive: true, force: true }); process.exit(0); };
   process.once("SIGINT", () => void stop());
   process.once("SIGTERM", () => void stop());
 } else {
-  const login = await fetch(new URL("/api/auth/login", web.url), {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
-    body: JSON.stringify({ token: config.WEB_ADMIN_TOKEN }),
-  });
-  assert.equal(login.status, 200);
-  const cookie = login.headers.get("Set-Cookie")!.split(";")[0]!;
+  const cookie = await telegram.signIn(web.url, ADMIN_ID);
   const authenticatedFetch = (url: URL, init?: RequestInit) => fetch(url, {
     ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), Cookie: cookie, "X-Admin-Request": "1" },
   });

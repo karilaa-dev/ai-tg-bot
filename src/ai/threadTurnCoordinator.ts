@@ -1,5 +1,5 @@
+import type { TurnFrontend } from "../application/turnFrontend.js";
 import { randomUUID } from "node:crypto";
-import type { Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
@@ -8,9 +8,8 @@ import type { Locale, MessageKind, TurnRunRow } from "../db/types.js";
 import type { FileResolver } from "../files/resolver.js";
 import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
-import type { TurnRunner } from "./types.js";
+import type { TurnDraft } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
-import { TurnActivityCoordinator } from "./turnActivity.js";
 
 interface ActiveTurn {
   run: TurnRunRow;
@@ -19,10 +18,11 @@ interface ActiveTurn {
 }
 
 export class ThreadTurnCoordinator {
-  private readonly draining = new Map<number, Promise<void>>();
-  private readonly active = new Map<number, ActiveTurn>();
-  private readonly activity: TurnActivityCoordinator;
-  private readonly recovery: Promise<number[]>;
+  private readonly draining = new Map<string, Promise<void>>();
+  private readonly active = new Map<string, ActiveTurn>();
+  private readonly drafts = new Map<string, TurnDraft>();
+  private readonly activity: TurnFrontend["activity"];
+  private readonly recovery: Promise<string[]>;
   private readonly ownerId = randomUUID();
   private readonly lifecycle = new AbortController();
   private recoveryPollTimer: NodeJS.Timeout | undefined;
@@ -41,20 +41,19 @@ export class ThreadTurnCoordinator {
   private static readonly RECOVERY_POLL_MS = 5_000;
 
   constructor(private readonly input: {
-    api: Api;
+    frontend: TurnFrontend;
     config: AppConfig;
     db: AppDatabase;
     repos: Repos;
     logger: Logger;
     pi: PiRuntimeService;
     fileResolver: FileResolver;
-    turnRunner: TurnRunner;
     t(locale: Locale, key: string, params?: Record<string, string | number>): string;
-    scheduleThreadTitle?(input: { threadId: number; chatId: number }): void;
-    syncThreadActivity?(input: { threadId: number; chatId: number; signal?: AbortSignal }): Promise<boolean | void>;
+    canUse?(userId: number): Promise<boolean>;
+    scheduleThreadTitle?(input: { threadId: string; chatId: number }): void;
     awaitProcessingOnAccept?: boolean;
   }) {
-    this.activity = new TurnActivityCoordinator(input);
+    this.activity = input.frontend.activity;
     this.recovery = this.recoverUntilReady();
     void this.recovery.then((threadIds) => {
       for (const threadId of threadIds) this.schedule(threadId);
@@ -66,7 +65,7 @@ export class ThreadTurnCoordinator {
 
   async accept(input: {
     userId: number;
-    threadId: number;
+    threadId: string;
     chatId: number;
     messageThreadId: number | null;
     locale: Locale;
@@ -74,6 +73,7 @@ export class ThreadTurnCoordinator {
     content: unknown;
     textPlain: string;
     sources: TelegramTurnSource[];
+    webRequestId?: string;
     attachments?: DurableTurnAttachment[];
     signal?: AbortSignal;
   }): Promise<AcceptedTurnRun> {
@@ -107,7 +107,7 @@ export class ThreadTurnCoordinator {
     return accepted;
   }
 
-  async cancelActive(threadId: number): Promise<boolean> {
+  async cancelActive(threadId: string): Promise<boolean> {
     await this.recovery;
     const active = this.active.get(threadId);
     if (active && !active.finalizer.canCancel()) return false;
@@ -134,7 +134,11 @@ export class ThreadTurnCoordinator {
     return true;
   }
 
-  async waitForIdle(threadId?: number, includeActivity = true): Promise<void> {
+  draft(threadId: string): TurnDraft | null {
+    return this.drafts.get(threadId) ?? null;
+  }
+
+  async waitForIdle(threadId?: string, includeActivity = true): Promise<void> {
     await this.recovery;
     while (true) {
       const tasks = threadId === undefined
@@ -165,7 +169,7 @@ export class ThreadTurnCoordinator {
   }
 
   async withThreadBarrier<T>(
-    threadId: number,
+    threadId: string,
     operation: "fork" | "compact",
     callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
@@ -287,7 +291,7 @@ export class ThreadTurnCoordinator {
     await this.activity.shutdown();
   }
 
-  private async recoverUntilReady(): Promise<number[]> {
+  private async recoverUntilReady(): Promise<string[]> {
     let consecutiveFailures = 0;
     while (this.accepting) {
       try {
@@ -309,7 +313,7 @@ export class ThreadTurnCoordinator {
     return [];
   }
 
-  private async recover(): Promise<number[]> {
+  private async recover(): Promise<string[]> {
     const now = Date.now();
     const interrupted = await this.input.repos.turnRuns.interruptStaleRunning({
       now,
@@ -354,7 +358,7 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private schedule(threadId: number): void {
+  private schedule(threadId: string): void {
     if (this.draining.has(threadId)) return;
     const task = this.drainThread(threadId);
     this.draining.set(threadId, task);
@@ -377,7 +381,7 @@ export class ThreadTurnCoordinator {
     });
   }
 
-  private async drainThread(threadId: number): Promise<void> {
+  private async drainThread(threadId: string): Promise<void> {
     let consecutiveFailures = 0;
     while (this.accepting) {
       try {
@@ -415,7 +419,7 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  private async finishDrain(threadId: number, retry = false): Promise<void> {
+  private async finishDrain(threadId: string, retry = false): Promise<void> {
     this.draining.delete(threadId);
     if (!this.accepting) return;
     try {
@@ -521,6 +525,7 @@ export class ThreadTurnCoordinator {
       queueWaitMs,
     });
     try {
+      if (this.input.canUse && !await this.input.canUse(run.user_id)) throw new Error("User access was revoked before this turn started.");
       this.activity.schedule(run.id, run.thread_id);
       const [user, thread, message] = await Promise.all([
         this.input.repos.users.get(run.user_id),
@@ -534,10 +539,7 @@ export class ThreadTurnCoordinator {
       } catch {
         // Keep the plain-text fallback; malformed historical JSON must not strand FIFO.
       }
-      await this.input.turnRunner({
-        api: this.input.api,
-        chatId: run.chat_id,
-        messageThreadId: run.message_thread_id ?? undefined,
+      await this.input.frontend.run({
         config: this.input.config,
         db: this.input.db,
         repos: this.input.repos,
@@ -549,18 +551,29 @@ export class ThreadTurnCoordinator {
         userMessageContent: content,
         userMessageId: message.id,
         turnRunId: run.id,
+        origin: run.origin,
         signal: controller.signal,
+        onDraft: (draft) => {
+          if (!controller.signal.aborted) this.drafts.set(thread.id, {
+            text: draft.text.slice(-64_000), thinking: draft.thinking.slice(-32_000),
+            ...(draft.toolActivity ? { toolActivity: draft.toolActivity } : {}),
+          });
+        },
         resolveFile: (file, signal) => this.input.fileResolver.resolveFile(file, signal),
+        fileResolver: this.input.fileResolver,
         pi: this.input.pi,
         t: (key, params) => this.input.t(run.locale, key, params),
         onInferenceUsage: (result) => this.input.repos.turnRuns.recordUsage(run.id, this.ownerId, result),
-        onAwaitingDelivery: (result) => finalizer.awaitingDelivery(result),
+        onAwaitingDelivery: (result) => {
+          this.drafts.delete(thread.id);
+          return finalizer.awaitingDelivery(result);
+        },
         onDeliveryStarting: () => finalizer.beginDelivery(),
         onDeliveryConfirmed: (result) => finalizer.confirmDelivery(result.assistantMessageId),
         onDeliveryUnknown: (result) => finalizer.unknownDelivery(result.assistantMessageId, result.failureCode),
         onDeliveryFailed: (result) => finalizer.rejectDelivery(result.assistantMessageId, result.failureCode),
         onExecutionFailure: async () => finalizer.recordExecutionFailure(),
-      });
+      }, { run, message });
       const outcome = await finalizer.finishEngine();
       if (outcome.deliveredSuccessfully) {
         this.input.scheduleThreadTitle?.({ threadId: run.thread_id, chatId: run.chat_id });
@@ -574,6 +587,7 @@ export class ThreadTurnCoordinator {
       });
     } finally {
       leaseMonitoring = false;
+      this.drafts.delete(run.thread_id);
       clearInterval(leaseTimer);
       leaseDeadline.stop();
       clearInterval(cancellationTimer);
@@ -597,7 +611,7 @@ export class ThreadTurnCoordinator {
   }
 
   private async releaseThreadBarrierWithRetry(
-    threadId: number,
+    threadId: string,
     ownerId: string,
     operation: "fork" | "compact",
   ): Promise<boolean | undefined> {

@@ -168,7 +168,7 @@ describe("Pi tool discovery and codemode", () => {
 
   it("returns structured failures to scripts and enforces the nested tool-call budget", async () => {
     const { runtime } = await setup([
-      { name: "codemode", arguments: { code: "const results = await Promise.allSettled([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99998, chunk_index: 0}), tools.read_file_section({file_id: 99997, chunk_index: 0})]); text(results.map(r => r.status === 'fulfilled' ? r.value : {error: r.reason.message}));" } },
+      { name: "codemode", arguments: { code: "const results = await Promise.allSettled([tools.read_file_section({file_id: '00000000-0000-4000-8000-000000099999', chunk_index: 0}), tools.read_file_section({file_id: '00000000-0000-4000-8000-000000099998', chunk_index: 0}), tools.read_file_section({file_id: '00000000-0000-4000-8000-000000099997', chunk_index: 0})]); text(results.map(r => r.status === 'fulfilled' ? r.value : {error: r.reason.message}));" } },
       { name: "finish_response", arguments: { text: "Handled" } },
     ], false, 3);
 
@@ -197,7 +197,7 @@ describe("Pi tool discovery and codemode", () => {
 
   it("keeps the failure limit across scripts that catch nested errors", async () => {
     const { runtime } = await setup(Array.from({ length: 3 }, (_, index) => ({
-      name: "codemode", arguments: { code: `text(await tools.read_file_section({file_id: ${99000 + index}, chunk_index: 0}));` },
+      name: "codemode", arguments: { code: `text(await tools.read_file_section({file_id: '00000000-0000-4000-8000-${String(99000 + index).padStart(12, "0")}', chunk_index: 0}));` },
     })), false, 40, 3);
 
     await runtime.session.prompt("Read three missing files", { expandPromptTemplates: false });
@@ -211,7 +211,7 @@ describe("Pi tool discovery and codemode", () => {
   it("completes repeated tool failures without a cap when turn limits are disabled", async () => {
     const { runtime } = await setup([
       ...Array.from({ length: 22 }, () => ({
-        name: "codemode", arguments: { code: "text(await Promise.all([tools.read_file_section({file_id: 99999, chunk_index: 0}), tools.read_file_section({file_id: 99999, chunk_index: 0})]));" },
+        name: "codemode", arguments: { code: "text(await Promise.all([tools.read_file_section({file_id: '00000000-0000-4000-8000-000000099999', chunk_index: 0}), tools.read_file_section({file_id: '00000000-0000-4000-8000-000000099999', chunk_index: 0})]));" },
       })),
       { name: "finish_response", arguments: { text: "Completed without a cap" } },
     ]);

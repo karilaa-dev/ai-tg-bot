@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import type { Repos } from "../db/repos/index.js";
-import { throwIfAborted } from "../files/cancel.js";
+import { isAbortError, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
 import type { Logger } from "../logger.js";
+import { threadChainScope } from "../memory/retrieval.js";
 import type { SandboxThreadFile, SandboxThreadFileSyncResult } from "../sandbox/types.js";
+import { webFileSource, type WebFileSourceAdapter } from "../web/file-source.js";
+import type { FileResolver } from "../files/resolver.js";
 import { quoteShellToken, shellJoin } from "../util/shell.js";
+import { isUuid } from "../utils/uuid.js";
 import { type E2BSandbox } from "./client.js";
 import { E2B_CONTROL_TMP, E2B_FILE_SOURCES, E2B_TELEGRAM_FILES } from "./paths.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+import { MAX_FILE_BYTES, TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 
 import { runControl, runCommandResult } from "./sandboxCommandExecutor.js";
 export type ThreadFileSync = {
@@ -18,12 +22,14 @@ export type ThreadFileSync = {
 type MaterializerInput = {
   config: AppConfig; repos: Repos; logger?: Logger;
   downloadTelegramBytes(fileId: string, signal?: AbortSignal): Promise<Buffer>;
+  webFileSource?: Pick<WebFileSourceAdapter, "fetch">;
+  fileResolver?: FileResolver;
 };
 const FILE_RESTORE_RETRY_BASE_MS = 5 * 60_000;
 const FILE_RESTORE_RETRY_MAX_MS = 60 * 60_000;
 
 type ThreadFileIndexEntry = {
-  file_id: number;
+  file_id: string;
   message_id: number | null;
   original_name: string;
   sandbox_name: string;
@@ -44,7 +50,7 @@ type ThreadFileIndex = {
 };
 
 type TelegramRestoreResult = {
-  file_id: number;
+  file_id: string;
   status: "available" | "error";
   ref_id: number | null;
   size?: number;
@@ -62,7 +68,7 @@ type ThreadFileInventoryEntry = {
 
 export async function syncThreadFiles(context: MaterializerInput,
   state: { threadFilesSync?: ThreadFileSync },
-  scope: { userId: number; threadId: number },
+  scope: { userId: number; threadId: string },
   sandbox: E2BSandbox,
   files: SandboxThreadFile[],
   signal?: AbortSignal,
@@ -133,7 +139,7 @@ export async function syncThreadFiles(context: MaterializerInput,
       pending.push({ file, sandboxName });
     }
 
-    const restored = await restoreTelegramFiles(context, sandbox, pending, signal);
+    const restored = await restoreTelegramFiles(context, scope, sandbox, pending, signal);
     const restoredById = new Map(restored.map((entry) => [entry.file_id, entry]));
     for (const item of pending) {
       const old = previousById.get(item.file.fileId);
@@ -219,7 +225,7 @@ export async function syncThreadFiles(context: MaterializerInput,
 
     const next = [...nextById.values()]
       .filter((entry) => isSandboxThreadFileName(entry.sandbox_name))
-      .sort((left, right) => left.file_id - right.file_id);
+      .sort((left, right) => left.file_id.localeCompare(right.file_id));
     const index: ThreadFileIndex = {
       version: 2,
       generated_at: new Date().toISOString(),
@@ -265,7 +271,7 @@ export async function syncThreadFiles(context: MaterializerInput,
   }
   const next = [...nextById.values()]
     .filter((entry) => isSandboxThreadFileName(entry.sandbox_name))
-    .sort((left, right) => left.file_id - right.file_id);
+    .sort((left, right) => left.file_id.localeCompare(right.file_id));
   const result: SandboxThreadFileSyncResult = {
     directory: E2B_TELEGRAM_FILES,
     available: next.filter((entry) => entry.status === "available").length,
@@ -288,11 +294,16 @@ export async function syncThreadFiles(context: MaterializerInput,
 }
 
 async function restoreTelegramFiles(context: MaterializerInput,
+  scope: { userId: number; threadId: string },
   sandbox: E2BSandbox,
   pending: Array<{ file: SandboxThreadFile; sandboxName: string }>,
   signal?: AbortSignal,
 ): Promise<TelegramRestoreResult[]> {
   if (!pending.length) return [];
+  const thread = await context.repos.threads.get(scope.threadId);
+  const webFileIds = new Set(thread?.user_id === scope.userId
+    ? (await threadChainScope(context.repos, thread)).fileIds
+    : []);
   const results = new Array<TelegramRestoreResult>(pending.length);
   let cursor = 0;
   const worker = async () => {
@@ -301,7 +312,7 @@ async function restoreTelegramFiles(context: MaterializerInput,
       cursor += 1;
       const item = pending[index];
       if (!item) return;
-      results[index] = await restoreTelegramFile(context, sandbox, item, signal);
+      results[index] = await restoreTelegramFile(context, sandbox, item, webFileIds, signal);
     }
   };
   const settlements = await Promise.allSettled(
@@ -320,21 +331,79 @@ async function restoreTelegramFiles(context: MaterializerInput,
 async function restoreTelegramFile(context: MaterializerInput,
   sandbox: E2BSandbox,
   item: { file: SandboxThreadFile; sandboxName: string },
+  webFileIds: Set<string>,
   signal?: AbortSignal,
 ): Promise<TelegramRestoreResult> {
+  const webUnavailable = {
+    file_id: item.file.fileId,
+    status: "error",
+    ref_id: null,
+    error_code: "file_unavailable",
+    error_detail: "web attachment unavailable or did not match the recorded file",
+  } satisfies TelegramRestoreResult;
+  let hasWebSource = false;
+  try {
+    const sources = await context.repos.files.listSources(item.file.fileId);
+    throwIfAborted(signal);
+    // A descriptor's Telegram refs cannot grant access to a private web attachment.
+    if (sources.some((entry) => entry.transport === "web" || entry.transport === "local") && !webFileIds.has(item.file.fileId)) {
+      return webUnavailable;
+    }
+    hasWebSource = sources.some((entry) => (entry.transport === "web" || entry.transport === "local")
+      && entry.connection_key === "default" && entry.remote_key === item.file.fileId);
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    if (isAbortError(error)) throw error;
+    return webUnavailable;
+  }
   const local = await restoreLocalFileSource(context, sandbox, item, signal);
   if (local) return local;
   const candidates = primaryTelegramRestoreCandidates(item.file);
   let lastRefId: number | null = null;
   let lastError: unknown = candidates.length ? undefined : new Error("no primary Telegram file reference");
+  if ((context.fileResolver || context.webFileSource) && hasWebSource) {
+    try {
+      const timeoutSignal = AbortSignal.timeout(context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
+      const transferSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      if (item.file.expectedSize !== null && item.file.expectedSize > MAX_FILE_BYTES) {
+        throw new Error("file exceeds the configured size limit");
+      }
+      const stored = await context.repos.files.get(item.file.fileId);
+      if (!stored) throw new Error("Attachment not found.");
+      const bytes = context.fileResolver
+        ? (await context.fileResolver.resolveFile(stored, transferSignal, MAX_FILE_BYTES,
+          { allowSandboxResume: false, pauseAfterRead: false, excludeSandbox: true })).bytes
+        : await context.webFileSource!.fetch(
+          webFileSource(item.file.fileId, item.file.mimeType ?? "application/octet-stream"), transferSignal, MAX_FILE_BYTES);
+      throwIfAborted(transferSignal);
+      if (bytes.length > MAX_FILE_BYTES
+        || (item.file.expectedSize !== null && bytes.length !== item.file.expectedSize)) {
+        throw new Error("web attachment did not match the recorded file");
+      }
+      const sha256 = sha256Hex(bytes);
+      if (item.file.expectedSha256 !== null && sha256 !== item.file.expectedSha256) {
+        throw new Error("web attachment did not match the recorded file");
+      }
+      await stageRestoredBytes(context, sandbox, item.sandboxName, bytes, transferSignal);
+      return { file_id: item.file.fileId, status: "available", ref_id: null, size: bytes.length, sha256 };
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (isAbortError(error)) throw error;
+      lastError = webUnavailable.error_detail;
+    }
+  }
   for (const candidate of candidates) {
     throwIfAborted(signal);
     lastRefId = candidate.id;
     try {
       const timeoutSignal = AbortSignal.timeout(context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
       const transferSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      if (candidate.telegramSize !== null && candidate.telegramSize > TG_DOWNLOAD_MAX_BYTES) {
+        throw new Error("Telegram file exceeds the 20 MiB download limit");
+      }
       const bytes = await context.downloadTelegramBytes(candidate.telegramFileId, transferSignal);
-      if (bytes.length > MAX_FILE_BYTES) throw new Error("file exceeds the configured size limit");
+      throwIfAborted(transferSignal);
+      if (bytes.length > TG_DOWNLOAD_MAX_BYTES) throw new Error("file exceeds the configured size limit");
       if (candidate.telegramSize !== null && bytes.length !== candidate.telegramSize) {
         throw new Error("Telegram file size did not match the recorded representation");
       }
@@ -342,35 +411,18 @@ async function restoreTelegramFile(context: MaterializerInput,
       const exactRepresentation = candidate.telegramSize !== null
         && item.file.expectedSize !== null
         && candidate.telegramSize === item.file.expectedSize;
+      if (candidate.mediaKind === "document" && item.file.expectedSize !== null
+        && bytes.length !== item.file.expectedSize) {
+        throw new Error("Telegram document size did not match the recorded file");
+      }
       // Telegram may re-encode outbound photos. When the recorded Telegram size differs
       // from the original, accept that primary representation as best-effort recovery;
       // INDEX.json and restore diagnostics retain the bytes' actual size and hash.
-      if (exactRepresentation && item.file.expectedSha256 && sha256 !== item.file.expectedSha256) {
+      if ((candidate.mediaKind === "document" || exactRepresentation)
+        && item.file.expectedSha256 && sha256 !== item.file.expectedSha256) {
         throw new Error("Telegram file hash did not match the recorded representation");
       }
-      const stagingPath = path.posix.join(E2B_CONTROL_TMP, `restore-${randomUUID()}`);
-      const destination = path.posix.join(E2B_TELEGRAM_FILES, item.sandboxName);
-      await sandbox.writeFile(
-        stagingPath,
-        bytes,
-        "root",
-        transferSignal,
-        context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
-      );
-      try {
-        await runControl(
-          sandbox,
-          [
-            `chown root ${quoteShellToken(stagingPath)}`,
-            `chmod 444 ${quoteShellToken(stagingPath)}`,
-            `mv -f ${quoteShellToken(stagingPath)} ${quoteShellToken(destination)}`,
-          ].join(" && "),
-          context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
-          transferSignal,
-        );
-      } finally {
-        await sandbox.removeFile(stagingPath, "root").catch(() => undefined);
-      }
+      await stageRestoredBytes(context, sandbox, item.sandboxName, bytes, transferSignal);
       return {
         file_id: item.file.fileId,
         status: "available",
@@ -387,9 +439,34 @@ async function restoreTelegramFile(context: MaterializerInput,
     file_id: item.file.fileId,
     status: "error",
     ref_id: lastRefId,
-    error_code: candidates.length ? "file_unavailable" : "missing_telegram_reference",
+    error_code: candidates.length || hasWebSource ? "file_unavailable" : "missing_telegram_reference",
     error_detail: sanitizeRestoreDetail(lastError, context.config.BOT_TOKEN),
   };
+}
+
+async function stageRestoredBytes(context: MaterializerInput,
+  sandbox: E2BSandbox,
+  sandboxName: string,
+  bytes: Buffer,
+  signal: AbortSignal,
+): Promise<void> {
+  const stagingPath = path.posix.join(E2B_CONTROL_TMP, `restore-${randomUUID()}`);
+  const destination = path.posix.join(E2B_TELEGRAM_FILES, sandboxName);
+  try {
+    await sandbox.writeFile(stagingPath, bytes, "root", signal, context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS);
+    await runControl(
+      sandbox,
+      [
+        `chown root ${quoteShellToken(stagingPath)}`,
+        `chmod 444 ${quoteShellToken(stagingPath)}`,
+        `mv -f ${quoteShellToken(stagingPath)} ${quoteShellToken(destination)}`,
+      ].join(" && "),
+      context.config.TELEGRAM_FILE_RESTORE_TIMEOUT_MS,
+      signal,
+    );
+  } finally {
+    await sandbox.removeFile(stagingPath, "root").catch(() => undefined);
+  }
 }
 
 async function restoreLocalFileSource(context: MaterializerInput,
@@ -410,7 +487,8 @@ async function restoreLocalFileSource(context: MaterializerInput,
       signal,
     );
     if (
-      inspected.sha256 !== item.file.expectedSha256
+      inspected.size > MAX_FILE_BYTES
+      || inspected.sha256 !== item.file.expectedSha256
       || (item.file.expectedSize !== null && inspected.size !== item.file.expectedSize)
     ) {
       return undefined;
@@ -446,7 +524,7 @@ async function restoreLocalFileSource(context: MaterializerInput,
 }
 
 async function recordRestoreStatus(context: MaterializerInput, input: {
-  threadId: number;
+  threadId: string;
   sandbox: E2BSandbox;
   file: SandboxThreadFile;
   sandboxName: string;
@@ -682,7 +760,10 @@ async function readThreadFileIndex(
       generated_at: typeof parsed.generated_at === "string"
         ? parsed.generated_at
         : new Date(0).toISOString(),
-      files: parsed.files.map((entry) => ({
+      files: parsed.files.filter((entry) => isUuid(entry.file_id)
+        && typeof entry.sandbox_name === "string"
+        && isSandboxThreadFileName(entry.sandbox_name)
+        && entry.sandbox_name.startsWith(`${entry.file_id}--`)).map((entry) => ({
         file_id: entry.file_id,
         message_id: entry.message_id,
         original_name: entry.original_name,
@@ -719,8 +800,8 @@ function sanitizeFileName(value: string): string {
   return normalized || "file";
 }
 
-function sandboxThreadFileName(fileId: number, originalName: string): string {
-  if (!Number.isSafeInteger(fileId) || fileId <= 0) throw new Error("invalid Telegram file id");
+function sandboxThreadFileName(fileId: string, originalName: string): string {
+  if (!isUuid(fileId)) throw new Error("invalid Telegram file id");
   const sandboxName = `${fileId}--${sanitizeFileName(originalName)}`;
   const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, sandboxName);
   if (path.posix.dirname(candidate) !== E2B_TELEGRAM_FILES) {
@@ -731,10 +812,9 @@ function sandboxThreadFileName(fileId: number, originalName: string): string {
 
 function isSandboxThreadFileName(value: string): boolean {
   if (path.posix.basename(value) !== value) return false;
-  const match = /^([1-9]\d*)--([A-Za-z0-9][A-Za-z0-9._-]{0,119})$/.exec(value);
+  const match = /^(.{36})--([A-Za-z0-9][A-Za-z0-9._-]{0,119})$/.exec(value);
   if (!match) return false;
-  const fileId = Number(match[1]);
-  if (!Number.isSafeInteger(fileId) || fileId <= 0) return false;
+  if (!isUuid(match[1])) return false;
   const candidate = path.posix.resolve(E2B_TELEGRAM_FILES, value);
   return path.posix.dirname(candidate) === E2B_TELEGRAM_FILES;
 }

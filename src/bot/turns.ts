@@ -26,17 +26,14 @@ export async function handleUserText(
     textChars: text.length,
   }));
   throwIfAborted(options.signal);
-  const accepted = await ctx.services.turnCoordinator.accept({
+  const accepted = await ctx.services.conversations.accept({
     signal: options.signal,
     userId: ctx.user.tg_id,
     threadId: ctx.thread.id,
-    chatId: ctx.chat.id,
-    messageThreadId: ctx.thread.topic_id,
-    locale: ctx.user.lang,
     kind,
     content,
-    textPlain: text,
-    sources: options.sources ?? [telegramTurnSource(ctx, { kind, content, textPlain: text })],
+    text,
+    source: { kind: "telegram", chatId: ctx.chat.id, updates: options.sources ?? [telegramTurnSource(ctx, { kind, content, textPlain: text })] },
     attachments: options.attachments,
   });
   if (accepted.created && accepted.queuedBehind) {

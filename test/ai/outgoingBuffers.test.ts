@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it } from "vitest";
 import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
 import type { CreatedFileAttachment } from "../../src/files/types.js";
@@ -5,7 +6,7 @@ import type { CreatedFileAttachment } from "../../src/files/types.js";
 describe("outgoing buffers", () => {
   it("evicts cached exports under pressure, preserves non-durable bytes on disk, and releases reservations", async () => {
     const buffers = new OutgoingBuffers(40);
-    const file = { fileId: 1, size: 30 } as CreatedFileAttachment;
+    const file = { fileId: fixtureUuid(1), size: 30 } as CreatedFileAttachment;
     try {
       const reservation = await buffers.reserve(30);
       const bytes = Buffer.alloc(30, 9);
@@ -25,7 +26,7 @@ describe("outgoing buffers", () => {
 
   it("rejects oversized output without exceeding the reservation", async () => {
     const buffers = new OutgoingBuffers(40);
-    const file = { fileId: 1, size: 10 } as CreatedFileAttachment;
+    const file = { fileId: fixtureUuid(1), size: 10 } as CreatedFileAttachment;
     try {
       await expect(buffers.load(file, async () => Buffer.alloc(11))).rejects.toThrow("reserved");
       await expect(buffers.reserve(41)).rejects.toThrow("budget");

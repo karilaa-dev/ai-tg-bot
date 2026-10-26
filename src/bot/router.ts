@@ -1,11 +1,18 @@
+import { telegramTurnFrontend } from "../telegram/turnFrontend.js";
+import type { AccessControl } from "../access/control.js";
+import { createApplication } from "../application/runtime.js";
+import { compactionDescription, compactionDuration, compactionTime, savedCompactionAction } from "../application/compactionAction.js";
+import { telegramConversationLink } from "../telegram/conversationLink.js";
+import { LocalFileStore } from "../files/localStore.js";
 import { Bot, GrammyError, HttpError } from "grammy";
 import { telegramRetry } from "../telegram/retry.js";
+import { silentSends } from "../telegram/silent.js";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import { sequentialize } from "@grammyjs/runner";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import { createRepos, type Repos } from "../db/repos/index.js";
-import type { Locale, ThreadRow } from "../db/types.js";
+import type { Locale } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { runTurn } from "../ai/agentTurnEngine.js";
 import { type TurnRunner } from "../ai/types.js";
@@ -17,7 +24,7 @@ import { languageKeyboard } from "./keyboards.js";
 import { Localizer } from "./i18n.js";
 import { classifyFile } from "../files/ingest.js";
 import { downloadTelegramFile, type TelegramFileDownloader } from "../files/telegram.js";
-import { MAX_FILE_BYTES } from "../files/limits.js";
+import { TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { PiRuntimeManager, type PiRuntimeService } from "../pi/runtime.js";
 import {
   clearInlineKeyboard,
@@ -30,6 +37,7 @@ import { ctxLogMeta, logCallback, logCommand, messageThreadId } from "./logging.
 import {
   cancelPendingMediaGroupsForContext,
   cancelPendingTextBurstForContext,
+  cancelPendingForThread,
   enqueueUserText,
   flushPendingTextBurstForContext,
   isPlainUserText,
@@ -42,15 +50,16 @@ import { TELEGRAM_CONNECTION_KEY, TelegramFileSourceAdapter } from "../files/tel
 import { E2BFileSourceAdapter } from "../e2b/fileSource.js";
 import { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
-import { ThreadTurnCoordinator } from "../ai/threadTurnCoordinator.js";
 import { audioFormat } from "../audio/transcription.js";
 import { showMemories } from "./memory.js";
+import { WebFileSourceAdapter } from "../web/file-source.js";
 
 interface InstallOptions {
   config: AppConfig;
   db: AppDatabase;
   logger: Logger;
   repos?: Repos;
+  access: AccessControl;
   localizer?: Localizer;
   turnRunner?: TurnRunner;
   downloadFile?: TelegramFileDownloader;
@@ -61,6 +70,7 @@ interface InstallOptions {
 }
 
 const moscowTimezoneOffsetMin = 180;
+const moscowTimeZone = "Europe/Moscow";
 
 export function createBot(options: InstallOptions): Bot<BotContext> {
   const bot = new Bot<BotContext>(options.config.BOT_TOKEN);
@@ -86,7 +96,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   const downloadFile = options.downloadFile ?? downloadTelegramFile;
   const fileResolver = options.fileResolver ?? new FileResolver(
-    repos.files,
+    repos.files, undefined, new LocalFileStore(options.config.FILE_STORAGE_PATH),
   );
   if (!fileResolver.registry.get({ transport: "telegram", connectionKey: TELEGRAM_CONNECTION_KEY })) {
     fileResolver.registry.register(new TelegramFileSourceAdapter({
@@ -105,40 +115,39 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     fileResolver.registry.register(new E2BFileSourceAdapter(options.config, options.commandRuntime));
   }
   const threadTitles = new ThreadTitleCoordinator({ repos, pi, logger: options.logger });
+  fileResolver.registry.register(new WebFileSourceAdapter(options.db.db));
   const turnRunner = options.turnRunner ?? runTurn;
-  const turnCoordinator = new ThreadTurnCoordinator({
-    api: bot.api,
+  const routerState = createRouterState();
+  const application = createApplication({
+    access: options.access,
+    frontend: telegramTurnFrontend({ api: bot.api, repos, logger: options.logger, fileResolver, turnRunner,
+      syncThreadActivity: (input) => threadTitles.syncActivity({ api: bot.api, ...input }),
+    }),
     config: options.config,
     db: options.db,
     repos,
     logger: options.logger,
     pi,
     fileResolver,
-    turnRunner,
     t: (locale, key, params) => localizer.t(locale, key, params),
     scheduleThreadTitle: (input) => threadTitles.schedule({
       api: bot.api,
       chatId: input.chatId,
       threadId: input.threadId,
     }),
-    syncThreadActivity: (input) => threadTitles.syncActivity({ api: bot.api, ...input }),
     awaitProcessingOnAccept: options.awaitTurnProcessingOnAccept,
+    cancelIncoming: threadId => {
+      const pending = cancelPendingForThread(routerState, threadId);
+      const job = routerState.activeFileJobs.get(threadId);
+      job?.cancel();
+      return pending || Boolean(job);
+    },
   });
-  const services: BotServices = {
-    config: options.config,
-    db: options.db,
-    repos,
-    logger: options.logger,
-    turnRunner,
-    turnCoordinator,
-    fileResolver,
-    commandRuntime: options.commandRuntime,
-    pi,
-    threadTitles,
-    routerState: createRouterState(),
-  };
+  const services: BotServices = { ...application, turnRunner, threadTitles,
+    commandRuntime: options.commandRuntime, routerState };
 
   bot.api.config.use(telegramRetry());
+  bot.api.config.use(silentSends());
   bot.use(async (ctx, next) => {
     ctx.services = services;
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);
@@ -147,6 +156,13 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.use(sequentialize<BotContext>(threadSequentializationKey));
   bot.use(privateOnly);
   bot.use(initializeUserAndThread);
+  bot.use(async (ctx, next) => {
+    if (ctx.user && ctx.thread && !ctx.from?.is_bot
+      && ((ctx.message && !isIgnoredServiceMessage(ctx.message)) || ctx.callbackQuery?.message)) {
+      await ctx.services.repos.threadReads.markCurrentRead(ctx.user.tg_id, ctx.thread.id);
+    }
+    await next();
+  });
   bot.use(conversations<BotContext, BotContext>());
   bot.use(createConversation<BotContext, BotContext>(timezoneConversation, "timezone"));
   bot.use(async (ctx, next) => {
@@ -169,7 +185,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     const textStopped = cancelPendingTextBurstForContext(ctx);
     const mediaStopped = cancelPendingMediaGroupsForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
-    const turnStopped = ctx.thread ? await ctx.services.turnCoordinator.cancelActive(ctx.thread.id) : false;
+    const turnStopped = ctx.thread && ctx.user ? await ctx.services.conversations.stop(ctx.user.tg_id, ctx.thread.id) : false;
     if (!textStopped && !mediaStopped && !fileStopped && !turnStopped) {
       await replyWithThreadFallback(ctx, ctx.t("stop-none"), threadExtra(ctx.thread));
     } else if (turnStopped) {
@@ -247,8 +263,8 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   bot.callbackQuery("tz:onboarding:moscow", async (ctx) => {
     logCallback(ctx, "timezone:onboarding:moscow");
     if (!ctx.user || !ctx.from) return;
-    await ctx.services.repos.users.setTimezone(ctx.from.id, moscowTimezoneOffsetMin);
-    ctx.user = { ...ctx.user, tz_offset_min: moscowTimezoneOffsetMin };
+    await ctx.services.repos.users.setTimeZoneName(ctx.from.id, moscowTimeZone, moscowTimezoneOffsetMin);
+    ctx.user = { ...ctx.user, tz_name: moscowTimeZone, tz_offset_min: moscowTimezoneOffsetMin };
     await ctx.answerCallbackQuery();
     await clearInlineKeyboard(ctx);
     await replyMarkdownWithThreadFallback(ctx, ctx.t("tz-direct-set", {
@@ -261,15 +277,23 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logCommand(ctx, "compact");
     const thread = ctx.thread;
     if (!thread) return;
+    const run = await ctx.services.conversations.compact(ctx.from!.id, thread.id);
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
-    const count = await ctx.services.turnCoordinator.withThreadBarrier(
-      thread.id,
-      "compact",
-      async (_snapshotMessageId, signal) => runCompaction(ctx, thread, signal),
-    );
-    await ctx.api
-      .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
-      .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
+    const done = run.completion.then(() => true, () => true);
+    let finished = false;
+    while (!finished) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      finished = await Promise.race([done, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 3_000); })]);
+      clearTimeout(timer);
+      const saved = await ctx.services.repos.messages.get(run.messageId);
+      const action = saved && savedCompactionAction(saved.content_json);
+      if (!action) continue;
+      const description = compactionDescription(action, ctx.user?.lang ?? "en");
+      const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
+      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, text).catch(() => {
+        if (finished) return replyWithThreadFallback(ctx, text, threadExtra(thread));
+      });
+    }
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");
@@ -280,55 +304,36 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(thread));
       return;
     }
-    const fork = await ctx.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotMessageId, signal) => {
-      let topicId: number | undefined;
-      let created: ThreadRow | undefined;
-      try {
-        signal.throwIfAborted();
-        const topic = await ctx.api.raw.createForumTopic({
-          chat_id: chat.id,
-          name: `Fork: ${thread.title}`,
-        });
-        topicId = topic.message_thread_id;
-        signal.throwIfAborted();
-        const latest = snapshotMessageId === null
-          ? undefined
-          : await ctx.services.repos.messages.get(snapshotMessageId);
-        signal.throwIfAborted();
-        created = await ctx.services.repos.threads.create({
-          userId: user.tg_id,
-          topicId,
-          title: `Fork: ${thread.title}`,
-          parentThreadId: thread.id,
-          forkPointMessageId: snapshotMessageId,
-        });
-        signal.throwIfAborted();
-        await ctx.services.pi.fork(thread, created, user, latest?.pi_entry_id, signal);
-        signal.throwIfAborted();
-        return created;
-      } catch (error) {
-        const cleanup = await Promise.allSettled([
-          created ? ctx.services.repos.threads.archive(created.id) : Promise.resolve(),
-          topicId === undefined
-            ? Promise.resolve()
-            : ctx.api.raw.deleteForumTopic({ chat_id: chat.id, message_thread_id: topicId }),
-        ]);
-        const cleanupFailures = cleanup.filter((result) => result.status === "rejected");
-        ctx.services.logger.warn("partial thread fork rolled back", ctxLogMeta(ctx, {
-          forkThreadId: created?.id,
-          topicId,
-          cleanupFailures: cleanupFailures.length,
-          error: String(error),
-        }));
-        throw error;
-      }
-    });
+    const fork = await ctx.services.conversations.fork({ userId: user.tg_id, threadId: thread.id, origin: "telegram",
+      link: telegramConversationLink(ctx.api, ctx.services.logger, true) });
     ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
       forkThreadId: fork.id,
       parentThreadId: thread.id,
       topicId: fork.topic_id,
     }));
+    if (fork.fork_point_message_id !== null && fork.fork_point_message_id > 0) {
+      await ctx.services.repos.threadReads.markRead(user.tg_id, fork.id, fork.fork_point_message_id);
+    }
     await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
+  });
+  bot.on(["message:video", "message:animation"], async (ctx) => {
+    const media = ctx.message.video ?? ctx.message.animation;
+    if (!media) return;
+    if ((media.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
+      await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
+      return;
+    }
+    await handleTelegramFile(ctx, {
+      fileId: media.file_id,
+      fileUniqueId: media.file_unique_id,
+      name: media.file_name ?? `${media.file_unique_id}.${media.mime_type === "image/gif" ? "gif" : "mp4"}`,
+      mime: media.mime_type ?? "video/mp4",
+      caption: ctx.message.caption,
+      type: "other",
+      mediaKind: "document",
+      size: media.file_size,
+      mediaGroupId: ctx.message.media_group_id,
+    });
   });
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
@@ -337,7 +342,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       mime: doc.mime_type ?? null,
       size: doc.file_size ?? null,
     }));
-    if ((doc.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((doc.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       ctx.services.logger.warn("document rejected; too large", ctxLogMeta(ctx, {
         name: doc.file_name ?? "file",
         size: doc.file_size ?? null,
@@ -347,16 +352,6 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     }
     const name = doc.file_name ?? "file";
     const type = classifyFile(name, doc.mime_type ?? "");
-    if (type === "legacy-doc") {
-      ctx.services.logger.info("document rejected; legacy doc unsupported", ctxLogMeta(ctx, { name }));
-      await replyWithThreadFallback(ctx, ctx.t("file-doc-legacy"), threadExtra(ctx.thread));
-      return;
-    }
-    if (!type) {
-      ctx.services.logger.info("document rejected; unsupported type", ctxLogMeta(ctx, { name, mime: doc.mime_type ?? null }));
-      await replyWithThreadFallback(ctx, ctx.t("file-unsupported"), threadExtra(ctx.thread));
-      return;
-    }
     await handleTelegramFile(ctx, {
       fileId: doc.file_id,
       fileUniqueId: doc.file_unique_id,
@@ -380,7 +375,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     const audio = ctx.message.audio;
     const media = voice ?? audio;
     if (!media) return;
-    if ((media.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((media.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
     }
@@ -407,7 +402,7 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       width: photo.width,
       height: photo.height,
     }));
-    if ((photo.file_size ?? 0) > MAX_FILE_BYTES) {
+    if ((photo.file_size ?? 0) > TG_DOWNLOAD_MAX_BYTES) {
       ctx.services.logger.warn("photo rejected; too large", ctxLogMeta(ctx, { size: photo.file_size ?? null }));
       await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
       return;
@@ -466,14 +461,6 @@ function threadSequentializationKey(ctx: BotContext): string | undefined {
   if (isStopCommand(ctx)) return undefined;
   if (!ctx.chat) return undefined;
   return `${ctx.chat.id}:${messageThreadId(ctx) ?? "general"}`;
-}
-
-async function runCompaction(ctx: BotContext, thread: ThreadRow, signal: AbortSignal): Promise<number> {
-  if (!ctx.user) return 0;
-  const count = await ctx.services.pi.compact(thread, ctx.user, signal);
-  signal.throwIfAborted();
-  ctx.thread = (await ctx.services.repos.threads.get(thread.id)) ?? thread;
-  return count;
 }
 
 const ignoredServiceMessageKeys = [

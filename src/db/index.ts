@@ -86,16 +86,25 @@ export function createDatabase(config: Pick<AppConfig, "DB_URL">, logger?: Logge
       dialect,
       query: <T extends object>(statement: SQL) => withLock(() => rawQuery<T>(statement)),
       execute: (statement: SQL) => withLock(() => rawExecute(statement)),
-      transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>) => {
+      transaction: async <T>(callback: (tx: SqlExecutor) => Promise<T>, options?: { rebuildSqliteTables: boolean }) => {
         return withLock(async () => {
-          await retryBusy(() => sqlite.exec("begin immediate"));
+          const rebuild = options?.rebuildSqliteTables === true;
+          if (rebuild) sqlite.exec("pragma foreign_keys = off");
+          let started = false;
           try {
+            await retryBusy(() => sqlite.exec("begin immediate"));
+            started = true;
             const result = await callback(transactionExecutor);
+            if (rebuild && sqlite.prepare("pragma foreign_key_check").all().length) {
+              throw new Error("Database migration would leave invalid foreign keys");
+            }
             sqlite.exec("commit");
             return result;
           } catch (error) {
-            sqlite.exec("rollback");
+            if (started) sqlite.exec("rollback");
             throw error;
+          } finally {
+            if (rebuild) sqlite.exec("pragma foreign_keys = on");
           }
         });
       },

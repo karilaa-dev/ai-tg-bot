@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { StreamShaper } from "../../src/ai/shaper.js";
+import { fixtureUuid } from "./uuid.js";
 
 describe("StreamShaper", () => {
+  it("shows UUID file subjects while keeping message IDs numeric", () => {
+    const s = new StreamShaper();
+    s.onToolCall("search_in_file", { file_id: fixtureUuid(1) });
+    s.onToolCall("materialize_chat_files", { file_ids: [fixtureUuid(2), fixtureUuid(3), 4, "invalid"] });
+    s.onToolCall("load_message", { message_id: 42 });
+    expect(s.toolStatusMd()).toContain(`<code>#${fixtureUuid(1)}</code>`);
+    expect(s.toolStatusMd()).toContain(`<code>#${fixtureUuid(2)}, #${fixtureUuid(3)}</code>`);
+    expect(s.toolStatusMd()).toContain("<code>#42</code>");
+    expect(s.toolStatusMd()).not.toContain("invalid");
+  });
+
   it("retains reasoning and tool summaries without provisional answers", () => {
     const s = new StreamShaper();
     s.onReasoningDelta([

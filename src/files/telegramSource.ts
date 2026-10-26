@@ -3,6 +3,8 @@ import type { AppConfig } from "../config.js";
 import type { TelegramFileDownloader } from "./telegram.js";
 import type { ChatFileSource, ChatFileSourceAdapter } from "./source.js";
 
+import { TG_DOWNLOAD_MAX_BYTES } from "./limits.js";
+
 export const TELEGRAM_CONNECTION_KEY = "default";
 
 export function telegramFileSource(input: {
@@ -40,7 +42,7 @@ export class TelegramFileSourceAdapter implements ChatFileSourceAdapter {
       config: this.input.config,
       fileId,
       signal,
-      maxBytes,
+      maxBytes: Math.min(maxBytes ?? TG_DOWNLOAD_MAX_BYTES, TG_DOWNLOAD_MAX_BYTES),
     });
     return Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
   }

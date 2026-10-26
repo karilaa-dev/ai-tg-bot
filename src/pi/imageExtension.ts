@@ -23,6 +23,7 @@ import type { OutgoingFiles } from "../files/outgoingFiles.js";
 import { botToolPolicy } from "./toolPolicy.js";
 import { ProviderUsageCapture } from "./providerUsage.js";
 import { raceWithAbort } from "../files/cancel.js";
+import { isUuid } from "../utils/uuid.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images";
@@ -50,7 +51,7 @@ export interface ChatImageBridge {
 type ImageParams = {
   prompt: string;
   mode?: "auto" | "generate" | "edit";
-  reference_file_ids?: number[];
+  reference_file_ids?: string[];
   output_format?: "png" | "jpeg" | "webp";
   reference_paths?: string[];
 };
@@ -87,7 +88,7 @@ export function createGenerateImagePiTool(
           ),
         ),
         reference_file_ids: Type.Optional(
-          Type.Array(Type.Integer({ minimum: 1 }), {
+          Type.Array(Type.String({ format: "uuid" }), {
             maxItems: MAX_REFERENCES,
             default: [],
           }),
@@ -116,6 +117,8 @@ export function createGenerateImagePiTool(
       const prompt = params.prompt.trim();
       if (!prompt) throw new Error("Image prompt is empty.");
       const referenceIds = [...new Set(params.reference_file_ids ?? [])];
+      if (!referenceIds.every(isUuid))
+        throw new Error("Reference file IDs must be canonical UUID strings.");
       const referencePaths = [
         ...new Set((params.reference_paths ?? []).map(sandboxWorkspaceFile)),
       ];
@@ -266,7 +269,7 @@ export function createGenerateImagePiTool(
 
 async function loadReferences(
   bridge: ChatImageBridge,
-  referenceIds: number[],
+  referenceIds: string[],
   signal?: AbortSignal,
 ): Promise<ImageContent[]> {
   if (!referenceIds.length) return [];

@@ -10,6 +10,7 @@ import type { FileRow, ThreadRow, UserRow } from "../../src/db/types.js";
 import { createLogger } from "../../src/logger.js";
 import type { CommandRuntime, SandboxCommandResult } from "../../src/sandbox/types.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
+import { buildToolRegistry } from "../../src/ai/tools/index.js";
 
 describe("sandbox document tools", () => {
   let db: AppDatabase;
@@ -59,6 +60,25 @@ describe("sandbox document tools", () => {
     await db.destroy();
   });
 
+  it("accepts UUID file references and rejects numeric or malformed IDs across file tools", () => {
+    const tools = buildToolRegistry(buildInput(fakeRuntime(pdf.id)));
+    const cases = [
+      { tool: "load_message", args: { message_id: 1 }, field: "file_ids", multiple: true },
+      { tool: "materialize_chat_files", args: {}, field: "file_ids", multiple: true },
+      { tool: "search_in_file", args: { query: "needle" }, field: "file_id", multiple: false },
+      { tool: "read_file_section", args: { chunk_index: 0 }, field: "file_id", multiple: false },
+      { tool: "render_pdf_pages", args: { pages: [1] }, field: "file_id", multiple: false },
+      { tool: "transcribe_audio", args: {}, field: "file_id", multiple: false },
+    ];
+    for (const { tool, args, field, multiple } of cases) {
+      const schema = tools[tool]!.inputSchema;
+      expect(schema.safeParse({ ...args, [field]: multiple ? [pdf.id] : pdf.id }).success).toBe(true);
+      for (const invalid of [1, "1", "not-a-uuid"]) {
+        expect(schema.safeParse({ ...args, [field]: multiple ? [invalid] : invalid }).success).toBe(false);
+      }
+    }
+  });
+
   it("returns file and chunk IDs that let research continue from a thread search into the matched document", async () => {
     const message = await repos.messages.insert({ threadId: thread.id, role: "user", content: {}, textPlain: "Attached notes" });
     const file = await repos.files.insertFile({
@@ -69,7 +89,7 @@ describe("sandbox document tools", () => {
     const tools = createPiToolAdapters({ buildInput: () => buildInput(fakeRuntime(pdf.id)) });
     const search = tools.find(tool => tool.name === "search_thread")!;
     const matched = await search.execute("search", { query: "Obsidian" }, undefined, undefined, {} as never);
-    const result = matched.structuredContent as { results: Array<{ file_id: number; chunk_index: number }> };
+    const result = matched.structuredContent as { results: Array<{ file_id: string; chunk_index: number }> };
     expect(result.results).toEqual([expect.objectContaining({ kind: "chunk", file_id: file.id, chunk_id: chunk.id, chunk_index: 3 })]);
     const read = tools.find(tool => tool.name === "read_file_section")!;
     const section = await read.execute("read", result.results[0]!, undefined, undefined, {} as never);
@@ -138,7 +158,7 @@ describe("sandbox document tools", () => {
   }
 });
 
-function fakeRuntime(fileId: number): CommandRuntime {
+function fakeRuntime(fileId: string): CommandRuntime {
   const materializeFiles = vi.fn(async () => ({
     directory: "/home/user/telegram-files",
     available: 1,

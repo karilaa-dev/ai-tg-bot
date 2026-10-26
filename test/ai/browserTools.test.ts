@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserUseRuntimeError } from "../../src/browserUse/pageOperations.js";
@@ -118,7 +119,7 @@ describe("Browser Use Pi tools", () => {
     const createdFiles: unknown[] = [];
     const selectContextFiles = vi.fn();
     const stored = {
-      id: 71,
+      id: fixtureUuid(71),
       type: "image",
       name: "browser-screenshot.png",
       mime_type: "image/png",
@@ -132,6 +133,9 @@ describe("Browser Use Pi tools", () => {
         files: {
           insertFile: vi.fn(async (value: Record<string, unknown>) => ({ ...stored, ...value, id: stored.id })),
           get: vi.fn(async () => stored),
+          rememberSource: vi.fn(async () => undefined),
+          updateContentHash: vi.fn(async () => undefined),
+          deleteFileIfUnattached: vi.fn(async () => true),
           deleteFile: vi.fn(async () => []),
         },
       },
@@ -148,7 +152,7 @@ describe("Browser Use Pi tools", () => {
 
     expect(result.details).toMatchObject({
       attached: true,
-      file_id: 71,
+      file_id: fixtureUuid(71),
       full_page: false,
       delivery: "photo",
       viewport: { width: 1920, height: 1080 },
@@ -156,7 +160,7 @@ describe("Browser Use Pi tools", () => {
     });
     expect(result.details).not.toHaveProperty("screenshot_base64");
     expect(createdFiles[0]).toMatchObject({ data: PNG, delivery: "photo", caption: "Page" });
-    expect(selectContextFiles).toHaveBeenCalledWith([71]);
+    expect(selectContextFiles).toHaveBeenCalledWith([fixtureUuid(71)]);
   });
 
   it("attaches Browser Use downloads directly and reports session time", async () => {
@@ -178,10 +182,15 @@ describe("Browser Use Pi tools", () => {
         files: {
           insertFile: vi.fn(async (value: Record<string, unknown>) => ({
             ...value,
-            id: 72,
+            id: fixtureUuid(72),
             mime_type: value.mimeType,
             is_inline: 0,
           })),
+          get: vi.fn(async () => ({ id: fixtureUuid(72), type: "other", name: "report.zip", mime_type: "application/zip",
+            size: 8, content_sha256: null, is_inline: 0, summary: null, outline_json: null, extraction_status: "source_only" })),
+          rememberSource: vi.fn(async () => undefined),
+          updateContentHash: vi.fn(async () => undefined),
+          deleteFileIfUnattached: vi.fn(async () => true),
           deleteFile: vi.fn(async () => []),
         },
       },
@@ -198,7 +207,7 @@ describe("Browser Use Pi tools", () => {
 
     expect(result.details).toMatchObject({
       attached: true,
-      file_id: 72,
+      file_id: fixtureUuid(72),
       name: "report.zip",
       session_remaining_seconds: 230,
     });
@@ -223,7 +232,7 @@ function bridge(
 ) {
   return {
     buildInput: () => {
-      const input = { config, repos: {}, user: { tg_id: 9910 }, thread: { id: 44 }, browserRuntime, ...extra };
+      const input = { config, repos: {}, user: { tg_id: 9910 }, thread: { id: fixtureUuid(44) }, browserRuntime, ...extra };
       return { ...input, outgoingFiles: testOutgoingFiles(input as never, extra.createdFiles as unknown[] | undefined) } as never;
     },
   };

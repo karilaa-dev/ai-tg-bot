@@ -1,3 +1,4 @@
+import { isUuid } from "../utils/uuid.js";
 import { asRecord, numberField, stringField } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 
@@ -280,7 +281,7 @@ function toolSubject(name: string, input?: unknown): string | undefined {
     case "materialize_chat_files": {
       const fileIds = record?.file_ids;
       if (!Array.isArray(fileIds)) return undefined;
-      const valid = fileIds.filter((value): value is number => typeof value === "number");
+      const valid = fileIds.filter(isUuid);
       return valid.length ? valid.map((value) => `#${value}`).join(", ") : undefined;
     }
     case "render_pdf_pages": {
@@ -341,8 +342,8 @@ function urlsSubject(record: Record<string, unknown> | undefined): string | unde
 }
 
 function fileIdSubject(record: Record<string, unknown> | undefined): string | undefined {
-  const fileId = numberField(record, "file_id");
-  return fileId === undefined ? undefined : `#${fileId}`;
+  const fileId = record?.file_id;
+  return isUuid(fileId) ? `#${fileId}` : undefined;
 }
 
 function truncateSubject(value: string | undefined, max: number): string | undefined {

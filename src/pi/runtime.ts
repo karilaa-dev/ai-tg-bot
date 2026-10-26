@@ -42,6 +42,7 @@ import { initializeUserMemory } from "../memory/userMemory.js";
 import { createContextPruningExtension } from "./contextPruning.js";
 import { createCodexCompactionExtension } from "./codexCompaction.js";
 import { raceWithAbort } from "../files/cancel.js";
+import { assertCompactionUseful, CompactionGuardError } from "./compactionPolicy.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -63,7 +64,7 @@ export interface PiRuntimeService {
   ): Promise<void>;
   captionImage(bytes: Buffer, mimeType: string, signal?: AbortSignal): Promise<string>;
   generateThreadTitle(input: ThreadTitlePromptInput): Promise<string>;
-  abort(threadId: number): Promise<boolean>;
+  abort(threadId: string): Promise<boolean>;
   dispose(): Promise<void>;
 }
 
@@ -72,7 +73,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   modelRegistry!: ModelRegistry;
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
-  private readonly runtimes = new Map<number, PiThreadRuntime>();
+  private readonly runtimes = new Map<string, PiThreadRuntime>();
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
   private codexCredentials!: CodexCliCredentialStore;
@@ -200,6 +201,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     if (user.memory_enabled) await initializeUserMemory(this.input.db.db, user.tg_id);
     const systemPrompt = await renderSystemPrompt({
       user,
+      thread,
       config: this.input.config,
     });
     const bridge = new ThreadBridge({
@@ -299,6 +301,8 @@ export class PiRuntimeManager implements PiRuntimeService {
     signal?.throwIfAborted();
     const runtime = await this.runtime(thread, user);
     signal?.throwIfAborted();
+    assertCompactionUseful(runtime.session);
+    const priorCompaction = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction")?.id;
     const before = contextMessageCount(runtime.session);
     const compaction = runtime.session.compact();
     const onAbort = () => runtime.session.abortCompaction();
@@ -307,8 +311,14 @@ export class PiRuntimeManager implements PiRuntimeService {
     try {
       await compaction;
       signal?.throwIfAborted();
+      const checkpoint = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+      if (!checkpoint?.summary.trim() || checkpoint.id === priorCompaction) throw new Error("Compaction did not save a new checkpoint.");
       const after = contextMessageCount(runtime.session);
       return Math.max(0, before - after);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Nothing to compact (session too small)") throw new CompactionGuardError("too_small");
+      if (error instanceof Error && error.message === "Already compacted") throw new CompactionGuardError("unchanged");
+      throw error;
     } finally {
       signal?.removeEventListener("abort", onAbort);
     }
@@ -350,7 +360,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     });
   }
 
-  async abort(threadId: number): Promise<boolean> {
+  async abort(threadId: string): Promise<boolean> {
     const runtime = this.runtimes.get(threadId);
     if (!runtime?.session.isStreaming) return false;
     void runtime.session.abort().catch((error) => {
@@ -461,7 +471,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     return SessionManager.create(process.cwd(), sessionDir);
   }
 
-  private async evictIdleRuntimes(keepThreadId: number): Promise<void> {
+  private async evictIdleRuntimes(keepThreadId: string): Promise<void> {
     while (this.runtimes.size > MAX_CACHED_RUNTIMES) {
       const candidates = [...this.runtimes.entries()]
         .filter(([threadId, runtime]) => threadId !== keepThreadId && !runtime.session.isStreaming)

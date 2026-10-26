@@ -9,6 +9,8 @@ import { renderThreadSessionContext } from "../../src/ai/prompt.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
 import { FileProcessingStatus } from "../../src/bot/files.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
+import { CompactionGuardError } from "../../src/pi/compactionPolicy.js";
+import { savedCompactionAction } from "../../src/application/compactionAction.js";
 
 describe("Telegram bot with grammy-emulate", () => {
   let env: GrammyEmulator;
@@ -22,7 +24,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.dispose();
   });
 
-  it("onboards a brand-new private-chat user without an invite", async () => {
+  it("onboards an allowed private-chat user", async () => {
     const onboarded = await env.bot.sendCommand(env.user, env.chat, "/start");
     const richWelcome = JSON.stringify(onboarded.getLastApiCall("sendRichMessage")?.payload);
     expect(richWelcome).toContain("# 👋 Welcome to your AI assistant");
@@ -43,7 +45,7 @@ describe("Telegram bot with grammy-emulate", () => {
 
     expect(res.text).toContain("private chats");
     expect(res.getLastApiCall("leaveChat")).toBeDefined();
-    expect(await env.repos.users.get(env.user.id)).toBeUndefined();
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tg_id: env.user.id });
   });
 
   it("ignores an unrecognized /start payload during onboarding", async () => {
@@ -132,6 +134,19 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(typeof user?.tz_offset_min).toBe("number");
   });
 
+  it("accepts a time zone name in the timezone conversation", async () => {
+    await startBot();
+    await env.bot.sendCommand(env.user, env.chat, "/timezone");
+    const done = await env.bot.sendMessage(env.user, env.chat, "europe/berlin");
+    expect(done.texts.join("\n")).toContain("Europe/Berlin");
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tz_name: "Europe/Berlin" });
+
+    // A local time afterwards replaces the name with a bare offset.
+    await env.bot.sendCommand(env.user, env.chat, "/timezone");
+    await env.bot.sendMessage(env.user, env.chat, "2:30 PM");
+    expect(await env.repos.users.get(env.user.id)).toMatchObject({ tz_name: null });
+  });
+
   it("lets users postpone timezone setup from onboarding", async () => {
     const onboarded = await startBot();
     const later = await env.bot.clickButton(env.user, env.chat, "tz:onboarding:later", onboarded.messages.at(-1)!);
@@ -165,6 +180,7 @@ describe("Telegram bot with grammy-emulate", () => {
     const user = await env.repos.users.get(ruUser.id);
     expect(user?.lang).toBe("ru");
     expect(user?.tz_offset_min).toBe(180);
+    expect(user?.tz_name).toBe("Europe/Moscow");
   });
 
   it("does not show onboarding timezone prompt when timezone is already set", async () => {
@@ -324,7 +340,7 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.sendCommand(env.user, env.chat, "/fork").catch(() => undefined);
 
     const [child] = await env.db.db.query<ThreadRow>(sql`
-      select * from threads where parent_thread_id = ${parent.id} order by id desc limit 1
+      select * from threads where parent_thread_id = ${parent.id} limit 1
     `);
     expect(child).toMatchObject({ archived: 1, topic_id: 2 });
     expect(env.bot.server.chatState.get(env.chat.id)?.forumTopics.has(2)).toBe(false);
@@ -332,14 +348,27 @@ describe("Telegram bot with grammy-emulate", () => {
 
   it("waits for the thread to become idle before compacting Pi history", async () => {
     await startBot();
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();
     const compact = vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
 
-    await env.bot.sendCommand(env.user, env.chat, "/compact");
+    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
 
-    expect(waitForIdle).toHaveBeenCalledWith(expect.any(Number), false);
+    expect(waitForIdle).toHaveBeenCalledWith(thread.id, false);
     expect(compact).toHaveBeenCalledOnce();
     expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
+    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({ text: expect.stringMatching(/Context compacted · \d+:\d{2}/) });
+    const action = (await env.repos.messages.listThread(thread.id)).find(message => savedCompactionAction(message.content_json));
+    expect(savedCompactionAction(action!.content_json)).toMatchObject({ status: "succeeded", messagesCompacted: 2 });
+  });
+
+  it("explains why a short Telegram chat cannot be compacted", async () => {
+    await startBot();
+    vi.spyOn(env.services.pi, "compact").mockRejectedValueOnce(new CompactionGuardError("too_small"));
+    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
+    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({
+      text: expect.stringContaining("The available context is still too small"),
+    });
   });
 
   it("treats a Telegram-created topic as a clean thread", async () => {
@@ -741,13 +770,13 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(await env.repos.files.listTelegramFileRefs([files[0]!.id])).toHaveLength(2);
   });
 
-  it("registers distinct source-only docx uploads without inspecting their bytes", async () => {
+  it("stores and deduplicates source-only docx uploads by their original bytes", async () => {
     await env.dispose();
-    const downloadFile = vi.fn(async () => ({ bytes: Buffer.from("must not be fetched") }));
+    const bytes = Buffer.from("same fake docx bytes");
+    const downloadFile = vi.fn(async () => ({ bytes }));
     env = await createGrammyEmulator({ config: { FILE_INLINE_TOKENS: 1 }, downloadFile });
     await startBot();
 
-    const bytes = Buffer.from("same fake docx bytes");
     const firstDoc = env.bot.server.fileState.storeDocument(
       "hash-report-a.docx",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -767,13 +796,14 @@ describe("Telegram bot with grammy-emulate", () => {
       env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, secondDoc),
     ]);
 
-    expect(downloadFile).not.toHaveBeenCalled();
-    expect(expectResponseSurface(second!)).not.toContain("Reused saved file");
+    expect(downloadFile).toHaveBeenCalledTimes(2);
+    expect(expectResponseSurface(second!)).toContain("Reused saved file");
     expect(expectResponseSurface(second!)).not.toContain("Extracting <code>hash-report-b.docx</code>");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const files = await env.repos.files.listForThreads([thread.id]);
-    expect(files).toHaveLength(2);
-    expect(files.every((file) => file.extraction_status === "source_only")).toBe(true);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ extraction_status: "source_only", size: bytes.length });
+    expect((await env.services.fileResolver.resolveFile(files[0]!)).bytes).toEqual(bytes);
     expect(await env.repos.files.listTelegramFileRefs(files.map((file) => file.id))).toHaveLength(2);
   });
 
@@ -800,7 +830,8 @@ describe("Telegram bot with grammy-emulate", () => {
     const [file] = await env.repos.files.listForThreads([thread.id]);
     const chunksBefore = await env.repos.files.chunks(file!.id);
     expect(chunksBefore.length).toBeGreaterThan(0);
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(1);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "telegram")).toHaveLength(1);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "local")).toHaveLength(1);
 
     const secondDoc = env.bot.server.fileState.storeDocument("restore-b.txt", "text/plain", { content: bytes });
     expect(secondDoc.file_unique_id).not.toBe(firstDoc.file_unique_id);
@@ -812,7 +843,8 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(expectResponseSurface(second!)).toContain("Reused saved file <code>restore-b.txt</code>.");
     const files = await env.repos.files.listForThreads([thread.id]);
     expect(files).toHaveLength(1);
-    expect(await env.repos.files.listSources(file!.id)).toHaveLength(2);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "telegram")).toHaveLength(2);
+    expect((await env.repos.files.listSources(file!.id)).filter(source => source.transport === "local")).toHaveLength(1);
     expect(await env.repos.files.listTelegramFileRefs([file!.id])).toHaveLength(2);
     const chunksAfter = await env.repos.files.chunks(file!.id);
     expect(chunksAfter.map((chunk) => chunk.id)).toEqual(chunksBefore.map((chunk) => chunk.id));
@@ -870,7 +902,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect((await resolveThreadFileDescriptors({ repos: env.repos, thread: otherThread }))[0]?.name).toBe("global-copy.txt");
   });
 
-  it("refuses legacy .doc files before download", async () => {
+  it("accepts legacy .doc files as opaque saved attachments", async () => {
     await startBot();
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "legacy.doc",
@@ -878,18 +910,41 @@ describe("Telegram bot with grammy-emulate", () => {
       content: Buffer.from("not docx"),
     });
 
-    expect(res.text).toContain(".docx");
+    expect(expectResponseSurface(res)).toContain("legacy.doc");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ name: "legacy.doc", type: "other", extraction_status: "source_only" }),
+    ]);
   });
 
-  it("replies to unsupported media instead of silently ignoring it", async () => {
+  it("saves native video as an opaque attachment", async () => {
     await startBot();
-    const res = await env.bot.sendVideo(env.user, env.chat, { width: 640, height: 480, duration: 3 });
+    const video = env.bot.server.fileState.storeVideo(640, 480, 3, { content: Buffer.from("video original bytes") });
+    const [res] = await env.bot.processUpdatesConcurrently([
+      env.bot.server.updateFactory.createVideoMessage(env.user, env.chat, video),
+    ]);
 
-    expect(res.text).toContain("not supported");
+    expect(expectResponseSurface(res!)).toContain(".mp4");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
-    expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(0);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ type: "other", extraction_status: "source_only", mime_type: "video/mp4" }),
+    ]);
+  });
+
+  it("saves native animation as an opaque attachment with its original media type", async () => {
+    await startBot();
+    const bytes = Buffer.from("GIF89a original animation");
+    const original = env.bot.server.fileState.storeDocument("animation.gif", "image/gif", { content: bytes });
+    await env.bot.handleUpdate({ update_id: 99001, message: {
+      message_id: 99001, date: Math.floor(Date.now() / 1000), from: env.user, chat: env.chat,
+      animation: { file_id: original.file_id, file_unique_id: "animation-unique", width: 64, height: 64,
+        duration: 1, mime_type: "image/gif", file_size: bytes.length }, caption: "An animation",
+      document: { file_id: original.file_id, file_unique_id: "animation-unique", mime_type: "image/gif", file_size: bytes.length },
+    } });
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([
+      expect.objectContaining({ name: "animation-unique.gif", type: "other", extraction_status: "source_only", mime_type: "image/gif" }),
+    ]);
   });
 
   it("downloads and captions photos while recording all Telegram sizes", async () => {
@@ -913,7 +968,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(files[0]?.summary).toBe("a sketched system diagram");
     expect(caption).toHaveBeenCalledTimes(1);
     expect(caption).toHaveBeenCalledWith(expect.objectContaining({ bytes: Buffer.from([1, 2, 3, 4]) }));
-    expect(await env.repos.files.listSources(files[0]!.id)).toHaveLength(1);
+    expect((await env.repos.files.listSources(files[0]!.id)).map(source => source.transport).sort()).toEqual(["local", "telegram"]);
     const refs = await env.repos.files.listTelegramFileRefs([files[0]!.id]);
     expect(refs.length).toBeGreaterThan(0);
     expect(refs.filter((ref) => ref.is_primary === 1)).toHaveLength(1);
@@ -956,7 +1011,7 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(ownerRefs).toHaveLength(firstPhotos.length);
     expect(ownerRefs.filter((ref) => ref.is_primary === 1)).toHaveLength(1);
     // Existing deployments can already have cached descriptions containing a
-    // previous uploader's caption. Reuse must also repair those old entries.
+    // previous uploader's caption. Reuse must sanitize its card without changing the owner's metadata.
     await env.repos.files.updateSummary(ownerFile!.id, "private caption alpha");
 
     const secondPhotos = env.bot.server.fileState.storePhoto(640, 480, {
@@ -979,7 +1034,9 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(otherRows.find((row) => row.kind === "image")?.text_plain).toContain("bob caption beta");
     const [otherFile] = await env.repos.files.listForThreads([otherThread.id]);
     expect(otherFile?.id).toBe(ownerFile?.id);
-    expect(otherFile?.summary).toBe("Telegram image");
+    expect(otherFile?.summary).toBe("private caption alpha");
+    expect(otherRows.find(row => row.kind === "image")?.text_plain).toContain("Telegram image");
+    expect((await env.repos.files.get(ownerFile!.id))?.summary).toBe("private caption alpha");
   });
 
   it("chunks large Telegram documents into searchable file content", async () => {
@@ -1019,9 +1076,10 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(res.apiCalls.some((call) => call.payload.parse_mode === "HTML" && typeof call.payload.text === "string" && call.payload.text.includes("<code>status.txt</code>"))).toBe(true);
   });
 
-  it("registers docx as source-only without downloading or extracting it", async () => {
+  it("downloads and stores original docx bytes without extracting them", async () => {
     await env.dispose();
-    const downloadFile = vi.fn(async () => ({ bytes: Buffer.from("should not be downloaded") }));
+    const bytes = Buffer.from("fake docx bytes");
+    const downloadFile = vi.fn(async () => ({ bytes }));
     env = await createGrammyEmulator({
       config: { FILE_INLINE_TOKENS: 1 },
       downloadFile,
@@ -1031,16 +1089,17 @@ describe("Telegram bot with grammy-emulate", () => {
     const res = await env.bot.sendDocument(env.user, env.chat, {
       fileName: "report.docx",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      content: Buffer.from("fake docx bytes"),
+      content: bytes,
     });
 
-    expect(downloadFile).not.toHaveBeenCalled();
-    expect(expectResponseSurface(res)).not.toContain("Downloading <code>report.docx</code>");
+    expect(downloadFile).toHaveBeenCalledOnce();
+    expect(expectResponseSurface(res)).toContain("Downloading <code>report.docx</code>");
     expect(expectResponseSurface(res)).not.toContain("Extracting <code>report.docx</code>");
     expect(expectResponseSurface(res)).toContain("File <code>report.docx</code> registered for sandbox inspection");
     const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
     const [file] = await env.repos.files.listForThreads([thread.id]);
-    expect(file).toMatchObject({ name: "report.docx", extraction_status: "source_only" });
+    expect(file).toMatchObject({ name: "report.docx", extraction_status: "source_only", size: bytes.length });
+    expect((await env.services.fileResolver.resolveFile(file!)).bytes).toEqual(bytes);
     const latest = await env.repos.messages.latest(thread.id);
     expect(latest?.text_plain).toContain("materialize_chat_files");
   });
@@ -1237,6 +1296,7 @@ describe("Telegram bot with grammy-emulate", () => {
   });
 
   async function startBot(user = env.user, chat = env.chat): Promise<BotResponse> {
+    await env.services.access.allow(user.id);
     return env.bot.sendCommand(user, chat, "/start");
   }
 });

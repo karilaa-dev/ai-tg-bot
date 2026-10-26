@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { audioFormat, EmptyTranscriptError, transcribeAudio } from "../../src/audio/transcription.js";
 import { loadTestConfig } from "../../src/config.js";
 import { audioFixture } from "../helpers/audio.js";
-import { MAX_FILE_BYTES } from "../../src/files/limits.js";
+import { MAX_TRANSCRIPTION_BYTES } from "../../src/audio/transcription.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -163,7 +163,7 @@ describe("OpenRouter transcription", () => {
   it("rejects empty and oversized files before sending a request", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    for (const bytes of [Buffer.alloc(0), Buffer.alloc(MAX_FILE_BYTES + 1)]) {
+    for (const bytes of [Buffer.alloc(0), Buffer.alloc(MAX_TRANSCRIPTION_BYTES + 1)]) {
       await expect(transcribeAudio(loadTestConfig(), { bytes, format: "wav" })).rejects.toThrow();
     }
     expect(fetchMock).not.toHaveBeenCalled();

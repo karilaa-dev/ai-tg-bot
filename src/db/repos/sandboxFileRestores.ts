@@ -7,9 +7,9 @@ export class SandboxFileRestoresRepo {
 
   upsert(input: {
     deploymentId: string;
-    threadId: number;
+    threadId: string;
     sandboxId: string;
-    fileId: number;
+    fileId: string;
     telegramFileRefId?: number | null;
     sandboxName: string;
     status: SandboxFileRestoreStatusRow["status"];

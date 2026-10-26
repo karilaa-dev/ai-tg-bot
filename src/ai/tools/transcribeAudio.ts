@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { audioFormat, AudioFormatSchema, transcribeAudio } from "../../audio/transcription.js";
+import { audioFormat, AudioFormatSchema, MAX_TRANSCRIPTION_BYTES, transcribeAudio } from "../../audio/transcription.js";
 import { boundTranscript, transcriptPage } from "../../audio/transcripts.js";
-import { MAX_FILE_BYTES } from "../../files/limits.js";
 import { threadVisibilityScope } from "../../memory/retrieval.js";
 import { getScopedFile, normalizeBashCwd, toToolError } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
@@ -11,7 +10,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
     holdsCommandActivity: true,
     description: "Transcribe speech from a chat audio file or an absolute workspace path using OpenRouter. Supply exactly one of file_id, path, or transcript_id. Supports WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC up to 20 MB. Returns original-language text in bounded pages. When next_offset is non-null, read more with transcript_id and offset=next_offset; this reads the saved transcript without another provider request. Read only sections needed for the task. Telegram voice/audio prompts already contain a transcript or a preview with continuation instructions; reuse those unless asked to transcribe again.",
     inputSchema: z.object({
-      file_id: z.number().int().positive().optional(),
+      file_id: z.string().uuid().optional(),
       path: z.string().startsWith("/").optional(),
       transcript_id: z.string().uuid().optional().describe("Saved transcript ID returned by this tool or the audio prompt."),
       offset: z.number().int().nonnegative().optional().describe("Use the returned next_offset to read a saved transcript; defaults to zero."),
@@ -51,7 +50,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
         if (file_id !== undefined) {
           const file = await getScopedFile(input, file_id);
           if (!file) return { error: "File not found in this thread." };
-          if (file.size > MAX_FILE_BYTES) return { error: "Audio exceeds the 20 MB file size limit." };
+          if (file.size > MAX_TRANSCRIPTION_BYTES) return { error: "Audio exceeds the 20 MB file size limit." };
           if (!input.resolveFile) return { error: "Chat file resolver is unavailable." };
           name = file.name;
           mime = file.mime_type ?? undefined;
@@ -66,7 +65,7 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
             userId: input.user.tg_id,
             threadId: input.thread.id,
             virtualPath: name,
-            maxBytes: MAX_FILE_BYTES,
+            maxBytes: MAX_TRANSCRIPTION_BYTES,
             signal,
           })).bytes;
         }

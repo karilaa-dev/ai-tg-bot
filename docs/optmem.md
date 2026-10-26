@@ -10,7 +10,7 @@ When memory is enabled, the main agent has a `memo` tool. Its argument is an arr
 | --- | --- |
 | `wake [part [T]]` | Reads the memory, with finer detail for recent records. Pages retain the same snapshot count `T`. |
 | `note "text"` | Appends one dated record and offers the next pending compression. |
-| `nap [lo-hi "summary"]` | Offers one compression or accepts its summary, then offers the next. |
+| `nap [lo-hi "summary" [revision]]` | Offers one compression or accepts its summary, then offers the next. |
 | `recall regex` | Searches complete raw records, including IDs and dates, case-insensitively. Retains the newest matches that fit the output byte budget. |
 | `zoom lo-hi` | Opens an aligned binary block into its two children. |
 | `forget lo-hi` | Truncates summaries at that level and ancestor levels from the affected position onward. The raw log remains unchanged. |
@@ -55,6 +55,8 @@ OPTMEM_WAKE_LINES=128
 Blocks of up to 16 records compress from raw notes. Larger blocks compress from their two child summaries. Pending blocks run smallest level first, then oldest first. The cover uses upstream's 60 alpha bisections and spends spare lines by splitting the rightmost remaining summary.
 
 Mutations use database transactions. PostgreSQL locks the owner's preference row and store row; SQLite serializes writers and waits without blocking the event loop when another connection holds the lock. IDs are assigned inside the transaction. A failed batch rolls back entirely. Retrying an uncertain successful note can still append a duplicate, as upstream.
+
+The website lets an authenticated user delete an individual saved note, including while memory is disabled. Deletion erases the note body and leaves a tombstone so existing note IDs remain stable. Deleted notes disappear from memory lists and recall results. Range reads use a deleted-note placeholder to keep the summary tree contiguous. Deletion clears cached summaries and increments the store revision; compression prompts include their source revision after deletion, and summary submissions must return it. This also rejects stale summaries submitted through a later tool call. This is separate from the agent's `forget` command, which only removes summaries.
 
 Back up the application database to preserve notes, summaries and preferences. Multiple PostgreSQL workers share these records through the database. Pi conversation sessions still use their existing filesystem storage and must be backed up separately.
 

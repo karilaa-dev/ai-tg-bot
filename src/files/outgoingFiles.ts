@@ -8,11 +8,13 @@ import type { Logger } from "../logger.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 import { E2B_WORKSPACE, sandboxWorkspaceFile } from "../e2b/paths.js";
 import { e2bFileSource } from "../e2b/fileSource.js";
-import { classifyFile, ingestFileBytes } from "./ingest.js";
+import { cardForFile, classifyFile, ingestFileBytes } from "./ingest.js";
 import { chatFileMarker } from "./contextMarker.js";
 import { sha256Hex } from "./hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "./limits.js";
 import { OutgoingBuffers, prepareWithTwoWorkers } from "./outgoingBuffers.js";
+import { FileResolver } from "./resolver.js";
+import { LocalFileStore } from "./localStore.js";
 import type { CreatedFileAttachment, CreatedFileDeliveryPreference } from "./types.js";
 
 type FileOptions = { name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference };
@@ -24,17 +26,20 @@ type Input = {
   thread: ThreadRow;
   commandRuntime?: CommandRuntime;
   officeValidation?: OfficeValidation;
+  fileResolver?: FileResolver;
   logger?: Logger;
-  selectContextFiles?(ids: number[]): void;
+  selectContextFiles?(ids: FileRow["id"][]): void;
 };
 
 /** Owns the attachment queue and every export reservation for one turn. */
 export class OutgoingFiles {
   readonly buffers = new OutgoingBuffers();
+  readonly fileResolver: FileResolver;
   private readonly slots = new Map<string, string | undefined>();
   private readonly officeHashes = new Map<CreatedFileAttachment, string>();
 
   constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {
+    this.fileResolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
     for (const file of items) this.slots.set(fileKey(file), undefined);
   }
 
@@ -109,7 +114,16 @@ export class OutgoingFiles {
   async dispose(): Promise<void> {
     try {
       for (const attachment of this.items.splice(0)) {
-        if (!attachment.telegramDelivery && !attachment.telegramDeliveryUnknown) await this.remove(attachment);
+        if (attachment.telegramDelivery || attachment.telegramDeliveryUnknown) continue;
+        try {
+          const stored = await this.input.repos.files.get(attachment.fileId);
+          if (stored && (stored.user_id !== this.input.user.tg_id || stored.thread_id !== this.input.thread.id)) continue;
+          if (stored && stored.message_id !== null
+            && (await this.input.repos.files.listSources(attachment.fileId)).length) continue;
+          await this.remove(attachment);
+        } catch (error) {
+          this.input.logger?.warn("failed to clean up undelivered created file", { fileId: attachment.fileId, error: String(error) });
+        }
       }
     } finally {
       this.slots.clear();
@@ -175,6 +189,9 @@ export class OutgoingFiles {
         }
       }
       attachment = await this.store(file, signal);
+      const stored = await this.input.repos.files.get(attachment.fileId);
+      if (!stored) throw new Error(`Created file #${attachment.fileId} disappeared before persistence.`);
+      await this.fileResolver.persistFile(stored, file.bytes, signal);
       if (office) this.officeHashes.set(attachment, sha256Hex(file.bytes));
       if (exported) {
         if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
@@ -197,16 +214,14 @@ export class OutgoingFiles {
   }
 
   private async store(file: DirectFile, signal?: AbortSignal): Promise<CreatedFileAttachment> {
-    assertAllowedOutboundFile(file.name, file.mime, file.bytes);
     const name = normalizeCreatedFileName(file.name);
-    assertAllowedOutboundFile(name, file.mime, file.bytes);
-    const type = classifyFile(name, file.mime ?? "");
+    const type = classifyFile(name, file.mime ?? "", file.bytes);
     const preference = file.delivery ?? "auto";
     if ((preference === "photo" || preference === "photo_only") && type !== "image") throw new Error(`delivery photo requires an image file: ${name}`);
     if (preference === "photo_only" && file.bytes.length > TG_PHOTO_MAX_BYTES) throw new Error(`delivery photo_only requires an image no larger than ${TG_PHOTO_MAX_BYTES} bytes: ${name}`);
     let stored: FileRow | undefined;
     let card: string | undefined;
-    if (type && type !== "legacy-doc" && file.origin !== "generated_image") {
+    if (file.origin !== "generated_image") {
       try {
         const ingested = await ingestFileBytes({
           config: this.input.config, repo: this.input.repos.files, userId: this.input.user.tg_id,
@@ -224,6 +239,7 @@ export class OutgoingFiles {
     stored ??= await this.input.repos.files.insertFile({
       userId: this.input.user.tg_id, threadId: this.input.thread.id,
       type: type === "image" ? "image" : "other", contentSha256: sha256Hex(file.bytes),
+      extractionStatus: type === "image" ? "ready" : "source_only",
       mimeType: file.mime?.trim() || null, name, size: file.bytes.length,
       summary: file.origin === "generated_image" ? file.summary : `Outbound file ${name}`, isInline: false,
     });
@@ -231,7 +247,7 @@ export class OutgoingFiles {
       fileId: stored.id, type: stored.type, name: stored.name, mimeType: stored.mime_type, size: stored.size,
       caption: file.caption?.trim() || null, inline: Boolean(stored.is_inline),
       card: file.origin === "generated_image" ? `${chatFileMarker(stored.id)} [Generated image #${stored.id}: ${file.summary}]`
-        : card ?? `${chatFileMarker(stored.id)} File #${stored.id}: ${name} (${formatBytes(stored.size)}).`,
+        : card ?? cardForFile(stored),
       delivery: preference === "document" || stored.type !== "image" ? "document" : "photo",
       ...(preference === "photo_only" ? { photoFallback: "none" as const } : {}),
       origin: file.origin ?? "created_file",
@@ -241,9 +257,13 @@ export class OutgoingFiles {
   private async remove(attachment: CreatedFileAttachment): Promise<void> {
     this.officeHashes.delete(attachment);
     this.buffers.release(attachment);
-    await this.input.repos.files.deleteFile(attachment.fileId).catch((error) => {
+    try {
+      if (await this.input.repos.files.deleteFileIfUnattached(attachment.fileId)) {
+        await this.fileResolver.removeLocalFile(attachment.fileId);
+      }
+    } catch (error) {
       this.input.logger?.warn("failed to remove unqueued created file", { fileId: attachment.fileId, error: String(error) });
-    });
+    }
   }
 }
 
@@ -253,90 +273,6 @@ function normalizeCreatedFilePath(value: string): string {
   const normalized = path.posix.normalize(value);
   return `/${path.posix.relative(E2B_WORKSPACE, sandboxWorkspaceFile(normalized.startsWith("/") ? normalized : `/${normalized}`))}`;
 }
-function assertAllowedOutboundFile(name: string, mime: string | undefined, bytes: Buffer): void {
-  const ext = path.extname(name).toLowerCase();
-  if (BLOCKED_EXECUTABLE_EXTENSIONS.has(ext)) throw new Error(`blocked executable file type: ${ext}`);
-  const normalizedMime = mime?.toLowerCase().trim();
-  if (normalizedMime && BLOCKED_EXECUTABLE_MIME_TYPES.has(normalizedMime)) {
-    throw new Error(`blocked executable MIME type: ${normalizedMime}`);
-  }
-  const magic = executableMagic(bytes.subarray(0, 4).toString("hex"));
-  if (magic) throw new Error(`blocked compiled executable: ${magic}`);
-}
-
-const BLOCKED_EXECUTABLE_EXTENSIONS = new Set([
-  ".exe",
-  ".dll",
-  ".com",
-  ".scr",
-  ".msi",
-  ".msp",
-  ".sys",
-  ".drv",
-  ".ocx",
-  ".cpl",
-  ".efi",
-  ".so",
-  ".dylib",
-  ".bundle",
-  ".node",
-  ".o",
-  ".obj",
-  ".a",
-  ".lib",
-  ".class",
-  ".jar",
-  ".war",
-  ".ear",
-  ".apk",
-  ".ipa",
-  ".wasm",
-]);
-
-const BLOCKED_EXECUTABLE_MIME_TYPES = new Set([
-  "application/x-msdownload",
-  "application/vnd.microsoft.portable-executable",
-  "application/x-dosexec",
-  "application/x-msdos-program",
-  "application/x-msi",
-  "application/x-executable",
-  "application/x-elf",
-  "application/x-mach-binary",
-  "application/x-sharedlib",
-  "application/java-archive",
-  "application/x-java-applet",
-  "application/wasm",
-]);
-
-function executableMagic(headHex: string): string | undefined {
-  if (headHex === "7f454c46") {
-    return "ELF binary";
-  }
-  if (headHex.startsWith("4d5a")) {
-    return "Windows PE binary";
-  }
-  switch (headHex) {
-    case "feedface":
-    case "feedfacf":
-    case "cefaedfe":
-    case "cffaedfe":
-      return "Mach-O binary";
-    case "cafebabe":
-    case "bebafeca":
-      return "Mach-O universal binary or Java class";
-    case "0061736d":
-      return "WebAssembly binary";
-    default:
-      return undefined;
-  }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${Math.round(bytes / 1024 / 1024)} MB`;
-}
-
 function normalizeCreatedFileName(value: string): string {
   const normalized = value.replace(/[\r\n\0]/g, " ").trim();
   const base = path.basename(normalized);

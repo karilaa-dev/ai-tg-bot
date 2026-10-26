@@ -1,4 +1,4 @@
-import type { BotContext, PendingMediaGroup, PendingMediaGroupItem } from "./context.js";
+import type { BotContext, BotServices, PendingMediaGroup, PendingMediaGroupItem } from "./context.js";
 import { ctxLogMeta } from "./logging.js";
 import { handleUserText, telegramTurnSource } from "./turns.js";
 
@@ -103,6 +103,17 @@ export function cancelPendingMediaGroupsForContext(ctx: BotContext): boolean {
     rememberCancelledMediaGroup(ctx, key);
     ctx.services.routerState.pendingMediaGroups.delete(key);
     cancelled = true;
+  }
+  return cancelled;
+}
+
+export function cancelPendingForThread(state: BotServices["routerState"], threadId: string): boolean {
+  let cancelled = false;
+  for (const pending of state.pendingTextBursts.values()) {
+    if (pending.ctx.thread?.id === threadId) cancelled = cancelPendingTextBurstForContext(pending.ctx) || cancelled;
+  }
+  for (const pending of state.pendingMediaGroups.values()) {
+    if (pending.ctx.thread?.id === threadId) cancelled = cancelPendingMediaGroupsForContext(pending.ctx) || cancelled;
   }
   return cancelled;
 }

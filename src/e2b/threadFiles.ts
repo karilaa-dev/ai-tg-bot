@@ -5,17 +5,20 @@ import type { SandboxThreadFile } from "../sandbox/types.js";
 export async function resolveThreadFileDescriptors(
   input: Pick<ToolBuildInput, "repos" | "thread" | "maxMessageId" | "currentScope">,
   _signal?: AbortSignal,
-  selectedFileIds?: number[],
+  selectedFileIds?: string[],
 ): Promise<SandboxThreadFile[]> {
   const scope = await (input.currentScope?.() ?? threadChainScope(input.repos, input.thread, input.maxMessageId));
   const selected = selectedFileIds
     ? [...new Set(selectedFileIds)].filter((fileId) => scope.fileIds.includes(fileId))
     : scope.fileIds;
-  const [files, refs] = await Promise.all([
+  const [files, refs, webFiles, localFiles] = await Promise.all([
     input.repos.files.listByIds(selected, scope.messageScopes),
     input.repos.files.listTelegramFileRefs(selected),
+    input.repos.files.listByIdsWithSource(selected, "web", "default"),
+    input.repos.files.listByIdsWithSource(selected, "local", "default"),
   ]);
-  const refsByFile = new Map<number, typeof refs>();
+  const webFileIds = new Set([...webFiles, ...localFiles].map((file) => file.id));
+  const refsByFile = new Map<string, typeof refs>();
   for (const ref of refs) {
     const list = refsByFile.get(ref.file_id) ?? [];
     list.push(ref);
@@ -39,5 +42,5 @@ export async function resolveThreadFileDescriptors(
       isPrimary: ref.is_primary === 1,
       lastSeenAt: ref.last_seen_at,
     })),
-  })).filter((file) => file.telegramRefs.some((ref) => ref.isPrimary));
+  })).filter((file) => webFileIds.has(file.fileId) || file.telegramRefs.some((ref) => ref.isPrimary));
 }

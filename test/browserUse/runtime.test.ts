@@ -8,6 +8,9 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { deferred } from "../helpers/async.js";
 
+const THREAD_ID = "123e4567-e89b-42d3-a456-426614174010";
+const OTHER_THREAD_ID = "123e4567-e89b-42d3-a456-426614174020";
+
 describe("BrowserUseRuntimeManager", () => {
   let database: AppDatabase | undefined;
   const managers: BrowserUseRuntimeManager[] = [];
@@ -21,8 +24,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("persists one profile across explicit close and a later session", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
 
     const opened = await browser.open("https://example.com");
     expect(opened).toMatchObject({ url: "https://example.com", session_remaining_seconds: expect.any(Number) });
@@ -59,8 +62,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("waits for profile persistence when the initial storage snapshot is unavailable", async () => {
     const fixture = await runtimeFixture({}, true);
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     await browser.open("https://example.com/login");
 
     await browser.closeSession();
@@ -70,8 +73,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("reports when an existing session cannot apply a longer open timeout", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     await browser.open("https://example.com/short", 5);
 
     await expect(browser.open("https://example.com/long", 20)).resolves.toMatchObject({
@@ -86,10 +89,10 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("shares the user session while keeping tabs private to their threads", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    await fixture.manager.forThread(7, 10).open("https://example.com/a");
-    await fixture.manager.beginTurn(7, 20);
-    const other = fixture.manager.forThread(7, 20);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    await fixture.manager.forThread(7, THREAD_ID).open("https://example.com/a");
+    await fixture.manager.beginTurn(7, OTHER_THREAD_ID);
+    const other = fixture.manager.forThread(7, OTHER_THREAD_ID);
     await other.open("https://example.com/b");
 
     await expect(other.listTabs()).resolves.toMatchObject({
@@ -100,17 +103,17 @@ describe("BrowserUseRuntimeManager", () => {
       return true;
     });
 
-    await fixture.manager.endTurn(7, 10);
+    await fixture.manager.endTurn(7, THREAD_ID);
     const closed = await other.closeSession();
     expect(closed).toMatchObject({ closed: true, tabs_closed: 2 });
     expect(closed).not.toHaveProperty("urls");
-    await expect(fixture.manager.forThread(7, 10).listTabs()).resolves.toMatchObject({ tabs: [] });
+    await expect(fixture.manager.forThread(7, THREAD_ID).listTabs()).resolves.toMatchObject({ tabs: [] });
   });
 
   it("rolls a session over with the same profile and stable tab id", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     const opened = await browser.open("https://example.com/long");
 
     await expect(browser.extendSession(20)).resolves.toMatchObject({
@@ -132,8 +135,8 @@ describe("BrowserUseRuntimeManager", () => {
     fixture.api.stopBrowser
       .mockRejectedValueOnce(new BrowserUseHttpError(503, "temporary"))
       .mockRejectedValueOnce(new BrowserUseHttpError(503, "temporary"));
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     await browser.open("https://example.com");
 
     await expect(browser.closeSession()).resolves.toMatchObject({ closed: true });
@@ -166,8 +169,8 @@ describe("BrowserUseRuntimeManager", () => {
       proxyUsedMb: "0.01",
       proxyCost: "0.001",
     });
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     await browser.open("https://example.com");
 
     await expect(browser.closeSession()).resolves.toMatchObject({ closed: true });
@@ -178,9 +181,9 @@ describe("BrowserUseRuntimeManager", () => {
   it("automatically stops an idle session after the configured five-minute fallback", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 300_000 });
-    await fixture.manager.beginTurn(7, 10);
-    await fixture.manager.forThread(7, 10).open("https://example.com", 10);
-    await fixture.manager.endTurn(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    await fixture.manager.forThread(7, THREAD_ID).open("https://example.com", 10);
+    await fixture.manager.endTurn(7, THREAD_ID);
 
     await vi.advanceTimersByTimeAsync(299_999);
     expect(fixture.api.stopBrowser).not.toHaveBeenCalled();
@@ -190,8 +193,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("returns the semantic snapshot when its optional PNG is too large", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     const opened = await browser.open("https://example.com/graphics");
     fixture.browsers[0]!.context.pageList[0]!.screenshotBytes = Buffer.alloc(20 * 1024 * 1024 + 1);
 
@@ -205,8 +208,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("releases a queued browser lock when the queued action is cancelled", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     const opened = await browser.open("https://example.com/start");
     const page = fixture.browsers[0]!.context.pageList[0]!;
     const started = deferred<void>();
@@ -228,8 +231,8 @@ describe("BrowserUseRuntimeManager", () => {
 
   it("retains user state while a browser operation is queued behind endTurn", async () => {
     const fixture = await runtimeFixture();
-    await fixture.manager.beginTurn(7, 10);
-    const browser = fixture.manager.forThread(7, 10);
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
     await browser.open("https://example.com/first");
     const stopStarted = deferred<void>();
     const releaseStop = deferred<void>();
@@ -248,7 +251,7 @@ describe("BrowserUseRuntimeManager", () => {
 
     const closing = browser.closeSession();
     await stopStarted.promise;
-    const ending = fixture.manager.endTurn(7, 10);
+    const ending = fixture.manager.endTurn(7, THREAD_ID);
     const reopening = browser.open("https://example.com/second");
     releaseStop.resolve();
     await createStarted.promise;
@@ -257,7 +260,7 @@ describe("BrowserUseRuntimeManager", () => {
 
     await expect(closing).resolves.toMatchObject({ closed: true });
     await expect(reopening).resolves.toMatchObject({ url: "https://example.com/second" });
-    await expect(fixture.manager.forThread(7, 10).listTabs()).resolves.toMatchObject({
+    await expect(fixture.manager.forThread(7, THREAD_ID).listTabs()).resolves.toMatchObject({
       tabs: [expect.objectContaining({ url: "https://example.com/second" })],
     });
   });

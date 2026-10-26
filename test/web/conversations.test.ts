@@ -1,3 +1,5 @@
+import { AccessControl } from "../../src/access/control.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { serve, type Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
@@ -11,6 +13,7 @@ import { createLogger } from "../../src/logger.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { createWebRoutes, startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
+import { fakeTelegramLogin, signInOnlyChat, telegramLoginConfig } from "../helpers/telegram-login.js";
 import { userLabel } from "../../src/web/types.js";
 import type { WebUsageReport, WebHistory } from "../../src/web/types.js";
 import type { SqlExecutor } from "../../src/db/sql.js";
@@ -19,8 +22,13 @@ import { UsagePricing } from "../../src/web/usage-pricing.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import type { WebMemories } from "../../src/web/types.js";
 
+// Not a stored account: admin sign-in only asks the stubbed chat service whether the user exists.
+const ADMIN_ID = 900;
+const telegram = fakeTelegramLogin();
+
 describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])])("conversation browser (%s)", dialect => {
   let database: AppDatabase;
+  let access: AccessControl;
   let admin: AppDatabase | undefined;
   let schema: string;
   let repos: Repos;
@@ -30,7 +38,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   let controller: AbortController;
   let server: Server<undefined>;
   let api: ReturnType<typeof createWebRoutes>;
-  const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: "test-admin-token" });
+  const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, WEB_ADMIN_USER_IDS: [ADMIN_ID] });
 
   beforeEach(async () => {
     let dbUrl = "sqlite::memory:";
@@ -44,6 +52,8 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     }
     database = createDatabase({ DB_URL: dbUrl });
     await database.initialize();
+    access = new AccessControl(database.db);
+    await access.initialize();
     repos = createRepos(database.db, database.search);
     repository = new ConversationRepository(database.db, repos, 99, new UsagePricing(async () => Response.json({
       "gpt-test": { input_cost_per_token: 2 / 1e6, output_cost_per_token: 10 / 1e6,
@@ -51,14 +61,10 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     })));
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
-    api = createWebRoutes({ config, repository, fileResolver: resolver, logger: createLogger(config) }, controller.signal);
+    const login = await telegram;
+    api = createWebRoutes({ config, access, repository, fileResolver: resolver, logger: createLogger(config), chat: signInOnlyChat(), telegramAuth: login.dependencies }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: api.routes, fetch: api.fetch });
-    const login = await fetch(new URL("/api/auth/login", server.url), {
-      method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
-      body: JSON.stringify({ token: config.WEB_ADMIN_TOKEN }),
-    });
-    expect(login.status).toBe(200);
-    const cookie = login.headers.get("Set-Cookie")!.split(";")[0]!;
+    const cookie = await login.signIn(server.url, ADMIN_ID);
     request = (url, init) => {
       const headers = new Headers(init?.headers);
       headers.set("Cookie", cookie);
@@ -72,6 +78,25 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await api.drain();
     await database.destroy();
     if (admin) { await admin.db.execute(sql.raw(`drop schema ${schema} cascade`)); await admin.destroy(); admin = undefined; }
+  });
+
+  it("searches only visible thread messages across pagination and nested forks", async () => {
+    const parent = await thread(1, "Search parent");
+    const before = await repos.messages.insert({ threadId: parent.id, role: "user", content: { text: "НАЙДИ 100%_literal" }, textPlain: "НАЙДИ 100%_literal" });
+    const child = await repos.threads.create({ userId: 1, topicId: null, title: "Child", parentThreadId: parent.id, forkPointMessageId: before.id });
+    const after = await repos.messages.insert({ threadId: parent.id, role: "assistant", content: { text: "after-cutoff" }, textPlain: "after-cutoff" });
+    const nested = await repos.threads.create({ userId: 1, topicId: null, title: "Nested", parentThreadId: child.id, forkPointMessageId: after.id });
+    await thread(2, "НАЙДИ 100%_literal");
+    expect((await repository.threads(1, 0, 50, "найди")).items.map(item => item.id)).toEqual(expect.arrayContaining([parent.id, child.id, nested.id]));
+    expect((await repository.threads(1, 0, 50, "after-cutoff")).items.map(item => item.id)).toEqual([parent.id]);
+    const first = await repository.threads(1, 0, 2, "100%_literal");
+    expect(first.items).toHaveLength(2);
+    expect(first.nextOffset).toBe(2);
+    const second = await repository.threads(1, first.nextOffset!, 2, "100%_literal");
+    expect(second.items).toHaveLength(1);
+    expect(second.nextOffset).toBeNull();
+    expect(new Set([...first.items, ...second.items].map(item => item.id)).size).toBe(3);
+    expect((await repository.threads(1, 0, 50, "100___literal")).items).toEqual([]);
   });
 
   it("serves private, paginated memories without enabling or changing them", async () => {
@@ -108,16 +133,16 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await repos.users.ensure({ tgId: userId, firstName: `Person ${userId}`, username: userId === 1 ? "alice" : undefined });
     return repos.threads.create({ userId, title, topicId: null });
   }
-  async function message(threadId: number, text = "Hello") {
+  async function message(threadId: string, text = "Hello") {
     return repos.messages.insert({ threadId, role: "user", content: { text, hidden: "not in API" }, textPlain: text });
   }
-  async function attachment(threadId: number, messageId: number, size: number, mimeType = "text/plain") {
+  async function attachment(threadId: string, messageId: number, size: number, mimeType = "text/plain") {
     const file = await repos.files.insertFile({ userId: 1, threadId, messageId, name: "notes.txt", size, mimeType, type: "txt", isInline: true });
     await repos.files.rememberSource(file.id, { transport: "test", connectionKey: "default", remoteKey: String(file.id), locator: { secret: "hidden" } });
     return file;
   }
 
-  async function usageTurn(threadId: number, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
+  async function usageTurn(threadId: string, options: { timestamp?: number; usage?: string | null; model?: string; status?: string; result?: boolean } = {}) {
     const user = await message(threadId);
     const assistant = options.result === false ? null : await repos.messages.insert({ threadId, role: "assistant", content: {}, textPlain: "Reply" });
     const owner = (await repos.threads.get(threadId))!;
@@ -359,18 +384,32 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     await thread(2);
     const bot = await thread(99);
     for (const query of ["days=-1", "days=8", "days=NaN", "days=", "user=0", "thread=1.5"]) expect((await request(`/api/usage?${query}`)).status).toBe(400);
-    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, "thread=9999"]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
+    for (const query of ["user=99", `thread=${bot.id}`, `user=2&thread=${first.id}`, `thread=${fixtureUuid(9999)}`]) expect((await request(`/api/usage?${query}`)).status).toBe(404);
     expect((await request("/api/usage", { method: "POST" })).status).toBe(405);
     const head = await request("/api/usage", { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(await head.text()).toBe("");
   });
 
+  it("reports how long each reply took from the start of generation", async () => {
+    const first = await thread();
+    const startedAt = Date.now() - 12_000;
+    const reply = await usageTurn(first.id, { timestamp: startedAt });
+    await repos.messages.insert({ threadId: first.id, role: "assistant", content: {}, textPlain: "Reply without a turn" });
+    const history = await repository.history(first.id);
+    const saved = history.messages.find(item => item.id === reply!.id)!;
+    expect(saved.durationMs).toBe(saved.createdAt - startedAt);
+    expect(saved.durationMs).toBeGreaterThanOrEqual(12_000);
+    expect(history.messages.find(item => item.text === "Reply without a turn")?.durationMs).toBeUndefined();
+    expect(history.messages.filter(item => item.role === "user").every(item => item.durationMs === undefined)).toBe(true);
+  });
+
   it("shows current thread activity through queue, generation, delivery, cancellation and completion", async () => {
     const first = await thread();
     expect((await repository.history(first.id)).thread.activity).toBeNull();
-    await usageTurn(first.id, { status: "queued", result: false });
-    expect((await repository.history(first.id)).thread.activity).toEqual({ state: "queued", queuedTurns: 1 });
+    const startedAt = Date.now() - 5_000;
+    await usageTurn(first.id, { status: "queued", result: false, timestamp: startedAt });
+    expect((await repository.history(first.id)).thread.activity).toEqual({ state: "queued", queuedTurns: 1, startedAt: null });
     await database.db.execute(sql`update turn_runs set status = 'running', lease_expires_at = ${Date.now() + 60_000}
       where thread_id = ${first.id}`);
     await usageTurn(first.id, { status: "queued", result: false });
@@ -380,7 +419,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await repository.history(fork.id)).thread.activity).toBeNull();
     const assertActivity = async (state: string) => {
       const history = await (await request(`/api/threads/${first.id}/messages`)).json() as WebHistory;
-      expect(history.thread.activity).toEqual({ state, queuedTurns: 1 });
+      expect(history.thread.activity).toEqual({ state, queuedTurns: 1, startedAt });
       expect((await repository.threads(1, 0)).items.find(t => t.id === first.id)?.activity).toEqual(history.thread.activity);
     };
     await assertActivity("generating");
@@ -503,6 +542,39 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(history.messages[0]?.text).toBe("Read this\n\nKeep this.");
     expect(JSON.stringify(history)).not.toContain("inlineContent");
     expect(JSON.stringify(history)).not.toContain("XML example");
+  });
+
+  it("preserves the original inline file card after a later message reuses and renames its file", async () => {
+    const t = await thread();
+    const original = await repos.messages.insert({ threadId: t.id, role: "user", kind: "file", content: {}, textPlain: "" });
+    const content = "Original inline payload";
+    const file = await repos.files.insertFile({
+      userId: 1, threadId: t.id, messageId: original.id, name: "original.txt", type: "txt",
+      mimeType: "text/plain", size: content.length, contentMd: content, isInline: true,
+    });
+    await repos.files.attachToMessage(original.id, file.id, { caption: "Original caption" });
+    await database.db.execute(sql`update messages set text_plain = ${`Original caption\n\n[[chat-file:${file.id}]] File #${file.id}: original.txt (txt, inline).\n<attachment id="${file.id}" name="original.txt">\n${content}\n</attachment>`} where id = ${original.id}`);
+    const expectedOriginal = {
+      id: original.id, text: "Original caption",
+      attachments: [{ id: file.id, name: "original.txt", caption: "Original caption" }],
+    };
+    expect((await repository.history(t.id)).messages).toMatchObject([expectedOriginal]);
+
+    const reused = await repos.messages.insert({
+      threadId: t.id, role: "user", kind: "file", content: {},
+      textPlain: `Later caption\n\n[[chat-file:${file.id}]] File #${file.id}: later-name.txt (txt, inline).\n<attachment id="${file.id}" name="later-name.txt">\n${content}\n</attachment>`,
+    });
+    await repos.files.attachToMessage(reused.id, file.id, { displayName: "later-name.txt", caption: "Later caption" });
+
+    const history = await repository.history(t.id);
+    expect(history.messages).toMatchObject([
+      expectedOriginal,
+      { id: reused.id, text: "Later caption", attachments: [{ id: file.id, name: "later-name.txt", caption: "Later caption" }] },
+    ]);
+    expect(JSON.stringify(history)).not.toContain("[[chat-file:");
+    expect(JSON.stringify(history)).not.toContain("<attachment");
+    expect(JSON.stringify(history)).not.toContain(content);
+    expect((await repository.history(t.id, reused.id)).messages).toMatchObject([expectedOriginal]);
   });
 
   it("searches Unicode names regardless of case before paginating", async () => {
@@ -647,6 +719,100 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect((await request(`/api/threads/${unrelated.id}/files/${file.id}`)).status).toBe(404);
   });
 
+  it("orders attachments by creation time with UUIDs breaking timestamp ties", async () => {
+    const t = await thread();
+    const m = await message(t.id);
+    const files = [await attachment(t.id, m.id, 5), await attachment(t.id, m.id, 5), await attachment(t.id, m.id, 5)]
+      .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const older = files[2]!;
+    await database.db.execute(sql`update files set created_at = case when id = ${older.id} then 10 else 20 end`);
+    const history = await repository.history(t.id);
+    expect(history.messages[0]?.attachments.map(file => file.id)).toEqual([older.id, files[0]!.id, files[1]!.id]);
+  });
+
+  it("projects shared history metadata without losing each recipient message's names or captions", async () => {
+    const owner = await thread(1);
+    const original = await message(owner.id);
+    const image = await repos.files.insertFile({
+      userId: 1, threadId: owner.id, messageId: original.id, type: "image", name: "owner-private-image.png",
+      mimeType: "image/png", size: 5, summary: "owner-private-generation-prompt", isInline: true,
+    });
+    const document = await repos.files.insertFile({
+      userId: 1, threadId: owner.id, messageId: original.id, type: "txt", name: "owner-private-project.txt",
+      mimeType: "text/plain", size: 5, isInline: true,
+    });
+    await database.db.execute(sql`update files set created_at = case when id = ${image.id} then 1 else 2 end`);
+    const recipient = await thread(2);
+    const first = await message(recipient.id, "My first caption");
+    await repos.files.attachToMessage(first.id, image.id, { displayName: "my-first-image.png", caption: "My first caption" });
+    await repos.files.attachToMessage(first.id, document.id, { caption: "My document caption" });
+    const second = await repos.messages.insert({
+      threadId: recipient.id, role: "user", kind: "file", content: {}, textPlain: "An unrecognized image card",
+    });
+    await repos.files.attachToMessage(second.id, image.id, { displayName: "my-second-image.png", caption: "My second caption" });
+    await repos.files.attachToMessage(second.id, document.id, { displayName: "my-later-document.txt" });
+    const card = await repos.messages.insert({
+      threadId: recipient.id, role: "user", kind: "file", content: { caption: "My saved caption" },
+      textPlain: `My saved caption\n\n[[chat-file:${image.id}]] [image #${image.id}: My saved image description]`,
+    });
+    await repos.files.attachToMessage(card.id, image.id, { displayName: "my-card-image.png", caption: "My saved caption" });
+
+    const history = await repository.history(recipient.id);
+    expect(history.messages).toMatchObject([
+      { id: first.id, text: "My first caption", attachments: [
+        { id: image.id, name: "my-first-image.png", caption: "My first caption", description: null },
+        { id: document.id, name: `attachment-${document.id}.txt`, caption: "My document caption" },
+      ] },
+      { id: second.id, text: "An unrecognized image card", attachments: [
+        { id: image.id, name: "my-second-image.png", caption: "My second caption", description: null },
+        { id: document.id, name: "my-later-document.txt", caption: null },
+      ] },
+      { id: card.id, text: "My saved caption", attachments: [
+        { id: image.id, name: "my-card-image.png", caption: "My saved caption", description: "My saved image description" },
+      ] },
+    ]);
+    expect(JSON.stringify(history)).not.toContain("owner-private");
+    expect((await repository.history(owner.id)).messages[0]?.attachments).toMatchObject([
+      { id: image.id, name: "owner-private-image.png", description: "owner-private-generation-prompt" },
+      { id: document.id, name: "owner-private-project.txt" },
+    ]);
+    expect(await repos.files.get(image.id)).toMatchObject({ name: "owner-private-image.png", summary: "owner-private-generation-prompt" });
+    expect(await repos.files.get(document.id)).toMatchObject({ name: "owner-private-project.txt" });
+  });
+
+  it("projects history metadata by fork scope even when canonical messages are outside the page", async () => {
+    const parent = await thread();
+    const first = await message(parent.id);
+    const visible = await repos.files.insertFile({
+      userId: 1, threadId: parent.id, messageId: first.id, type: "image", name: "visible.png",
+      size: 5, summary: "Visible image description", isInline: true,
+    });
+    const later = await message(parent.id);
+    const hidden = await repos.files.insertFile({
+      userId: 1, threadId: parent.id, messageId: later.id, type: "image", name: "private-after-fork.png",
+      size: 5, summary: "Private description after fork", isInline: true,
+    });
+    await database.db.execute(sql`update files set created_at = case when id = ${visible.id} then 1 else 2 end`);
+    await repos.files.attachToMessage(later.id, visible.id, { displayName: "private-after-fork-rename.png" });
+    await repos.files.attachToMessage(later.id, hidden.id, { displayName: "private-after-fork-display.png" });
+    const child = await repos.threads.create({ userId: 1, topicId: 1, title: "Child", parentThreadId: parent.id, forkPointMessageId: later.id });
+    const grandchild = await repos.threads.create({ userId: 1, topicId: 2, title: "Grandchild", parentThreadId: child.id, forkPointMessageId: first.id });
+    const own = await message(grandchild.id, "Reused images");
+    await repos.files.attachToMessage(own.id, visible.id);
+    await repos.files.attachToMessage(own.id, hidden.id, { caption: "My caption" });
+
+    const refreshed = await repository.history(grandchild.id, undefined, own.id);
+    expect(refreshed.messages).toMatchObject([{ id: own.id, attachments: [
+      { id: visible.id, name: "visible.png", description: "Visible image description" },
+      { id: hidden.id, name: `attachment-${hidden.id}.png`, caption: "My caption", description: null },
+    ] }]);
+    expect(JSON.stringify(refreshed)).not.toContain("private-after-fork");
+    expect(JSON.stringify(refreshed)).not.toContain("Private description after fork");
+    expect((await repository.history(grandchild.id, own.id)).messages).toMatchObject([{ id: first.id, attachments: [
+      { id: visible.id, name: "visible.png", description: "Visible image description" },
+    ] }]);
+  });
+
   it("gates automatic downloads, passes byte limits, and forces active content to downloads", async () => {
     const t = await thread();
     const m = await message(t.id);
@@ -665,10 +831,13 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(await response.text()).toBe("hello");
     expect(fetch.mock.calls[0]).toHaveLength(4);
     expect((fetch.mock.calls[0] as unknown[])[2]).toBe(config.WEB_AUTOLOAD_MAX_BYTES);
+    fetch.mockResolvedValue(Buffer.alloc(large.size));
     expect((await request(`/api/threads/${t.id}/files/${large.id}?mode=download`)).status).toBe(200);
+    fetch.mockResolvedValue(Buffer.alloc(0));
     expect((await request(`/api/threads/${t.id}/files/${missingSize.id}?mode=download`)).status).toBe(200);
-    const svg = await attachment(t.id, m.id, 20, "image/svg+xml");
-    fetch.mockResolvedValue(Buffer.from('<svg onload="alert(1)"></svg>'));
+    const svgBytes = Buffer.from('<svg onload="alert(1)"></svg>');
+    const svg = await attachment(t.id, m.id, svgBytes.length, "image/svg+xml");
+    fetch.mockResolvedValue(svgBytes);
     const active = await request(`/api/threads/${t.id}/files/${svg.id}?mode=auto`);
     expect(active.headers.get("content-type")).toBe("application/octet-stream");
     expect(active.headers.get("content-disposition")).toMatch(/^attachment/);
@@ -704,7 +873,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
   it("rejects malformed requests, hides resolver errors, and respects shutdown", async () => {
     expect((await request("/api/users?offset=-1")).status).toBe(400);
     expect((await request("/api/threads/1e3/messages")).status).toBe(400);
-    expect((await request("/api/threads/1/messages?before=2&after=3")).status).toBe(400);
+    expect((await request(`/api/threads/${fixtureUuid(1)}/messages?before=2&after=3`)).status).toBe(400);
     expect((await request("/api/users", { method: "POST" })).status).toBe(405);
     expect((await request("/.env")).status).toBe(404);
     const t = await thread();
@@ -715,7 +884,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(await response.text()).not.toContain("hidden");
     controller.abort();
     expect((await request("/api/users")).status).toBe(503);
-    expect(await startWebServer({ config: { ...config, WEB_ENABLED: false }, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
+    expect(await startWebServer({ config: { ...config, WEB_ENABLED: false }, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
   });
 });
 
@@ -723,7 +892,7 @@ it("parses the website flag without treating false as truthy and validates limit
   const env = { BOT_TOKEN: "test", OPENROUTER_API_KEY: "test", TAVILY_API_KEY: "test", E2B_API_KEY: "test" };
   expect(loadConfig(env).WEB_ENABLED).toBe(false);
   expect(loadConfig({ ...env, WEB_ENABLED: "false" }).WEB_ENABLED).toBe(false);
-  expect(loadConfig({ ...env, WEB_ENABLED: "true", WEB_ADMIN_TOKEN: "test" }).WEB_ENABLED).toBe(true);
+  expect(loadConfig({ ...env, WEB_ENABLED: "true", WEB_TELEGRAM_CLIENT_ID: "1", WEB_TELEGRAM_CLIENT_SECRET: "test", WEB_PUBLIC_URL: "https://chat.example" }).WEB_ENABLED).toBe(true);
   expect(() => loadConfig({ ...env, WEB_PORT: "65536" })).toThrow();
   expect(() => loadConfig({ ...env, WEB_AUTOLOAD_MAX_BYTES: "-1" })).toThrow();
 });

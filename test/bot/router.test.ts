@@ -2,6 +2,7 @@ import { Api, Bot, GrammyError, HttpError } from "grammy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BotContext } from "../../src/bot/context.js";
 import { installBot } from "../../src/bot/router.js";
+import { AccessControl } from "../../src/access/control.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -59,6 +60,8 @@ describe("bot router file adapters", () => {
     const logger = createLogger(config);
     db = createDatabase(config, logger);
     await db.initialize();
+    const access = new AccessControl(db.db);
+    await access.initialize();
     const repos = createRepos(db.db, db.search);
     const resolver = new FileResolver(repos.files);
     const custom: ChatFileSourceAdapter = {
@@ -81,6 +84,7 @@ describe("bot router file adapters", () => {
     installBot(bot, {
       config,
       db,
+      access,
       logger,
       repos,
       pi,

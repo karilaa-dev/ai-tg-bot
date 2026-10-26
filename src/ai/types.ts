@@ -2,13 +2,31 @@ import { type Api } from "grammy";
 import type { AppConfig } from "../config.js";
 import type { AppDatabase } from "../db/index.js";
 import type { Repos } from "../db/repos/index.js";
-import type { MessageKind, MessageRow, ThreadRow, UserRow } from "../db/types.js";
+import type { MessageKind, MessageRow, ThreadRow, TurnRunRow, UserRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import type { FileRow } from "../db/types.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { ResolvedChatFile } from "../files/source.js";
 import { type InferenceUsageDelta } from "../pi/usage.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
+import type { ToolActivity } from "./toolActivity.js";
+import type { OpenUiLanguage } from "../openui/language.js";
+import type { FileResolver } from "../files/resolver.js";
+
+export interface TurnInferenceMetadata {
+  provider?: string;
+  model?: string;
+  usage?: InferenceUsageDelta;
+  openui?: string;
+  openuiLanguage?: OpenUiLanguage;
+  toolActivity?: ToolActivity;
+}
+
+export interface TurnDraft {
+  text: string;
+  thinking: string;
+  toolActivity?: ToolActivity;
+}
 
 export interface TurnInput {
   api: Api;
@@ -25,7 +43,10 @@ export interface TurnInput {
   userMessageContent?: unknown;
   userMessageId?: number;
   turnRunId?: number;
+  origin?: TurnRunRow["origin"];
   signal?: AbortSignal;
+  onDraft?: (draft: TurnDraft) => void;
+  telegramPlaceholder?: { messageId: number; state: "pending" | "attempted" };
   outgoingBuffers?: OutgoingBuffers;
   deliveryTiming?: { startedAt: number; firstTextMs?: number; firstFileMs?: number; lastFileMs?: number };
   onUserMessagePersisted?: (message: MessageRow) => Promise<void>;
@@ -42,6 +63,7 @@ export interface TurnInput {
   onDeliveryFailed?: (result: { assistantMessageId: number; failureCode: string }) => Promise<void>;
   onExecutionFailure?: (failureCode: string) => Promise<void>;
   resolveFile?: (file: FileRow, signal?: AbortSignal) => Promise<ResolvedChatFile>;
+  fileResolver?: FileResolver;
   pi?: Pick<PiRuntimeService, "runtime">;
   t: (key: string, params?: Record<string, string | number>) => string;
 }

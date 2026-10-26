@@ -1,3 +1,4 @@
+import { OUTGOING_BUFFER_BYTES } from "../../src/files/outgoingBuffers.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,11 +16,72 @@ import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import type { ToolBuildInput } from "../../src/ai/tools/types.js";
 import type { SandboxCommandRequest } from "../../src/sandbox/types.js";
+import { createFinishResponseTool } from "../../src/ai/tools/finishResponse.js";
+import { messageView } from "../../src/web/message-view.js";
+import { validateOpenUi } from "../../src/openui/validate.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 describe("finish_response", () => {
+  it("does not expose OpenUI to Telegram-created threads and rejects direct execution bypasses", async () => {
+    const { input } = await setup();
+    const tool = createPiToolAdapters({ buildInput: () => input }).find(tool => tool.name === "finish_response")!;
+    expect(JSON.stringify(tool.parameters)).not.toContain("openui");
+    const openui = 'root = Stack([Text("UI")])';
+    const bypass = await createFinishResponseTool(input).execute({ text: "Fallback", openui });
+    expect(bypass).toMatchObject({ completed: false, error: expect.stringContaining("threads created on the website") });
+    expect(input.responseDraft?.text).toBe("");
+    const accepted = await finish(input, { text: "Fallback", openui });
+    expect(accepted.details).toMatchObject({ text: "Fallback", completed: true });
+    expect(accepted.details).not.toHaveProperty("openui");
+  });
+
+  it("requires fallback text and rejects malformed UI before completing a web response", async () => {
+    const { input } = await setup("web");
+    const tool = createPiToolAdapters({ buildInput: () => input }).find(tool => tool.name === "finish_response")!;
+    expect(JSON.stringify(tool.parameters)).toContain("openui");
+    expect((await finish(input, { openui: 'root = Stack([Text("UI")])' })).details)
+      .toMatchObject({ completed: false, error: expect.stringContaining("accompanying answer") });
+    expect((await finish(input, { text: "Fallback", openui: "root = Stack([root])" })).details)
+      .toMatchObject({ completed: false });
+    expect((await finish(input, { text: "Fallback" })).details).toMatchObject({ completed: true, text: "Fallback" });
+  });
+
+  it("persists the answer's OpenUI language through inference independently of the account language", async () => {
+    const openui = 'root = Stack([Card("Plan", [Text("A useful plan"), Button("Expand", "Expand this plan")])])';
+    const { input, runtime, contexts } = await setupPi([[{ name: "finish_response", arguments: { text: "A useful plan", openui, openui_language: "en" } }]], "web");
+    const send = vi.fn(async () => ({ message_id: 7 }));
+    await runTurn({ ...input, user: { ...input.user, lang: "ru", stream_mode: 0 }, logger: input.logger!,
+      api: { raw: { sendRichMessage: send, editMessageText: async () => true }, sendChatAction: async () => true } as never,
+      chatId: input.user.tg_id, text: "Make a plan", pi: { runtime: async () => runtime }, t: key => key,
+    });
+    const messages = await input.repos.messages.listForThreadChain([input.thread]);
+    const assistant = messages.find(message => message.role === "assistant")!;
+    expect(assistant.text_plain).toBe("A useful plan");
+    expect(messageView(assistant, [])).toMatchObject({ text: "A useful plan", openui: validateOpenUi(openui), openuiLanguage: "en" });
+    expect(JSON.parse(assistant.content_json).openuiLanguage).toBe("en");
+    expect(JSON.stringify(send.mock.calls)).toContain("A useful plan");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("Stack(");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("openui");
+    expect(JSON.stringify(contexts[0])).toContain("finish_response.openui");
+  });
+
+  it("keeps a Telegram-origin inference text-only even when a model supplies web UI", async () => {
+    const openui = 'root = Stack([Text("UI")])';
+    const { input, runtime, contexts } = await setupPi([[{ name: "finish_response", arguments: { text: "Plain answer", openui } }]]);
+    const send = vi.fn(async () => ({ message_id: 7 }));
+    await runTurn({ ...input, user: { ...input.user, stream_mode: 0 }, logger: input.logger!,
+      api: { raw: { sendRichMessage: send, editMessageText: async () => true }, sendChatAction: async () => true } as never,
+      chatId: input.user.tg_id, text: "Continue from the website", pi: { runtime: async () => runtime }, t: key => key,
+    });
+    const messages = await input.repos.messages.listForThreadChain([input.thread]);
+    const assistant = messages.find(message => message.role === "assistant")!;
+    expect(assistant.text_plain).toBe("Plain answer");
+    expect(messageView(assistant, []).openui).toBeUndefined();
+    expect(JSON.stringify(contexts[0])).not.toContain("finish_response.openui");
+  });
+
   it("prepares with two workers, registers requested order, retains bytes and durable sources, and terminates", async () => {
     const { input, read } = await setup();
     let active = 0;
@@ -35,10 +97,10 @@ describe("finish_response", () => {
     expect(peak).toBe(2);
     expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl", "/c.stl"]);
     for (const attachment of input.outgoingFiles!.items) {
-      expect(await input.repos.files.listSources(attachment.fileId)).toHaveLength(1);
+      expect((await input.repos.files.listSources(attachment.fileId)).map(source => source.transport)).toEqual(expect.arrayContaining(["local", "e2b"]));
     }
     expect(input.outgoingFiles!.items.filter((file) => file.data).length).toBeGreaterThanOrEqual(2);
-    expect(input.outgoingFiles!.buffers.snapshot().peakBufferedBytes).toBeLessThanOrEqual(40 * 1024 * 1024);
+    expect(input.outgoingFiles!.buffers.snapshot().peakBufferedBytes).toBeLessThanOrEqual(OUTGOING_BUFFER_BYTES);
     expect(result.details).toMatchObject({ completed: true, text: "Ready" });
   });
 
@@ -178,7 +240,7 @@ describe("finish_response", () => {
     confirmed!.telegramDelivery = { messageId: 55, fileId: null, fileUniqueId: null };
     unknown!.telegramDeliveryUnknown = true;
     rejected!.telegramDeliveryFailure = "telegram_rejected";
-    const remove = vi.spyOn(input.repos.files, "deleteFile");
+    const remove = vi.spyOn(input.repos.files, "deleteFileIfUnattached");
 
     await runtime.bridge.endTurn();
     await runtime.bridge.endTurn();
@@ -190,7 +252,7 @@ describe("finish_response", () => {
     }
     for (const file of [confirmed!, unknown!]) {
       expect(await input.repos.files.get(file.fileId)).toBeDefined();
-      expect(await input.repos.files.listSources(file.fileId)).toHaveLength(1);
+      expect((await input.repos.files.listSources(file.fileId)).map(source => source.transport)).toEqual(expect.arrayContaining(["local", "e2b"]));
     }
     expect(queue.buffers.snapshot().bufferedBytes).toBe(0);
     expect(queue.items).toEqual([]);
@@ -289,7 +351,7 @@ describe("finish_response", () => {
     expect(metadata).toHaveBeenCalledTimes(outcome === "confirmed" ? 2 : 0);
     const retained = await input.repos.files.listForThreads([input.thread.id]);
     expect(retained).toHaveLength(1);
-    expect(await input.repos.files.listSources(retained[0]!.id)).toMatchObject([{ transport: "e2b" }]);
+    expect((await input.repos.files.listSources(retained[0]!.id)).map(source => source.transport)).toEqual(["e2b", "local"]);
     expect(runtime.bridge.attachments).toEqual([]);
   });
 
@@ -310,16 +372,16 @@ async function finish(input: ToolBuildInput, args: unknown, signal?: AbortSignal
   return createPiToolAdapters({ buildInput: () => input }).find((tool) => tool.name === "finish_response")!.execute("finish", args, signal, undefined, {} as never);
 }
 
-async function setup() {
+async function setup(origin: "telegram" | "web" = "telegram") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-finish-test-"));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
-  const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: undefined });
+  const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, FILE_STORAGE_PATH: path.join(directory, "files"), CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: undefined });
   const db = createDatabase(config);
   await db.initialize();
   cleanups.push(() => db.destroy());
   const repos = createRepos(db.db, db.search);
   const user = await repos.users.ensure({ tgId: 9191, firstName: "Test", lang: "en" });
-  const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Harness" });
+  const thread = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Harness", origin });
   const read = vi.fn(async (request: { virtualPath: string }) => {
     const bytes = request.virtualPath.endsWith(".stl") ? Buffer.alloc(84) : Buffer.from([255, 216, 255, 224, 0]);
     return { bytes, size: bytes.length, sandboxId: "test", canonicalPath: request.virtualPath, sourceCanonicalPath: "/home/user/.file-sources/test", contentSha256: createHash("sha256").update(bytes).digest("hex") };
@@ -338,8 +400,8 @@ async function setup() {
   return { input, read, execute };
 }
 
-async function setupPi(cycles: Array<Array<{ name: string; arguments: JsonObject }>>) {
-  const { input, read, execute } = await setup();
+async function setupPi(cycles: Array<Array<{ name: string; arguments: JsonObject }>>, origin: "telegram" | "web" = "telegram") {
+  const { input, read, execute } = await setup(origin);
   const contexts: TranscriptContext[] = [];
   let call = 0;
   const pi = new PiRuntimeManager({ config: input.config, db: input.db, repos: input.repos, logger: input.logger!, commandRuntime: input.commandRuntime,

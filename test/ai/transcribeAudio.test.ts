@@ -14,7 +14,7 @@ import type { TranscriptPage } from "../../src/audio/transcripts.js";
 describe("transcribe_audio", () => {
   let db: AppDatabase;
   let input: ToolBuildInput;
-  let fileId: number;
+  let fileId: string;
   let messageId: number;
   let fetchMock: ReturnType<typeof vi.fn>;
 

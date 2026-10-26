@@ -22,6 +22,9 @@ import {
 import { budgetReasonText } from "../pi/turnBudget.js";
 import { currentTurnAssistantResult } from "./currentTurnResult.js";
 import { resolveTurnAnswer } from "./turnOutput.js";
+import { threadAllowsOpenUi } from "./openui.js";
+import { ToolActivityCollector, type ToolActivity } from "./toolActivity.js";
+import { TurnCancelledError } from "./turnFinalizer.js";
 
 const TYPING_ACTION_INTERVAL_MS = 5000;
 
@@ -50,12 +53,26 @@ export const runTurn: TurnRunner = async (input) => {
     streamMode: input.user.stream_mode,
   });
   const shaper = new StreamShaper();
+  const toolActivity = new ToolActivityCollector(input.config);
   const { streamer, status, stop } = createTurnPresenter(input, startedAt);
   let inferenceUsage: InferenceUsageDelta | undefined;
   let inferenceBackend: { inferenceProvider: string; inferenceModel: string } | undefined;
   let currentTurnMessages: AgentMessage[] = [];
   let completionEntryId: string | undefined;
   let deliveryStarted = false;
+  let cancelledToolsSaved = false;
+
+  const saveCancelledTools = async () => {
+    if (deliveryStarted || cancelledToolsSaved) return;
+    const activity = toolActivity.snapshot(shaper.runSummary().reasoningSummaries, "cancelled");
+    if (!activity) return;
+    await input.repos.messages.insert({
+      threadId: input.thread.id, role: "assistant", textPlain: "", thinking: "",
+      content: { text: "", toolActivity: activity },
+    }).then(() => { cancelledToolsSaved = true; }).catch(error => input.logger.warn("failed to persist cancelled tool activity", {
+      threadId: input.thread.id, turnRunId: input.turnRunId, error: String(error),
+    }));
+  };
 
   const piEntries: Array<{ id: string; role: "user" | "assistant" }> = [];
   try {
@@ -66,6 +83,7 @@ export const runTurn: TurnRunner = async (input) => {
     const runtime = await input.pi.runtime(input.thread, input.user);
     activeBridge = runtime.bridge;
     await runtime.bridge.beginTurn({
+      fileResolver: input.fileResolver,
       api: input.api,
       chatId: input.chatId,
       messageThreadId: input.messageThreadId,
@@ -85,7 +103,7 @@ export const runTurn: TurnRunner = async (input) => {
       sessionId: runtime.session.sessionId,
     });
     streamer?.update({ thinkingMd: "", answerMd: "" });
-    const stats = createPiStreamLoop(input, shaper, streamer, status);
+    const stats = createPiStreamLoop(input, shaper, streamer, status, toolActivity);
     const existingEntryIds = new Set(runtime.session.sessionManager.getEntries().map((entry) => entry.id));
     const usageBefore = runtime.session.getSessionStats().tokens;
     const usageCollector = new InferenceUsageCollector();
@@ -162,7 +180,8 @@ export const runTurn: TurnRunner = async (input) => {
     const budgetSnapshot = runtime.bridge.currentTurnBudget()?.snapshot();
     const budgetReason = budgetSnapshot?.terminationReason;
     if (assistantResult.stopReason === "aborted" && !budgetReason) {
-      await status?.finish(shaper.toolStatusMd());
+      await saveCancelledTools();
+      await status?.cancel(shaper.toolStatusMd());
       await streamer?.finish();
       input.logger.info("Pi turn cancelled", {
         threadId: input.thread.id,
@@ -222,6 +241,9 @@ export const runTurn: TurnRunner = async (input) => {
         provider: inferenceBackend?.inferenceProvider,
         model: inferenceBackend?.inferenceModel,
         usage: inferenceUsage,
+        openui: threadAllowsOpenUi(input.thread) ? assistantResult.openui : undefined,
+        openuiLanguage: threadAllowsOpenUi(input.thread) ? assistantResult.openuiLanguage : undefined,
+        toolActivity: toolActivity.snapshot(shaper.runSummary().reasoningSummaries),
       },
       () => { deliveryStarted = true; },
     );
@@ -281,8 +303,9 @@ export const runTurn: TurnRunner = async (input) => {
       ...input.outgoingBuffers?.snapshot(),
     });
   } catch (err) {
-    if (input.signal?.aborted) {
-      await status?.finish(shaper.toolStatusMd());
+    if (input.signal?.aborted || err instanceof TurnCancelledError) {
+      await saveCancelledTools();
+      await status?.cancel(shaper.toolStatusMd());
       await streamer?.finish();
       input.logger.info("turn cancelled", {
         threadId: input.thread.id,
@@ -294,7 +317,9 @@ export const runTurn: TurnRunner = async (input) => {
     const budgetReason = activeBridge?.currentTurnBudget()?.snapshot().terminationReason;
     if (budgetReason && !deliveryStarted) {
       const partial = appendBudgetNotice(shaper.finalAnswer(), budgetReasonText(budgetReason, input.user.lang), input.user.lang);
-      await sendFinal(input, "", partial);
+      await sendFinal(input, "", partial, 0, [], {
+        toolActivity: toolActivity.snapshot(shaper.runSummary().reasoningSummaries, "cancelled"),
+      });
       input.logger.warn("turn stopped by loop budget", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
@@ -314,6 +339,7 @@ export const runTurn: TurnRunner = async (input) => {
     await status?.finish(shaper.toolStatusMd());
     await streamer?.finish();
     if (deliveryStarted) {
+      await status?.fail();
       input.logger.warn("turn failed after final delivery began; suppressing duplicate error reply", {
         threadId: input.thread.id,
         turnRunId: input.turnRunId,
@@ -322,7 +348,9 @@ export const runTurn: TurnRunner = async (input) => {
     }
     const reference = input.turnRunId ? `#${input.turnRunId}` : "unavailable";
     const label = input.user.lang === "ru" ? "Код обращения" : "Turn reference";
-    await sendFinal(input, "", `${input.t("error-generic")}\n\n${label}: ${reference}`);
+    await sendFinal(input, "", `${input.t("error-generic")}\n\n${label}: ${reference}`, 0, [], {
+      toolActivity: toolActivity.snapshot(shaper.runSummary().reasoningSummaries),
+    });
   } finally {
     try {
       await activeBridge?.endTurn();
@@ -420,7 +448,7 @@ interface TurnPresenter {
 }
 
 function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter {
-  const streamer = input.user.stream_mode
+  const streamer = input.user.stream_mode && input.origin !== "web"
     ? new TurnDraftStreamer(input, startedAt)
     : undefined;
   const status = streamer ? undefined : new TurnStatusMessage(input);
@@ -431,7 +459,7 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
   });
   let typingThreadId = input.messageThreadId;
   let typing: NodeJS.Timeout | undefined;
-  if (!streamer) {
+  if (!streamer && input.origin !== "web") {
     typing = setInterval(() => {
       void input.api.sendChatAction(input.chatId, "typing", { message_thread_id: typingThreadId }).catch((err) => {
         if (typingThreadId && isThreadNotFound(err)) {
@@ -568,6 +596,7 @@ function createPiStreamLoop(
   shaper: StreamShaper,
   streamer: TurnDraftStreamer | undefined,
   status: TurnStatusMessage | undefined,
+  toolActivity: ToolActivityCollector,
 ): { counts: TurnStreamStats; onEvent: (event: AgentSessionEvent) => void } {
   const counts: TurnStreamStats = {
     modelTiming: { modelMs: 0, peakContextTokens: 0 },
@@ -578,10 +607,17 @@ function createPiStreamLoop(
   let cycleStartedAt = Date.now();
   let cycle = 0;
   const toolStartedAt = new Map<string, number>();
+  let liveActivity: ToolActivity | undefined;
+  const refreshActivity = () => { liveActivity = toolActivity.snapshot(shaper.runSummary().reasoningSummaries, "running"); };
   const updatePresenter = () => {
+    const thinking = shaper.streamingThinkingMd();
+    const text = shaper.finalAnswer();
+    input.onDraft?.({ text: input.user.stream_mode ? text : "",
+      thinking: input.user.stream_mode ? toolActivity.sanitizeText(shaper.runSummary().reasoningSummaries.join("\n\n")) : "",
+      ...(liveActivity ? { toolActivity: liveActivity } : {}) });
     streamer?.update({
-      thinkingMd: shaper.streamingThinkingMd(),
-      answerMd: shaper.finalAnswer(),
+      thinkingMd: thinking,
+      answerMd: text,
     });
   };
   const updateStatus = () => {
@@ -589,6 +625,11 @@ function createPiStreamLoop(
       input.logger.warn("status update failed", { threadId: input.thread.id, err: String(err) }));
   };
   const onEvent = (event: AgentSessionEvent) => {
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+      toolActivity.onEvent(event, input.signal?.aborted,
+        event.type === "tool_execution_start" ? shaper.runSummary().reasoningSummaries.length : undefined);
+      refreshActivity();
+    }
     if (event.type === "turn_start") { cycleStartedAt = Date.now(); cycle++; }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const usage = event.message.usage;
@@ -618,7 +659,12 @@ function createPiStreamLoop(
         counts.contentEvents += 1;
       } else if (update.type === "thinking_end") {
         shaper.onReasoningEnd();
+        refreshActivity();
       }
+      updatePresenter();
+      return;
+    }
+    if (event.type === "tool_execution_update") {
       updatePresenter();
       return;
     }
@@ -688,6 +734,9 @@ class TurnStatusMessage {
     try {
       const sent = await sendPlainWithThreadFallback(this.input, text, { parse_mode: "HTML" });
       this.messageId = sent.message_id;
+      if (this.input.origin === "web" && sent.message_id > 0) {
+        this.input.telegramPlaceholder = { messageId: sent.message_id, state: "pending" };
+      }
       this.lastText = text;
       this.input.logger.debug("thinking status message sent", {
         threadId: this.input.thread.id,
@@ -699,6 +748,7 @@ class TurnStatusMessage {
   }
 
   async update(text: string): Promise<void> {
+    if (this.input.origin === "web") return;
     if (!this.messageId || text === this.lastText) return;
     try {
       await this.input.api.editMessageText(this.input.chatId, this.messageId, text, { parse_mode: "HTML" });
@@ -713,8 +763,29 @@ class TurnStatusMessage {
   }
 
   async finish(toolStatusMd: string): Promise<void> {
+    if (this.input.origin === "web") {
+      if (this.input.signal?.aborted) await this.closePlaceholder(this.input.user.lang === "ru" ? "🛑 Остановлено." : "🛑 Stopped.");
+      return;
+    }
     this.input.logger.debug("thinking status message finishing", { threadId: this.input.thread.id });
     await this.update(buildThinkingStatus(this.input.t("thinking-done"), toolStatusMd));
+  }
+
+  async fail(): Promise<void> {
+    await this.closePlaceholder(this.input.t("error-generic"));
+  }
+
+  async cancel(toolStatusMd: string): Promise<void> {
+    if (this.input.origin === "web") await this.closePlaceholder(this.input.user.lang === "ru" ? "🛑 Остановлено." : "🛑 Stopped.");
+    else await this.finish(toolStatusMd);
+  }
+
+  private async closePlaceholder(text: string): Promise<void> {
+    const placeholder = this.input.telegramPlaceholder;
+    if (!placeholder || placeholder.state !== "pending") return;
+    placeholder.state = "attempted";
+    try { await this.input.api.editMessageText(this.input.chatId, placeholder.messageId, text); }
+    catch (error) { this.input.logger.warn("failed to close web turn placeholder", { threadId: this.input.thread.id, err: String(error) }); }
   }
 }
 

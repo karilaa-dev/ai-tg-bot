@@ -9,6 +9,17 @@ export function isStopCommand(ctx: BotContext): boolean {
   return /^\/stop(?:@\w+)?(?:\s|$)/.test(text ?? "");
 }
 
+export function isStartCommand(ctx: BotContext): boolean {
+  const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
+  const command = /^\/start(?:@(\w+))?(?:\s|$)/.exec(text ?? "");
+  return Boolean(command && (!command[1] || command[1].toLowerCase() === ctx.me.username.toLowerCase()));
+}
+
+async function denyAccess(ctx: BotContext, key: "access-denied" | "registration-required") {
+  if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: ctx.t(key), show_alert: true }).catch(() => undefined);
+  else if (ctx.chat) await replyWithThreadFallback(ctx, ctx.t(key)).catch(() => undefined);
+}
+
 export async function privateOnly(ctx: BotContext, next: NextFunction): Promise<void> {
   if (ctx.chat && ctx.chat.type !== "private") {
     ctx.services.logger.warn("non-private chat rejected", ctxLogMeta(ctx, { chatType: ctx.chat.type }));
@@ -29,6 +40,15 @@ export async function initializeUserAndThread(ctx: BotContext, next: NextFunctio
   if (!ctx.from) {
     ctx.services.logger.debug("update has no sender; skipping user initialization", ctxLogMeta(ctx));
     await next();
+    return;
+  }
+  if (!await ctx.services.access.isAllowed(ctx.from.id)) {
+    await denyAccess(ctx, "access-denied");
+    return;
+  }
+  const existing = await ctx.services.repos.users.get(ctx.from.id);
+  if (!existing && !isStartCommand(ctx)) {
+    await denyAccess(ctx, "registration-required");
     return;
   }
   const lang = ctx.from.language_code?.startsWith("ru") ? "ru" : "en";

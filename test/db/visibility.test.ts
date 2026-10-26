@@ -7,6 +7,8 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { threadVisibilityScope } from "../../src/memory/retrieval.js";
 import { createLoadMessageTool } from "../../src/ai/tools/loadMessage.js";
 import { renderThreadSessionContext } from "../../src/ai/prompt.js";
+import { ingestFileBytes } from "../../src/files/ingest.js";
+import { webFileSource } from "../../src/web/file-source.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dialect} visibility`, () => {
@@ -24,7 +26,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const repos = createRepos(db.db, db.search);
         const user = await repos.users.ensure({ tgId: 777, firstName: "Scope" });
         const parent = await repos.threads.create({ userId: user.tg_id, topicId: null, title: "Parent" });
-        const message = (threadId: number, text: string) => repos.messages.insert({ threadId, role: "user", content: { text }, textPlain: text });
+        const message = (threadId: string, text: string) => repos.messages.insert({ threadId, role: "user", content: { text }, textPlain: text });
         const beforeFork = await message(parent.id, "before fork empty __empty__");
         const child = await repos.threads.create({ userId: user.tg_id, topicId: 1, title: "Child", parentThreadId: parent.id, forkPointMessageId: beforeFork.id });
         const afterFork = await message(parent.id, "after fork");
@@ -32,7 +34,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         const queued = await message(child.id, "queued");
         const other = await repos.threads.create({ userId: user.tg_id, topicId: 2, title: "Other" });
         const otherMessage = await message(other.id, "other");
-        const file = (threadId: number, messageId?: number) => repos.files.insertFile({
+        const file = (threadId: string, messageId?: number) => repos.files.insertFile({
           userId: user.tg_id, threadId, messageId, type: "txt", name: "notes.txt", size: 5, contentMd: "notes", isInline: true,
         });
         const visible = await file(parent.id, beforeFork.id);
@@ -58,7 +60,22 @@ for (const dialect of ["sqlite", "postgres"] as const) {
 
         const scope = await threadVisibilityScope(repos, child, accepted.id);
         expect(scope.messageIds).toEqual([beforeFork.id, accepted.id]);
-        expect(scope.fileIds).toEqual([visible.id, reused.id, reusedPending.id, outgoing.id]);
+        expect(new Set(scope.fileIds)).toEqual(new Set([visible.id, reused.id, reusedPending.id, outgoing.id]));
+        for (const name of ["upload.txt", "upload.png", "upload.zip"]) {
+          const pending = await ingestFileBytes({ config: loadTestConfig(), repo: repos.files,
+            userId: user.tg_id, threadId: child.id, name, bytes: Buffer.from("pending upload"), requireMessage: true });
+          // Visibility is closed from insertion, before a transport source exists.
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, child)).fileIds).not.toContain(pending.fileId);
+          await repos.files.rememberSource(pending.fileId, webFileSource(pending.fileId, "application/octet-stream"));
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          await repos.files.setMessageId(pending.fileId, queued.id);
+          expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).not.toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, child)).fileIds).toContain(pending.fileId);
+          expect((await threadVisibilityScope(repos, other)).fileIds).not.toContain(pending.fileId);
+        }
+        await repos.files.rememberSource(outgoing.id, webFileSource(outgoing.id, "text/plain"));
+        expect((await threadVisibilityScope(repos, child, accepted.id)).fileIds).toContain(outgoing.id);
         expect((await repos.files.get(reused.id, scope.messageScopes))?.name).toBe("accepted-name.txt");
         expect((await repos.files.get(reusedPending.id, scope.messageScopes))?.name).toBe(`attachment-${reusedPending.id}.txt`);
         expect((await repos.messages.listForThreadChain([parent, child], accepted.id)).map((row) => row.id)).toEqual(scope.messageIds);

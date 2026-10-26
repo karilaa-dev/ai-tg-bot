@@ -80,7 +80,7 @@ describe("transport-neutral file resolver", () => {
     await repos.files.rememberSource(file.id, {
       transport: "e2b",
       connectionKey: "deployment",
-      remoteKey: "sandbox:file:1",
+      remoteKey: `sandbox:file:${file.id}`,
       locator: {},
       mimeType: "text/plain",
     });
@@ -116,7 +116,7 @@ describe("transport-neutral file resolver", () => {
     await repos.files.rememberSource(file.id, {
       transport: "e2b",
       connectionKey: "deployment",
-      remoteKey: "sandbox:file:integrity",
+      remoteKey: `sandbox:file:${file.id}`,
       locator: {},
       mimeType: "text/plain",
     });
@@ -150,6 +150,33 @@ describe("transport-neutral file resolver", () => {
     const resolver = createResolver(repos);
 
     await expect(resolver.resolveFile(file)).rejects.toThrow(`File #${file.id} has no durable source`);
+  });
+
+  it("excludes sandbox adapters while resolving inside a sandbox operation", async () => {
+    const file = await insertFile(repos, 908, "inside-sandbox.txt");
+    await repos.files.rememberSource(file.id, {
+      transport: "e2b", connectionKey: "deployment", remoteKey: "sandbox:file", locator: {},
+    });
+    const fetch = vi.fn(async () => { throw new Error("Must not enter serialized sandbox operations"); });
+    const resolver = createResolver(repos);
+    resolver.registry.register({ transport: "e2b", connectionKey: "deployment", fetch });
+    await expect(resolver.resolveFile(file, undefined, undefined, {
+      allowSandboxResume: false, pauseAfterRead: false, excludeSandbox: true,
+    })).rejects.toThrow("no durable source");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["wrong size", "wrong hash"])("rejects corrupted canonical web bytes (%s)", async (corruption) => {
+    const expected = Buffer.from("remote content");
+    const file = await insertFile(repos, 907, "original.bin", createHash("sha256").update(expected).digest("hex"));
+    await repos.files.rememberSource(file.id, {
+      transport: "web", connectionKey: "default", remoteKey: file.id, locator: {},
+    });
+    const resolver = createResolver(repos);
+    resolver.registry.register({ transport: "web", connectionKey: "default",
+      fetch: async () => corruption === "wrong size" ? Buffer.from("short") : Buffer.alloc(expected.length),
+    });
+    await expect(resolver.resolveFile(file)).rejects.toThrow(corruption === "wrong size" ? "size mismatch" : "hash mismatch");
   });
 
   it("keeps the first file canonical when the same remote source is claimed twice", async () => {

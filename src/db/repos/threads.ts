@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { insertReturning, queryOne, type SqlExecutor } from "../sql.js";
 import type { ThreadRow, ThreadTitleSource } from "../types.js";
@@ -5,7 +6,7 @@ import type { ThreadRow, ThreadTitleSource } from "../types.js";
 export class ThreadsRepo {
   constructor(private readonly db: SqlExecutor) {}
 
-  get(id: number): Promise<ThreadRow | undefined> {
+  get(id: string): Promise<ThreadRow | undefined> {
     return queryOne<ThreadRow>(this.db, sql`select * from threads where id = ${id}`);
   }
 
@@ -40,8 +41,8 @@ export class ThreadsRepo {
       const existing = await queryOne<ThreadRow>(
         tx,
         topicId === null
-          ? sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id is null order by id desc limit 1`
-          : sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id = ${topicId} order by id desc limit 1`,
+          ? sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id is null and origin = 'telegram' order by created_at desc, id desc limit 1`
+          : sql`select * from threads where user_id = ${userId} and archived = 0 and topic_id = ${topicId} order by created_at desc, id desc limit 1`,
       );
       return existing ?? new ThreadsRepo(tx).create({ userId, topicId, title, titleSource });
     });
@@ -52,19 +53,20 @@ export class ThreadsRepo {
     topicId: number | null;
     title: string;
     titleSource?: ThreadTitleSource;
-    parentThreadId?: number | null;
+    origin?: ThreadRow["origin"];
+    parentThreadId?: string | null;
     forkPointMessageId?: number | null;
   }): Promise<ThreadRow> {
     return insertReturning<ThreadRow>(
       this.db,
       sql`
         insert into threads(
-          user_id, topic_id, parent_thread_id, fork_point_message_id, title,
+          id, user_id, topic_id, parent_thread_id, fork_point_message_id, title, origin,
           title_source, title_attempts, topic_title_synced,
           pi_session_file, pi_session_id, archived, created_at
         )
         values (
-          ${input.userId}, ${input.topicId}, ${input.parentThreadId ?? null}, ${input.forkPointMessageId ?? null}, ${input.title},
+          ${randomUUID()}, ${input.userId}, ${input.topicId}, ${input.parentThreadId ?? null}, ${input.forkPointMessageId ?? null}, ${input.title}, ${input.origin ?? "telegram"},
           ${input.titleSource ?? "explicit"}, 0, 1,
           null, null, 0, ${Date.now()}
         )
@@ -73,7 +75,7 @@ export class ThreadsRepo {
     );
   }
 
-  claimTitleGeneration(threadId: number, maxAttempts: number): Promise<ThreadRow | undefined> {
+  claimTitleGeneration(threadId: string, maxAttempts: number): Promise<ThreadRow | undefined> {
     return queryOne<ThreadRow>(this.db, sql`
       update threads
       set title_attempts = title_attempts + 1
@@ -84,7 +86,7 @@ export class ThreadsRepo {
     `);
   }
 
-  setGeneratedTitleIfPlaceholder(threadId: number, title: string): Promise<ThreadRow | undefined> {
+  setGeneratedTitleIfPlaceholder(threadId: string, title: string): Promise<ThreadRow | undefined> {
     return queryOne<ThreadRow>(this.db, sql`
       update threads
       set title = ${title}, title_source = 'generated', topic_title_synced = 0
@@ -93,7 +95,7 @@ export class ThreadsRepo {
     `);
   }
 
-  markTopicTitleSynced(threadId: number, title: string): Promise<ThreadRow | undefined> {
+  markTopicTitleSynced(threadId: string, title: string): Promise<ThreadRow | undefined> {
     return queryOne<ThreadRow>(this.db, sql`
       update threads
       set topic_title_synced = 1
@@ -103,7 +105,7 @@ export class ThreadsRepo {
   }
 
   applyTelegramTopicTitle(
-    threadId: number,
+    threadId: string,
     title: string,
     implicit: boolean,
   ): Promise<ThreadRow | undefined> {
@@ -129,7 +131,7 @@ export class ThreadsRepo {
     `);
   }
 
-  async setPiSession(threadId: number, sessionFile: string, sessionId: string): Promise<void> {
+  async setPiSession(threadId: string, sessionFile: string, sessionId: string): Promise<void> {
     await this.db.execute(sql`
       update threads
       set pi_session_file = ${sessionFile}, pi_session_id = ${sessionId}
@@ -137,16 +139,19 @@ export class ThreadsRepo {
     `);
   }
 
-  async archive(id: number): Promise<void> {
+  async archive(id: string): Promise<void> {
     await this.db.execute(sql`update threads set archived = 1 where id = ${id}`);
   }
 
   async chain(thread: ThreadRow): Promise<ThreadRow[]> {
     const chain: ThreadRow[] = [thread];
+    const seen = new Set([thread.id]);
     let current = thread;
     while (current.parent_thread_id !== null) {
+      if (seen.has(current.parent_thread_id) || chain.length >= 1000) throw new Error("Invalid thread ancestry");
       const parent = await this.get(current.parent_thread_id);
-      if (!parent) break;
+      if (!parent || parent.user_id !== thread.user_id || current.fork_point_message_id === null) break;
+      seen.add(parent.id);
       chain.push(parent);
       current = parent;
     }

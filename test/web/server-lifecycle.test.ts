@@ -1,3 +1,5 @@
+import { AccessControl } from "../../src/access/control.js";
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { copyFile, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,9 +13,13 @@ import { FileResolver } from "../../src/files/resolver.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
 import { deferred } from "../helpers/async.js";
+import { fakeTelegramLogin, signInOnlyChat, telegramLoginConfig } from "../helpers/telegram-login.js";
 import { SandboxConsentRequired } from "../../src/files/source.js";
 
+const telegram = fakeTelegramLogin();
+
 let database: AppDatabase;
+let access: AccessControl;
 let assetsDirectory: string;
 let web: Awaited<ReturnType<typeof startWebServer>>;
 let resolver: FileResolver;
@@ -28,9 +34,11 @@ const request = (url: URL, init?: RequestInit) => {
 };
 
 beforeEach(async () => {
-  const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: "test-admin-token", WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
+  const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, WEB_ADMIN_USER_IDS: [1], WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
   database = createDatabase(config);
   await database.initialize();
+    access = new AccessControl(database.db);
+    await access.initialize();
   const repos = createRepos(database.db, database.search);
   await repos.users.ensure({ tgId: 1, firstName: "Alice" });
   const thread = await repos.threads.create({ userId: 1, topicId: null, title: "Test" });
@@ -53,13 +61,9 @@ beforeEach(async () => {
   ]);
   await symlink(path.join(assetsDirectory, "private.txt"), path.join(assetsDirectory, "symlink.js"));
   repository = new ConversationRepository(database.db, repos);
-  web = await startWebServer({ config, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory });
-  const login = await fetch(new URL("/api/auth/login", web!.url), {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
-    body: JSON.stringify({ token: config.WEB_ADMIN_TOKEN }),
-  });
-  expect(login.status).toBe(200);
-  cookie = login.headers.get("Set-Cookie")!.split(";")[0]!;
+  const login = await telegram;
+  web = await startWebServer({ config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory, chat: signInOnlyChat(), telegramAuth: login.dependencies });
+  cookie = await login.signIn(web!.url, 1);
   fileUrl = new URL(`/api/threads/${thread.id}/files/${file.id}?mode=auto`, web!.url);
 });
 
@@ -93,11 +97,22 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
   expect(await (await request(new URL("/app.js", web!.url))).text()).toBe("window.rebuilt = true;");
 });
 
+it("canonicalizes the admin URL so relative assets resolve at the website root", async () => {
+  for (const method of ["GET", "HEAD"]) {
+    const response = await fetch(new URL(`/admin/?user=1&thread=${fixtureUuid(2)}`, web!.url), { method, redirect: "manual" });
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`/admin?user=1&thread=${fixtureUuid(2)}`);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+  }
+  expect((await fetch(new URL("/admin", web!.url))).status).toBe(200);
+});
+
 it("stops the Codex login worker exactly once when the website stops", async () => {
   const state = { credentialStatus: "missing" as const, login: { status: "idle" as const } };
   const stop = vi.fn(async () => {});
-  const config = loadTestConfig({ WEB_ENABLED: true, WEB_ADMIN_TOKEN: "test-admin-token", WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
-  const other = await startWebServer({ config, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory,
+  const config = loadTestConfig({ WEB_ENABLED: true, ...telegramLoginConfig, WEB_ADMIN_USER_IDS: [1], WEB_HOST: "127.0.0.1", WEB_PORT: 0 });
+  const other = await startWebServer({ config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory,
     codexLogin: { status: async () => state, start: async () => state, cancel: async () => state, stop } });
   await Promise.all([other!.stop(), other!.stop()]);
   expect(stop).toHaveBeenCalledOnce();

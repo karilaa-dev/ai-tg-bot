@@ -6,7 +6,7 @@ export interface SqlExecutor {
   dialect: DialectName;
   query<T extends object>(statement: SQL): Promise<T[]>;
   execute(statement: SQL): Promise<void>;
-  transaction<T>(callback: (tx: SqlExecutor) => Promise<T>): Promise<T>;
+  transaction<T>(callback: (tx: SqlExecutor) => Promise<T>, options?: { rebuildSqliteTables: boolean }): Promise<T>;
   destroy(): Promise<void>;
 }
 

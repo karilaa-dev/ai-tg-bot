@@ -1,16 +1,27 @@
 import { GrammyError, InputFile, type Api } from "grammy";
+import { sql } from "drizzle-orm";
 import type { MessageRow } from "../db/types.js";
 import { renderFinalAnswer, renderFinalThinking, variantsForRichRetry } from "../telegram/render.js";
+import { closeOpenStructures } from "../telegram/mdRepair.js";
 import { isRichParseError, editRich, prefixPlainForThreadFallback, prefixRichForThreadFallback, sendRich, withThreadNotFoundFallback, type InputRichMessage } from "../telegram/richApi.js";
-import { MAX_CREATED_FILES_PER_ANSWER, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
+import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
 import type { CreatedFileAttachment } from "../files/types.js";
 import { escapeHtml } from "../util/text.js";
 import { telegramFileSource } from "../files/telegramSource.js";
-import { type InferenceUsageDelta } from "../pi/usage.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
+import { isAbortError } from "../files/cancel.js";
 import { AttachmentPreparation } from "./attachmentPreparation.js";
 
-import type { TurnInput, ThinkingDelivery } from "./types.js";
+import type { TurnInput, ThinkingDelivery, TurnInferenceMetadata } from "./types.js";
+import { finishResponseOpenUi, retainOpenUiImages } from "./openui.js";
+import { resolveOpenUiLanguage, type OpenUiLanguage } from "../openui/language.js";
+import { sha256Hex } from "../files/hash.js";
+import { FileResolver } from "../files/resolver.js";
+import { LocalFileStore } from "../files/localStore.js";
+import { queryOne } from "../db/sql.js";
+import { createTextSearch } from "../db/search.js";
+import { FilesRepo } from "../db/repos/files.js";
+import { MessagesRepo } from "../db/repos/messages.js";
 
 const TG_CAPTION_LIMIT = 1024;
 const TG_MESSAGE_LIMIT = 4096;
@@ -22,8 +33,9 @@ export async function sendFinal(
   answer: string,
   elapsedMs = 0,
   attachments: CreatedFileAttachment[] = [],
+  inference?: TurnInferenceMetadata,
 ): Promise<void> {
-  await sendFinalVisible(input, thinking, answer, elapsedMs, attachments);
+  await sendFinalVisible(input, thinking, answer, elapsedMs, attachments, undefined, undefined, inference);
 }
 
 interface FinalVisibleDelivery {
@@ -39,7 +51,7 @@ export async function sendFinalVisible(
   attachments: CreatedFileAttachment[],
   piEntryId?: string,
   thinkingDelivery?: ThinkingDelivery,
-  inference?: { provider?: string; model?: string; usage?: InferenceUsageDelta },
+  inference?: TurnInferenceMetadata,
   onPersisted?: () => void,
 ): Promise<FinalVisibleDelivery> {
   input.signal?.throwIfAborted();
@@ -56,18 +68,28 @@ export async function sendFinalVisible(
       limit: MAX_CREATED_FILES_PER_ANSWER,
     });
   }
-  const thinkingMessages = thinkingDelivery?.handled
+  const thinkingMessages = input.origin === "web" || thinkingDelivery?.handled
     ? []
     : renderFinalThinking({
         thinkingLog: visibleThinking,
         elapsedMs,
         t: input.t,
       });
-  const answerMessages = renderFinalAnswer({
-    answerMd: visibleAnswer,
-  });
   let deliveredAnswer = visibleAnswer;
   const initialPersistedText = visibleAnswer.trim() ? visibleAnswer : "";
+  const openui = finishResponseOpenUi(input.thread, inference?.openui, initialPersistedText);
+  const fileResolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
+  input = { ...input, fileResolver };
+  if (openui) await retainOpenUiImages({ ...input, source: openui, fileResolver,
+    attachments: outboundAttachments, maxMessageId: input.userMessageId });
+  const visualContent = openui
+    ? { openui, openuiLanguage: resolveOpenUiLanguage(initialPersistedText, inference?.openuiLanguage) }
+    : undefined;
+  const answerMessages = renderFinalAnswer({
+    answerMd: visualContent
+      ? `${closeOpenStructures(visibleAnswer)}\n\n${webVisualizationMarker(input, visualContent.openuiLanguage)}`
+      : visibleAnswer,
+  });
   input.logger.debug("sending final answer", {
     threadId: input.thread.id,
     thinkingParts: thinkingMessages.length,
@@ -79,13 +101,19 @@ export async function sendFinalVisible(
   const assistantMessage = await input.repos.messages.insert({
     threadId: input.thread.id,
     role: "assistant",
-    content: { text: initialPersistedText },
+    content: {
+      text: initialPersistedText,
+      ...visualContent,
+      ...(outboundAttachments.length && input.turnRunId ? { attachmentDeliveryTurnId: input.turnRunId } : {}),
+      ...(inference?.toolActivity ? { toolActivity: inference.toolActivity } : {}),
+    },
     textPlain: initialPersistedText,
     thinking: visibleThinking,
     tgMessageId: null,
     piEntryId: piEntryId ?? null,
   });
   onPersisted?.();
+  await persistRecoverableAttachments(input, assistantMessage, outboundAttachments);
   await input.onAwaitingDelivery?.({
     assistantMessageId: assistantMessage.id,
     provider: inference?.provider,
@@ -106,7 +134,7 @@ export async function sendFinalVisible(
       thinkingIds.push(...sent.map((message) => message.message_id));
     }
     for (const rich of answerMessages) {
-      const sent = await sendRichWithFallback(input, rich);
+      const sent = await sendAnswerReplacingPlaceholder(input, rich);
       answerIds.push(...sent.map((message) => message.message_id));
       if (input.deliveryTiming) input.deliveryTiming.firstTextMs ??= Date.now() - input.deliveryTiming.startedAt;
     }
@@ -119,20 +147,6 @@ export async function sendFinalVisible(
     // ownership; the next worker may immediately start using this sandbox.
     await preparation.close();
     if (ownsBuffers) await input.outgoingBuffers?.dispose();
-  }
-  if (deliveryFailed) {
-    if (isDefinitiveTelegramRejection(deliveryError)) {
-      await input.onDeliveryFailed?.({
-        assistantMessageId: assistantMessage.id,
-        failureCode: "telegram_delivery_rejected",
-      });
-    } else {
-      await input.onDeliveryUnknown?.({
-        assistantMessageId: assistantMessage.id,
-        failureCode: "telegram_delivery_unknown",
-      });
-    }
-    throw deliveryError;
   }
   const generatedAttachments = outboundAttachments.filter((attachment) =>
     attachment.origin === "generated_image");
@@ -153,30 +167,29 @@ export async function sendFinalVisible(
     && retainedAttachments.length === 0
     && unknownAttachments.length === 0
     && attachmentFailures.length === outboundAttachments.length;
-  if (generatedDeliveryFailed || strictPhotoDeliveryFailed || everyRegularAttachmentFailed) {
+  if (!deliveryFailed && (generatedDeliveryFailed || strictPhotoDeliveryFailed || everyRegularAttachmentFailed)) {
     deliveredAnswer = input.t(generatedDeliveryFailed || strictPhotoDeliveryFailed ? "image-delivery-failed" : "file-delivery-failed");
     try {
       for (const rich of renderFinalAnswer({ answerMd: deliveredAnswer })) {
-        const sent = await sendRichWithFallback(input, rich);
+        const sent = await sendAnswerReplacingPlaceholder(input, rich);
         answerIds.push(...sent.map((message) => message.message_id));
       }
     } catch (error) {
-      if (isDefinitiveTelegramRejection(error)) {
-        await input.onDeliveryFailed?.({
-          assistantMessageId: assistantMessage.id,
-          failureCode: "telegram_delivery_rejected",
-        });
-      } else {
-        await input.onDeliveryUnknown?.({
-          assistantMessageId: assistantMessage.id,
-          failureCode: "telegram_delivery_unknown",
-        });
-      }
-      throw error;
+      deliveryFailed = true;
+      deliveryError = error;
+    }
+  }
+  if (!deliveryFailed && input.telegramPlaceholder?.state === "pending") {
+    try {
+      const sent = await sendAnswerReplacingPlaceholder(input, { markdown: input.t("thinking-done") });
+      answerIds.push(...sent.map(message => message.message_id));
+    } catch (error) {
+      deliveryFailed = true;
+      deliveryError = error;
     }
   }
   const persistedText = deliveredAnswer.trim() ? deliveredAnswer : attachmentPersistedText(retainedAttachments);
-  const persistedContent: Record<string, unknown> = { text: persistedText };
+  const persistedContent: Record<string, unknown> = { text: persistedText, ...visualContent, ...(inference?.toolActivity ? { toolActivity: inference.toolActivity } : {}) };
   if (retainedAttachments.length) {
     persistedContent.files = retainedAttachments.map((file) => ({
       id: file.fileId,
@@ -203,16 +216,33 @@ export async function sendFinalVisible(
   const attachmentMessageId = retainedAttachments
     .map((attachment) => attachment.telegramDelivery?.messageId)
     .find((id) => typeof id === "number" && id > 0);
-  await retryFinalizedAssistantContentWrite(input, assistantMessage.id, () =>
-    input.repos.messages.setDeliveryContent({
-      messageId: assistantMessage.id,
-      content: persistedContent,
-      textPlain: persistedText,
-      tgMessageId: answerIds.find((id) => id > 0)
-        ?? thinkingIds.find((id) => id > 0)
-        ?? attachmentMessageId
-        ?? null,
-    }));
+  try {
+    await retryFinalizedAssistantContentWrite(input, assistantMessage.id, () =>
+      writeVisibleDelivery(input, repos => repos.messages.setDeliveryContent({
+        messageId: assistantMessage.id,
+        content: persistedContent,
+        textPlain: persistedText,
+        tgMessageId: answerIds.find((id) => id > 0)
+          ?? thinkingIds.find((id) => id > 0)
+          ?? attachmentMessageId
+          ?? null,
+      })));
+  } finally {
+    if (deliveryFailed) {
+      if (isDefinitiveTelegramRejection(deliveryError)) {
+        await input.onDeliveryFailed?.({
+          assistantMessageId: assistantMessage.id,
+          failureCode: "telegram_delivery_rejected",
+        });
+      } else {
+        await input.onDeliveryUnknown?.({
+          assistantMessageId: assistantMessage.id,
+          failureCode: "telegram_delivery_unknown",
+        });
+      }
+    }
+  }
+  if (deliveryFailed) throw deliveryError;
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -226,6 +256,17 @@ export async function sendFinalVisible(
     assistantMessageId: assistantMessage.id,
     thinkingMessageIds: thinkingIds,
   };
+}
+
+function webVisualizationMarker(input: TurnInput, language: OpenUiLanguage): string {
+  const label = language === "ru"
+    ? "🧩 Интерактивная визуализация доступна на сайте."
+    : "🧩 Interactive visualization available on the website.";
+  if (!input.config.WEB_PUBLIC_URL) return label;
+  const url = new URL("/", input.config.WEB_PUBLIC_URL);
+  url.searchParams.set("thread", String(input.thread.id));
+  const href = escapeHtml(url.href).replaceAll('"', "&quot;");
+  return `<a href="${href}">${label}</a>`;
 }
 
 export async function sendFinalThinkingVisible(
@@ -260,7 +301,7 @@ export async function refreshFinalThinkingVisible(
   if (existing.length) {
     const sharedParts = Math.min(existing.length, messages.length);
     for (let index = 0; index < sharedParts; index += 1) {
-      const edited = await editFinalThinkingVisible(input, existing[index]!, messages[index]!);
+      const edited = await editFinalMessageVisible(input, existing[index]!, messages[index]!);
       if (!edited) return existingMessageIds;
     }
 
@@ -293,7 +334,7 @@ export async function refreshFinalThinkingVisible(
   return [...existingMessageIds, ...sent];
 }
 
-async function editFinalThinkingVisible(
+async function editFinalMessageVisible(
   input: TurnInput,
   messageId: number,
   rich: InputRichMessage,
@@ -312,6 +353,7 @@ async function editFinalThinkingVisible(
       });
       if (edited) return true;
     } catch (err) {
+      if (err instanceof GrammyError && /message is not modified/i.test(err.description)) return true;
       if (!isRichParseError(err)) throw err;
       input.logger.debug("final thinking edit parse failed; trying repaired variant", {
         threadId: input.thread.id,
@@ -325,6 +367,23 @@ async function editFinalThinkingVisible(
     telegramMessageId: messageId,
   });
   return false;
+}
+
+async function sendAnswerReplacingPlaceholder(input: TurnInput, rich: InputRichMessage): Promise<Array<{ message_id: number }>> {
+  const placeholder = input.origin === "web" ? input.telegramPlaceholder : undefined;
+  if (placeholder?.state === "pending") {
+    // A network failure may have applied the edit; do not send a duplicate answer.
+    placeholder.state = "attempted";
+    try {
+      if (await editFinalMessageVisible(input, placeholder.messageId, rich)) return [{ message_id: placeholder.messageId }];
+    } catch (error) {
+      if (!isDefinitiveTelegramRejection(error)) throw error;
+    }
+    const sent = await sendRichWithFallback(input, rich);
+    await input.api.deleteMessage(input.chatId, placeholder.messageId).catch(() => undefined);
+    return sent;
+  }
+  return sendRichWithFallback(input, rich);
 }
 
 export async function sendCreatedFileAttachments(
@@ -358,9 +417,10 @@ function createAttachmentPreparation(input: TurnInput, attachments: CreatedFileA
     buffers: input.outgoingBuffers!,
     signal: input.signal,
     load: async (attachment, signal) => {
-      if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
       const stored = await input.repos.files.get(attachment.fileId);
       if (!stored) throw new Error(`Attachment file #${attachment.fileId} no longer exists.`);
+      if (input.fileResolver) return (await input.fileResolver.resolveFile(stored, signal)).bytes;
+      if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
       return (await input.resolveFile(stored, signal)).bytes;
     },
     onPrepared: (attachment, ms, error) => {
@@ -640,17 +700,86 @@ async function rememberSentCreatedFileAttachment(
   const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
   if (delivery) attachment.telegramDelivery = delivery;
   await rememberTelegramDeliverySource(input, attachment);
-  await retryTelegramDeliveryMetadataWrite(input, attachment, "message association", () =>
-    input.repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
+  await retryAttachmentMetadataWrite(input, attachment, "message association", () =>
+    writeVisibleDelivery(input, repos => repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
       displayName: attachment.name,
       caption: attachment.caption ?? null,
-    }));
+    })));
+}
+
+async function persistRecoverableAttachments(
+  input: TurnInput,
+  assistantMessage: MessageRow,
+  attachments: CreatedFileAttachment[],
+): Promise<void> {
+  for (const attachment of attachments) {
+    const stored = await input.repos.files.get(attachment.fileId);
+    if (!stored) {
+      attachment.telegramDeliveryFailure = "source_unavailable";
+      continue;
+    }
+    let loaded = false;
+    try {
+      const load = async () => {
+        if (input.resolveFile) return (await input.resolveFile(stored, input.signal)).bytes;
+        if (input.fileResolver) return (await input.fileResolver.resolveFile(stored, input.signal)).bytes;
+        throw new Error("Chat file resolution is unavailable.");
+      };
+      if (!attachment.data && input.outgoingBuffers) {
+        await input.outgoingBuffers.load(attachment, load, input.signal);
+        loaded = true;
+      }
+      const bytes = attachment.data ?? await input.outgoingBuffers?.readSpool(attachment, input.signal) ?? await load();
+      if (bytes.length > MAX_FILE_BYTES) throw new Error("Attachment exceeds the local storage limit.");
+      if (bytes.length !== stored.size || (stored.content_sha256 && sha256Hex(bytes) !== stored.content_sha256)) {
+        throw new Error(`Attachment #${attachment.fileId} did not match its recorded bytes.`);
+      }
+      await retryAttachmentMetadataWrite(input, attachment, "durable source", async () => {
+        const resolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
+        await resolver.persistFile(stored, bytes, input.signal);
+      });
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      if (isAbortError(error)) throw error;
+      attachment.telegramDeliveryFailure = "source_unavailable";
+      input.logger.warn("failed to preserve outgoing attachment source", {
+        fileId: attachment.fileId, threadId: input.thread.id, error: String(error),
+      });
+      continue;
+    } finally { if (loaded) input.outgoingBuffers?.release(attachment); }
+    const metadata = { displayName: attachment.name, caption: attachment.caption ?? null };
+    await retryAttachmentMetadataWrite(input, attachment, "message association", () =>
+      writeVisibleDelivery(input, repos =>
+        stored.user_id === input.user.tg_id && stored.thread_id === input.thread.id
+          ? repos.files.setMessageId(attachment.fileId, assistantMessage.id, metadata)
+          : repos.files.attachToMessage(assistantMessage.id, attachment.fileId, metadata)));
+  }
+}
+
+async function writeVisibleDelivery(
+  input: TurnInput,
+  write: (repos: Pick<TurnInput["repos"], "files" | "messages">) => Promise<void>,
+): Promise<void> {
+  if (input.turnRunId === undefined) return write(input.repos);
+  await input.db.db.transaction(async tx => {
+    // Recovery can terminalize an expired worker while its source reads drain.
+    // Lock the run through the visible write so recovery either observes that
+    // content or wins first and prevents any subsequent content from appearing.
+    const active = await queryOne(tx, sql`
+      select id from turn_runs where id = ${input.turnRunId}
+        and user_id = ${input.user.tg_id} and thread_id = ${input.thread.id}
+        and status in ('running', 'awaiting_delivery')
+      ${tx.dialect === "postgres" ? sql`for update` : sql``}
+    `);
+    if (!active) return;
+    await write({ files: new FilesRepo(tx, createTextSearch(tx, tx.dialect)), messages: new MessagesRepo(tx) });
+  });
 }
 
 async function rememberTelegramDeliverySource(input: TurnInput, attachment: CreatedFileAttachment): Promise<void> {
   const delivery = attachment.telegramDelivery;
   if (!delivery?.fileId) return;
-  await retryTelegramDeliveryMetadataWrite(input, attachment, "Telegram source", () =>
+  await retryAttachmentMetadataWrite(input, attachment, "Telegram source", () =>
     input.repos.files.rememberTelegramObservation(attachment.fileId, telegramFileSource({
       fileId: delivery.fileId!,
       fileUniqueId: delivery.fileUniqueId,
@@ -671,7 +800,7 @@ async function rememberTelegramDeliverySource(input: TurnInput, attachment: Crea
     }));
 }
 
-async function retryTelegramDeliveryMetadataWrite(
+async function retryAttachmentMetadataWrite(
   input: TurnInput,
   attachment: CreatedFileAttachment,
   label: string,
@@ -685,7 +814,7 @@ async function retryTelegramDeliveryMetadataWrite(
     } catch (error) {
       lastError = error;
       if (attempt === 1) {
-        input.logger.warn(`retrying delivered attachment ${label} write`, {
+        input.logger.warn(`retrying attachment ${label} write`, {
           threadId: input.thread.id,
           fileId: attachment.fileId,
           telegramMessageId: attachment.telegramDelivery?.messageId,

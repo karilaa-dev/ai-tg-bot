@@ -34,18 +34,18 @@ describe("SQLite schema initialization", () => {
     `);
     await database.db.execute(sql`
       insert into threads(id, user_id, title, created_at)
-      values (1, 7, 'Cascade', 1)
+      values ('00000000-0000-4000-8000-000000000001', 7, 'Cascade', 1)
     `);
     await database.db.execute(sql`
       insert into files(id, user_id, thread_id, type, name, size, is_inline, created_at)
-      values (1, 7, 1, 'txt', 'cascade.txt', 1, 0, 1)
+      values ('00000000-0000-4000-8000-000000000002', 7, '00000000-0000-4000-8000-000000000001', 'txt', 'cascade.txt', 1, 0, 1)
     `);
     await database.db.execute(sql`
       insert into file_sources(file_id, transport, connection_key, remote_key, locator_json, created_at)
-      values (1, 'test', 'default', 'cascade-source', '{}', 1)
+      values ('00000000-0000-4000-8000-000000000002', 'test', 'default', 'cascade-source', '{}', 1)
     `);
 
-    await database.db.execute(sql`delete from files where id = 1`);
+    await database.db.execute(sql`delete from files where id = '00000000-0000-4000-8000-000000000002'`);
 
     await expect(database.db.query<{ count: number }>(sql`select count(*) as count from file_sources`))
       .resolves.toEqual([{ count: 0 }]);

@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid-fixtures.js";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Api } from "grammy";
 import { AttachmentLoader, type LoadedAttachment } from "../../src/web/client/attachments.js";
@@ -19,15 +20,15 @@ it("loads at most three attachments, deduplicates refreshes, and cancels work on
   vi.stubGlobal("fetch", fetch);
   const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fixture");
   const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-  let states = new Map<number, LoadedAttachment>();
-  const loader = new AttachmentLoader(1, next => { states = next; });
-  const file = (id: number) => ({ id, name: `${id}.txt`, size: 5, mimeType: "text/plain", caption: null });
-  for (let id = 1; id <= 5; id++) loader.load(file(id), "auto");
-  loader.load(file(1), "auto");
+  let states = new Map<string, LoadedAttachment>();
+  const loader = new AttachmentLoader(fixtureUuid(1), next => { states = next; });
+  const file = (id: string) => ({ id, name: `${id}.txt`, size: 5, mimeType: "text/plain", caption: null });
+  for (let id = 1; id <= 5; id++) loader.load(file(fixtureUuid(id)), "auto");
+  loader.load(file(fixtureUuid(1)), "auto");
   expect(fetch).toHaveBeenCalledTimes(3);
   pending[0]!(new Response("hello", { headers: { "Content-Type": "text/plain" } }));
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
-  expect(states.get(1)).toMatchObject({ status: "ready", text: "hello", url: "blob:fixture" });
+  expect(states.get(fixtureUuid(1))).toMatchObject({ status: "ready", text: "hello", url: "blob:fixture" });
   expect(create).toHaveBeenCalledOnce();
   loader.dispose();
   expect(signals.every(signal => signal.aborted)).toBe(true);
@@ -38,17 +39,17 @@ it("loads at most three attachments, deduplicates refreshes, and cancels work on
 
 it("shows file errors and retries only when requested", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "File unavailable" }), { status: 502 })));
-  let states = new Map<number, LoadedAttachment>();
-  const loader = new AttachmentLoader(9, next => { states = next; });
-  const file = { id: 3, name: "a.txt", size: 5, mimeType: "text/plain", caption: null };
+  let states = new Map<string, LoadedAttachment>();
+  const loader = new AttachmentLoader(fixtureUuid(9), next => { states = next; });
+  const file = { id: fixtureUuid(3), name: "a.txt", size: 5, mimeType: "text/plain", caption: null };
   loader.load(file, "auto");
-  await vi.waitFor(() => expect(states.get(3)?.status).toBe("error"));
+  await vi.waitFor(() => expect(states.get(fixtureUuid(3))?.status).toBe("error"));
   loader.load(file, "auto");
   expect(fetch).toHaveBeenCalledTimes(1);
   vi.mocked(fetch).mockResolvedValue(new Response("hello"));
   loader.load(file, "download", true);
-  await vi.waitFor(() => expect(states.get(3)?.status).toBe("ready"));
-  expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe("/api/threads/9/files/3?mode=download");
+  await vi.waitFor(() => expect(states.get(fixtureUuid(3))?.status).toBe("ready"));
+  expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe(`/api/threads/${fixtureUuid(9)}/files/${fixtureUuid(3)}?mode=download`);
   loader.dispose();
 });
 
@@ -77,17 +78,17 @@ it("accepts the exact byte boundary and rejects oversized Telegram metadata befo
 
 it("waits for explicit sandbox approval without retrying during refresh", async () => {
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => Response.json({ code: "sandbox_consent_required" }, { status: 409 })));
-  let states = new Map<number, LoadedAttachment>();
-  const loader = new AttachmentLoader(9, next => { states = next; });
-  const file = { id: 3, name: "a.png", size: 5, mimeType: "image/png", caption: null };
+  let states = new Map<string, LoadedAttachment>();
+  const loader = new AttachmentLoader(fixtureUuid(9), next => { states = next; });
+  const file = { id: fixtureUuid(3), name: "a.png", size: 5, mimeType: "image/png", caption: null };
   loader.load(file, "auto");
-  await vi.waitFor(() => expect(states.get(3)?.needsSandbox).toBe(true));
+  await vi.waitFor(() => expect(states.get(fixtureUuid(3))?.needsSandbox).toBe(true));
   loader.load(file, "auto");
   expect(fetch).toHaveBeenCalledTimes(1);
   vi.mocked(fetch).mockResolvedValue(new Response("hello"));
   loader.load(file, "download", true, true);
-  await vi.waitFor(() => expect(states.get(3)?.status).toBe("ready"));
-  expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe("/api/threads/9/files/3?mode=download&sandbox=start");
+  await vi.waitFor(() => expect(states.get(fixtureUuid(3))?.status).toBe("ready"));
+  expect(vi.mocked(fetch).mock.calls.at(-1)?.[0]).toBe(`/api/threads/${fixtureUuid(9)}/files/${fixtureUuid(3)}?mode=download&sandbox=start`);
   const request = vi.mocked(fetch).mock.calls.at(-1)?.[1];
   expect(request?.method).toBe("POST");
   const headers = new Headers(request?.headers);

@@ -11,18 +11,18 @@ const MAX_REMEMBERED_TOPIC_TITLES = 1_000;
 interface ThreadTitleScheduleInput {
   api: Api;
   chatId: number;
-  threadId: number;
+  threadId: string;
   signal?: AbortSignal;
 }
 
 export class ThreadTitleCoordinator {
-  private readonly jobs = new Map<number, Promise<void>>();
-  private readonly titleUpdates = new Map<number, Promise<boolean>>();
+  private readonly jobs = new Map<string, Promise<void>>();
+  private readonly titleUpdates = new Map<string, Promise<boolean>>();
   private readonly requestedActivityTitles = new Map<string, Set<string>>();
 
   constructor(private readonly input: {
     repos: Repos;
-    pi: PiRuntimeService;
+    pi: Pick<PiRuntimeService, "generateThreadTitle">;
     logger: Logger;
   }) {}
 
@@ -73,7 +73,7 @@ export class ThreadTitleCoordinator {
 
   private async run(input: ThreadTitleScheduleInput): Promise<void> {
     const thread = await this.input.repos.threads.get(input.threadId);
-    if (!isEligibleTopic(thread)) return;
+    if (!thread || (thread.origin !== "web" && !isEligibleTopic(thread))) return;
 
     if (thread.title_source === "generated") {
       if (!thread.topic_title_synced) await this.syncActivity(input);

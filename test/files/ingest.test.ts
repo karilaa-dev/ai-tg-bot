@@ -4,6 +4,8 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { classifyFile, ingestFileBytes, refreshExtractedFileBytes, type FileIngestProgress } from "../../src/files/ingest.js";
+import { chatFileIdsFromText } from "../../src/files/contextMarker.js";
+import { isUuid } from "../../src/utils/uuid.js";
 import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
 import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
 
@@ -26,6 +28,41 @@ describe("file ingestion", () => {
     expect(classifyFile("airtravel.csv", "text/csv")).toBe("csv");
     expect(classifyFile("download", "text/csv")).toBe("csv");
     expect(classifyFile("notes.txt", "text/plain")).toBe("txt");
+    expect(classifyFile("download", "Text/Csv; charset=utf-8")).toBe("csv");
+  });
+
+  it.each([
+    ["bundle.zip", "application/zip"],
+    ["clip.mp4", "video/mp4"],
+    ["installer.exe", "application/x-msdownload"],
+    ["legacy.doc", "application/msword"],
+    ["legacy.xls", "application/vnd.ms-excel"],
+    ["legacy.ppt", "application/vnd.ms-powerpoint"],
+    ["unknown.custom", ""],
+    ["mislabelled.txt", "text/plain"],
+    ["mislabelled.csv", "text/csv"],
+  ])("stores %s as an opaque source and preserves that behavior on refresh", async (name, mime) => {
+    const user = await repos.users.ensure({ tgId: 231 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const bytes = Buffer.from([0x4d, 0x5a, 0, 0xff, 0xfe, 0x80]);
+    const result = await ingestFileBytes({
+      config: loadTestConfig(), repo: repos.files, userId: user.tg_id, threadId: thread.id, name, mime, bytes,
+    });
+    expect(result).toMatchObject({ type: "other", inline: false });
+    expect(result.card).toContain(name);
+    expect(result.card).toContain("materialize_chat_files");
+    expect(result.card).not.toContain("docx-cli");
+    expect(result.card).not.toContain("search_in_file");
+    const file = (await repos.files.get(result.fileId))!;
+    expect(file).toMatchObject({ type: "other", extraction_status: "source_only", content_md: null, is_inline: 0, size: bytes.length });
+    const refreshed = await refreshExtractedFileBytes({ config: loadTestConfig(), repo: repos.files, file, bytes: Buffer.concat([bytes, bytes]) });
+    expect(refreshed).toMatchObject({ type: "other", extraction_status: "source_only", content_md: null, is_inline: 0, size: bytes.length * 2 });
+    expect(await repos.files.chunks(result.fileId)).toEqual([]);
+  });
+
+  it("does not decode invalid UTF-8 without NUL bytes as text", () => {
+    expect(classifyFile("text.txt", "text/plain", Buffer.from([0x80, 0xff]))).toBe("other");
+    expect(classifyFile("text.txt", "text/plain", Buffer.from("Привет\nHello\tworld"))).toBe("txt");
   });
 
   it("persists attachment metadata without a host filesystem snapshot", async () => {
@@ -66,7 +103,8 @@ describe("file ingestion", () => {
 
     expect(result.inline).toBe(true);
     expect(result.type).toBe("csv");
-    expect(result.card).toContain("[[chat-file:");
+    expect(isUuid(result.fileId)).toBe(true);
+    expect(chatFileIdsFromText(result.card)).toEqual([result.fileId]);
     expect(result.card).toContain('"JAN"');
     const file = await repos.files.get(result.fileId);
     expect(file?.content_md).toContain("1 rows");

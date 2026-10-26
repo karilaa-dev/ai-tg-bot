@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { insertReturning, queryOne, valueList, type SqlExecutor } from "../sql.js";
 import { createTextSearch, messageScopePredicate, type MessageSearchScope, type TextSearch } from "../search.js";
@@ -18,8 +19,9 @@ export class FilesRepo {
 
   async insertFile(input: {
     userId: number;
-    threadId: number;
+    threadId: string;
     messageId?: number | null;
+    requireMessage?: boolean;
     type: StoredFileType;
     contentSha256?: string | null;
     mimeType?: string | null;
@@ -34,11 +36,13 @@ export class FilesRepo {
     return insertReturning<FileRow>(
       this.db,
       sql`
-        insert into files(user_id, thread_id, message_id, type, content_sha256, mime_type, extraction_status, name, size, content_md, summary, outline_json, is_inline, created_at)
+        insert into files(id, user_id, thread_id, message_id, requires_message, type, content_sha256, mime_type, extraction_status, name, size, content_md, summary, outline_json, is_inline, created_at)
         values (
+          ${randomUUID()},
           ${input.userId},
           ${input.threadId},
           ${input.messageId ?? null},
+          ${input.requireMessage ? 1 : 0},
           ${input.type},
           ${input.contentSha256 ?? null},
           ${input.mimeType ?? null},
@@ -56,7 +60,7 @@ export class FilesRepo {
     );
   }
 
-  async insertChunk(input: { fileId: number; idx: number; headingPath?: string | null; content: string }): Promise<FileChunkRow> {
+  async insertChunk(input: { fileId: string; idx: number; headingPath?: string | null; content: string }): Promise<FileChunkRow> {
     const inserted = await insertReturning<FileChunkRow>(
       this.db,
       sql`
@@ -69,7 +73,7 @@ export class FilesRepo {
     return inserted;
   }
 
-  async get(fileId: number, scopes?: MessageSearchScope[]): Promise<FileRow | undefined> {
+  async get(fileId: string, scopes?: MessageSearchScope[]): Promise<FileRow | undefined> {
     const file = await queryOne<FileRow>(this.db, sql`select * from files where id = ${fileId}`);
     return file && scopes ? (await this.scopedNames([file], scopes))[0] : file;
   }
@@ -84,7 +88,7 @@ export class FilesRepo {
         where s.transport = ${source.transport}
           and s.connection_key = ${source.connectionKey}
           and s.remote_key = ${source.remoteKey}
-        order by f.id asc
+        order by f.created_at asc, f.id asc
         limit 1
       `,
     );
@@ -102,8 +106,8 @@ export class FilesRepo {
         where content_sha256 = ${hash}
           and type = ${input.type}
           and size = ${input.size}
-          and extraction_status = 'ready'
-        order by id asc
+          and extraction_status in ('ready', 'source_only')
+        order by created_at asc, id asc
         limit 1
       `,
     );
@@ -121,43 +125,48 @@ export class FilesRepo {
       left join message_files mf on mf.file_id = f.id
       where mf.message_id in (${valueList(messageIds)})
          or f.message_id in (${valueList(messageIds)})
-      order by f.id asc
+      order by f.created_at asc, f.id asc
     `);
+    const messages = await this.db.query<{ id: number; thread_id: string }>(sql`
+      select id, thread_id from messages where id in (${valueList(messageIds)})
+    `);
+    const messageThreads = new Map(messages.map(message => [message.id, message.thread_id]));
     return this.projectNames(files, sql`m.id in (${valueList(messageIds)})`, file =>
-      file.message_id !== null && messageIds.includes(file.message_id));
+      file.message_id !== null && messageThreads.get(file.message_id) === file.thread_id);
   }
 
-  async listVisibleIds(scopes: MessageSearchScope[], includeUnattachedInbound: boolean): Promise<number[]> {
+  async listVisibleIds(scopes: MessageSearchScope[], includeUnattachedInbound: boolean): Promise<string[]> {
     if (!scopes.length) return [];
     const threadIds = scopes.map((scope) => scope.threadId);
     const visibleMessage = messageScopePredicate(sql`m.thread_id`, sql`m.id`, threadIds, scopes);
-    const rows = await this.db.query<{ id: number }>(sql`
+    const rows = await this.db.query<{ id: string }>(sql`
       select id from (
-        select f.id, 1 as attached
+        select f.id, f.created_at, 1 as attached
         from files f join messages m on m.id = f.message_id
         where ${visibleMessage}
         union
-        select mf.file_id as id, 1 as attached
-        from message_files mf join messages m on m.id = mf.message_id
+        select mf.file_id as id, f.created_at, 1 as attached
+        from message_files mf join messages m on m.id = mf.message_id join files f on f.id = mf.file_id
         where ${visibleMessage}
         union all
-        select f.id, 0 as attached
+        select f.id, f.created_at, 0 as attached
         from files f
         where f.message_id is null and f.thread_id = ${scopes.at(-1)!.threadId}
+          and f.requires_message = 0
           and not exists (select 1 from message_files mf where mf.file_id = f.id)
           and (${includeUnattachedInbound ? 1 : 0} = 1 or not (
             exists (select 1 from telegram_file_refs r where r.file_id = f.id and r.direction = 'inbound')
             or exists (select 1 from file_sources s where s.file_id = f.id and s.transport = 'telegram')
           ))
       ) candidates
-      order by attached desc, id asc
+      order by attached desc, created_at asc, id asc
     `);
     return rows.map((row) => row.id);
   }
 
-  async listByIds(fileIds: number[], scopes?: MessageSearchScope[]): Promise<FileRow[]> {
+  async listByIds(fileIds: string[], scopes?: MessageSearchScope[]): Promise<FileRow[]> {
     if (!fileIds.length) return [];
-    const files = await this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by id asc`);
+    const files = await this.db.query<FileRow>(sql`select * from files where id in (${valueList(fileIds)}) order by created_at asc, id asc`);
     return scopes ? this.scopedNames(files, scopes) : files;
   }
 
@@ -173,14 +182,14 @@ export class FilesRepo {
 
   private async projectNames(files: FileRow[], visibleMessage: SQL, ownsFile: (file: FileRow) => boolean): Promise<FileRow[]> {
     if (!files.length) return files;
-    const names = await this.db.query<{ file_id: number; display_name: string }>(sql`
+    const names = await this.db.query<{ file_id: string; display_name: string }>(sql`
       select mf.file_id, mf.display_name
       from message_files mf join messages m on m.id = mf.message_id
       where mf.file_id in (${valueList(files.map(file => file.id))})
         and mf.display_name is not null and ${visibleMessage}
       order by m.id desc
     `);
-    const latest = new Map<number, string>();
+    const latest = new Map<string, string>();
     for (const row of names) if (!latest.has(row.file_id)) latest.set(row.file_id, row.display_name);
     return files.map(file => {
       // Byte deduplication crosses users; the original uploader's name is private.
@@ -193,9 +202,9 @@ export class FilesRepo {
     });
   }
 
-  async listRecoverableIds(fileIds: number[]): Promise<number[]> {
+  async listRecoverableIds(fileIds: string[]): Promise<string[]> {
     if (!fileIds.length) return [];
-    const rows = await this.db.query<{ id: number }>(sql`
+    const rows = await this.db.query<{ id: string }>(sql`
       select f.id
       from files f
       where f.id in (${valueList(fileIds)})
@@ -204,12 +213,12 @@ export class FilesRepo {
           or exists (select 1 from file_chunks fc where fc.file_id = f.id)
           or exists (select 1 from file_sources fs where fs.file_id = f.id)
         )
-      order by f.id asc
+      order by f.created_at asc, f.id asc
     `);
     return rows.map((row) => row.id);
   }
 
-  listByIdsWithSource(fileIds: number[], transport: string, connectionKey: string): Promise<FileRow[]> {
+  listByIdsWithSource(fileIds: string[], transport: string, connectionKey: string): Promise<FileRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileRow>(sql`
       select distinct f.*
@@ -218,26 +227,28 @@ export class FilesRepo {
       where f.id in (${valueList(fileIds)})
         and s.transport = ${transport}
         and s.connection_key = ${connectionKey}
-      order by f.id asc
+      order by f.created_at asc, f.id asc
     `);
   }
 
   async setMessageId(
-    fileId: number,
+    fileId: string,
     messageId: number,
     attachment: { displayName?: string | null; caption?: string | null } = {},
   ): Promise<void> {
-    await this.db.execute(sql`update files set message_id = coalesce(message_id, ${messageId}) where id = ${fileId}`);
+    await this.db.execute(sql`update files set message_id = coalesce(message_id, ${messageId})
+      where id = ${fileId} and thread_id = (select thread_id from messages where id = ${messageId})`);
     const file = await this.get(fileId);
+    const message = await queryOne<{ thread_id: string }>(this.db, sql`select thread_id from messages where id = ${messageId}`);
     await this.attachToMessage(messageId, fileId, {
-      displayName: attachment.displayName ?? file?.name ?? null,
+      displayName: attachment.displayName ?? (file ? file.thread_id === message?.thread_id ? file.name : anonymousFileName(file) : null),
       caption: attachment.caption ?? null,
     });
   }
 
   async attachToMessage(
     messageId: number,
-    fileId: number,
+    fileId: string,
     input: { displayName?: string | null; caption?: string | null } = {},
   ): Promise<void> {
     await this.db.execute(sql`
@@ -249,15 +260,15 @@ export class FilesRepo {
     `);
   }
 
-  async updateContentHash(fileId: number, hash: string): Promise<void> {
+  async updateContentHash(fileId: string, hash: string): Promise<void> {
     await this.db.execute(sql`update files set content_sha256 = ${hash} where id = ${fileId}`);
   }
 
-  async updateExtractionStatus(fileId: number, status: FileRow["extraction_status"]): Promise<void> {
+  async updateExtractionStatus(fileId: string, status: FileRow["extraction_status"]): Promise<void> {
     await this.db.execute(sql`update files set extraction_status = ${status} where id = ${fileId}`);
   }
 
-  async updateExtraction(fileId: number, input: {
+  async updateExtraction(fileId: string, input: {
     contentSha256: string;
     mimeType: string | null;
     size: number;
@@ -284,7 +295,7 @@ export class FilesRepo {
     return updated;
   }
 
-  async replaceDocumentExtraction(fileId: number, input: {
+  async replaceDocumentExtraction(fileId: string, input: {
     contentSha256: string;
     mimeType: string | null;
     size: number;
@@ -331,11 +342,11 @@ export class FilesRepo {
     });
   }
 
-  async updateSummary(fileId: number, summary: string | null): Promise<void> {
+  async updateSummary(fileId: string, summary: string | null): Promise<void> {
     await this.db.execute(sql`update files set summary = ${summary} where id = ${fileId}`);
   }
 
-  async rememberSource(fileId: number, source: ChatFileSource): Promise<FileSourceRow> {
+  async rememberSource(fileId: string, source: ChatFileSource): Promise<FileSourceRow> {
     return insertReturning<FileSourceRow>(this.db, sql`
       insert into file_sources(
         file_id, transport, connection_key, remote_key, locator_json, mime_type, last_verified_at, created_at
@@ -358,7 +369,7 @@ export class FilesRepo {
   }
 
   async rememberTelegramFileRefs(
-    fileId: number,
+    fileId: string,
     input: TelegramFileObservation,
   ): Promise<TelegramFileRefRow[]> {
     return this.db.transaction(async (tx) => {
@@ -367,7 +378,7 @@ export class FilesRepo {
   }
 
   async rememberTelegramObservation(
-    fileId: number,
+    fileId: string,
     source: ChatFileSource,
     input: TelegramFileObservation,
   ): Promise<{ source: FileSourceRow; refs: TelegramFileRefRow[] }> {
@@ -397,7 +408,7 @@ export class FilesRepo {
     });
   }
 
-  listTelegramFileRefs(fileIds: number[]): Promise<TelegramFileRefRow[]> {
+  listTelegramFileRefs(fileIds: string[]): Promise<TelegramFileRefRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<TelegramFileRefRow>(sql`
       select * from telegram_file_refs
@@ -406,7 +417,7 @@ export class FilesRepo {
     `);
   }
 
-  listSources(fileId: number): Promise<FileSourceRow[]> {
+  listSources(fileId: string): Promise<FileSourceRow[]> {
     return this.db.query<FileSourceRow>(sql`
       select * from file_sources
       where file_id = ${fileId}
@@ -455,22 +466,22 @@ export class FilesRepo {
     await this.db.execute(sql`update file_sources set last_verified_at = ${Date.now()} where id = ${sourceId}`);
   }
 
-  async setOutline(fileId: number, outline: unknown): Promise<void> {
+  async setOutline(fileId: string, outline: unknown): Promise<void> {
     await this.db.execute(sql`update files set outline_json = ${JSON.stringify(outline)} where id = ${fileId}`);
   }
 
-  chunks(fileId: number): Promise<FileChunkRow[]> {
+  chunks(fileId: string): Promise<FileChunkRow[]> {
     return this.db.query<FileChunkRow>(sql`select * from file_chunks where file_id = ${fileId} order by idx asc`);
   }
 
-  async clearChunks(fileId: number): Promise<number[]> {
+  async clearChunks(fileId: string): Promise<number[]> {
     const chunks = await this.chunks(fileId);
     await this.search.removeChunksForFile(fileId);
     await this.db.execute(sql`delete from file_chunks where file_id = ${fileId}`);
     return chunks.map((chunk) => chunk.id);
   }
 
-  async deleteFile(fileId: number): Promise<number[]> {
+  async deleteFile(fileId: string): Promise<number[]> {
     const chunkIds = await this.clearChunks(fileId);
     await this.db.execute(sql`delete from file_sources where file_id = ${fileId}`);
     await this.db.execute(sql`delete from message_files where file_id = ${fileId}`);
@@ -478,7 +489,20 @@ export class FilesRepo {
     return chunkIds;
   }
 
-  listForThreads(threadIds: number[]): Promise<FileRow[]> {
+  async deleteFileIfUnattached(fileId: string): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const file = await queryOne<FileRow>(tx, sql`
+        select * from files where id = ${fileId} ${tx.dialect === "postgres" ? sql`for update` : sql``}
+      `);
+      if (!file || file.message_id !== null) return false;
+      const attachment = await queryOne(tx, sql`select 1 from message_files where file_id = ${fileId} limit 1`);
+      if (attachment) return false;
+      await new FilesRepo(tx, createTextSearch(tx, tx.dialect)).deleteFile(fileId);
+      return true;
+    });
+  }
+
+  listForThreads(threadIds: string[]): Promise<FileRow[]> {
     if (!threadIds.length) return Promise.resolve([]);
     return this.db.query<FileRow>(sql`
       select distinct f.*
@@ -487,12 +511,12 @@ export class FilesRepo {
       left join messages m on m.id = mf.message_id
       where f.thread_id in (${valueList(threadIds)})
          or m.thread_id in (${valueList(threadIds)})
-      order by f.id asc
+      order by f.created_at asc, f.id asc
     `);
   }
 
 
-  chunksForFiles(fileIds: number[]): Promise<FileChunkRow[]> {
+  chunksForFiles(fileIds: string[]): Promise<FileChunkRow[]> {
     if (!fileIds.length) return Promise.resolve([]);
     return this.db.query<FileChunkRow>(sql`select * from file_chunks where file_id in (${valueList(fileIds)}) order by file_id asc, idx asc`);
   }
@@ -519,7 +543,7 @@ type TelegramFileObservation = {
 
 async function rememberTelegramRefs(
   db: SqlExecutor,
-  fileId: number,
+  fileId: string,
   input: TelegramFileObservation,
   now: number,
 ): Promise<TelegramFileRefRow[]> {

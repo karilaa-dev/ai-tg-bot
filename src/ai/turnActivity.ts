@@ -4,17 +4,17 @@ import type { Repos } from "../db/repos/index.js";
 import type { Logger } from "../logger.js";
 
 export class TurnActivityCoordinator {
-  private readonly jobs = new Map<number, { promise: Promise<void>; requested: boolean; threadId?: number }>();
+  private readonly jobs = new Map<number, { promise: Promise<void>; requested: boolean; threadId?: string }>();
   private readonly stopping = new AbortController();
 
   constructor(private readonly input: {
     api: Api;
     repos: Repos;
     logger: Logger;
-    syncThreadActivity?(input: { threadId: number; chatId: number; signal?: AbortSignal }): Promise<boolean | void>;
+    syncThreadActivity?(input: { threadId: string; chatId: number; signal?: AbortSignal }): Promise<boolean | void>;
   }) {}
 
-  schedule(runId: number, threadId?: number): void {
+  schedule(runId: number, threadId?: string): void {
     if (this.stopping.signal.aborted) return;
     const existing = this.jobs.get(runId);
     if (existing) {
@@ -40,7 +40,7 @@ export class TurnActivityCoordinator {
     }
   }
 
-  async waitForIdle(threadId?: number): Promise<void> {
+  async waitForIdle(threadId?: string): Promise<void> {
     while (true) {
       const jobs = [...this.jobs.values()].filter((job) => threadId === undefined || job.threadId === undefined || job.threadId === threadId);
       if (!jobs.length) return;

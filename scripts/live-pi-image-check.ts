@@ -28,6 +28,7 @@ const db = createDatabase(config, logger);
 let pi: PiRuntimeManager | undefined;
 let commands: ThreadE2BSandboxRuntimeManager | undefined;
 let sandboxId: string | undefined;
+let threadId: string | undefined;
 try {
   await db.initialize();
   const repos = createRepos(db.db, db.search);
@@ -41,6 +42,7 @@ try {
     topicId: null,
     title: "Office image smoke",
   });
+  threadId = thread.id;
   commands = new ThreadE2BSandboxRuntimeManager({ config, repos, logger });
   pi = new PiRuntimeManager({
     config,
@@ -170,10 +172,10 @@ try {
   await pi?.dispose();
   await commands?.dispose();
   // Locate a sandbox even if the workflow failed before producing an attachment.
-  if (!sandboxId) {
+  if (!sandboxId && threadId !== undefined) {
     const repos = createRepos(db.db, db.search);
     const rows = await repos.threadSandboxes
-      .get(config.E2B_DEPLOYMENT_ID, 1)
+      .get(config.E2B_DEPLOYMENT_ID, threadId)
       .catch(() => undefined);
     sandboxId = rows?.sandbox_id;
   }

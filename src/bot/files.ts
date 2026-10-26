@@ -1,11 +1,11 @@
 import type { FileRow } from "../db/types.js";
 import { isAbortError, raceWithAbort, throwIfAborted } from "../files/cancel.js";
 import { sha256Hex } from "../files/hash.js";
-import { cardForFile, ingestFileBytes, sourceFileSummary, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
+import { cardForFile, classifyFile, ingestFileBytes, type AcceptedFileType, type FileIngestProgress } from "../files/ingest.js";
 import { audioFormat, detectAudioType, EmptyTranscriptError, TranscriptionHttpError, transcribeAudio } from "../audio/transcription.js";
 import { boundTranscript } from "../audio/transcripts.js";
 import { chatFileMarker } from "../files/contextMarker.js";
-import { FileTooLargeError, MAX_FILE_BYTES } from "../files/limits.js";
+import { FileTooLargeError, TG_DOWNLOAD_MAX_BYTES } from "../files/limits.js";
 import { detectImageMediaType } from "../files/mediaType.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { escapeHtml } from "../util/text.js";
@@ -36,7 +36,7 @@ interface TelegramFileInput {
 }
 
 interface PreparedTelegramFile {
-  fileId: number;
+  fileId: FileRow["id"];
   card: string;
   inline: boolean;
   type: AcceptedFileType;
@@ -51,15 +51,13 @@ export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): 
     return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
-  cancelMediaGroup(ctx, job.mediaGroupId);
-  job.controller.abort();
+  job.cancel();
   await job.status.updateKey("file-processing-stopping");
   return true;
 }
 
 function activeFileJobKey(ctx: BotContext): string | undefined {
-  if (!ctx.chat || !ctx.thread) return undefined;
-  return `${ctx.chat.id}:${ctx.thread.topic_id ?? "general"}`;
+  return ctx.thread?.id;
 }
 
 export class FileProcessingStatus {
@@ -136,6 +134,7 @@ async function ingestTelegramFile(
     signal: AbortSignal | undefined;
     status?: FileProcessingStatus;
     logLabel: "file" | "image";
+    bytes?: Buffer;
   },
 ): Promise<IngestTelegramResult> {
   if (!ctx.user || !ctx.thread || !ctx.chat) return undefined;
@@ -151,49 +150,25 @@ async function ingestTelegramFile(
     }));
   }
   const reused = cached && isCompatibleStoredFile(cached, input)
-    ? await prepareCachedTelegramFile(ctx, input, cached, signal, status)
+    ? await prepareCachedTelegramFile(ctx, input, cached, signal, opts.bytes)
     : undefined;
   if (reused) return { outcome: "reused-cached", prepared: reused };
 
-  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
-    throwIfAborted(signal);
-    if ((input.size ?? 0) > MAX_FILE_BYTES) {
-      if (status) await status.updateText(ctx.t("file-too-big"));
-      else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
-      return "too-big";
-    }
-    const file = await ctx.services.repos.files.insertFile({
-      userId: ctx.user.tg_id,
-      threadId: ctx.thread.id,
-      type: input.type,
-      mimeType: input.mime ?? null,
-      extractionStatus: "source_only",
-      name: input.name,
-      size: input.size ?? 0,
-      summary: sourceFileSummary(input.type),
-      isInline: false,
-    });
-    const canonical = await claimTelegramSource(ctx, file, source, input);
-    return {
-      outcome: "ingested",
-      prepared: await preparedTelegramFile(ctx, input, canonical, signal),
-    };
-  }
+  if ((input.size ?? 0) > TG_DOWNLOAD_MAX_BYTES) throw new FileTooLargeError();
 
-  await status?.updateKey("file-processing-downloading");
+  if (!opts.bytes) await status?.updateKey("file-processing-downloading");
   ctx.services.logger.debug(withType ? "telegram file download starting" : "telegram image download starting", ctxLogMeta(ctx, {
     name: input.name,
     ...(withType ? { type: input.type } : {}),
   }));
-  const downloaded = await ctx.services.fileResolver.resolveSource(source, signal);
+  const bytes = opts.bytes ?? (await ctx.services.fileResolver.resolveSource(source, signal)).bytes;
   throwIfAborted(signal);
-  const bytes = Buffer.isBuffer(downloaded.bytes) ? downloaded.bytes : Buffer.from(downloaded.bytes);
   ctx.services.logger.debug(withType ? "telegram file download complete" : "telegram image download complete", ctxLogMeta(ctx, {
     name: input.name,
     ...(withType ? { type: input.type } : {}),
     bytes: bytes.length,
   }));
-  if ((input.size ?? bytes.length) > MAX_FILE_BYTES || bytes.length > MAX_FILE_BYTES) {
+  if ((input.size ?? bytes.length) > TG_DOWNLOAD_MAX_BYTES || bytes.length > TG_DOWNLOAD_MAX_BYTES) {
     ctx.services.logger.warn(withType ? "downloaded file rejected; too large" : "downloaded image rejected; too large", ctxLogMeta(ctx, {
       name: input.name,
       ...(withType ? { type: input.type } : {}),
@@ -203,6 +178,7 @@ async function ingestTelegramFile(
     else await replyWithThreadFallback(ctx, ctx.t("file-too-big"), threadExtra(ctx.thread));
     return "too-big";
   }
+  input = { ...input, type: classifyFile(input.name, input.mime, bytes) };
   const contentSha256 = sha256Hex(bytes);
   const cachedByHash = await ctx.services.repos.files.findByContentHash(contentSha256, {
     type: input.type,
@@ -214,7 +190,7 @@ async function ingestTelegramFile(
       name: input.name,
       ...(withType ? { type: cachedByHash.type } : {}),
     }));
-    const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, signal, status);
+    const hashReused = await prepareCachedTelegramFile(ctx, input, cachedByHash, signal, bytes);
     if (hashReused) return { outcome: "reused-hash", prepared: hashReused };
   }
   if (input.type === "image") {
@@ -234,7 +210,8 @@ async function ingestTelegramFile(
       summary,
       isInline: true,
     });
-    const canonical = await claimTelegramSource(ctx, file, { ...source, mimeType }, input);
+    const canonical = await claimTelegramSource(ctx, file, { ...source, mimeType }, input, true);
+    await ctx.services.fileResolver.persistFile(canonical, bytes, signal);
     return {
       outcome: "ingested",
       prepared: await preparedTelegramFile(ctx, input, canonical, signal),
@@ -256,7 +233,8 @@ async function ingestTelegramFile(
   throwIfAborted(signal);
   const stored = await ctx.services.repos.files.get(ingested.fileId);
   if (!stored) throw new Error(`Ingested file #${ingested.fileId} disappeared before source registration.`);
-  const canonical = await claimTelegramSource(ctx, stored, source, input);
+  const canonical = await claimTelegramSource(ctx, stored, source, input, true);
+  await ctx.services.fileResolver.persistFile(canonical, bytes, signal);
   return {
     outcome: "ingested",
     prepared: canonical.id === ingested.fileId ? ingested : await preparedTelegramFile(ctx, input, canonical, signal),
@@ -283,7 +261,10 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   }
   const controller = new AbortController();
   const status = new FileProcessingStatus(ctx, input.name);
-  activeFileJobs.set(jobKey, { controller, status, mediaGroupId: input.mediaGroupId });
+  activeFileJobs.set(jobKey, { controller, status, cancel: () => {
+    cancelMediaGroup(ctx, input.mediaGroupId);
+    controller.abort();
+  } });
   const startedAt = Date.now();
   ctx.services.logger.info("file job starting", ctxLogMeta(ctx, {
     name: input.name,
@@ -299,12 +280,14 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
   let failureKey = "error-generic";
   try {
     let transcript: Awaited<ReturnType<typeof transcribeAudio>> | undefined;
+    let downloadedBytes: Buffer | undefined;
     // Failed or cancelled transcription must not create or claim durable file records.
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
       failureKey = "audio-download-failed";
       const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
         fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
       }), controller.signal);
+      downloadedBytes = downloaded.bytes;
       input = { ...input, size: downloaded.size };
       failureKey = "audio-transcription-failed";
       let format = audioFormat(input.name, input.mime);
@@ -327,6 +310,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       signal: controller.signal,
       status: input.type === "image" ? undefined : status,
       logLabel: input.type === "image" ? "image" : "file",
+      bytes: downloadedBytes,
     });
     throwIfAborted(controller.signal);
     if (result === "too-big" || result === undefined) return;
@@ -357,7 +341,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       await handlePreparedTelegramFile(ctx, input, result.prepared, controller.signal);
       return;
     }
-    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio"
+    await status.updateKey(result.prepared.type === "pdf" || result.prepared.type === "docx" || result.prepared.type === "audio" || result.prepared.type === "other"
       ? "file-source-registered"
       : "file-processed");
     ctx.services.logger.info("file job complete", ctxLogMeta(ctx, {
@@ -390,7 +374,7 @@ async function prepareCachedTelegramFile(
   input: TelegramFileInput,
   cached: FileRow,
   signal: AbortSignal | undefined,
-  _status?: FileProcessingStatus,
+  bytes?: Buffer,
 ): Promise<PreparedTelegramFile> {
   throwIfAborted(signal);
   const canonical = await claimTelegramSource(ctx, cached, telegramFileSource({
@@ -399,6 +383,8 @@ async function prepareCachedTelegramFile(
     mimeType: input.mime,
   }), input);
   assertCompatibleTelegramFile(canonical, input);
+  if (bytes) await ctx.services.fileResolver.persistFile(canonical, bytes, signal);
+  else await ctx.services.fileResolver.resolveFile(canonical, signal);
   const prepared = await preparedTelegramFile(ctx, input, canonical, signal);
   ctx.services.logger.debug("prepared indexed telegram file", ctxLogMeta(ctx, {
     fileId: canonical.id,
@@ -412,6 +398,7 @@ async function claimTelegramSource(
   candidate: FileRow,
   source: ReturnType<typeof telegramFileSource>,
   input: TelegramFileInput,
+  createdHere = false,
 ): Promise<FileRow> {
   const refs = input.telegramRefs?.length
     ? input.telegramRefs
@@ -433,7 +420,12 @@ async function claimTelegramSource(
   if (!isCompatibleStoredFile(canonical, input)) {
     throw new Error(`Telegram source already belongs to incompatible file #${canonical.id}.`);
   }
-  await ctx.services.repos.files.deleteFile(candidate.id);
+  if (candidate.content_sha256 && canonical.content_sha256 && candidate.content_sha256 !== canonical.content_sha256) {
+    throw new Error(`Telegram source already belongs to different bytes for file #${canonical.id}.`);
+  }
+  if (createdHere && await ctx.services.repos.files.deleteFileIfUnattached(candidate.id)) {
+    await ctx.services.fileResolver.removeLocalFile(candidate.id);
+  }
   ctx.services.logger.info("reused canonical Telegram source owner", ctxLogMeta(ctx, {
     duplicateFileId: candidate.id,
     canonicalFileId: canonical.id,
@@ -451,14 +443,11 @@ async function preparedTelegramFile(
   assertCompatibleTelegramFile(file, input);
   if (file.type === "image" && file.user_id !== ctx.user!.tg_id) {
     // Older cached descriptions (and generated images) may contain the owner's
-    // private prompt. Replace that description before sharing the file record.
-    const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
-      fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
-    }), signal);
+    // private prompt. Use a fresh description for this attachment only.
+    const downloaded = await ctx.services.fileResolver.resolveFile(file, signal);
     const mimeType = detectImageMediaType(downloaded.bytes) ?? input.mime ?? "image/jpeg";
     const summary = await raceWithAbort(ctx.services.pi.captionImage(downloaded.bytes, mimeType, signal), signal);
     throwIfAborted(signal);
-    await ctx.services.repos.files.updateSummary(file.id, summary);
     file = { ...file, summary };
   }
   const chunks = file.is_inline ? [] : await ctx.services.repos.files.chunks(file.id);
@@ -478,7 +467,7 @@ function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): 
 
 function isCompatibleStoredFile(file: FileRow, input: TelegramFileInput): boolean {
   if (file.type !== input.type) return false;
-  if (input.type === "pdf" || input.type === "docx" || input.type === "audio") {
+  if (input.type === "pdf" || input.type === "docx" || input.type === "audio" || input.type === "other") {
     return file.extraction_status === "source_only" || file.extraction_status === "ready";
   }
   return file.extraction_status === "ready";

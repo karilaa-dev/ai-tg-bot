@@ -1,20 +1,37 @@
 import { z } from "zod";
+import { MAX_FILE_BYTES } from "./files/limits.js";
+import { isIP } from "node:net";
 import { E2B_TOOLBOX_RELEASE_REF } from "./e2b/templateIdentity.js";
 import { MemoryEnvironmentSchema } from "./memory/optmem/settings.js";
 
 const PiThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 const OptionalStringSchema = z.preprocess(normalizeOptionalString, z.string().min(1).optional());
+const UserIdListSchema = z.preprocess(value => typeof value === "string" ? value.trim() === "" ? [] : value.split(",").map(id => id.trim()) : value,
+  z.array(z.union([z.number(), z.string().regex(/^[1-9]\d*$/).transform(Number)]).pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))).default([]));
 
 const ConfigSchema = z.object({
   ...MemoryEnvironmentSchema.shape,
   WEB_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
-  WEB_ADMIN_TOKEN: z.preprocess(normalizeOptionalString, z.string().min(1).refine(value => Buffer.byteLength(value) <= 1_024, "WEB_ADMIN_TOKEN must not exceed 1024 bytes.").optional()),
+  /** Telegram user IDs that see the admin dashboard after signing in with Telegram. */
+  WEB_ADMIN_USER_IDS: UserIdListSchema,
+  WEB_TELEGRAM_CLIENT_ID: z.preprocess(normalizeOptionalString, z.string().regex(/^[1-9]\d*$/).max(32).optional()),
+  WEB_TELEGRAM_CLIENT_SECRET: OptionalStringSchema,
+  WEB_PUBLIC_URL: z.preprocess(normalizeOptionalString, z.string().refine(value => {
+    try {
+      const url = new URL(value);
+      return !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash
+        && (url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)));
+    } catch { return false; }
+  }, "WEB_PUBLIC_URL must be an HTTPS origin (HTTP is permitted only on loopback).").transform(value => new URL(value).origin).optional()),
   WEB_HOST: z.string().trim().min(1).default("0.0.0.0"),
   WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  WEB_AUTOLOAD_MAX_BYTES: z.coerce.number().int().min(0).max(20 * 1024 * 1024).default(5 * 1024 * 1024),
+  WEB_AUTOLOAD_MAX_BYTES: z.coerce.number().int().min(0).max(MAX_FILE_BYTES).default(5 * 1024 * 1024),
+  WEB_TRUSTED_PROXY_IPS: z.preprocess(value => typeof value === "string" ? value.trim() === "" ? [] : value.split(",").map(ip => ip.trim()) : value,
+    z.array(z.string().refine(ip => isIP(ip) !== 0, "Use exact proxy IP addresses.")).default([])),
   BOT_TOKEN: z.string().min(1),
   DB_URL: z.string().default("sqlite:./data/bot.db"),
+  FILE_STORAGE_PATH: z.string().trim().min(1).default("./data/files"),
   PI_CODING_AGENT_DIR: z.string().min(1).default("./data/pi"),
   CODEX_AUTH_FILE: OptionalStringSchema,
   CODEX_FAST_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
@@ -61,8 +78,12 @@ const ConfigSchema = z.object({
   ONBOARDING_TIMEZONE_DELAY_MS: z.coerce.number().int().min(0).default(2_000),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 }).superRefine((config, context) => {
-  if (config.WEB_ENABLED && !config.WEB_ADMIN_TOKEN) {
-    context.addIssue({ code: "custom", path: ["WEB_ADMIN_TOKEN"], message: "WEB_ADMIN_TOKEN is required when WEB_ENABLED=true." });
+  const oauth = [config.WEB_TELEGRAM_CLIENT_ID, config.WEB_TELEGRAM_CLIENT_SECRET, config.WEB_PUBLIC_URL];
+  if (oauth.some(Boolean) && !oauth.every(Boolean)) {
+    context.addIssue({ code: "custom", path: ["WEB_TELEGRAM_CLIENT_ID"], message: "Telegram login requires WEB_TELEGRAM_CLIENT_ID, WEB_TELEGRAM_CLIENT_SECRET, and WEB_PUBLIC_URL together." });
+  }
+  if (config.WEB_ENABLED && !oauth.every(Boolean)) {
+    context.addIssue({ code: "custom", path: ["WEB_TELEGRAM_CLIENT_ID"], message: "WEB_ENABLED=true requires Telegram login: set WEB_TELEGRAM_CLIENT_ID, WEB_TELEGRAM_CLIENT_SECRET, and WEB_PUBLIC_URL." });
   }
 });
 

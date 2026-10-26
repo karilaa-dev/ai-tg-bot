@@ -1,3 +1,4 @@
+import { fixtureUuid } from "./uuid.js";
 import { describe, it, expect } from "vitest";
 import { workspaceRuntime } from "../helpers/workspaceRuntime.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -14,12 +15,12 @@ export function officeTestSetup() {
     runtime,
     config,
     userId: 1,
-    threadId: 2,
+    threadId: fixtureUuid(2),
   });
   const input = {
     config,
     user: { tg_id: 1 },
-    thread: { id: 2 },
+    thread: { id: fixtureUuid(2) },
     commandRuntime: runtime,
     officeValidation,
   } as unknown as ToolBuildInput;

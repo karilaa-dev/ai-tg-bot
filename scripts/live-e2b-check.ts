@@ -640,7 +640,7 @@ try {
 
 function commandRequest(
   userId: number,
-  threadId: number,
+  threadId: string,
   script: string,
   args: string[] = [],
   threadFiles: SandboxThreadFile[] = [],

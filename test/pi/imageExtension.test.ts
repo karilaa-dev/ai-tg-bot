@@ -1,7 +1,7 @@
 import { workspaceRuntime, TEST_PNG } from "../helpers/workspaceRuntime.js";
 import { testOutgoingFiles } from "../helpers/outgoingFiles.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { validateToolArguments, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
@@ -195,9 +195,15 @@ describe("Pi generate_image extension", () => {
     const {bridge}=await reusableBridge();
     await expect(createGenerateImagePiTool({...bridge,commandRuntime:undefined}).execute("missing",{prompt:"draw"},undefined,undefined,{} as never)).rejects.toThrow("workspace support");
     const tool=createGenerateImagePiTool(bridge);
-    await expect(tool.execute("too-many",{prompt:"draw",reference_file_ids:[1,2,3],reference_paths:["/a.png","/b.png","/c.png"]},undefined,undefined,{} as never)).rejects.toThrow("At most 5");
+    for (const fileId of [1, "1", "not-a-uuid"]) {
+      const invalidInput = {prompt:"draw",reference_file_ids:[fileId]};
+      expect(() => validateToolArguments(tool, {type:"toolCall",id:"invalid-reference",name:tool.name,arguments:invalidInput})).toThrow("Validation failed");
+      await expect(tool.execute("invalid-reference",invalidInput,undefined,undefined,{} as never)).rejects.toThrow("UUID strings");
+    }
+    await expect(tool.execute("too-many",{prompt:"draw",reference_file_ids:["00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002","00000000-0000-4000-8000-000000000003"],reference_paths:["/a.png","/b.png","/c.png"]},undefined,undefined,{} as never)).rejects.toThrow("At most 5");
     const other=await bridge.repos.threads.create({userId:bridge.user.tg_id,topicId:null,title:"Other"});
     const ref=await bridge.repos.files.insertFile({userId:bridge.user.tg_id,threadId:other.id,type:"image",name:"private.png",size:TEST_PNG.length,isInline:false});
+    expect(validateToolArguments(tool, {type:"toolCall",id:"valid-reference",name:tool.name,arguments:{prompt:"draw",reference_file_ids:[ref.id]}})).toMatchObject({reference_file_ids:[ref.id]});
     await expect(tool.execute("cross-thread",{prompt:"draw",reference_file_ids:[ref.id]},undefined,undefined,{} as never)).rejects.toThrow("not available in this thread");
     expect(fetch).not.toHaveBeenCalled();
   });

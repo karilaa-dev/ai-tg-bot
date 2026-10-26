@@ -15,7 +15,7 @@ const PDF_RENDER_JPEG_QUALITY = 85;
 type RenderedPdfPages =
   | { error: string; error_code?: string }
   | {
-      file_id: number;
+      file_id: string;
       pages: Array<{
         page: number;
         media_type: "image/jpeg";
@@ -30,7 +30,7 @@ export function createRenderPdfPagesTool(input: ToolBuildInput) {
     description:
       `Render selected pages of an attached PDF as model-only vision images. Use after PDF Inspector classifies a PDF as scanned, image-based, mixed, or reports unreadable text. Accepts at most ${MAX_PAGES_PER_CALL} pages per call. The images are returned to the model and are not sent to Telegram.`,
     inputSchema: z.object({
-      file_id: z.number().int().positive(),
+      file_id: z.string().uuid(),
       pages: z.array(z.number().int().positive()).min(1).max(MAX_PAGES_PER_CALL).default([1]),
     }),
     execute: async ({ file_id, pages }, signal): Promise<RenderedPdfPages> => {
