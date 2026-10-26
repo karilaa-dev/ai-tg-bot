@@ -36,6 +36,19 @@ describe("durable outgoing attachment bytes", () => {
     return { thread, files: new OutgoingFiles({ config, repos, user, thread, fileResolver }) };
   }
 
+  it("retains bytes even when a caller does not inject a resolver", async () => {
+    const user = await repos.users.ensure({ tgId: 2903 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const files = new OutgoingFiles({ config: { ...config, FILE_STORAGE_PATH: directory }, repos, user, thread });
+    try {
+      const bytes = Buffer.from("Download without a sandbox");
+      const attachment = await files.bytes(async () => ({ name: "result.bin", bytes }));
+      const stored = await repos.files.get(attachment.fileId);
+      if (!stored) throw new Error("Missing file");
+      expect((await fileResolver.resolveFile(stored, undefined, undefined, { excludeSandbox: true, allowSandboxResume: false, pauseAfterRead: false })).bytes).toEqual(bytes);
+    } finally { await files.dispose(); }
+  });
+
   it.each(["created_file", "generated_image"] as const)("retains %s after delivery, buffer disposal, and restart", async origin => {
     const { files, thread } = await outgoing();
     const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 1, 2]);

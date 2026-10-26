@@ -38,6 +38,7 @@ export class FileResolver {
 
   async persistFile(file: FileRow, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
+    if (!this.localStore) throw new Error("Local file storage is not configured.");
     if (!file.content_sha256) file = await this.files.get(file.id) ?? file;
     const integrity = { size: bytes.byteLength, contentSha256: sha256Hex(bytes) };
     if (hasUnknownTelegramSize(file)
@@ -91,10 +92,10 @@ export class FileResolver {
         if (source.transport === "local" && source.remote_key !== String(file.id)) throw new Error("Local source UUID does not match its file.");
         if (hasUnknownTelegramSize(file)
           && (source.transport === "telegram" || source.transport === "local")) {
-          await this.persistFile(file, resolved.bytes, signal);
+          if (this.localStore) await this.persistFile(file, resolved.bytes, signal);
         } else {
           assertCanonicalIntegrity(file, resolved, source.transport);
-          if (source.transport !== "local") await this.persistFile(file, resolved.bytes, signal);
+          if (this.localStore && source.transport !== "local") await this.persistFile(file, resolved.bytes, signal);
         }
         await this.files.markSourceVerified(source.id).catch(() => undefined);
         return resolved;

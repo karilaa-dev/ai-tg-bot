@@ -18,6 +18,10 @@ const ItemProps = UiItem.props.omit({ links: true }).extend({ links: z.array(Ele
 
 /** Validate the static subset before the SDK resolves references or evaluates anything. */
 export function validateOpenUi(source: string): string {
+  return inspectOpenUi(source).source;
+}
+
+export function inspectOpenUi(source: string): { source: string; fileIds: string[] } {
   if (!source.trim() || source.length > OPENUI_MAX_SOURCE_CHARS) throw new Error("OpenUI source is empty or too large.");
   const lines = source.trim().split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
   if (lines.length > 64) throw new Error("OpenUI has too many statements.");
@@ -90,16 +94,19 @@ export function validateOpenUi(source: string): string {
   if (!parsed.root || parsed.meta.incomplete || parsed.meta.errors.length || parsed.meta.unresolved.length
     || parsed.rootExpression || parsed.queryStatements.length || parsed.mutationStatements.length
     || Object.keys(parsed.stateDeclarations).length) throw new Error("OpenUI does not match the component library.");
-  validateTree(parsed.root);
-  return normalized;
+  return { source: normalized, fileIds: validateTree(parsed.root) };
 }
 
-function validateTree(root: ElementNode): void {
+function validateTree(root: ElementNode): string[] {
   type Name = z.infer<typeof ComponentName>;
   const pending: { value: unknown; parent?: Name }[] = [{ value: root }];
   let nodes = 0;
   let images = 0;
-  const countImage = () => { if (++images > 12) throw new Error("OpenUI has too many images."); };
+  const fileIds = new Set<string>();
+  const countImage = (source: string) => {
+    if (++images > 12) throw new Error("OpenUI has too many images.");
+    fileIds.add(source.slice(5));
+  };
   while (pending.length) {
     if (++nodes > MAX_NODES) throw new Error("OpenUI has too many components.");
     const entry = pending.pop()!;
@@ -115,8 +122,7 @@ function validateTree(root: ElementNode): void {
       case "Text": UiText.props.parse(node.props); break;
       case "Button": UiButton.props.parse(node.props); break;
       case "Image":
-        UiImage.props.parse(node.props);
-        countImage();
+        countImage(UiImage.props.parse(node.props).source);
         break;
       case "Flow": push(FlowProps.parse(node.props).steps, "FlowStep"); break;
       case "FlowStep": requireParent("Flow"); UiFlowStep.props.parse(node.props); break;
@@ -126,7 +132,7 @@ function validateTree(root: ElementNode): void {
       case "Item": {
         requireParent("ItemList");
         const props = ItemProps.parse(node.props);
-        if (props.image) countImage();
+        if (props.image) countImage(props.image);
         push(props.links, "Link");
         break;
       }
@@ -172,6 +178,7 @@ function validateTree(root: ElementNode): void {
       }
     }
   }
+  return [...fileIds];
 }
 
 export function safeOpenUi(source: unknown): string | undefined {

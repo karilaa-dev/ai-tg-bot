@@ -251,7 +251,10 @@ describe("create_file", () => {
     expect(createdFiles).toMatchObject([{ type: "other", delivery: "document", data: bytes }]);
     const stored = (await repos.files.listForThreads([thread.id]))[0]!;
     expect(stored).toMatchObject({ extraction_status: "source_only", content_md: null, is_inline: 0, content_sha256: contentSha256 });
-    expect(await repos.files.listSources(stored.id)).toMatchObject([{ transport: "e2b", remote_key: expect.stringContaining(contentSha256) }]);
+    expect(await repos.files.listSources(stored.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ transport: "local", remote_key: stored.id }),
+      expect.objectContaining({ transport: "e2b", remote_key: expect.stringContaining(contentSha256) }),
+    ]));
     expect(createdFiles[0]?.card).toContain("materialize_chat_files");
   });
 });

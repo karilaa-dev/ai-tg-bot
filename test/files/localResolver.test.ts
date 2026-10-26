@@ -30,6 +30,12 @@ describe("local-first durable file resolution", () => {
     resolver = new FileResolver(repos.files, undefined, store);
   });
 
+  it("refuses to report persistence when no local store is configured", async () => {
+    const file = await insertFile();
+    await expect(new FileResolver(repos.files).persistFile(file, original)).rejects.toThrow("Local file storage is not configured");
+    expect(await repos.files.listSources(file.id)).toEqual([]);
+  });
+
   afterEach(async () => {
     await db.destroy();
     await rm(directory, { recursive: true, force: true });

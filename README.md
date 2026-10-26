@@ -106,7 +106,7 @@ Set the required Telegram, E2B, and OpenRouter keys in Dokploy. Tavily and Brows
 - E2B Base allows one hour of continuous runtime. The manager pauses and reconnects near 55 minutes during long work, which resets that runtime window without discarding filesystem or memory state.
 - Public traffic does not resume a paused sandbox. A later bot operation reconnects it.
 
-There is no host bind mount, E2B volume, cross-thread shared directory, or canonical host file store. Temporary outgoing spools last only for the current turn. Telegram bytes pass through the bot during intake, sandbox restoration, and delivery.
+Sandbox workspaces are isolated and have no host bind mount or shared E2B volume. User-visible attachment bytes are retained separately in the bot's local file store. Temporary outgoing spools last only for the current turn.
 
 The implementation follows E2B's current documentation for [sandboxes](https://e2b.dev/docs/sandbox), [persistence](https://e2b.dev/docs/sandbox/persistence), and [auto-resume](https://e2b.dev/docs/sandbox/auto-resume).
 
@@ -152,11 +152,13 @@ The bot creates secure sandboxes with outbound internet and public port traffic 
 - `[[chat-file:<id>]]` markers are persistent Pi references.
 - `load_message` can add selected attachment bytes to model context.
 - `materialize_chat_files` restores explicitly selected, visible files from either frontend into `/home/user/telegram-files` for sandbox work.
-- Agent-created files retain local bytes and an E2B source locator. Delivery reuses buffered export bytes when available; local storage is the first choice for subsequent reads.
+- Agent-created files retain local bytes before they enter the outgoing queue. Final delivery verifies and repairs that copy before publishing the attachment. Reused gallery images and recommendation thumbnails are also retained before the visual response is published. Downloading these files does not require a running sandbox.
 - CSV and text content is placed inline or split into searchable chunks. DOCX and PDF uploads retain their original source and are inspected in the sandbox with the document tools. Images receive model-generated descriptions that exclude private attachment captions.
 - Website uploads and created files support 50 MiB per file, matching the Telegram cloud Bot API multipart sending limit. Telegram-only downloads and audio transcription retain their separate 20 MiB limits. One answer can attach at most 25 created files.
 
 Existing Telegram-only attachments and legacy database upload blobs are cached locally when read. New uploads are downloaded eagerly; no file extension is blocked. Keep the local storage folder accessible to every app instance using the same database.
+
+Run `bun scripts/cache-visible-files.ts` against an initialized database to cache existing visible attachments in advance. It verifies each file, downloads recoverable originals from Telegram or legacy web blobs with two workers, and reports UUIDs it could not recover. By default it never starts a sandbox. Add `--recover-sandbox-sources` for a one-time recovery of older originals from saved sandbox snapshots; sandboxes resumed for a read are paused afterward. The command exits with status 1 if any original remains unavailable. Rerunning it safely reuses verified local copies.
 
 The bot retries partial Telegram restoration with exponential delays from five minutes to one hour. Recreating a sandbox or changing a file descriptor triggers an immediate retry. Ambiguous send results are stored separately from confirmed deliveries.
 

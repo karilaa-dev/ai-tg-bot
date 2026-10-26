@@ -2,7 +2,7 @@ import { fixtureUuid } from "./uuid.js";
 import { describe, expect, it } from "vitest";
 import { finishResponseOpenUi } from "../../src/ai/openui.js";
 import { openUiExamples, openUiInstructions } from "../../src/openui/library.js";
-import { safeOpenUi, validateOpenUi } from "../../src/openui/validate.js";
+import { inspectOpenUi, safeOpenUi, validateOpenUi } from "../../src/openui/validate.js";
 import { currentTurnAssistantResult } from "../../src/ai/currentTurnResult.js";
 import { messageView } from "../../src/web/message-view.js";
 import type { MessageRow } from "../../src/db/types.js";
@@ -11,6 +11,13 @@ import { savedRestaurantOpenUi } from "../web/openui-saved-fixture.js";
 const source = 'root = Stack([card, next])\ncard = Card("Comparison", [Text("Two options"), Table("Plans", ["Name", "Price"], [["Basic", "$10"], ["Pro", "$20"]])])\nnext = Button("Choose basic", "Tell me more about the Basic plan.")';
 
 describe("OpenUI admission", () => {
+  it("collects referenced pictures and thumbnails without treating text as a file request", () => {
+    const id = fixtureUuid(1);
+    const literal = fixtureUuid(2);
+    const inspected = inspectOpenUi(`root = Stack([picture,choices,Text("file:${literal}")])\npicture = Image("file:${id}","Alt","")\nchoices = ItemList("Choices",[Item("One","file:${id}",[],"Description",[])])`);
+    expect(inspected.fileIds).toEqual([id]);
+  });
+
   it("preserves the saved restaurant comparison and validates referenced table rows", () => {
     expect(validateOpenUi(savedRestaurantOpenUi)).toBe(savedRestaurantOpenUi);
     expect(safeOpenUi(savedRestaurantOpenUi.replace(',"Lincoln Square"', ""))).toBeUndefined();

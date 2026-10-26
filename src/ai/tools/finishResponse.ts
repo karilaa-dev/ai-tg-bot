@@ -3,7 +3,7 @@ import { MAX_CREATED_FILES_PER_ANSWER } from "../../files/limits.js";
 import { CreateFileSchema } from "./createFile.js";
 import { toToolError } from "./helpers.js";
 import { defineBotTool, type ToolBuildInput } from "./types.js";
-import { finishResponseOpenUi, threadAllowsOpenUi } from "../openui.js";
+import { finishResponseOpenUi, retainOpenUiImages, threadAllowsOpenUi } from "../openui.js";
 import { OPENUI_MAX_SOURCE_CHARS } from "../../openui/library.js";
 import { OpenUiLanguageSchema, resolveOpenUiLanguage } from "../../openui/language.js";
 
@@ -37,6 +37,9 @@ export function createFinishResponseTool(input: ToolBuildInput) {
         const prepared = result.prepared.map(({ attachment }) => ({ file_id: attachment.fileId, path: attachment.sourceVirtualPath! }));
         const errors = input.outgoingFiles.unresolved;
         if (errors.length) return { completed: false, error: "Some files could not be prepared. Repair only failed paths, then finish_response again.", prepared, errors };
+        if (ui) await retainOpenUiImages({ repos: input.repos, thread: input.thread, maxMessageId: input.maxMessageId,
+          source: ui, fileResolver: input.outgoingFiles.fileResolver, resolveFile: input.resolveFile,
+          attachments: input.outgoingFiles.items, signal });
         return { completed: true, text: input.responseDraft.text, file_ids: input.outgoingFiles.items.map((file) => file.fileId), ...(ui ? {
           openui: ui, openuiLanguage: resolveOpenUiLanguage(input.responseDraft.text, openui_language),
         } : {}) };

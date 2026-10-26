@@ -13,7 +13,7 @@ import { isAbortError } from "../files/cancel.js";
 import { AttachmentPreparation } from "./attachmentPreparation.js";
 
 import type { TurnInput, ThinkingDelivery, TurnInferenceMetadata } from "./types.js";
-import { finishResponseOpenUi } from "./openui.js";
+import { finishResponseOpenUi, retainOpenUiImages } from "./openui.js";
 import { resolveOpenUiLanguage, type OpenUiLanguage } from "../openui/language.js";
 import { sha256Hex } from "../files/hash.js";
 import { FileResolver } from "../files/resolver.js";
@@ -78,6 +78,10 @@ export async function sendFinalVisible(
   let deliveredAnswer = visibleAnswer;
   const initialPersistedText = visibleAnswer.trim() ? visibleAnswer : "";
   const openui = finishResponseOpenUi(input.thread, inference?.openui, initialPersistedText);
+  const fileResolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
+  input = { ...input, fileResolver };
+  if (openui) await retainOpenUiImages({ ...input, source: openui, fileResolver,
+    attachments: outboundAttachments, maxMessageId: input.userMessageId });
   const visualContent = openui
     ? { openui, openuiLanguage: resolveOpenUiLanguage(initialPersistedText, inference?.openuiLanguage) }
     : undefined;
@@ -413,9 +417,10 @@ function createAttachmentPreparation(input: TurnInput, attachments: CreatedFileA
     buffers: input.outgoingBuffers!,
     signal: input.signal,
     load: async (attachment, signal) => {
-      if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
       const stored = await input.repos.files.get(attachment.fileId);
       if (!stored) throw new Error(`Attachment file #${attachment.fileId} no longer exists.`);
+      if (input.fileResolver) return (await input.fileResolver.resolveFile(stored, signal)).bytes;
+      if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
       return (await input.resolveFile(stored, signal)).bytes;
     },
     onPrepared: (attachment, ms, error) => {
@@ -709,42 +714,39 @@ async function persistRecoverableAttachments(
 ): Promise<void> {
   for (const attachment of attachments) {
     const stored = await input.repos.files.get(attachment.fileId);
-    if (!stored) continue;
-    const sources = await input.repos.files.listSources(attachment.fileId);
-    const needsLocalBackup = !sources.some(source => source.transport === "local");
-    if (needsLocalBackup) {
-      if (attachment.size > MAX_FILE_BYTES) continue;
-      let loaded = false;
-      try {
-        if (!attachment.data && input.outgoingBuffers) {
-          await input.outgoingBuffers.load(attachment, async () => {
-            if (!input.resolveFile) throw new Error("Chat file resolution is unavailable.");
-            return (await input.resolveFile(stored, input.signal)).bytes;
-          }, input.signal);
-          loaded = true;
-        }
-        const bytes = attachment.data ?? await input.outgoingBuffers?.readSpool(attachment, input.signal);
-        if (!bytes || bytes.length > MAX_FILE_BYTES) {
-          throw new Error("Attachment has no durable local copy.");
-        }
-        if (bytes.length !== stored.size || (stored.content_sha256 && sha256Hex(bytes) !== stored.content_sha256)) {
-          throw new Error(`Attachment #${attachment.fileId} did not match its recorded bytes.`);
-        }
-        await retryAttachmentMetadataWrite(input, attachment, "durable source", async () => {
-          const resolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined,
-            new LocalFileStore(input.config.FILE_STORAGE_PATH));
-          await resolver.persistFile(stored, bytes, input.signal);
-        });
-      } catch (error) {
-        input.signal?.throwIfAborted();
-        if (isAbortError(error)) throw error;
-        attachment.telegramDeliveryFailure = "source_unavailable";
-        input.logger.warn("failed to preserve outgoing attachment source", {
-          fileId: attachment.fileId, threadId: input.thread.id, error: String(error),
-        });
-        continue;
-      } finally { if (loaded) input.outgoingBuffers?.release(attachment); }
+    if (!stored) {
+      attachment.telegramDeliveryFailure = "source_unavailable";
+      continue;
     }
+    let loaded = false;
+    try {
+      const load = async () => {
+        if (input.resolveFile) return (await input.resolveFile(stored, input.signal)).bytes;
+        if (input.fileResolver) return (await input.fileResolver.resolveFile(stored, input.signal)).bytes;
+        throw new Error("Chat file resolution is unavailable.");
+      };
+      if (!attachment.data && input.outgoingBuffers) {
+        await input.outgoingBuffers.load(attachment, load, input.signal);
+        loaded = true;
+      }
+      const bytes = attachment.data ?? await input.outgoingBuffers?.readSpool(attachment, input.signal) ?? await load();
+      if (bytes.length > MAX_FILE_BYTES) throw new Error("Attachment exceeds the local storage limit.");
+      if (bytes.length !== stored.size || (stored.content_sha256 && sha256Hex(bytes) !== stored.content_sha256)) {
+        throw new Error(`Attachment #${attachment.fileId} did not match its recorded bytes.`);
+      }
+      await retryAttachmentMetadataWrite(input, attachment, "durable source", async () => {
+        const resolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
+        await resolver.persistFile(stored, bytes, input.signal);
+      });
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      if (isAbortError(error)) throw error;
+      attachment.telegramDeliveryFailure = "source_unavailable";
+      input.logger.warn("failed to preserve outgoing attachment source", {
+        fileId: attachment.fileId, threadId: input.thread.id, error: String(error),
+      });
+      continue;
+    } finally { if (loaded) input.outgoingBuffers?.release(attachment); }
     const metadata = { displayName: attachment.name, caption: attachment.caption ?? null };
     await retryAttachmentMetadataWrite(input, attachment, "message association", () =>
       writeVisibleDelivery(input, repos =>

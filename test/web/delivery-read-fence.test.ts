@@ -32,7 +32,8 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
       messageThreadId: null, locale: "en", kind: "text", textPlain: "Generate files", content: {}, sources: [{ updateId: 500, messageId: 500 }] });
     await env.repos.turnRuns.claimRunning(accepted.turnRun.id, "read-fence-worker", Date.now() + 60_000);
     input = { api: env.bot.api, config: env.config, db: env.db, repos: env.repos, logger: env.services.logger,
-      user, thread, chatId: user.tg_id, text: "Generate files", turnRunId: accepted.turnRun.id, t: key => key };
+      user, thread, chatId: user.tg_id, text: "Generate files", turnRunId: accepted.turnRun.id, t: key => key,
+      fileResolver: env.services.fileResolver };
     repository = new ConversationRepository(env.db.db, env.repos);
   });
   afterEach(async () => {
@@ -55,15 +56,15 @@ describe.skipIf(dialect === "postgres" && !process.env.TEST_POSTGRES_URL)(`${dia
     const attachments = [await file("first.bin"), await file("second.bin")];
     const reached = deferred<void>();
     const release = deferred<void>();
-    const listSources = env.repos.files.listSources.bind(env.repos.files);
+    const persistFile = env.services.fileResolver.persistFile.bind(env.services.fileResolver);
     let paused = false;
-    vi.spyOn(env.repos.files, "listSources").mockImplementation(async id => {
-      if (!paused && id === attachments[countBeforeRecovery]!.fileId) {
+    vi.spyOn(env.services.fileResolver, "persistFile").mockImplementation(async (file, bytes, signal) => {
+      if (!paused && file.id === attachments[countBeforeRecovery]!.fileId) {
         paused = true;
         reached.resolve();
         await release.promise;
       }
-      return listSources(id);
+      return persistFile(file, bytes, signal);
     });
     const delivery = sendFinal(input, "", "", 0, attachments);
     try {

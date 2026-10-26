@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InputFile } from "grammy";
+import { readFile, rm } from "node:fs/promises";
+import path from "node:path";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import type { TurnInput } from "../../src/ai/types.js";
 import { e2bFileSource } from "../../src/e2b/fileSource.js";
@@ -95,6 +97,27 @@ it.each(["source read", "source integrity", "backup registration"])("isolates a 
   expect((await env.repos.turnRuns.get(turnId))?.status).toBe("succeeded");
   expect(input.onDeliveryConfirmed).toHaveBeenCalledOnce();
   expect(buffers.snapshot().bufferedBytes).toBe(0);
+});
+
+it("recovers a legacy source without a live outgoing buffer owner before delivery", async () => {
+  input.outgoingBuffers = undefined;
+  const bytes = healthy.data!;
+  healthy.data = undefined;
+  input.resolveFile = vi.fn(async () => ({ bytes, size: bytes.length, mimeType: null, contentSha256: sha256Hex(bytes),
+    source: { transport: "e2b", connectionKey: env.config.E2B_DEPLOYMENT_ID, remoteKey: "legacy", locator: {} } }));
+  await sendFinal(input, "", "Your file", 0, [healthy]);
+  expect(uploads).toEqual(["healthy.bin"]);
+  expect(await readFile(path.join(env.config.FILE_STORAGE_PATH, healthy.fileId))).toEqual(bytes);
+});
+
+it("repairs a missing local copy before publishing an attachment with a stale source record", async () => {
+  const stored = (await env.repos.files.get(healthy.fileId))!;
+  await env.services.fileResolver.persistFile(stored, healthy.data!);
+  const filename = path.join(env.config.FILE_STORAGE_PATH, healthy.fileId);
+  await rm(filename);
+  await sendFinal(input, "", "Your file", 0, [healthy]);
+  expect(uploads).toEqual(["healthy.bin"]);
+  expect(await readFile(filename)).toEqual(Buffer.from("hello"));
 });
 
 it.each(["signal", "AbortError"])("propagates %s cancellation during the large-file backup read", async kind => {

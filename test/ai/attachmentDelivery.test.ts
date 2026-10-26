@@ -7,6 +7,7 @@ import { normalizeTelegramAttachmentDeliveries, refreshFinalThinkingVisible, sen
 import { type TurnInput } from "../../src/ai/types.js";
 import type { CreatedFileAttachment } from "../../src/files/types.js";
 import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
+import { FileResolver } from "../../src/files/resolver.js";
 import { deferred } from "../helpers/async.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
 import { renderFinalThinking } from "../../src/telegram/render.js";
@@ -19,7 +20,7 @@ describe("buffered Telegram attachment delivery", () => {
     api.raw.sendRichMessage.mockImplementation(async () => { await textGate.promise; return { message_id: 700 }; });
     const file = imageAttachment(fixtureUuid(1), "a.jpg", 100);
     file.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1) } as never);
+    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1), size: 10, user_id: 1, thread_id: input.thread.id } as never);
     input.resolveFile = vi.fn(async () => ({ bytes: Buffer.from("prefetched") } as never));
     const sending = sendFinal(input, "", "Final answer", 0, [file]);
     try {
@@ -211,9 +212,8 @@ describe("buffered Telegram attachment delivery", () => {
     const started = deferred<void>();
     let drained = false;
     const attachment = imageAttachment(fixtureUuid(1), "pending.jpg", 100);
-    attachment.data = undefined;
-    vi.mocked(input.repos.files.get).mockResolvedValue({ id: fixtureUuid(1) } as never);
-    input.resolveFile = vi.fn(async (_file, signal) => {
+    vi.mocked(input.fileResolver!.persistFile).mockImplementationOnce(async () => { attachment.data = undefined; });
+    vi.mocked(input.fileResolver!.resolveFile).mockImplementation(async (_file, signal) => {
       started.resolve();
       try {
         return await new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
@@ -635,7 +635,7 @@ function telegramError(description: string, method: string): GrammyError {
 }
 
 function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
-  return {
+  const input = {
     api,
     chatId: 123,
     config: {} as never,
@@ -649,7 +649,7 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
       files: {
         setMessageId: vi.fn(async () => undefined),
         rememberTelegramObservation: vi.fn(async () => undefined),
-        get: vi.fn(async () => undefined),
+        get: vi.fn(async (id: string) => ({ id, user_id: 1, thread_id: fixtureUuid(2), size: Buffer.byteLength(`image-${id}`), content_sha256: null })),
         listSources: vi.fn(async () => [{ transport: "local" }]),
         attachToMessage: vi.fn(async () => undefined),
         deleteFile: vi.fn(async () => []),
@@ -667,4 +667,15 @@ function turnInput(api: ReturnType<typeof fakeApi>): TurnInput {
     text: "",
     t: (key: string) => key,
   } as unknown as TurnInput;
+  const retained = new Map<string, Buffer>();
+  input.fileResolver = new FileResolver(input.repos.files);
+  vi.spyOn(input.fileResolver, "persistFile").mockImplementation(async (file, bytes) => { retained.set(file.id, Buffer.from(bytes)); });
+  vi.spyOn(input.fileResolver, "resolveFile").mockImplementation(async (file, signal) => {
+    const bytes = retained.get(file.id);
+    if (bytes) return { bytes, size: bytes.length, contentSha256: "", mimeType: null,
+      source: { transport: "local", connectionKey: "default", remoteKey: file.id, locator: {} } };
+    if (input.resolveFile) return input.resolveFile(file, signal);
+    throw new Error("No retained test file");
+  });
+  return input;
 }

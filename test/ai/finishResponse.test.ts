@@ -97,7 +97,7 @@ describe("finish_response", () => {
     expect(peak).toBe(2);
     expect(input.outgoingFiles!.items.map((file) => file.sourceVirtualPath)).toEqual(["/a.stl", "/b.stl", "/c.stl"]);
     for (const attachment of input.outgoingFiles!.items) {
-      expect(await input.repos.files.listSources(attachment.fileId)).toHaveLength(1);
+      expect((await input.repos.files.listSources(attachment.fileId)).map(source => source.transport)).toEqual(expect.arrayContaining(["local", "e2b"]));
     }
     expect(input.outgoingFiles!.items.filter((file) => file.data).length).toBeGreaterThanOrEqual(2);
     expect(input.outgoingFiles!.buffers.snapshot().peakBufferedBytes).toBeLessThanOrEqual(OUTGOING_BUFFER_BYTES);
@@ -252,7 +252,7 @@ describe("finish_response", () => {
     }
     for (const file of [confirmed!, unknown!]) {
       expect(await input.repos.files.get(file.fileId)).toBeDefined();
-      expect(await input.repos.files.listSources(file.fileId)).toHaveLength(1);
+      expect((await input.repos.files.listSources(file.fileId)).map(source => source.transport)).toEqual(expect.arrayContaining(["local", "e2b"]));
     }
     expect(queue.buffers.snapshot().bufferedBytes).toBe(0);
     expect(queue.items).toEqual([]);
@@ -375,7 +375,7 @@ async function finish(input: ToolBuildInput, args: unknown, signal?: AbortSignal
 async function setup(origin: "telegram" | "web" = "telegram") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-finish-test-"));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
-  const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: undefined });
+  const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, FILE_STORAGE_PATH: path.join(directory, "files"), CODEX_AUTH_FILE: path.join(directory, "no-auth.json"), BROWSER_USE_API_KEY: undefined });
   const db = createDatabase(config);
   await db.initialize();
   cleanups.push(() => db.destroy());

@@ -13,7 +13,8 @@ import { chatFileMarker } from "./contextMarker.js";
 import { sha256Hex } from "./hash.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "./limits.js";
 import { OutgoingBuffers, prepareWithTwoWorkers } from "./outgoingBuffers.js";
-import type { FileResolver } from "./resolver.js";
+import { FileResolver } from "./resolver.js";
+import { LocalFileStore } from "./localStore.js";
 import type { CreatedFileAttachment, CreatedFileDeliveryPreference } from "./types.js";
 
 type FileOptions = { name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference };
@@ -33,10 +34,12 @@ type Input = {
 /** Owns the attachment queue and every export reservation for one turn. */
 export class OutgoingFiles {
   readonly buffers = new OutgoingBuffers();
+  readonly fileResolver: FileResolver;
   private readonly slots = new Map<string, string | undefined>();
   private readonly officeHashes = new Map<CreatedFileAttachment, string>();
 
   constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {
+    this.fileResolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
     for (const file of items) this.slots.set(fileKey(file), undefined);
   }
 
@@ -186,11 +189,9 @@ export class OutgoingFiles {
         }
       }
       attachment = await this.store(file, signal);
-      if (this.input.fileResolver) {
-        const stored = await this.input.repos.files.get(attachment.fileId);
-        if (!stored) throw new Error(`Created file #${attachment.fileId} disappeared before persistence.`);
-        await this.input.fileResolver.persistFile(stored, file.bytes, signal);
-      }
+      const stored = await this.input.repos.files.get(attachment.fileId);
+      if (!stored) throw new Error(`Created file #${attachment.fileId} disappeared before persistence.`);
+      await this.fileResolver.persistFile(stored, file.bytes, signal);
       if (office) this.officeHashes.set(attachment, sha256Hex(file.bytes));
       if (exported) {
         if (!exported.sourceCanonicalPath) throw new Error("E2B export has no durable source path.");
@@ -258,7 +259,7 @@ export class OutgoingFiles {
     this.buffers.release(attachment);
     try {
       if (await this.input.repos.files.deleteFileIfUnattached(attachment.fileId)) {
-        await this.input.fileResolver?.removeLocalFile(attachment.fileId);
+        await this.fileResolver.removeLocalFile(attachment.fileId);
       }
     } catch (error) {
       this.input.logger?.warn("failed to remove unqueued created file", { fileId: attachment.fileId, error: String(error) });
