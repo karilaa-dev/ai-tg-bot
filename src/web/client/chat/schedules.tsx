@@ -111,6 +111,7 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
   const language = useUiLanguage();
   const id = useId();
   const [form, setForm] = useState<Form>(() => initialForm(schedule, thread?.title ?? ""));
+  const openingSchedule = useRef(schedule);
   const [problems, setProblems] = useState<Problems>({});
   const [busy, setBusy] = useState<"save" | "delete" | null>(null);
   const [failure, setFailure] = useState<{ kind: "save" | "delete"; error: unknown } | null>(null);
@@ -121,6 +122,7 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
   // Each opening starts from the saved schedule, so a cancelled edit leaves nothing behind.
   useEffect(() => {
     if (!open) return;
+    openingSchedule.current = schedule;
     const next = initialForm(schedule, thread?.title ?? "");
     setForm(resume ? { ...next, enabled: true } : next);
     setProblems({}); setFailure(null); setBusy(null); setConfirmDelete(false);
@@ -140,6 +142,8 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
 
   const save = async () => {
     if (!thread || busy) return;
+    // Polls may advance the next run or bring in another editor's changes while this form is open.
+    const original = openingSchedule.current;
     const found: Problems = {};
     const title = form.title.trim();
     const prompt = form.prompt.trim();
@@ -149,27 +153,28 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
     const minutes = interval();
     if (minutes === undefined) found.hours = t.scheduleNeedsHours;
     // An unchanged time may be overdue by seconds while it runs; only new times and resumed schedules must lie ahead.
-    const timeChanged = !schedule || when !== fromLocalInput(toLocalInput(schedule.nextRunAt));
-    const resuming = Boolean(schedule && !schedule.enabled && form.enabled);
+    const timeChanged = !original || when !== fromLocalInput(toLocalInput(original.nextRunAt));
+    const resuming = Boolean(original && !original.enabled && form.enabled);
     if (when === null) found.when = t.scheduleNeedsTime;
     else if ((timeChanged || resuming) && when <= Date.now()) found.when = t.scheduleNeedsFuture;
     setProblems(found);
     if (Object.keys(found).length || when === null || minutes === undefined) return;
     setBusy("save"); setFailure(null);
     try {
-      let saved: ChatSchedule;
-      if (!schedule) saved = await chatApi.createSchedule({ threadId: thread.id, title, prompt, intervalMinutes: minutes, nextRunAt: when });
+      let saved: ChatSchedule | null = null;
+      if (!original) saved = await chatApi.createSchedule({ threadId: thread.id, title, prompt, intervalMinutes: minutes, nextRunAt: when });
       else {
         const patch: ChatSchedulePatch = {};
-        if (title !== schedule.title) patch.title = title;
-        if (prompt !== schedule.prompt) patch.prompt = prompt;
-        if (minutes !== schedule.intervalMinutes) patch.intervalMinutes = minutes;
+        if (title !== original.title) patch.title = title;
+        if (prompt !== original.prompt) patch.prompt = prompt;
+        if (minutes !== original.intervalMinutes) patch.intervalMinutes = minutes;
         if (timeChanged) patch.nextRunAt = when;
-        if (form.enabled !== schedule.enabled) patch.enabled = form.enabled;
-        saved = Object.keys(patch).length ? await chatApi.updateSchedule(schedule.id, patch) : schedule;
+        if (form.enabled !== original.enabled) patch.enabled = form.enabled;
+        if (Object.keys(patch).length) saved = await chatApi.updateSchedule(original.id, patch);
       }
       if (!mounted.current) return;
-      schedules.put(saved); schedules.refresh();
+      if (saved) schedules.put(saved);
+      schedules.refresh();
       onOpenChange(false);
     } catch (error) {
       if (mounted.current) setFailure({ kind: "save", error: error ?? new Error() });

@@ -254,6 +254,85 @@ try {
     console.log("PASS: narrow search toggles between list and preview");
   }
 
+  for (const overdue of [false, true]) {
+    // Polling may observe another editor or a completed run while this dialog stays open.
+    schedules = [{ id: "schedule-1", threadId: fixtureUuid(1), title: "Weather check", prompt: "Check the weather.",
+      intervalMinutes: 60, nextRunAt: Date.now() + (overdue ? -60_000 : 3_600_000), enabled: true,
+      lastRunAt: null, lastTurnId: null, createdAt: Date.now(), updatedAt: Date.now() }];
+    const page = await openPage();
+    await page.goto(`${rootUrl}?thread=${fixtureUuid(1)}`);
+    await page.getByRole("button", { name: /^Scheduled · next run/ }).click();
+    const edit = page.getByRole("dialog", { name: "Edit schedule" });
+    await edit.getByLabel("Prompt").waitFor();
+    const newer = { ...schedules[0]!, prompt: "Check weather and flight delays.", intervalMinutes: 90,
+      nextRunAt: Date.now() + 7_200_000, enabled: false, lastRunAt: Date.now() };
+    schedules = [newer];
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    // The header updates from the refreshed prop while the open form keeps its original input.
+    await page.getByRole("button", { name: "Schedule paused", exact: true, includeHidden: true }).waitFor({ state: "attached" });
+    assert.equal(await edit.getByLabel("Prompt").inputValue(), "Check the weather.");
+    await edit.getByLabel("Name", { exact: true }).fill("Trip updates");
+    const writesBefore = scheduleWrites.length;
+    await edit.getByRole("button", { name: "Save", exact: true }).click();
+    await edit.waitFor({ state: "hidden" });
+    assert.equal(scheduleWrites.length, writesBefore + 1);
+    assert.deepEqual(scheduleWrites.at(-1)?.body, { title: "Trip updates" }, "Only fields changed from the opening form are sent");
+    assert.deepEqual(schedules[0], { ...newer, title: "Trip updates", updatedAt: schedules[0]!.updatedAt });
+
+    // Saving without edits must not write or restore the stale opening snapshot locally.
+    await page.getByRole("button", { name: "Schedule paused", exact: true }).click();
+    await edit.getByLabel("Prompt").waitFor();
+    schedules = [{ ...schedules[0]!, prompt: "Latest prompt from another tab", enabled: true }];
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByRole("button", { name: /^Scheduled · next run/, includeHidden: true }).waitFor({ state: "attached" });
+    const writesBeforeNoop = scheduleWrites.length;
+    await edit.getByRole("button", { name: "Save", exact: true }).click();
+    await edit.waitFor({ state: "hidden" });
+    assert.equal(scheduleWrites.length, writesBeforeNoop, "An untouched form sends no patch");
+    await page.getByRole("button", { name: /^Scheduled · next run/ }).click();
+    assert.equal(await edit.getByLabel("Prompt").inputValue(), "Latest prompt from another tab");
+    await page.unrouteAll({ behavior: "wait" });
+    await page.close();
+    console.log(`PASS: schedule edits preserve concurrent changes${overdue ? " after a due run" : " from another editor"}, including an untouched save`);
+  }
+
+  for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+    const page = await openPage(viewport);
+    await page.route("**/api/chat/threads/*/messages?after=*", async route => {
+      const response = await route.fetch();
+      const history: ChatHistory = await response.json();
+      const matchId = new URL(route.request().url()).searchParams.get("after");
+      const match = history.messages.find(message => message.id === Number(matchId));
+      assert.ok(match);
+      match.text += "\n\n" + Array.from({ length: 60 }, (_, index) => `Grocery note ${index + 1}: keep the spinach chilled until dinner.`).join("\n\n");
+      await route.fulfill({ response, json: history });
+    });
+    await page.goto(rootUrl);
+    if (viewport.width < 768) await page.getByRole("button", { name: "Open chats" }).click();
+    await page.getByRole("button", { name: "Search chats", exact: true }).click();
+    const palette = page.getByRole("dialog", { name: "Search chats", exact: true });
+    await palette.getByRole("combobox").fill("spinach");
+    const grocery = palette.getByRole("option", { name: /Weekly grocery list/ });
+    await grocery.waitFor();
+    if (viewport.width < 768) {
+      await palette.getByRole("button", { name: "Preview" }).tap();
+      await grocery.tap();
+    }
+    const match = palette.locator("[data-match]");
+    await match.getByText(/Grocery note 60:/).waitFor();
+    const bounds = await match.evaluate(target => {
+      const body = target.closest(".chat-search-preview-body")!;
+      return { top: target.getBoundingClientRect().top - body.getBoundingClientRect().top,
+        height: target.getBoundingClientRect().height, viewportHeight: body.clientHeight };
+    });
+    assert(bounds.height > bounds.viewportHeight, "The matching message must exceed the preview height");
+    assert(bounds.top >= 0 && bounds.top <= 24, `The match opening must be visible in its scroll area (${viewport.width}px): ${JSON.stringify(bounds)}`);
+    await page.screenshot({ path: `/tmp/uicheck/search-long-match-${viewport.width}.png` });
+    await page.unrouteAll({ behavior: "wait" });
+    await page.close();
+    console.log(`PASS: a long matching message opens at its start in the ${viewport.width}px search preview`);
+  }
+
   assert.deepEqual(errors, []);
 } finally {
   await browser.close();
