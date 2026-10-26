@@ -33,4 +33,3 @@ describe("timezone parser", () => {
     expect(describeUserTimeZone({ tz_name: "America/Los_Angeles", tz_offset_min: -420 }, winter)).toBe("America/Los_Angeles (UTC-08:00)");
   });
 });
-
