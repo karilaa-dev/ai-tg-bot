@@ -104,6 +104,12 @@ describe("OpenRouter transcription", () => {
     await expect(transcribeAudio(loadTestConfig(), options)).resolves.toMatchObject({ text: "One voice.", speaker_labels: false });
   });
 
+  it("keeps requested timestamps when no speaker labels come back", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ text: "One voice.", segments: [{ start: 0, end: 2, text: "One voice." }] })));
+    await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture(), format: "ogg", speakers: true, timestamps: true }))
+      .resolves.toMatchObject({ text: "[0:00-0:02] One voice.", speaker_labels: false, timestamps: true });
+  });
+
   it.each([null, {}, { text: 12 }, { error: { message: "provider failed" } }])("rejects malformed provider responses: %j", async (body) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(body)));
     await expect(transcribeAudio(loadTestConfig(), { bytes: audioFixture("wav"), format: "wav" })).rejects.toThrow("invalid transcription response");
