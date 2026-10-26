@@ -134,7 +134,8 @@ try {
   const palette = page.getByRole("dialog", { name: "Search chats", exact: true });
   const search = palette.getByRole("combobox");
   await search.waitFor();
-  await page.clock.pauseAt(new Date());
+  // Use the browser's own clock, with room for command delivery, so clock drift cannot make the target stale.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 60_000));
   const beforeSearch = page.url();
   await search.fill("spinach");
   const submitted = page.waitForRequest(request => new URL(request.url()).searchParams.get("q") === "spinach");
