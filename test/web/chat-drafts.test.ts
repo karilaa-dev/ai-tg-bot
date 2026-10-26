@@ -101,6 +101,23 @@ it("notifies the current subscriber when an in-flight send finishes after naviga
   expect(drafts.pending(fixtureUuid(2))).toEqual([]);
 });
 
+it("releases original uploads after confirmation without reopening the chat", () => {
+  const drafts = new DraftStore(1);
+  drafts.updatePending(fixtureUuid(2), () => [{ ...message, requestId: "same-request", status: "sending" }]);
+  drafts.updatePending(fixtureUuid(3), () => [failedMessage]);
+  drafts.write(fixtureUuid(2), { ...emptyDraft, text: "A newer draft" });
+  drafts.confirmSend(fixtureUuid(2), "same-request", 285);
+  expect(drafts.pending(fixtureUuid(2))).toEqual([{
+    requestId: "same-request", status: "sent", messageId: 285, sentAt: expect.any(Number),
+    text: "Alice's private message", fileNames: ["private.txt"],
+  }]);
+  expect(drafts.pending(fixtureUuid(3))).toEqual([failedMessage]);
+  expect(drafts.read(fixtureUuid(2))).toEqual({ ...emptyDraft, text: "A newer draft" });
+  drafts.close();
+  drafts.confirmSend(fixtureUuid(2), "same-request", 285);
+  expect(drafts.pending(fixtureUuid(2))).toEqual([]);
+});
+
 it("keeps in-memory drafts revocable when browser storage is unavailable", () => {
   vi.stubGlobal("sessionStorage", { get length() { throw new Error("Storage disabled"); }, getItem() { throw new Error("Storage disabled"); }, setItem() { throw new Error("Storage disabled"); } });
   const drafts = new DraftStore(1);

@@ -242,13 +242,13 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     try {
       const result = await chatApi.send(threadId, { text: item.text, requestId, files: item.files });
       if (!drafts.active) return;
-      setPending(list => list.map(entry => entry.requestId === requestId ? { ...entry, status: "sent", messageId: result.messageId, sentAt: Date.now() } : entry));
+      drafts.confirmSend(threadId, requestId, result.messageId);
       if (!mounted.current) return;
       void load();
       onThreadChange();
     } catch (error) {
       if (!drafts.active) return;
-      setPending(list => list.map(entry => entry.requestId === requestId ? { ...entry, status: "failed", error: error ?? new Error() } : entry));
+      setPending(list => list.map(entry => entry.requestId === requestId && entry.status !== "sent" ? { ...entry, status: "failed", error: error ?? new Error() } : entry));
     }
   }, [threadId, drafts, load, onThreadChange, setPending]);
 
@@ -258,7 +258,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   }, [threadId, drafts, send]);
 
   const submit = (value: Draft) => { setDraft(emptyDraft); void send(value); };
-  const editFailed = (item: PendingSend) => {
+  const editFailed = (item: Extract<PendingSend, { status: "failed" }>) => {
     setPending(list => list.filter(entry => entry.requestId !== item.requestId));
     setDraft({ text: item.text, files: item.files, requestId: item.requestId });
   };
@@ -371,17 +371,20 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
                 load={loadFile} onFork={forkFrom} onAction={followUp} />
             </div>;
           })}
-          {pending.map(item => <article key={item.requestId} className="chat-message" data-role="user" data-pending={item.status}>
-            <div className="chat-bubble">{item.text && <p className="chat-plain">{item.text}</p>}
-              {item.files.length > 0 && <ul className="chat-pending-files">{item.files.map((file, index) => <li key={index}><IconFile size={14} aria-hidden="true" />{file.name}</li>)}</ul>}
-            </div>
-            {item.status === "failed" ? <div className="chat-send-failed" role="alert">
-              <IconAlertCircle size={16} aria-hidden="true" /><span>{describeError(item.error, t.sendFailed, language)}</span>
-              <Button size="sm" variant="secondary" onClick={() => void send({ text: item.text, files: item.files, requestId: item.requestId })}>{t.retry}</Button>
-              <Button size="sm" variant="ghost" icon={<IconPencil size={14} aria-hidden="true" />} onClick={() => editFailed(item)}>{t.edit}</Button>
-              <Button size="sm" variant="ghost" shape="square" aria-label={t.discardMessage} onClick={() => setPending(list => list.filter(entry => entry.requestId !== item.requestId))}><IconTrash size={14} aria-hidden="true" /></Button>
-            </div> : <p className="chat-message-meta" role="status">{item.status === "sending" ? <><Loader size={12} /> {t.sending}</> : t.sent}</p>}
-          </article>)}
+          {pending.map(item => {
+            const fileNames = item.status === "sent" ? item.fileNames : item.files.map(file => file.name);
+            return <article key={item.requestId} className="chat-message" data-role="user" data-pending={item.status}>
+              <div className="chat-bubble">{item.text && <p className="chat-plain">{item.text}</p>}
+                {fileNames.length > 0 && <ul className="chat-pending-files">{fileNames.map((name, index) => <li key={index}><IconFile size={14} aria-hidden="true" />{name}</li>)}</ul>}
+              </div>
+              {item.status === "failed" ? <div className="chat-send-failed" role="alert">
+                <IconAlertCircle size={16} aria-hidden="true" /><span>{describeError(item.error, t.sendFailed, language)}</span>
+                <Button size="sm" variant="secondary" onClick={() => void send({ text: item.text, files: item.files, requestId: item.requestId })}>{t.retry}</Button>
+                <Button size="sm" variant="ghost" icon={<IconPencil size={14} aria-hidden="true" />} onClick={() => editFailed(item)}>{t.edit}</Button>
+                <Button size="sm" variant="ghost" shape="square" aria-label={t.discardMessage} onClick={() => setPending(list => list.filter(entry => entry.requestId !== item.requestId))}><IconTrash size={14} aria-hidden="true" /></Button>
+              </div> : <p className="chat-message-meta" role="status">{item.status === "sending" ? <><Loader size={12} /> {t.sending}</> : t.sent}</p>}
+            </article>;
+          })}
           {history && (live || hasDraftContent(history.draft)) && <LiveDraft draft={history.draft} live={live} />}
         </div>
       </div>

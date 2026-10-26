@@ -202,6 +202,21 @@ try {
   assert.equal(await page.getByText("recover-me.txt", { exact: true }).count(), 0);
   assert.equal(await page.locator('[data-pending="failed"]').count(), 0);
   assert.equal(await composer.inputValue(), "A newer unsent draft");
+  // Completion in another view releases upload bytes while preserving pending display metadata.
+  holdSend = deferred<Route>();
+  await composer.fill("Upload completed away from chat");
+  await page.locator('input[type="file"]').setInputFiles({ name: "completed.txt", mimeType: "text/plain", buffer: Buffer.from("Already uploaded bytes") });
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  const completedSend = await holdSend.promise;
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await json(completedSend, { turnId: 3, messageId: 285, queued: true });
+  holdSend = undefined;
+  await page.getByRole("button", { name: "Chat 1", exact: false }).click();
+  const confirmed = page.locator('[data-pending="sent"]');
+  await confirmed.waitFor();
+  assert.equal(await confirmed.getByText("completed.txt", { exact: true }).count(), 1);
+  assert.equal(await confirmed.getByText("Upload completed away from chat", { exact: true }).count(), 1);
+  assert.equal(await confirmed.getByRole("button").count(), 0);
   holdSend = deferred<Route>();
   await composer.fill("Alice delayed message");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -246,7 +261,7 @@ try {
   holdCreate = undefined;
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(page.url(), bobUrl);
-  assert.equal(posts, 3);
+  assert.equal(posts, 4);
   assert.equal(await composer.inputValue(), "");
 
   // A completed fork must not navigate the next user's workspace either.
@@ -274,7 +289,7 @@ try {
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await account("Bob").waitFor();
   assert.equal(await composer.inputValue(), "");
-  assert.equal(posts, 3);
+  assert.equal(posts, 4);
 
   assert.deepEqual(errors, []);
   assert.deepEqual(remoteRequests, []);

@@ -1,10 +1,10 @@
 /** `requestId` is kept while the content is unchanged so a retried send cannot post twice. */
 export interface Draft { text: string; files: File[]; requestId: string | null }
 export type DraftKey = string;
-export type PendingSend = Omit<Draft, "requestId"> & { requestId: string } & (
-  | { status: "sending" }
-  | { status: "sent"; messageId: number; sentAt: number }
-  | { status: "failed"; error: unknown }
+export type PendingSend = { requestId: string; text: string } & (
+  | { status: "sending"; files: File[] }
+  | { status: "sent"; messageId: number; fileNames: string[]; sentAt: number }
+  | { status: "failed"; files: File[]; error: unknown }
 );
 
 export const emptyDraft: Draft = { text: "", files: [], requestId: null };
@@ -73,6 +73,11 @@ export class DraftStore {
     if (next === current) return;
     if (next.length) this.sends.set(key, next); else this.sends.delete(key);
     for (const listener of this.listeners) listener();
+  }
+
+  confirmSend(key: DraftKey, requestId: string, messageId: number) {
+    this.updatePending(key, list => list.map(entry => entry.requestId === requestId && entry.status !== "sent"
+      ? { requestId, text: entry.text, status: "sent", messageId, fileNames: entry.files.map(file => file.name), sentAt: Date.now() } : entry));
   }
 
   subscribe = (listener: () => void): (() => void) => {
