@@ -35,8 +35,18 @@ export async function detectAudioType(bytes: Buffer, expected?: AudioFormat): Pr
   return { format: actual, mimeType: detected.mime };
 }
 
+const SegmentSchema = z.object({
+  start: z.number().nonnegative(),
+  end: z.number().nonnegative(),
+  text: z.string(),
+  speaker: z.number().int().nonnegative().optional(),
+});
+type Segment = z.infer<typeof SegmentSchema>;
+
 const TranscriptSchema = z.object({
   text: z.string(),
+  // Only verbose_json responses carry segments; a malformed list falls back to the plain text.
+  segments: z.array(SegmentSchema).optional().catch(undefined),
   usage: z.object({
     seconds: z.number().nonnegative().optional(),
     total_tokens: z.number().nonnegative().optional(),
@@ -87,6 +97,35 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** Speaker labels and timestamps the caller asked for; both need verbose_json segments. */
+export interface TranscriptLayout { speakers?: boolean; timestamps?: boolean }
+
+function clock(seconds: number): string {
+  const total = Math.floor(seconds);
+  const [hours, minutes, rest] = [Math.floor(total / 3600), Math.floor(total / 60) % 60, total % 60];
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${minutes}:${pad(rest)}`;
+}
+
+/** One line per segment, or per speaker turn when only speakers are labeled. */
+export function formatSegments(segments: Segment[], layout: TranscriptLayout): { text: string; speakers: boolean; timestamps: boolean } {
+  const lines = segments.map((segment) => ({ ...segment, text: segment.text.trim() })).filter((segment) => segment.text);
+  // A provider that found one voice, or ignored diarization, labels nothing; "Speaker 1" alone adds no information.
+  const speakers = Boolean(layout.speakers) && lines.some((segment) => segment.speaker !== undefined);
+  const timestamps = Boolean(layout.timestamps);
+  const label = (segment: Segment) => speakers ? `Speaker ${segment.speaker === undefined ? "?" : segment.speaker + 1}: ` : "";
+  if (timestamps) {
+    return { speakers, timestamps, text: lines.map((segment) => `[${clock(segment.start)}-${clock(segment.end)}] ${label(segment)}${segment.text}`).join("\n") };
+  }
+  const turns: { segment: Segment; text: string }[] = [];
+  for (const segment of lines) {
+    const last = turns.at(-1);
+    if (last && last.segment.speaker === segment.speaker) last.text += ` ${segment.text}`;
+    else turns.push({ segment, text: segment.text });
+  }
+  return { speakers, timestamps, text: turns.map((turn) => `${label(turn.segment)}${turn.text}`).join("\n") };
+}
+
 async function requestTranscription(request: RequestInit, signal: AbortSignal, deadline: number): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
@@ -104,7 +143,7 @@ async function requestTranscription(request: RequestInit, signal: AbortSignal, d
 
 export async function transcribeAudio(
   config: Pick<AppConfig, "OPENROUTER_API_KEY" | "OPENROUTER_TRANSCRIPTION_MODEL" | "TRANSCRIPTION_TIMEOUT_MS">,
-  input: { bytes: Buffer; format: AudioFormat; language?: string; signal?: AbortSignal },
+  input: { bytes: Buffer; format: AudioFormat; language?: string; signal?: AbortSignal } & TranscriptLayout,
 ) {
   input.signal?.throwIfAborted();
   if (!input.bytes.length) throw new Error("The audio file is empty.");
@@ -126,13 +165,21 @@ export async function transcribeAudio(
       model: config.OPENROUTER_TRANSCRIPTION_MODEL,
       input_audio: { data: input.bytes.toString("base64"), format: input.format },
       ...(input.language ? { language: input.language } : {}),
+      ...(input.speakers || input.timestamps ? { response_format: "verbose_json", timestamp_granularities: ["segment"] } : {}),
+      // Diarization is a provider option; OpenRouter forwards it only to Azure, which serves MAI-Transcribe.
+      ...(input.speakers ? { provider: { options: { azure: { diarization: { enabled: true } } } } } : {}),
     }),
     signal,
   }, signal, deadline);
   const parsed = TranscriptSchema.safeParse(await response.json());
   signal.throwIfAborted();
   if (!parsed.success) throw new Error("OpenRouter returned an invalid transcription response.");
-  const text = parsed.data.text.trim();
-  if (!text) throw new EmptyTranscriptError();
-  return { text, model: config.OPENROUTER_TRANSCRIPTION_MODEL, usage: parsed.data.usage };
+  const plain = parsed.data.text.trim();
+  if (!plain) throw new EmptyTranscriptError();
+  const model = config.OPENROUTER_TRANSCRIPTION_MODEL;
+  const { usage, segments } = parsed.data;
+  if (!input.speakers && !input.timestamps) return { text: plain, model, usage };
+  const layout = segments?.length ? formatSegments(segments, input) : null;
+  if (!layout?.text) return { text: plain, model, usage, speaker_labels: false, timestamps: false };
+  return { text: layout.text, model, usage, speaker_labels: layout.speakers, timestamps: layout.timestamps };
 }

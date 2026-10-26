@@ -8,7 +8,7 @@ import { defineBotTool, type ToolBuildInput } from "./types.js";
 export function createTranscribeAudioTool(input: ToolBuildInput) {
   return defineBotTool({
     holdsCommandActivity: true,
-    description: "Transcribe speech from a chat audio file or an absolute workspace path using OpenRouter. Supply exactly one of file_id, path, or transcript_id. Supports WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC up to 20 MB. Returns original-language text in bounded pages. When next_offset is non-null, read more with transcript_id and offset=next_offset; this reads the saved transcript without another provider request. Read only sections needed for the task. Telegram voice/audio prompts already contain a transcript or a preview with continuation instructions; reuse those unless asked to transcribe again.",
+    description: "Transcribe speech from a chat audio file or an absolute workspace path using OpenRouter. Supply exactly one of file_id, path, or transcript_id. Supports WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC up to 20 MB. Returns original-language text in bounded pages. New transcriptions default to one line per segment with timestamps and speaker labels, such as [1:05-1:12] Speaker 2: text; speaker_labels and timestamps in the result report what the provider returned. Set speaker_labels or timestamps to false when they are not useful, for example a single speaker or text to quote. When next_offset is non-null, read more with transcript_id and offset=next_offset; this reads the saved transcript without another provider request. Read only sections needed for the task. Telegram voice/audio prompts already contain a transcript or a preview with continuation instructions; reuse those unless asked to transcribe again.",
     inputSchema: z.object({
       file_id: z.string().uuid().optional(),
       path: z.string().startsWith("/").optional(),
@@ -16,14 +16,17 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
       offset: z.number().int().nonnegative().optional().describe("Use the returned next_offset to read a saved transcript; defaults to zero."),
       format: AudioFormatSchema.optional().describe("Format hint for files without a recognized name or MIME type. Must match the audio byte signature."),
       language: z.string().regex(/^[a-z]{2}$/).optional().describe("Optional ISO-639-1 language hint; omit to auto-detect."),
+      speaker_labels: z.boolean().optional().describe("Label who is speaking (Speaker 1, Speaker 2, ...). Defaults to true."),
+      timestamps: z.boolean().optional().describe("Start each segment with its [m:ss-m:ss] time range. Defaults to true."),
     }).refine((value) => [value.file_id, value.path, value.transcript_id].filter((source) => source !== undefined).length === 1, {
       message: "Supply exactly one of file_id, path, or transcript_id.",
     }).refine((value) => value.offset === undefined || value.transcript_id !== undefined, {
       message: "offset requires transcript_id.",
-    }).refine((value) => value.transcript_id === undefined || (value.format === undefined && value.language === undefined), {
-      message: "format and language apply only to new transcriptions.",
+    }).refine((value) => value.transcript_id === undefined
+      || [value.format, value.language, value.speaker_labels, value.timestamps].every((option) => option === undefined), {
+      message: "format, language, speaker_labels and timestamps apply only to new transcriptions.",
     }),
-    execute: async ({ file_id, path, transcript_id, offset, format, language }, signal) => {
+    execute: async ({ file_id, path, transcript_id, offset, format, language, speaker_labels = true, timestamps = true }, signal) => {
       try {
         signal?.throwIfAborted();
         if (transcript_id !== undefined) {
@@ -71,7 +74,9 @@ export function createTranscribeAudioTool(input: ToolBuildInput) {
         }
         const detected = format ?? audioFormat(name, mime);
         if (!detected) return { error: "Unsupported audio format." };
-        const transcript = await transcribeAudio(input.config, { bytes, format: detected, language, signal });
+        const transcript = await transcribeAudio(input.config, {
+          bytes, format: detected, language, speakers: speaker_labels, timestamps, signal,
+        });
         signal?.throwIfAborted();
         const scope = await (input.currentScope?.() ?? threadVisibilityScope(input.repos, input.thread, input.maxMessageId));
         signal?.throwIfAborted();

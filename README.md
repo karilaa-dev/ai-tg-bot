@@ -21,7 +21,7 @@ Long transcripts are saved in the database. Prompts and tool results include a b
 
 Transcription retries HTTP 429, 502, 503, and 504 responses up to twice on the selected model, honoring `Retry-After` when present and otherwise waiting one then two seconds. All attempts and waits share the configured transcription timeout, and `/stop` cancels retry waits. If rate limiting persists, the bot says so. Retries never switch models.
 
-The `transcribe_audio` tool accepts a chat `file_id` or an absolute workspace `path`, with an optional `language` hint and `format` override. Both the tool and incoming audio prompts check the file's byte signature before uploading; a format hint must match the detected format. Audio uploaded as a document is kept as an attachment for this tool. Supported formats are WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC, up to 20 MB. Original audio stays available through its Telegram file reference. Both paths use [OpenRouter's transcription API](https://openrouter.ai/docs/guides/overview/multimodal/stt) with `qwen/qwen3-asr-1.7b` by default. Set `OPENROUTER_TRANSCRIPTION_MODEL` to choose another transcription model and `TRANSCRIPTION_TIMEOUT_MS` to change the 120-second request timeout.
+The `transcribe_audio` tool accepts a chat `file_id` or an absolute workspace `path`, with an optional `language` hint and `format` override. By default it returns one line per segment with its time range and speaker, such as `[1:05-1:12] Speaker 2: …`; the model can set `speaker_labels` or `timestamps` to `false` for plainer text. Incoming voice and audio prompts stay plain text. Both the tool and incoming audio prompts check the file's byte signature before uploading; a format hint must match the detected format. Audio uploaded as a document is kept as an attachment for this tool. Supported formats are WAV, MP3, FLAC, M4A, OGG/Opus, WebM, and AAC, up to 20 MB. Original audio stays available through its Telegram file reference. Both paths use [OpenRouter's transcription API](https://openrouter.ai/docs/guides/overview/multimodal/stt) with `microsoft/mai-transcribe-2` by default. Speaker labels use Azure diarization, so another model may return timestamps without speakers. Set `OPENROUTER_TRANSCRIPTION_MODEL` to choose another transcription model and `TRANSCRIPTION_TIMEOUT_MS` to change the 120-second request timeout.
 
 Accepted messages receive a 👀 reaction until their response finishes, fails, or is cancelled. Topic titles show ⏳ while that topic has queued or running work. Skill reads show the skill name in the tool status, for example `Loading skill pptxgenjs`. Indicator calls run in the background. Pending synchronization is stored in the database and retried after failures or restarts; unavailable or deleted Telegram messages are skipped. Indicator updates use the [Telegram Bot API](https://core.telegram.org/bots/api#setmessagereaction) and are best effort when Telegram rejects them.
 
@@ -120,7 +120,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.2` uses `ai-tg-bot-tools:v2.1.2`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.3` uses `ai-tg-bot-tools:v2.1.3`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -136,8 +136,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.2 is ai-tg-bot-tools:v2.1.2.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.2
+# Optional override. The default for version 2.1.3 is ai-tg-bot-tools:v2.1.3.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.3
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
