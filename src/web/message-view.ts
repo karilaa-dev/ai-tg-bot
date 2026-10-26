@@ -5,12 +5,14 @@ import { safeOpenUi } from "../openui/validate.js";
 import { asRecord } from "../util/records.js";
 import { savedToolActivity } from "../ai/toolActivity.js";
 import { resolveOpenUiLanguage } from "../openui/language.js";
+import { savedCompactionAction } from "../application/compactionAction.js";
 
 export interface SavedTranscript { id: string; messageId: number; fileId: string; text: string }
 export interface SavedAttachment extends WebAttachment { inlineContent?: string | null }
 
 /** Separate the bot's saved media cards from the words a person actually sent. */
 export function messageView(message: MessageRow, attachments: SavedAttachment[], transcripts: SavedTranscript[] = [], attachmentDeliveryPending = false): WebMessage {
+  const action = message.role === "system" ? savedCompactionAction(message.content_json) : undefined;
   const pending = message.role === "assistant" && attachmentDeliveryPending;
   const files = attachments.map(({ inlineContent, ...file }) => file);
   const visualization = !pending && message.role === "assistant" && message.text_plain.trim() ? savedOpenUi(message.content_json, message.text_plain) : undefined;
@@ -19,7 +21,7 @@ export function messageView(message: MessageRow, attachments: SavedAttachment[],
     thinking: toolActivity ? toolActivity.reasoning.join("\n\n") || null : message.thinking,
     createdAt: message.created_at, attachments: pending ? [] : files, ...visualization,
     ...(toolActivity ? { toolActivity } : {}),
-    ...(savedTelegramSyncFailure(message.content_json) ? { telegramSyncFailed: true } : {}) };
+    ...(savedTelegramSyncFailure(message.content_json) ? { telegramSyncFailed: true } : {}), ...(action ? { action } : {}) };
   if (message.kind === "text" && message.role !== "assistant") return view;
   const captions = savedCaptions(message.content_json, files);
   const visible: string[] = [];

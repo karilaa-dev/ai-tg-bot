@@ -56,7 +56,7 @@ export interface ChatService {
   send(userId: number, threadId: string, input: { text: string; requestId: string; files?: ChatUploadFile[] }): Promise<ChatSendResult>;
   stop(userId: number, threadId: string): Promise<void>;
   fork(userId: number, threadId: string, messageId?: number): Promise<ChatThread>;
-  compact(userId: number, threadId: string): Promise<void>;
+  compact(userId: number, threadId: string): Promise<{ messageId: number }>;
   settings(userId: number): Promise<ChatSettings>;
   updateSettings(userId: number, patch: ChatSettingsPatch): Promise<ChatSettings>;
   memories(userId: number, offset: number): Promise<WebMemories>;

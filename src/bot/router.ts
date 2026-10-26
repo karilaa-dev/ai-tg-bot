@@ -1,6 +1,7 @@
 import { telegramTurnFrontend } from "../telegram/turnFrontend.js";
 import type { AccessControl } from "../access/control.js";
 import { createApplication } from "../application/runtime.js";
+import { compactionDescription, compactionDuration, compactionTime, savedCompactionAction } from "../application/compactionAction.js";
 import { telegramConversationLink } from "../telegram/conversationLink.js";
 import { LocalFileStore } from "../files/localStore.js";
 import { Bot, GrammyError, HttpError } from "grammy";
@@ -276,12 +277,23 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     logCommand(ctx, "compact");
     const thread = ctx.thread;
     if (!thread) return;
+    const run = await ctx.services.conversations.compact(ctx.from!.id, thread.id);
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
-    const count = await ctx.services.conversations.compact(ctx.from!.id, thread.id);
-    ctx.thread = await ctx.services.repos.threads.get(thread.id) ?? thread;
-    await ctx.api
-      .editMessageText(ctx.chat!.id, status.message_id, ctx.t("compacted", { count }))
-      .catch(() => replyWithThreadFallback(ctx, ctx.t("compacted", { count }), threadExtra(ctx.thread)));
+    const done = run.completion.then(() => true, () => true);
+    let finished = false;
+    while (!finished) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      finished = await Promise.race([done, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 3_000); })]);
+      clearTimeout(timer);
+      const saved = await ctx.services.repos.messages.get(run.messageId);
+      const action = saved && savedCompactionAction(saved.content_json);
+      if (!action) continue;
+      const description = compactionDescription(action, ctx.user?.lang ?? "en");
+      const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
+      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, text).catch(() => {
+        if (finished) return replyWithThreadFallback(ctx, text, threadExtra(thread));
+      });
+    }
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");

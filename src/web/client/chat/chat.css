@@ -146,6 +146,12 @@
 .chat-message[data-role="user"] .chat-attachments { justify-items: end; }
 .chat-openui { width: 100%; min-width: 0; }
 .chat-system { align-self: center; max-width: 36rem; padding: 6px 12px; border-radius: 10px; color: var(--chat-subtle); background: var(--color-kumo-elevated); text-align: center; font-size: 14px; }
+.chat-thread-action { width: 100%; padding: 12px 0; color: var(--chat-subtle); font-size: 14px; }
+.chat-thread-action-heading { display: flex; align-items: center; gap: 12px; }
+.chat-thread-action-title { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.chat-thread-action-title > svg { flex-shrink: 0; }
+.chat-thread-action-time { margin-left: auto; flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 13px; }
+.chat-thread-action p { margin: 5px 0 0 24px; line-height: 1.5; }
 .chat-empty-state { display: grid; justify-items: center; gap: 8px; margin: 14vh auto 0; max-width: 26rem; text-align: center; }
 .chat-empty-state h2 { font-size: 18px; font-weight: 600; }
 .chat-empty-state .chat-muted { line-height: 1.6; text-wrap: balance; }

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
@@ -46,10 +46,11 @@ describe("Pi runtime barrier operations", () => {
   it("reports messages removed from active context while retaining the complete history", async () => {
     const sessionManager = SessionManager.inMemory();
     for (let index = 0; index < 4; index++) {
-      sessionManager.appendMessage({ role: "user", content: `Request ${index}`, timestamp: index });
+      sessionManager.appendMessage({ role: "user", content: `Request ${index} `.repeat(1500), timestamp: index });
     }
     const session = {
       sessionManager,
+      settingsManager: SettingsManager.inMemory({ compaction: { keepRecentTokens: 1000 } }),
       getSessionStats: () => ({ totalMessages: 4 }),
       compact: async () => { sessionManager.appendCompaction("Earlier requests", sessionManager.getLeafId()!, 1000); },
     };
@@ -60,14 +61,31 @@ describe("Pi runtime barrier operations", () => {
     expect(sessionManager.getEntries().filter(entry => entry.type === "message")).toHaveLength(4);
   });
 
+  it("does not report success when the provider returns without saving a compaction", async () => {
+    const session = {
+      sessionManager: SessionManager.inMemory(),
+      settingsManager: SettingsManager.inMemory({ compaction: { keepRecentTokens: 1000 } }),
+      compact: vi.fn(async () => undefined),
+    };
+    const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
+    vi.spyOn(manager, "runtime").mockResolvedValue({ session, bridge: {}, lastUsedAt: 0 } as never);
+    await expect(manager.compact({} as never, {} as never)).rejects.toMatchObject({ reason: "too_small" });
+    expect(session.compact).not.toHaveBeenCalled();
+    for (let i = 0; i < 4; i++) session.sessionManager.appendMessage({ role: "user", content: "More context ".repeat(1500), timestamp: i });
+    await expect(manager.compact({} as never, {} as never)).rejects.toThrow("Compaction did not save a new checkpoint");
+    expect(session.compact).toHaveBeenCalledOnce();
+  });
+
   it("aborts an in-flight compaction when its barrier signal is cancelled", async () => {
     const compaction = deferred<void>();
     const abortCompaction = vi.fn(() => compaction.reject(new Error("Compaction cancelled")));
     const session = {
       sessionManager: SessionManager.inMemory(),
+      settingsManager: SettingsManager.inMemory({ compaction: { keepRecentTokens: 1000 } }),
       compact: vi.fn(() => compaction.promise),
       abortCompaction,
     };
+    for (let i = 0; i < 4; i++) session.sessionManager.appendMessage({ role: "user", content: "More context ".repeat(1500), timestamp: i });
     const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
     vi.spyOn(manager, "runtime").mockResolvedValue({
       session,

@@ -157,8 +157,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         return Response.json(await chat.fork(userId, threadId, input.messageId), { status: 201 });
       }) },
       "/api/chat/threads/:threadId/compact": { POST: user<"/api/chat/threads/:threadId/compact">(async (request, userId, chat) => {
-        await chat.compact(userId, await owned(request, userId, chat));
-        return new Response(null, { status: 204 });
+        return Response.json(await chat.compact(userId, await owned(request, userId, chat)), { status: 202 });
       }) },
       "/api/chat/threads/:threadId/files/:fileId": {
         ...read<"/api/chat/threads/:threadId/files/:fileId">(async (request, userId, chat) => { await owned(request, userId, chat); return attachment(request); }),

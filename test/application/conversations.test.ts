@@ -9,6 +9,9 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
+import { deferred } from "../helpers/async.js";
+import { savedCompactionAction } from "../../src/application/compactionAction.js";
+import { CompactionGuardError } from "../../src/pi/compactionPolicy.js";
 
 async function setup() {
   const config = loadTestConfig();
@@ -74,8 +77,51 @@ describe("conversation backend without a Telegram client", () => {
     expect(fork).toMatchObject({ parent_thread_id: thread.id, fork_point_message_id: point.id });
     expect(app.fork).toHaveBeenCalledWith(expect.objectContaining({ id: thread.id }), expect.objectContaining({ id: fork.id }),
       expect.objectContaining({ tg_id: 1001 }), "checkpoint", expect.any(AbortSignal));
-    expect(await app.conversations.compact(1001, fork.id)).toBe(2);
+    expect(await (await app.conversations.compact(1001, fork.id)).completion).toBe(2);
     expect(app.compact).toHaveBeenCalledTimes(1);
+  });
+
+  it("records progress and duration, coalesces duplicate requests, and preserves the completed action", async () => {
+    const thread = await app.conversations.create({ userId: 1001, title: "Compact", origin: "web" });
+    const finish = deferred<number>();
+    app.compact.mockImplementation(() => finish.promise);
+    const run = await app.conversations.compact(1001, thread.id);
+    const same = await app.conversations.compact(1001, thread.id);
+    expect(same.messageId).toBe(run.messageId);
+    await vi.waitFor(() => expect(app.compact).toHaveBeenCalledOnce());
+    const before = await app.repos.messages.get(run.messageId);
+    expect(before?.role).toBe("system");
+    const active = savedCompactionAction(before!.content_json);
+    expect(active?.status).toBe("running");
+    finish.resolve(12);
+    expect(await run.completion).toBe(12);
+    const saved = savedCompactionAction((await app.repos.messages.get(run.messageId))!.content_json);
+    expect(saved).toMatchObject({ status: "succeeded", messagesCompacted: 12 });
+    if (saved?.status !== "succeeded") throw new Error("Missing completed action");
+    expect(saved.finishedAt).toBeGreaterThanOrEqual(saved.startedAt);
+    expect((await app.repos.messages.listThread(thread.id))).toHaveLength(1);
+  });
+
+  it.each(["too_small", "recent", "unchanged"] as const)("persists a useful %s result without reporting success", async reason => {
+    const thread = await app.conversations.create({ userId: 1001, title: "Guarded", origin: "web" });
+    app.compact.mockRejectedValueOnce(new CompactionGuardError(reason));
+    const run = await app.conversations.compact(1001, thread.id);
+    await expect(run.completion).rejects.toMatchObject({ reason });
+    expect(savedCompactionAction((await app.repos.messages.get(run.messageId))!.content_json))
+      .toMatchObject({ status: "failed", reason });
+  });
+
+  it("records a provider failure and permits a retry", async () => {
+    const thread = await app.conversations.create({ userId: 1001, title: "Retry", origin: "web" });
+    app.compact.mockRejectedValueOnce(new Error("Private provider failure detail"));
+    const run = await app.conversations.compact(1001, thread.id);
+    await expect(run.completion).rejects.toThrow("Private provider failure detail");
+    const saved = (await app.repos.messages.get(run.messageId))!;
+    expect(savedCompactionAction(saved.content_json)).toMatchObject({ status: "failed", reason: "failed" });
+    expect(saved.text_plain).not.toContain("Private provider");
+    const retry = await app.conversations.compact(1001, thread.id);
+    expect(retry.messageId).not.toBe(run.messageId);
+    await retry.completion;
   });
 
   it("denies revoked accounts and cross-user access before durable writes", async () => {

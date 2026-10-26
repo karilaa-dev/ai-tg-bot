@@ -207,7 +207,7 @@ const server = serve({
         const url = new URL(request.url);
         const all = messages.get(target.id)!;
         const after = Number(url.searchParams.get("after") ?? 0);
-        const list = after ? all.filter(item => item.id > after) : all;
+        const list = after ? all.filter(item => item.id >= after) : all;
         return json({ user: user(), thread: withRead(target), chain: [], messages: list, draft: drafts.get(target.id) ?? null,
           olderCursor: null, newerCursor: null, autoLoadMaxBytes: 2 * 1024 * 1024, maxFileBytes: MAX_FILE_BYTES } satisfies ChatHistory);
       },
@@ -245,7 +245,24 @@ const server = serve({
       return json({ readMessageId: readCursors.get(target.id) ?? null, unread: state.unread });
     } },
     "/api/chat/threads/:id/stop": { POST: request => { const target = find(request.params.id); if (target) target.activity = { state: "interrupted", queuedTurns: 0 }; return new Response(null, { status: 204 }); } },
-    "/api/chat/threads/:id/compact": { POST: () => new Response(null, { status: 204 }) },
+    "/api/chat/threads/:id/compact": { POST: request => {
+      if (!requireWrite(request)) return json({ error: "Missing chat header." }, 403);
+      const target = find(request.params.id);
+      if (!target) return json({ error: "Not found." }, 404);
+      const history = messages.get(target.id)!;
+      const previous = history.findLast(item => item.action?.status === "succeeded")?.action;
+      const startedAt = Date.now();
+      const row = message(target.id, "system", "Compacting context", startedAt, { action: previous?.status === "succeeded"
+        ? { kind: "compaction", status: "failed", requestedAt: startedAt, startedAt, updatedAt: startedAt, finishedAt: startedAt,
+          reason: "recent", retryAt: startedAt + 60_000 }
+        : { kind: "compaction", status: "running", requestedAt: startedAt, startedAt, updatedAt: startedAt } });
+      history.push(row);
+      if (row.action?.status === "running") setTimeout(() => {
+        const finishedAt = Date.now();
+        row.action = { kind: "compaction", status: "succeeded", requestedAt: startedAt, startedAt, finishedAt, updatedAt: finishedAt, messagesCompacted: 12 };
+      }, 5_000);
+      return json({ messageId: row.id }, 202);
+    } },
     "/api/chat/threads/:id/fork": { POST: request => {
       const source = find(request.params.id)!;
       const fork = thread(threads.length + 1, `${source.title} (fork)`, "web", Date.now(), { parentThreadId: source.id });

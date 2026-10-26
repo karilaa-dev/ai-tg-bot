@@ -42,6 +42,7 @@ import { initializeUserMemory } from "../memory/userMemory.js";
 import { createContextPruningExtension } from "./contextPruning.js";
 import { createCodexCompactionExtension } from "./codexCompaction.js";
 import { raceWithAbort } from "../files/cancel.js";
+import { assertCompactionUseful, CompactionGuardError } from "./compactionPolicy.js";
 
 const MAX_CACHED_RUNTIMES = 32;
 
@@ -300,6 +301,8 @@ export class PiRuntimeManager implements PiRuntimeService {
     signal?.throwIfAborted();
     const runtime = await this.runtime(thread, user);
     signal?.throwIfAborted();
+    assertCompactionUseful(runtime.session);
+    const priorCompaction = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction")?.id;
     const before = contextMessageCount(runtime.session);
     const compaction = runtime.session.compact();
     const onAbort = () => runtime.session.abortCompaction();
@@ -308,8 +311,14 @@ export class PiRuntimeManager implements PiRuntimeService {
     try {
       await compaction;
       signal?.throwIfAborted();
+      const checkpoint = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+      if (!checkpoint?.summary.trim() || checkpoint.id === priorCompaction) throw new Error("Compaction did not save a new checkpoint.");
       const after = contextMessageCount(runtime.session);
       return Math.max(0, before - after);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Nothing to compact (session too small)") throw new CompactionGuardError("too_small");
+      if (error instanceof Error && error.message === "Already compacted") throw new CompactionGuardError("unchanged");
+      throw error;
     } finally {
       signal?.removeEventListener("abort", onAbort);
     }

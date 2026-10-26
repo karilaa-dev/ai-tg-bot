@@ -331,6 +331,33 @@ try {
   assert(await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await mobile.waitForTimeout(500);
   await mobile.screenshot({ path: "/tmp/ai-tg-polish-mobile-read.png" });
+
+  await laptop.click();
+  const compact = async () => {
+    await mobile.getByRole("button", { name: "Действия с чатом", exact: true }).click();
+    await mobile.getByRole("menuitem", { name: "Сжать контекст", exact: true }).click();
+    await mobile.getByRole("dialog").getByRole("button", { name: "Сжать", exact: true }).click();
+  };
+  await compact();
+  await mobile.locator('.chat-thread-action[data-state="running"]').waitFor();
+  await mobile.waitForFunction(() => document.querySelector(".chat-thread-action-time")?.textContent !== "0:00");
+  await mobile.getByRole("button", { name: "Действия с чатом", exact: true }).click();
+  assert.equal(await mobile.getByRole("menuitem", { name: "Сжать контекст", exact: true }).getAttribute("aria-disabled"), "true");
+  await mobile.reload();
+  await mobile.locator('.chat-thread-action[data-state="running"]').waitFor();
+  await mobile.locator('.chat-thread-action[data-state="succeeded"]').waitFor({ timeout: 8_000 });
+  const elapsed = await mobile.locator(".chat-thread-action-time").innerText();
+  assert.match(elapsed, /^0:0[5-9]$/);
+  await mobile.reload();
+  await mobile.getByText("Контекст сжат", { exact: true }).waitFor();
+  assert.equal(await mobile.locator(".chat-thread-action-time").innerText(), elapsed);
+  await compact();
+  await mobile.getByText("Сжатие пока не нужно", { exact: true }).waitFor();
+  await mobile.getByText("Контекст только что сжат. Подождите минуту и продолжите общение.", { exact: true }).waitFor();
+  assert.equal(await mobile.locator('.chat-thread-action[data-state="succeeded"]').count(), 1);
+  assert(await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  console.log("PASS: compaction action timer, refresh during work, saved duration, and repeat guard in the mobile Russian chat");
+
   assert.deepEqual(mobileErrors, []);
   await mobile.close();
   console.log("PASS: mobile Russian sidebar with Telegram marks, unread dot cleared after viewing");

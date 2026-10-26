@@ -1,4 +1,5 @@
 import type { InferenceUsageCall } from "../pi/usage.js";
+import type { CompactionAction } from "../application/compactionAction.js";
 import type { MemoryPage } from "../memory/view.js";
 import type { ToolActivity } from "../ai/toolActivity.js";
 import type { OpenUiLanguage } from "../openui/language.js";
@@ -51,6 +52,7 @@ export interface WebAttachment {
 }
 
 export interface WebMessage {
+  action?: CompactionAction;
   id: number;
   threadId: string;
   role: "user" | "assistant" | "system";

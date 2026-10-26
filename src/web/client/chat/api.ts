@@ -105,7 +105,7 @@ export const chatApi = {
   },
   stop: (threadId: string) => chatJson<unknown>(`/api/chat/threads/${threadId}/stop`, json("POST", {})),
   fork: (threadId: string, messageId?: number) => chatJson<ChatThread>(`/api/chat/threads/${threadId}/fork`, json("POST", messageId === undefined ? {} : { messageId })),
-  compact: (threadId: string) => chatJson<unknown>(`/api/chat/threads/${threadId}/compact`, json("POST", {})),
+  compact: (threadId: string) => chatJson<{ messageId: number }>(`/api/chat/threads/${threadId}/compact`, json("POST", {})),
   /** The server keeps the cursor monotonic, so a late or repeated acknowledgement never marks newer messages read. */
   markRead: (threadId: string, messageId: number, signal?: AbortSignal) =>
     chatJson<ChatReadResult>(`/api/chat/threads/${threadId}/read`, { ...json("POST", { messageId }), signal }),

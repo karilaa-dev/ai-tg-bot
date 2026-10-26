@@ -1,10 +1,14 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DurableTurnAttachment, TelegramTurnSource } from "../db/repos/turnRuns.js";
-import type { MessageKind, ThreadRow } from "../db/types.js";
+import type { MessageKind, ThreadRow, UserRow } from "../db/types.js";
 import { canonicalTimeZone, userOffsetMinutes, zoneOffsetMinutes } from "../bot/timezone.js";
 import type { ApplicationServices } from "./services.js";
 import { ConversationError } from "./errors.js";
+import { compactionDescription, type CompactionAction } from "./compactionAction.js";
+import { CompactionGuardError } from "../pi/compactionPolicy.js";
+
+export interface CompactionRun { messageId: number; completion: Promise<number> }
 
 const settingsSchema = z.object({
   language: z.enum(["en", "ru"]).optional(),
@@ -26,6 +30,7 @@ export type ConversationSource =
   | { kind: "web"; requestId: string };
 
 export class ConversationService {
+  private readonly compactions = new Map<string, Promise<CompactionRun>>();
   constructor(private readonly services: ApplicationServices) {}
 
   async user(userId: number) {
@@ -118,14 +123,65 @@ export class ConversationService {
     });
   }
 
-  async compact(userId: number, threadId: ThreadRow["id"]) {
+  async compact(userId: number, threadId: ThreadRow["id"]): Promise<CompactionRun> {
     const thread = await this.thread(userId, threadId);
     const user = await this.user(userId);
-    return this.services.turnCoordinator.withThreadBarrier(thread.id, "compact", async (_snapshot, signal) => {
-      const count = await this.services.pi.compact(thread, user, signal);
-      signal.throwIfAborted();
-      return count;
-    });
+    if (thread.archived) throw new ConversationError(409, "Fork this archived conversation to continue it.");
+    const existing = this.compactions.get(threadId);
+    if (existing) return existing;
+    const starting = this.startCompaction(thread, user);
+    this.compactions.set(threadId, starting);
+    try { return await starting; }
+    catch (error) { this.compactions.delete(threadId); throw error; }
+  }
+
+  private async startCompaction(thread: ThreadRow, user: UserRow): Promise<CompactionRun> {
+    const now = Date.now();
+    const action: CompactionAction = { kind: "compaction", status: "queued", requestedAt: now, updatedAt: now };
+    const message = await this.services.repos.messages.insert({ threadId: thread.id, role: "system", kind: "system",
+      content: { action }, textPlain: compactionDescription(action, user.lang).title });
+    const completion = this.performCompaction(thread, user, message.id, action).finally(() => this.compactions.delete(thread.id));
+    void completion.catch(error => this.services.logger.warn("context compaction did not complete", { threadId: thread.id, error: String(error) }));
+    return { messageId: message.id, completion };
+  }
+
+  private async performCompaction(thread: ThreadRow, user: UserRow, messageId: number, initial: CompactionAction): Promise<number> {
+    let action = initial;
+    let writes = Promise.resolve();
+    let operationSignal: AbortSignal | undefined;
+    const save = (next: CompactionAction) => {
+      action = next;
+      const description = compactionDescription(next, user.lang);
+      writes = writes.catch(() => undefined).then(() => this.services.repos.messages.setDeliveryContent({ messageId,
+        content: { action: next }, textPlain: [description.title, description.detail].filter(Boolean).join(". "), tgMessageId: null }));
+      return writes;
+    };
+    const heartbeat = setInterval(() => {
+      if (action.status === "queued" || action.status === "running") void save({ ...action, updatedAt: Date.now() })
+        .catch(error => this.services.logger.warn("compaction progress could not be saved", { messageId, error: String(error) }));
+    }, 10_000);
+    heartbeat.unref();
+    try {
+      return await this.services.turnCoordinator.withThreadBarrier(thread.id, "compact", async (_snapshot, signal) => {
+        operationSignal = signal;
+        await this.user(user.tg_id);
+        const startedAt = Date.now();
+        await save({ kind: "compaction", status: "running", requestedAt: initial.requestedAt, startedAt, updatedAt: startedAt });
+        const count = await this.services.pi.compact(thread, user, signal);
+        signal.throwIfAborted();
+        const finishedAt = Date.now();
+        await save({ kind: "compaction", status: "succeeded", requestedAt: initial.requestedAt,
+          startedAt, finishedAt, updatedAt: finishedAt, messagesCompacted: count });
+        return count;
+      });
+    } catch (error) {
+      const finishedAt = Date.now();
+      await save({ kind: "compaction", status: "failed", requestedAt: initial.requestedAt,
+        startedAt: action.status === "queued" ? null : action.startedAt, finishedAt, updatedAt: finishedAt,
+        reason: error instanceof CompactionGuardError ? error.reason : operationSignal?.aborted ? "interrupted" : "failed",
+        retryAt: error instanceof CompactionGuardError ? error.retryAt : null });
+      throw error;
+    } finally { clearInterval(heartbeat); }
   }
 
   async settings(userId: number) {

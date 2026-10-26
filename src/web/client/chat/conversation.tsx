@@ -26,6 +26,7 @@ import { hasDraftContent, LiveDraft } from "./live-draft.js";
 import { MobileNavButton } from "./shell-parts.js";
 import { chatFormat, useChatStrings } from "./strings.js";
 import type { ChatHistory, ChatThread } from "../../chat-types.js";
+import { CompactionStatus } from "./compaction-status.js";
 
 interface PendingSend { requestId: string; text: string; files: File[]; status: "sending" | "sent" | "failed"; error?: unknown; messageId?: number; sentAt?: number }
 type ActionKind = "stop" | "fork" | "compact";
@@ -101,7 +102,9 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       do {
         again.current = false;
         const previous = historyRef.current;
-        let cursor = older ? previous?.olderCursor ?? null : previous?.messages.slice(-50)[0]?.id ?? null;
+        const activeAction = previous?.messages.find(message => message.action?.status === "queued" || message.action?.status === "running");
+        let cursor = older ? previous?.olderCursor ?? null : Math.min(previous?.messages.slice(-50)[0]?.id ?? Infinity, activeAction?.id ?? Infinity);
+        if (cursor === Infinity) cursor = null;
         let latest: ChatHistory;
         const received: ChatMessage[] = [];
         do {
@@ -148,6 +151,13 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       loader.dispose();
     };
   }, [load, loader]);
+
+  const compacting = history?.messages.some(message => message.action?.status === "queued" || message.action?.status === "running") ?? false;
+  useEffect(() => {
+    if (!compacting) return;
+    const timer = setInterval(() => { if (!document.hidden) void load(); }, 1_000);
+    return () => clearInterval(timer);
+  }, [compacting, load]);
 
   useEffect(() => {
     if (!history) return;
@@ -274,9 +284,10 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     onOpenThread(thread);
   });
   const compact = () => void run("compact", async () => {
+    setCompactOpen(false);
     await chatApi.compact(threadId);
     if (!mounted.current || !drafts.active) return;
-    setCompactOpen(false); void load(); onThreadChange();
+    void load(); onThreadChange();
   });
   const forkFrom = useCallback((message: ChatMessage) => setForkTarget({ open: true, message }), []);
   const followUp = useCallback((text: string) => void send({ text, files: [], requestId: null }), [send]);
@@ -325,7 +336,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
           <DropdownMenu.Trigger render={<Button variant="ghost" shape="square" aria-label={t.chatActions} disabled={!thread}><IconDots size={20} aria-hidden="true" /></Button>} />
           <DropdownMenu.Content align="end" sideOffset={6}>
             <DropdownMenu.Item icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setForkTarget({ open: true, message: null })}>{t.forkChat}</DropdownMenu.Item>
-            <DropdownMenu.Item icon={<IconFold size={16} aria-hidden="true" />} onClick={() => setCompactOpen(true)}>{t.compactContext}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={compacting || (action?.kind === "compact" && action.busy)} icon={<IconFold size={16} aria-hidden="true" />} onClick={() => setCompactOpen(true)}>{t.compactContext}</DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu>
       </div>
@@ -426,7 +437,9 @@ const MessageView = memo(function MessageView({ message, web, files, maxBytes, a
   const [renderedImages, setRenderedImages] = useState<{ source: ChatMessage["openui"]; ids: ReadonlySet<string> }>({ source: undefined, ids: new Set() });
   const messageImageSource = useMemo(() => ({ ...imageSource, fileNames: new Map(message.attachments.map(file => [file.id, file.name])) }), [imageSource, message.attachments]);
   const imagesRendered = useCallback((ids: ReadonlySet<string>) => setRenderedImages({ source: message.openui, ids }), [message.openui]);
-  if (message.role === "system") return <div className="chat-system" role="note" data-message-id={message.id}><RichText text={message.text} /></div>;
+  if (message.role === "system") return message.action
+    ? <CompactionStatus action={message.action} messageId={message.id} language={language} />
+    : <div className="chat-system" role="note" data-message-id={message.id}><RichText text={message.text} /></div>;
   const assistant = message.role === "assistant";
   const openui = assistant && web && message.openui ? message.openui : null;
   // Tool-only records (for example a cancelled run) have nothing to copy or fork from.

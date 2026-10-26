@@ -170,8 +170,9 @@ export class BotChatService implements ChatService {
     return { ...threadView(created), unread: reads?.unread ?? false, lastMessageId: reads?.lastMessageId ?? null };
   }
 
-  async compact(userId: number, threadId: ThreadRow["id"]): Promise<void> {
-    await this.conversations.compact(userId, threadId);
+  async compact(userId: number, threadId: ThreadRow["id"]): Promise<{ messageId: number }> {
+    const run = await this.conversations.compact(userId, threadId);
+    return { messageId: run.messageId };
   }
 
   settings(userId: number): Promise<ChatSettings> { return this.conversations.settings(userId); }

@@ -9,6 +9,8 @@ import { renderThreadSessionContext } from "../../src/ai/prompt.js";
 import { resolveThreadFileDescriptors } from "../../src/e2b/threadFiles.js";
 import { FileProcessingStatus } from "../../src/bot/files.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
+import { CompactionGuardError } from "../../src/pi/compactionPolicy.js";
+import { savedCompactionAction } from "../../src/application/compactionAction.js";
 
 describe("Telegram bot with grammy-emulate", () => {
   let env: GrammyEmulator;
@@ -350,11 +352,23 @@ describe("Telegram bot with grammy-emulate", () => {
     const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();
     const compact = vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
 
-    await env.bot.sendCommand(env.user, env.chat, "/compact");
+    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
 
     expect(waitForIdle).toHaveBeenCalledWith(thread.id, false);
     expect(compact).toHaveBeenCalledOnce();
     expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
+    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({ text: expect.stringMatching(/Context compacted · \d+:\d{2}/) });
+    const action = (await env.repos.messages.listThread(thread.id)).find(message => savedCompactionAction(message.content_json));
+    expect(savedCompactionAction(action!.content_json)).toMatchObject({ status: "succeeded", messagesCompacted: 2 });
+  });
+
+  it("explains why a short Telegram chat cannot be compacted", async () => {
+    await startBot();
+    vi.spyOn(env.services.pi, "compact").mockRejectedValueOnce(new CompactionGuardError("too_small"));
+    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
+    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({
+      text: expect.stringContaining("The available context is still too small"),
+    });
   });
 
   it("treats a Telegram-created topic as a clean thread", async () => {

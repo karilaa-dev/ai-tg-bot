@@ -5,12 +5,35 @@ import { attachmentDeliveryTurnId, messageView } from "../../src/web/message-vie
 import type { WebAttachment } from "../../src/web/types.js";
 import { cardForFile } from "../../src/files/ingest.js";
 import type { FileRow } from "../../src/db/types.js";
+import { COMPACTION_ACTION_STALE_MS, compactionDuration, type CompactionAction } from "../../src/application/compactionAction.js";
 
 const image: WebAttachment = { id: fixtureUuid(1), kind: "image", name: "photo.jpg", mimeType: "image/jpeg", size: 500, caption: "Make a picture", description: "A cat [with stripes]." };
 const audio: WebAttachment = { id: fixtureUuid(2), kind: "audio", name: "voice.ogg", mimeType: "audio/ogg", size: 500, caption: null };
 function message(text: string, content: unknown = {}): MessageRow {
   return { id: 10, thread_id: fixtureUuid(1), role: "user", kind: "file", text_plain: text, content_json: JSON.stringify(content), thinking: null, created_at: 0, tg_message_id: null, pi_entry_id: null };
 }
+
+it("projects saved compaction progress only from system messages and preserves the final duration", () => {
+  const now = Date.now();
+  const action: CompactionAction = { kind: "compaction", status: "succeeded", requestedAt: now - 20_000,
+    startedAt: now - 15_000, finishedAt: now - 1_000, updatedAt: now - 1_000, messagesCompacted: 12 };
+  const row = message("Context compacted", { action });
+  expect(messageView(row, []).action).toBeUndefined();
+  row.role = "system";
+  row.kind = "system";
+  expect(messageView(row, []).action).toEqual(action);
+  expect(compactionDuration(action, now + 100_000)).toBe(14_000);
+  expect(messageView({ ...row, content_json: '{"action":{"kind":"compaction","status":"unknown"}}' }, []).action).toBeUndefined();
+});
+
+it.each(["queued", "running"] as const)("shows an abandoned %s action as interrupted after a restart", status => {
+  const updatedAt = Date.now() - COMPACTION_ACTION_STALE_MS - 1_000;
+  const row = message("Compacting context", { action: { kind: "compaction", status,
+    requestedAt: updatedAt - 5_000, updatedAt, ...(status === "running" ? { startedAt: updatedAt - 4_000 } : {}) } });
+  row.role = "system";
+  row.kind = "system";
+  expect(messageView(row, []).action).toMatchObject({ status: "failed", reason: "interrupted", finishedAt: updatedAt });
+});
 
 it("moves photo descriptions into image details while retaining the caption and following text", () => {
   const view = messageView(message(`Make a picture\n\n[[chat-file:${fixtureUuid(1)}]] [image #${fixtureUuid(1)}: A cat [with stripes].]\n\nKeep this too.`), [image]);

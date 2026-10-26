@@ -67,7 +67,7 @@ beforeEach(async () => {
     history: vi.fn(async (userId, threadId) => ({ thread: thread(threadId), user: { ...profile(userId), lastActivity: 1, threadCount: 1 }, chain: [], messages: [], olderCursor: null, newerCursor: null, autoLoadMaxBytes: 0, maxFileBytes: 0 })),
     createThread: vi.fn(async () => thread(fixtureUuid(1))),
     send: vi.fn(async () => ({ turnId: 3, messageId: 4, queued: false })),
-    stop: vi.fn(async () => {}), fork: vi.fn(async () => thread(fixtureUuid(1))), compact: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}), fork: vi.fn(async () => thread(fixtureUuid(1))), compact: vi.fn(async () => ({ messageId: 1 })),
     settings: vi.fn<ChatService["settings"]>(async () => ({ language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true })),
     updateSettings: vi.fn(async (_id, patch) => ({ language: "en", timeZone: null, timezoneOffsetMinutes: null, streaming: true, memoryEnabled: true, ...patch })),
     memories: vi.fn(), deleteMemory: vi.fn(), usage: vi.fn(),
@@ -222,6 +222,16 @@ it("bounds search and deletes zero-based memory IDs only for the verified accoun
   expect((await request("/api/chat/memories/0", { method: "DELETE", headers: { ...headers, Origin: "https://evil.example" } })).status).toBe(403);
   expect((await request("/api/chat/memories/-1", { method: "DELETE", headers })).status).toBe(400);
   expect(chat.deleteMemory).toHaveBeenCalledTimes(1);
+});
+
+it("accepts compaction with the saved action ID for polling", async () => {
+  const cookie = await login();
+  const response = await request(`/api/chat/threads/${fixtureUuid(1)}/compact`, {
+    method: "POST", headers: { ...mutation, Cookie: cookie },
+  });
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ messageId: 1 });
+  expect(chat.compact).toHaveBeenCalledWith(42, fixtureUuid(1));
 });
 
 it("rejects another user's thread on every read, mutation and download before resolving files", async () => {
