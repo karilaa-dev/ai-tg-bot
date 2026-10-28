@@ -83,6 +83,7 @@ try {
   scheduler.start();
   const repository = new ConversationRepository(db.db, repos, bot.botInfo.id);
   web = await startWebServer({
+    db: db.db,
     development: process.argv.includes("--web-dev"), config, repository,
     fileResolver: services.fileResolver, logger, codexLogin, access,
     chat: { service: new BotChatService({ services, repository, api: bot.api }), botUsername: bot.botInfo.username },

@@ -41,6 +41,14 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
     }
     await tx.execute(sql`create index if not exists turn_runs_schedule_thread_idx on turn_runs(thread_id, accepted_at) where schedule_id is not null`);
     const timeType = dialect === "postgres" ? sql`bigint` : sql`integer`;
+    // Admins can sign in before registering with the bot, so there is no users FK.
+    await tx.execute(sql`
+      create table if not exists web_sessions (
+        token_hash text primary key not null,
+        user_id ${timeType} not null check(user_id > 0 and user_id <= 9007199254740991)
+      )
+    `);
+    await tx.execute(sql`create index if not exists web_sessions_user_idx on web_sessions(user_id)`);
     await tx.execute(sql`
       create table if not exists chat_schedules (
         id text primary key, user_id ${timeType} not null references users(tg_id),

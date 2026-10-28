@@ -79,7 +79,7 @@ beforeEach(async () => {
   access = new AccessControl(db.db);
   await access.initialize();
   for (const id of [42, 84]) await access.allow(id);
-  options = { config, access, chat: { service: chat, botUsername: "test_bot" }, repository: { file: fileLookup } as unknown as ConversationRepository, fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config) };
+  options = { db: db.db, config, access, chat: { service: chat, botUsername: "test_bot" }, repository: { file: fileLookup } as unknown as ConversationRepository, fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config) };
   controller = new AbortController();
   api = createWebRoutes(options, controller.signal);
   server = serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: MAX_CHAT_BODY_BYTES, routes: api.routes, fetch: api.fetch });
@@ -103,6 +103,7 @@ it("refuses every private route before identity and keeps admin routes from ordi
   const session = await request("/api/chat/session", { headers: { Cookie: cookie } });
   expect(await session.json()).toEqual({ authenticated: true, user: profile(42), botUsername: "test_bot", admin: false });
   expect(session.headers.get("Cache-Control")).toBe("no-store");
+  expect(session.headers.get("Set-Cookie")).toContain(`${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=34560000; Secure`);
   for (const path of ["/api/users", "/api/usage", "/api/admin/codex", `/api/threads/${fixtureUuid(1)}/files/${fixtureUuid(1)}`]) expect((await request(path, { headers: { Cookie: cookie } })).status).toBe(403);
   expect((await request("/api/auth/login", { method: "POST", headers: { "X-Admin-Request": "1", "Content-Type": "application/json" }, body: '{"token":"anything"}' })).status).toBe(405);
 });

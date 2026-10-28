@@ -62,7 +62,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     resolver = new FileResolver(repos.files);
     controller = new AbortController();
     const login = await telegram;
-    api = createWebRoutes({ config, access, repository, fileResolver: resolver, logger: createLogger(config), chat: signInOnlyChat(), telegramAuth: login.dependencies }, controller.signal);
+    api = createWebRoutes({ db: database.db, config, access, repository, fileResolver: resolver, logger: createLogger(config), chat: signInOnlyChat(), telegramAuth: login.dependencies }, controller.signal);
     server = serve({ hostname: "127.0.0.1", port: 0, development: false, routes: api.routes, fetch: api.fetch });
     const cookie = await login.signIn(server.url, ADMIN_ID);
     request = (url, init) => {
@@ -903,7 +903,7 @@ describe.each(["sqlite", ...(process.env.TEST_POSTGRES_URL ? ["postgres"] : [])]
     expect(await response.text()).not.toContain("hidden");
     controller.abort();
     expect((await request("/api/users")).status).toBe(503);
-    expect(await startWebServer({ config: { ...config, WEB_ENABLED: false }, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
+    expect(await startWebServer({ db: database.db, config: { ...config, WEB_ENABLED: false }, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: "/missing" })).toBeUndefined();
   });
 });
 

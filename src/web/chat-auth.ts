@@ -6,12 +6,12 @@ import type { AppConfig } from "../config.js";
 import type { AccessControl } from "../access/control.js";
 import { WebHttpError } from "./auth.js";
 import { loginReturnPath } from "./login-return.js";
+import { WebSessionStore } from "./session-store.js";
 
 const ISSUER = "https://oauth.telegram.org";
-const SESSION_MS = 12 * 60 * 60_000;
+const SESSION_COOKIE_SECONDS = 400 * 24 * 60 * 60;
 const TRANSACTION_MS = 10 * 60_000;
 const MAX_ENTRIES = 4_096;
-const MAX_USER_SESSIONS = 8;
 const token = () => randomBytes(32).toString("base64url");
 const hash = (value: string) => createHash("sha256").update(value).digest();
 const key = (value: string) => hash(value).toString("hex");
@@ -22,7 +22,6 @@ export interface TelegramAuthDependencies { jwks?: JWTVerifyGetKey; fetch?: Tele
 
 type AuthConfig = Pick<AppConfig, "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_ADMIN_USER_IDS">;
 interface Transaction { browser: string; verifier: string; nonce: string; returnTo: string; expires: number }
-interface Session { userId: number; expires: number }
 
 /** Bounded fixed-window request budgets. */
 export class ChatRateLimit {
@@ -84,7 +83,6 @@ export async function verifyTelegramIdentity(idToken: string, nonce: string, cli
 }
 
 export class WebChatAuth {
-  private readonly sessions = new Map<string, Session>();
   private readonly transactions = new Map<string, Transaction>();
   private readonly starts = new ChatRateLimit(10);
   private readonly globalStarts = new ChatRateLimit(120);
@@ -95,7 +93,8 @@ export class WebChatAuth {
   private readonly fetcher: TelegramFetch;
   private readonly authorizeUrl: string;
 
-  constructor(private readonly config: AuthConfig, private readonly access: Pick<AccessControl, "isAllowed">, dependencies: TelegramAuthDependencies = {}) {
+  constructor(private readonly config: AuthConfig, private readonly access: Pick<AccessControl, "isAllowed">,
+    private readonly sessions: WebSessionStore, dependencies: TelegramAuthDependencies = {}) {
     this.jwks = dependencies.jwks ?? createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`), { timeoutDuration: 10_000 });
     this.fetcher = dependencies.fetch ?? fetch;
     this.authorizeUrl = dependencies.authorizeUrl ?? `${ISSUER}/auth`;
@@ -122,7 +121,6 @@ export class WebChatAuth {
   }
   private prune() {
     const now = Date.now();
-    for (const [key, entry] of this.sessions) if (entry.expires <= now) this.sessions.delete(key);
     for (const [key, entry] of this.transactions) if (entry.expires <= now) this.transactions.delete(key);
   }
   isAdmin(userId: number) { return this.config.WEB_ADMIN_USER_IDS.includes(userId); }
@@ -130,12 +128,21 @@ export class WebChatAuth {
     if (!this.available) return undefined;
     const value = this.cookieValue(request, "session");
     const sessionKey = value ? key(value) : undefined;
-    const session = sessionKey ? this.sessions.get(sessionKey) : undefined;
-    if (!session || session.expires <= Date.now() || (!this.isAdmin(session.userId) && !await this.access.isAllowed(session.userId))) {
-      if (sessionKey) this.sessions.delete(sessionKey);
+    const userId = sessionKey ? await this.sessions.userId(sessionKey) : undefined;
+    if (userId === undefined) return undefined;
+    if (!this.isAdmin(userId) && !await this.access.isAllowed(userId)) {
+      await this.sessions.revokeUser(userId);
       return undefined;
     }
-    return session.userId;
+    return userId;
+  }
+  /** Call only after authenticating the request. Renew browser persistence during use. */
+  refreshSession(request: Request, response: Response): Response {
+    const value = this.cookieValue(request, "session");
+    if (!value || response.headers.has("Set-Cookie")) return response;
+    const headers = new Headers(response.headers);
+    headers.append("Set-Cookie", this.cookie("session", value, SESSION_COOKIE_SECONDS));
+    return new Response(response.body, { status: response.status, headers });
   }
   async requireSession(request: Request) {
     const userId = await this.userId(request);
@@ -203,26 +210,22 @@ export class WebChatAuth {
     request.signal.throwIfAborted();
     this.prune();
     const previous = this.cookieValue(request, "session");
-    if (previous) this.sessions.delete(key(previous));
-    const existing = [...this.sessions].filter(([, session]) => session.userId === userId);
-    for (const [sessionKey] of existing.slice(0, Math.max(0, existing.length - MAX_USER_SESSIONS + 1))) this.sessions.delete(sessionKey);
-    if (this.sessions.size >= MAX_ENTRIES) throw new WebHttpError(503, "Sign-in is busy. Try again shortly.");
     const session = token();
-    this.sessions.set(key(session), { userId, expires: Date.now() + SESSION_MS });
+    await this.sessions.create(key(session), userId, previous ? key(previous) : undefined);
     const headers = new Headers({ Location: transaction.returnTo });
-    headers.append("Set-Cookie", this.cookie("session", session, SESSION_MS / 1_000));
+    headers.append("Set-Cookie", this.cookie("session", session, SESSION_COOKIE_SECONDS));
     headers.append("Set-Cookie", this.cookie("login", "", 0));
     return new Response(null, { status: 303, headers });
   }
-  logout(request: Request) {
+  async logout(request: Request) {
     const value = this.cookieValue(request, "session");
-    if (value) this.sessions.delete(key(value));
+    if (value) await this.sessions.delete(key(value));
     return this.cookie("session", "", 0);
   }
   revokeSessions(userId: number) {
-    for (const [sessionKey, session] of this.sessions) if (session.userId === userId) this.sessions.delete(sessionKey);
+    return this.sessions.revokeUser(userId);
   }
-  clear() { this.stopped = true; this.sessions.clear(); this.transactions.clear(); this.starts.clear(); this.globalStarts.clear(); this.callbacks.clear(); }
+  clear() { this.stopped = true; this.transactions.clear(); this.starts.clear(); this.globalStarts.clear(); this.callbacks.clear(); }
 }
 
 /** Enforce limits on bytes actually received, including chunked bodies. */

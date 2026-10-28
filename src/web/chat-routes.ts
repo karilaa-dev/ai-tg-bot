@@ -80,7 +80,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
       const chat = service();
       (request.method === "GET" || request.method === "HEAD" ? reads : writes).take(String(userId));
       await chat.profile(userId);
-      return handler(request, userId, chat);
+      return auth.refreshSession(request, await handler(request, userId, chat));
     });
   }
   function read<Path extends string>(handler: (request: BunRequest<Path>, userId: number, chat: ChatService) => Promise<Response>) {
@@ -92,7 +92,11 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
     await chat.requireThread(userId, id);
     return id;
   }
-  const sessionRead = guard(async request => Response.json(await session(request)));
+  const sessionRead = guard(async request => {
+    const current = await session(request);
+    const response = Response.json(current);
+    return current.authenticated ? auth.refreshSession(request, response) : response;
+  });
   return {
     routes: {
       "/api/chat/session": {
@@ -100,7 +104,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         DELETE: guard(async request => {
           await requireBoundSession(request);
           return Response.json({ authenticated: false, loginAvailable: auth.available && Boolean(options.chat) } satisfies ChatSession,
-            { headers: { "Set-Cookie": auth.logout(request) } });
+            { headers: { "Set-Cookie": await auth.logout(request) } });
         }),
       },
       "/api/auth/telegram/start": { GET: guard((request, server) => auth.start(request, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS))) },

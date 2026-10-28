@@ -57,7 +57,7 @@ it.each(["gallery", "thumbnail"] as const)("retains a reused %s before completio
   const chat = new BotChatService({ services: env.services, api: env.bot.api, repository });
   const login = await fakeTelegramLogin();
   const controller = new AbortController();
-  const routes = createWebRoutes({ config: env.config, access: env.services.access, repository,
+  const routes = createWebRoutes({ db: env.db.db, config: env.config, access: env.services.access, repository,
     chat: { service: chat, botUsername: "test_bot" }, telegramAuth: login.dependencies,
     fileResolver: restarted, logger: env.services.logger }, controller.signal);
   const server = serve({ hostname: "127.0.0.1", port: 0, routes: routes.routes, fetch: routes.fetch });
