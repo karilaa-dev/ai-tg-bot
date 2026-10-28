@@ -120,7 +120,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.3` uses `ai-tg-bot-tools:v2.1.3`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.4` uses `ai-tg-bot-tools:v2.1.4`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -136,8 +136,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.3 is ai-tg-bot-tools:v2.1.3.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.3
+# Optional override. The default for version 2.1.4 is ai-tg-bot-tools:v2.1.4.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.4
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -332,7 +332,9 @@ Telegram-created chats have a Telegram icon before their title. Blue dots indica
 
 `BOT_TOKEN` remains the bot's API credential; it is not an OAuth client secret and no secret is derived from it. All three OAuth settings are required together. `WEB_PUBLIC_URL` must be the canonical HTTPS origin, without a path or query (explicit loopback HTTP is supported for local setup). The user must already have started this bot in Telegram. Membership comes from the database allowlist managed on the admin page. Login uses authorization code with S256 PKCE, a browser-bound single-use state, nonce, and verified Telegram signatures, issuer, audience, expiry, and numeric `id` claim. Username and OIDC `sub` never authorize access.
 
-User login creates a 12-hour HttpOnly, SameSite=Lax cookie, Secure over HTTPS. Each user may retain eight sessions; another sign-in revokes their oldest session. Logout revokes the current session immediately; restarting the process invalidates all user sessions and pending logins. The same session opens `/admin` only for accounts in `WEB_ADMIN_USER_IDS`; other accounts receive 403 from every admin API. The API always derives identity from the session and checks thread ownership before history, mutations, or downloads.
+User login creates a persistent HttpOnly, SameSite=Lax cookie, Secure over HTTPS. Sessions are stored as token hashes in the application database without an automatic timeout and survive app restarts. Authenticated requests renew the browser cookie for 400 days. Signing in on another device keeps existing devices signed in. Logout revokes the current session immediately; removing a member's access revokes their sessions. Pending logins expire after ten minutes and are cleared on restart. The same session opens `/admin` only for accounts in `WEB_ADMIN_USER_IDS`; other accounts receive 403 from every admin API. The API always derives identity from the session and checks thread ownership before history, mutations, or downloads.
+
+The first upgrade from in-memory website sessions requires users to sign in once. Later restarts preserve those sessions. Back up the application database to preserve sign-ins alongside conversations.
 
 Behind a reverse proxy, set `WEB_TRUSTED_PROXY_IPS` to the comma-separated exact IP addresses of your trusted proxy hops (for example, `127.0.0.1,::1` for a local proxy). The proxy must overwrite `X-Forwarded-For` with the real client address or append the actual connecting peer. OAuth rate limits then use the first untrusted hop, walking from the socket toward the client. Forwarded headers from other peers are ignored. Without this setting, clients behind a proxy share its OAuth rate limits. CIDRs and hostnames are not accepted.
 
@@ -350,7 +352,7 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 
 `bun-plugin-tailwind` 0.1.2 embeds a Tailwind 4.1.14 compiler, separately from the installed `tailwindcss` styles. The existing UI and HMR have been checked with this combination; newer Tailwind compiler features require an updated plugin.
 
-Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Terminate HTTPS at the proxy, preserve the original `Host`, and set `X-Forwarded-Proto: https`. `/admin` signs in with Telegram and returns to the dashboard afterward. Conversation APIs, usage reports, file downloads, and Codex controls all require a Telegram session for an account in `WEB_ADMIN_USER_IDS`. Signing out of the chat ends admin access too; restarting the app invalidates all sessions. To revoke an admin, remove their ID and restart the app.
+Point a reverse proxy hostname at port `3000`, or your configured `WEB_PORT`, with the website at `/`. Terminate HTTPS at the proxy, preserve the original `Host`, and set `X-Forwarded-Proto: https`. `/admin` signs in with Telegram and returns to the dashboard afterward. Conversation APIs, usage reports, file downloads, and Codex controls all require a Telegram session for an account in `WEB_ADMIN_USER_IDS`. Signing out of the chat ends admin access too; restarting the app preserves signed-in sessions. To revoke an admin, remove their ID and restart the app.
 
 Persist the existing bot data volume as before; there is no separate website database. Allow GET, HEAD, POST, PATCH, and DELETE through the proxy. PATCH updates user settings. Admin mutations keep their separate `X-Admin-Request: 1` contract.
 

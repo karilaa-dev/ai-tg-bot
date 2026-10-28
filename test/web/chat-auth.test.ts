@@ -1,17 +1,27 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import { WebSessionStore } from "../../src/web/session-store.js";
+import { sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { chatClientAddress, verifyTelegramIdentity, WebChatAuth, readBoundedBody } from "../../src/web/chat-auth.js";
 
 const config = { WEB_PUBLIC_URL: "https://chat.example", WEB_TELEGRAM_CLIENT_ID: "123", WEB_TELEGRAM_CLIENT_SECRET: "dedicated_secret-with_underscore", WEB_ADMIN_USER_IDS: [7] };
 const access = { isAllowed: async (id: number) => id === 42 };
+let database: AppDatabase;
+let sessions: WebSessionStore;
 let keys: Awaited<ReturnType<typeof generateKeyPair>>;
 let jwks: ReturnType<typeof createLocalJWKSet>;
 beforeAll(async () => {
   keys = await generateKeyPair("RS256");
   jwks = createLocalJWKSet({ keys: [{ ...await exportJWK(keys.publicKey), kid: "test", alg: "RS256" }] });
 });
-afterEach(() => vi.restoreAllMocks());
+beforeEach(async () => {
+  database = createDatabase({ DB_URL: "sqlite::memory:" });
+  await database.initialize();
+  sessions = new WebSessionStore(database.db);
+});
+afterEach(async () => { vi.restoreAllMocks(); await database.destroy(); });
 const signed = (claims: JWTPayload, signingKey = keys.privateKey) => new SignJWT({ iss: "https://oauth.telegram.org", aud: "123", sub: "opaque-not-a-telegram-id", nonce: "nonce", id: 42, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 300, ...claims }).setProtectedHeader({ alg: "RS256", kid: "test" }).sign(signingKey);
 const cookie = (response: Response, prefix = "__Host-ai_tg_bot_chat_login=") => response.headers.getSetCookie().find(value => value.startsWith(prefix))!.split(";")[0]!;
 function begin(auth: WebChatAuth, previous?: string, query = "") {
@@ -53,7 +63,7 @@ it("completes S256 exchange using dedicated raw Basic credentials and revocable 
     verifier = form.get("code_verifier")!;
     return Response.json({ id_token: await signed({ nonce }) });
   });
-  const auth = new WebChatAuth(config, access, { jwks, fetch: exchange });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: exchange });
   const start = begin(auth);
   nonce = start.location.searchParams.get("nonce")!;
   expect(start.location.origin).toBe("https://oauth.telegram.org");
@@ -67,11 +77,14 @@ it("completes S256 exchange using dedicated raw Basic credentials and revocable 
   expect(complete.headers.get("Location")).toBe("/");
   expect(createHash("sha256").update(verifier).digest("base64url")).toBe(start.location.searchParams.get("code_challenge"));
   const sessionCookie = cookie(complete, "__Host-ai_tg_bot_chat_session=");
-  expect(complete.headers.getSetCookie().find(value => value.startsWith(sessionCookie))).toContain("Max-Age=43200; Secure");
+  expect(complete.headers.getSetCookie().find(value => value.startsWith(sessionCookie))).toContain("Max-Age=34560000; Secure");
   const request = new Request("https://chat.example/api/chat/session", { headers: { Cookie: sessionCookie } });
   expect(await auth.requireSession(request)).toBe(42);
+  expect(await database.db.query(sql`select * from web_sessions`)).toEqual([
+    { token_hash: createHash("sha256").update(sessionCookie.split("=")[1]!).digest("hex"), user_id: 42 },
+  ]);
   expect(await auth.userId(new Request(request, { headers: { Cookie: `${sessionCookie}; ${sessionCookie}` } }))).toBeUndefined();
-  expect(auth.logout(request)).toContain("Max-Age=0");
+  expect(await auth.logout(request)).toContain("Max-Age=0");
   expect(await auth.userId(request)).toBeUndefined();
   await expect(auth.callback(callback(start), existing)).rejects.toMatchObject({ status: 400 });
   expect(exchange).toHaveBeenCalledOnce();
@@ -79,7 +92,7 @@ it("completes S256 exchange using dedicated raw Basic credentials and revocable 
 
 it("returns to the admin page only when asked, and never to another site", async () => {
   let nonce = "";
-  const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
   for (const [query, location] of [["?return=/admin", "/admin"], ["?return=//evil.example", "/"], ["?return=https://evil.example/admin", "/"], ["?return=/admin/../api", "/"], ["", "/"]] as const) {
     const start = begin(auth, undefined, query);
     nonce = start.location.searchParams.get("nonce")!;
@@ -102,7 +115,7 @@ it("preserves only validated conversation selections through the OAuth callback"
     [`https://evil.example/?thread=${threadId}`, "/"],
     [`/admin?thread=${threadId}`, "/"],
   ] satisfies Array<[string, string]>) {
-    const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+    const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
     const start = begin(auth, undefined, `?return=${encodeURIComponent(requested)}`);
     nonce = start.location.searchParams.get("nonce")!;
     const complete = await auth.callback(callback(start), async () => {});
@@ -112,7 +125,7 @@ it("preserves only validated conversation selections through the OAuth callback"
 
 it("binds single-use transactions to the browser and rejects expired or duplicate state", async () => {
   const exchange = vi.fn<(...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>>();
-  const auth = new WebChatAuth(config, access, { jwks, fetch: exchange });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: exchange });
   const a = begin(auth);
   const b = begin(auth);
   for (const Cookie of ["", b.cookie, `${a.cookie}; ${a.cookie}`]) {
@@ -127,7 +140,7 @@ it("binds single-use transactions to the browser and rejects expired or duplicat
 it("enforces the allowlist and existing-user policy before creating a session", async () => {
   for (const allowed of [[], [42], [99]]) {
     let nonce = "";
-    const auth = new WebChatAuth(config, { isAllowed: async id => allowed.includes(id) }, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+    const auth = new WebChatAuth(config, { isAllowed: async id => allowed.includes(id) }, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
     const start = begin(auth);
     nonce = start.location.searchParams.get("nonce")!;
     const existing = vi.fn(async () => { throw new Error("unknown user"); });
@@ -137,9 +150,9 @@ it("enforces the allowlist and existing-user policy before creating a session", 
   }
 });
 
-it("expires sessions, replaces old browser sessions and clears them on shutdown", async () => {
+it("keeps sessions across inactivity and auth restarts, but rotates a browser session on sign-in", async () => {
   let nonce = "";
-  const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
   const signIn = async (previous?: string) => {
     const start = begin(auth, previous);
     nonce = start.location.searchParams.get("nonce")!;
@@ -151,17 +164,23 @@ it("expires sessions, replaces old browser sessions and clears them on shutdown"
   expect(await auth.userId(first)).toBeUndefined();
   expect(await auth.userId(second)).toBe(42);
   const now = Date.now();
-  const clock = vi.spyOn(Date, "now").mockReturnValue(now + 12 * 60 * 60_000);
-  expect(await auth.userId(second)).toBeUndefined();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now + 5 * 365 * 24 * 60 * 60_000);
+  expect(await auth.userId(second)).toBe(42);
   clock.mockRestore();
   const third = await signIn();
   auth.clear();
   expect(await auth.userId(third)).toBeUndefined();
   expect(auth.available).toBe(false);
+  const restarted = new WebChatAuth(config, access, new WebSessionStore(database.db), { jwks });
+  expect(await restarted.userId(third)).toBe(42);
+  expect(await restarted.userId(first)).toBeUndefined();
+  expect(await restarted.logout(third)).toContain("Max-Age=0");
+  const another = new WebChatAuth(config, access, new WebSessionStore(database.db), { jwks });
+  expect(await another.userId(third)).toBeUndefined();
 });
 
 it("rejects OAuth errors returned with HTTP 200 and rate-limits start attempts", async () => {
-  const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ error: "invalid_client" }) });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ error: "invalid_client" }) });
   const start = begin(auth);
   await expect(auth.callback(callback(start), async () => {})).rejects.toMatchObject({ status: 401 });
   for (let i = 0; i < 9; i++) begin(auth);
@@ -170,7 +189,7 @@ it("rejects OAuth errors returned with HTTP 200 and rate-limits start attempts",
 
 it("keeps invalid callbacks from consuming a legitimate browser's exchange budget", async () => {
   let nonce = "";
-  const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
   const start = begin(auth);
   nonce = start.location.searchParams.get("nonce")!;
   for (let i = 0; i < 30; i++) {
@@ -179,18 +198,22 @@ it("keeps invalid callbacks from consuming a legitimate browser's exchange budge
   expect((await auth.callback(callback(start), async () => {})).status).toBe(303);
 });
 
-it("bounds sessions per verified account even when the browser discards its cookie", async () => {
+it("keeps other devices signed in when the same account signs in again", async () => {
   let nonce = "";
-  const auth = new WebChatAuth(config, access, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
-  const sessions: Request[] = [];
+  const auth = new WebChatAuth(config, access, sessions, { jwks, fetch: async () => Response.json({ id_token: await signed({ nonce }) }) });
+  const requests: Request[] = [];
   for (let i = 0; i < 9; i++) {
     const start = begin(auth);
     nonce = start.location.searchParams.get("nonce")!;
     const result = await auth.callback(callback(start), async () => {});
-    sessions.push(new Request("https://chat.example", { headers: { Cookie: cookie(result, "__Host-ai_tg_bot_chat_session=") } }));
+    requests.push(new Request("https://chat.example", { headers: { Cookie: cookie(result, "__Host-ai_tg_bot_chat_session=") } }));
   }
-  expect(await auth.userId(sessions[0]!)).toBeUndefined();
-  for (const request of sessions.slice(1)) expect(await auth.userId(request)).toBe(42);
+  for (const request of requests) expect(await auth.userId(request)).toBe(42);
+  await auth.logout(requests[0]!);
+  expect(await auth.userId(requests[0]!)).toBeUndefined();
+  for (const request of requests.slice(1)) expect(await auth.userId(request)).toBe(42);
+  await auth.revokeSessions(42);
+  for (const request of requests) expect(await auth.userId(request)).toBeUndefined();
 });
 
 it("only derives the client from forwarding headers behind explicitly trusted proxy hops", () => {

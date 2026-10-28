@@ -2,6 +2,9 @@ import { AccessControl } from "../../src/access/control.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { fixtureUuid } from "./uuid-fixtures.js";
 import { serve, type Server } from "bun";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
@@ -41,7 +44,7 @@ beforeEach(async () => {
   access = new AccessControl(db.db);
   await access.initialize();
   for (const id of [7, 42]) await access.allow(id);
-  options = { config, access, repository: repository as unknown as ConversationRepository, chat: signInOnlyChat(), telegramAuth: login.dependencies,
+  options = { db: db.db, config, access, repository: repository as unknown as ConversationRepository, chat: signInOnlyChat(), telegramAuth: login.dependencies,
     fileResolver: { resolveFile: resolver } as unknown as FileResolver, logger: createLogger(config), codexLogin: codex };
   controller = new AbortController();
   api = createWebRoutes(options, controller.signal);
@@ -118,15 +121,69 @@ it("rejects non-UUID thread and file IDs before querying admin data", async () =
   expect(resolver).not.toHaveBeenCalled();
 });
 
-it("ends admin access when the Telegram session signs out or expires", async () => {
+it("preserves admin access after inactivity and ends it on sign-out", async () => {
   const cookie = await signIn();
   const signOut = await request("/api/chat/session", { method: "DELETE", headers: { "X-Chat-Request": "1", "X-Chat-User": String(adminId), Cookie: cookie } });
   expect(signOut.status).toBe(200);
   expect(signOut.headers.get("Set-Cookie")).toContain("Max-Age=0");
   expect((await request("/api/users", { headers: { Cookie: cookie } })).status).toBe(401);
   const next = await signIn();
-  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 12 * 60 * 60_000);
-  expect((await request("/api/users", { headers: { Cookie: next } })).status).toBe(401);
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5 * 365 * 24 * 60 * 60_000);
+  const response = await request("/api/users", { headers: { Cookie: next } });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Set-Cookie")).toContain(`${next}; Path=/; HttpOnly; SameSite=Lax; Max-Age=34560000; Secure`);
+  const session = await request("/api/admin/session", { headers: { Cookie: next } });
+  expect(await session.json()).toMatchObject({ authenticated: true, admin: true });
+  expect(session.headers.get("Set-Cookie")).toContain("Max-Age=34560000");
+});
+
+it("keeps chat and admin signed in across database and server restarts, and persists logout", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "web-sessions-"));
+  const DB_URL = `sqlite:${path.join(directory, "bot.db")}`;
+  let database: AppDatabase | undefined;
+  let website: Server<undefined> | undefined;
+  let routes: ReturnType<typeof createWebRoutes> | undefined;
+  let shutdown: AbortController | undefined;
+  const stop = async () => {
+    shutdown?.abort();
+    await website?.stop(true);
+    await routes?.drain();
+    await database?.destroy();
+  };
+  const start = async () => {
+    database = createDatabase({ DB_URL });
+    await database.initialize();
+    const membership = new AccessControl(database.db);
+    await membership.initialize();
+    await membership.allow(adminId);
+    shutdown = new AbortController();
+    routes = createWebRoutes({ ...options, db: database.db, access: membership }, shutdown.signal);
+    website = serve({ hostname: "127.0.0.1", port: 0, routes: routes.routes, fetch: routes.fetch });
+    return website;
+  };
+  try {
+    const first = await start();
+    const cookie = await login.signIn(first.url, adminId);
+    await stop();
+    const second = await start();
+    for (const endpoint of ["/api/chat/session", "/api/admin/session"]) {
+      const response = await fetch(new URL(endpoint, second.url), { headers: { Cookie: cookie } });
+      expect(await response.json()).toMatchObject({ authenticated: true, admin: true });
+      expect(response.headers.get("Set-Cookie")).toContain("Max-Age=34560000");
+    }
+    const logout = await fetch(new URL("/api/chat/session", second.url), {
+      method: "DELETE", headers: { Cookie: cookie, "X-Chat-Request": "1", "X-Chat-User": String(adminId) },
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("Set-Cookie")).toContain("Max-Age=0");
+    await stop();
+    const third = await start();
+    const response = await fetch(new URL("/api/admin/session", third.url), { headers: { Cookie: cookie } });
+    expect(await response.json()).toMatchObject({ authenticated: false });
+  } finally {
+    await stop();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 it("sends a finished admin sign-in back to the admin page", async () => {

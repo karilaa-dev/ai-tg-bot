@@ -110,7 +110,7 @@ const telegram = await fakeTelegramLogin();
 const consent = preview ? telegram.serveAuthorizePage(ADMIN_ID, (): URL => new URL(`http://127.0.0.1:${web.url.port}`)) : undefined;
 const access = new AccessControl(db.db);
 await access.initialize();
-const options = { access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
+const options = { db: db.db, access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
   chat: signInOnlyChat("archive_test_bot"), telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
 const web = (await startWebServer(options))!;
 if (preview) {

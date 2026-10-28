@@ -18,8 +18,11 @@ import type { ChatService } from "./chat-types.js";
 import { readBoundedBody, WebChatAuth, type TelegramAuthDependencies } from "./chat-auth.js";
 import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
 import { uuid } from "./ids.js";
+import type { SqlExecutor } from "../db/sql.js";
+import { WebSessionStore } from "./session-store.js";
 
 export interface WebServerOptions {
+  db: SqlExecutor;
   config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
     | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS">;
   access: AccessControl;
@@ -52,8 +55,8 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   if (!(options.config.WEB_PUBLIC_URL && options.config.WEB_TELEGRAM_CLIENT_ID && options.config.WEB_TELEGRAM_CLIENT_SECRET)) {
     throw new Error("Telegram login (WEB_TELEGRAM_CLIENT_ID, WEB_TELEGRAM_CLIENT_SECRET, WEB_PUBLIC_URL) must be configured when the website is enabled.");
   }
-  // Admins sign in with Telegram like everyone else; the chat routes clear these sessions on shutdown.
-  const auth = new WebChatAuth(options.config, options.access, options.telegramAuth);
+  // Chat and admin share durable Telegram sessions; shutdown only clears pending logins.
+  const auth = new WebChatAuth(options.config, options.access, new WebSessionStore(options.db), options.telegramAuth);
   const requireAdmin = async (request: Request) => {
     if (!auth.isAdmin(await auth.requireSession(request))) throw new HttpError(403, "This Telegram account does not have admin access.");
   };
@@ -66,7 +69,8 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
           if (shutdownSignal.aborted) throw new HttpError(503, "The website is stopping.");
           if (!publicRoute) await requireAdmin(request);
           if (request.method !== "GET" && request.method !== "HEAD") requireAdminMutation(request);
-          const response = await handler(request, server);
+          const result = await handler(request, server);
+          const response = publicRoute ? result : auth.refreshSession(request, result);
           return request.method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
         } catch (error) {
           if (request.signal.aborted) return new Response(null, { status: 499, headers });
@@ -147,7 +151,8 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         const session: AdminSession = userId === undefined
           ? { authenticated: false, loginAvailable: auth.available }
           : { authenticated: true, userId, admin: auth.isAdmin(userId) };
-        return Response.json(session, { headers });
+        const response = Response.json(session, { headers });
+        return session.authenticated ? auth.refreshSession(request, response) : response;
       }, true),
       "/api/admin/allowed-users": {
         ...read(async () => Response.json({ users: await options.access.list() }, { headers })),
@@ -165,7 +170,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         DELETE: guard<"/api/admin/allowed-users/:telegramId">(async request => {
           const userId = integer(request.params.telegramId);
           await options.access.revoke(userId);
-          if (!auth.isAdmin(userId)) auth.revokeSessions(userId);
+          if (!auth.isAdmin(userId)) await auth.revokeSessions(userId);
           return Response.json({ users: await options.access.list() }, { headers });
         }),
       },

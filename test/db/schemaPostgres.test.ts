@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
+import { WebSessionStore } from "../../src/web/session-store.js";
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 
@@ -29,6 +30,19 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
     const contender = createDatabase(loadTestConfig({ DB_URL: databaseUrl() }));
     await Promise.all([database.initialize(), contender.initialize()]);
     await contender.destroy();
+
+    const sessions = new WebSessionStore(database.db);
+    // Website admins can sign in before a users row exists.
+    const tokenHash = "a".repeat(64);
+    await sessions.create(tokenHash, 7);
+    await database.initialize();
+    const other = createDatabase(loadTestConfig({ DB_URL: databaseUrl() }));
+    try {
+      const otherSessions = new WebSessionStore(other.db);
+      expect(await otherSessions.userId(tokenHash)).toBe(7);
+      await otherSessions.revokeUser(7);
+      expect(await sessions.userId(tokenHash)).toBeUndefined();
+    } finally { await other.destroy(); }
 
     const repos = createRepos(database.db, database.search);
     const user = await repos.users.ensure({ tgId: 42, firstName: "Current", lang: "en" });
