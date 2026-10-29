@@ -43,10 +43,10 @@ export async function renderThreadSessionContext(input: {
     id: file.id,
     name: file.name,
     type: file.type,
-    mode: file.type === "pdf" || file.type === "docx"
-      ? "sandbox source"
-      : file.type === "image" || file.type === "audio"
+    mode: file.type === "image" || file.type === "audio"
       ? "chat reference"
+      : file.type === "pdf" || file.type === "docx" || file.extraction_status === "source_only"
+      ? "sandbox source"
       : file.is_inline ? "inline" : "searchable",
     summary: file.summary,
   }));

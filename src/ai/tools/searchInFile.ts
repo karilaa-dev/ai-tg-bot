@@ -6,7 +6,7 @@ import { defineBotTool, type ToolBuildInput } from "./types.js";
 export function createSearchInFileTool(input: ToolBuildInput) {
   return defineBotTool({
     description:
-      "Lexically search chunks of a large TXT or CSV attachment by file_id. PDF and DOCX files are source-only and must be inspected with materialize_chat_files plus sandbox tools.",
+      "Lexically search indexed TXT or CSV attachment chunks by file_id. Source-only files must be inspected with materialize_chat_files plus sandbox tools.",
     inputSchema: z.object({
       file_id: z.string().uuid(),
       query: z.string(),
@@ -31,7 +31,7 @@ export function createSearchInFileTool(input: ToolBuildInput) {
         return {
           error: "sandbox_required",
           file_id,
-          message: "This PDF or DOCX is read in E2B. Call materialize_chat_files, then use PDF Inspector or docx-cli.",
+          message: "This file is source-only. Call materialize_chat_files, then inspect it with the recommended sandbox tools.",
         };
       }
       const hits = await hybridSearch({
