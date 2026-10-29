@@ -1,7 +1,10 @@
 {
   "name": "ai-tg-bot",
-  "version": "2.1.4",
+  "version": "2.1.6",
   "private": true,
+  "overrides": {
+    "undici": "^8.12.3"
+  },
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/main.ts --web-dev",
@@ -26,53 +29,53 @@
     "memo": "bun src/memory/optmem/cli.ts"
   },
   "engines": {
-    "bun": "1.4.2"
+    "bun": "1.4.4"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.99.1",
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@grammyjs/auto-retry": "^2.0.2",
     "@grammyjs/conversations": "^2.1.1",
     "@grammyjs/i18n": "^1.1.2",
     "@grammyjs/runner": "^2.0.3",
-    "@openuidev/lang-core": "1.0.1",
-    "@openuidev/react-lang": "1.0.1",
-    "@tavily/core": "^0.7.13",
-    "@unicode/unicode-16.0.0": "2.0.7",
+    "@openuidev/lang-core": "1.0.2",
+    "@openuidev/react-lang": "1.0.2",
+    "@tavily/core": "^0.7.14",
+    "@unicode/unicode-16.0.0": "2.1.0",
     "csv-parse": "^7.0.3",
-    "drizzle-orm": "^0.45.3",
-    "e2b": "2.51.0",
-    "file-type": "22.1.1",
+    "drizzle-orm": "^0.45.4",
+    "e2b": "2.62.0",
+    "file-type": "22.2.0",
     "grammy": "^1.46.0",
-    "jose": "^6",
-    "pg": "^8.23.0",
-    "playwright-core": "1.63.0",
-    "undici": "^8.11.2",
-    "zod": "^4.6.5"
+    "jose": "^6.2.13",
+    "pg": "^8.23.1",
+    "playwright-core": "1.64.1",
+    "undici": "^8.12.3",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@base-ui/react": "^1.9.0",
     "@bonkers-agency/grammy-test": "^0.1.3",
-    "@cloudflare/kumo": "^2.14.0",
+    "@cloudflare/kumo": "^2.16.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@tabler/icons-react": "^3.49.0",
-    "@types/bun": "1.4.2",
-    "@types/node": "^26.6.3",
+    "@tabler/icons-react": "^3.50.0",
+    "@types/bun": "1.4.4",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "bun-plugin-tailwind": "0.1.2",
     "clsx": "^2.1.1",
     "prism-react-renderer": "^2.4.1",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.5"
   },
-  "packageManager": "bun@1.4.2"
+  "packageManager": "bun@1.4.4"
 }

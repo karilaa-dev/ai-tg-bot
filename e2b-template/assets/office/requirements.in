@@ -1,0 +1,7 @@
+python-pptx
+openpyxl
+lxml
+Pillow==13.0.0
+XlsxWriter
+typing_extensions
+et_xmlfile

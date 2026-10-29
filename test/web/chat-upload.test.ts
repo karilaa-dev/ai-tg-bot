@@ -63,6 +63,14 @@ async function uploadDirectory(): Promise<string> {
   return join(temporaryRoot, entries[0]);
 }
 
+it("rejects low disk space before writing upload data and removes temporary files", async () => {
+  const cancel = vi.fn();
+  await expect(readChatUpload(streamRequest(generatedUpload(1, 1024), { cancel }), Number.MAX_SAFE_INTEGER))
+    .rejects.toMatchObject({ status: 507 });
+  expect(await readdir(temporaryRoot)).toEqual([]);
+  expect(cancel).toHaveBeenCalledOnce();
+});
+
 it.each([1, 2, 3, 13, 64 * 1024])("preserves binary content and false boundaries with %i-byte fragments", async size => {
   const bytes = Buffer.concat([
     Buffer.from([0, 255, 128, 13, 10]),

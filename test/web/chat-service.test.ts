@@ -321,6 +321,26 @@ describe("shared web and Telegram conversations", () => {
     expect((await env.repos.turnRuns.get(sent.turnId))?.status).toBe("succeeded");
   });
 
+  it("enforces persistent upload quotas before reading bytes and permits idempotent retries", async () => {
+    env.config.WEB_UPLOAD_USER_MAX_BYTES = 10;
+    const thread = await chat.createThread(env.user.id, "Quota");
+    const input = { text: "", requestId: randomUUID(), files: [new File(["12345678"], "quota.bin")] };
+    const sent = await chat.send(env.user.id, thread.id, input);
+    expect(await chat.send(env.user.id, thread.id, input)).toEqual(sent);
+    let read = false;
+    await expect(chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [{ name: "over.bin", size: 3, type: "", async arrayBuffer() { read = true; return new ArrayBuffer(3); } }] }))
+      .rejects.toMatchObject({ status: 413 });
+    expect(read).toBe(false);
+    expect(await env.db.db.query(sql`select * from web_upload_reservations`)).toEqual([]);
+  });
+
+  it("releases failed upload reservations without leaving files or bytes behind", async () => {
+    const thread = await chat.createThread(env.user.id, "Failure");
+    await expect(chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [{ name: "broken.bin", size: 8, type: "", async arrayBuffer() { throw new Error("failed read"); } }] })).rejects.toThrow("failed read");
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([]);
+    expect(await env.db.db.query(sql`select * from web_upload_reservations`)).toEqual([]);
+  });
+
   it("forks a visible point without pulling later messages into the new history", async () => {
     const parent = await chat.createThread(env.user.id, "Original");
     const first = await chat.send(env.user.id, parent.id, { text: "First", requestId: randomUUID() });

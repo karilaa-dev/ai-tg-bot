@@ -320,7 +320,7 @@ it.each([false, true])("uses the explicit policy when a queued automatic load st
   ]);
 });
 
-it.each([{ options: {}, limit: 3 }, { options: { maxConcurrent: 2 }, limit: 2 }])(
+it.each([{ options: {}, limit: 1 }, { options: { maxConcurrent: 2 }, limit: 2 }])(
   "uses one queue across threads with concurrency $limit",
   async ({ options, limit }) => {
     const pending: Array<ReturnType<typeof deferred<Response>>> = [];

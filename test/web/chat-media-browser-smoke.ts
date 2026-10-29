@@ -79,7 +79,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
         await completeRecovery.promise;
         return new Response(png, { headers: { "Content-Type": "image/png" } });
       }
-      if (active >= 3) { rejected++; return Response.json({ error: "Other files are loading. Try again shortly." }, { status: 429, headers: { "Retry-After": "0.1" } }); }
+      if (active >= 1) { rejected++; return Response.json({ error: "Your previous file is still loading." }, { status: 429, headers: { "Retry-After": "0.1" } }); }
       active++; maxActive = Math.max(active, maxActive);
       await Bun.sleep(slow ? 1_000 : 120);
       active--;
@@ -118,8 +118,8 @@ if (process.argv.includes("--preview")) {
     assert.equal(await images.count(), 4);
     assert.deepEqual(await page.locator(".chat-openui a[download]").evaluateAll(links => links.map(link => link.getAttribute("download"))), fileIndices.map(index => `restaurant-${index}.png`));
     assert.equal(await page.locator('[data-message-id="291"] .chat-attachments').count(), 0, "Images the generated view mounted have no duplicate attachment rows or empty container");
-    assert.equal(rejected, 0, "Four images never overflow the shared three-request server limit");
-    assert.equal(maxActive, 3);
+    assert.equal(rejected, 0, "Four images respect the per-user server limit");
+    assert.equal(maxActive, 1);
     assert.equal(requests.length, 5, "Four images plus one automatic retry, without manual clicks");
     assert(requests.every(request => request.user === "1001" && request.method === "GET" && request.url.endsWith("?mode=auto")));
     await page.screenshot({ path: "/tmp/ai-tg-gallery-cache.png", fullPage: true });

@@ -20,11 +20,12 @@ import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
 import { uuid } from "./ids.js";
 import type { SqlExecutor } from "../db/sql.js";
 import { WebSessionStore } from "./session-store.js";
+import { DownloadPool } from "./download-pool.js";
 
 export interface WebServerOptions {
   db: SqlExecutor;
   config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
-    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS">;
+    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS" | "WEB_UPLOAD_MIN_FREE_BYTES">;
   access: AccessControl;
   repository: ConversationRepository;
   fileResolver: FileResolver;
@@ -60,7 +61,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   const requireAdmin = async (request: Request) => {
     if (!auth.isAdmin(await auth.requireSession(request))) throw new HttpError(403, "This Telegram account does not have admin access.");
   };
-  let downloads = 0;
+  const downloads = new DownloadPool();
   const tasks = new Set<Promise<Response>>();
   function guard<Path extends string>(handler: (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">) => Response | Promise<Response>, publicRoute = false) {
     return (request: BunRequest<Path>, server?: Pick<Server<unknown>, "requestIP">): Promise<Response> => {
@@ -115,10 +116,9 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     }
     // HEAD never fetches a remote attachment.
     if (request.method === "HEAD") return new Response(null, { headers });
-    if (downloads >= 3) throw new HttpError(503, "Other files are loading. Try again shortly.");
-    downloads++;
+    const signal = AbortSignal.any([request.signal, shutdownSignal, AbortSignal.timeout(120_000)]);
+    const release = await downloads.acquire(await auth.requireSession(request), signal);
     try {
-      const signal = AbortSignal.any([request.signal, shutdownSignal, AbortSignal.timeout(120_000)]);
       const resolved = await options.fileResolver.resolveFile(file, signal, maxBytes, { allowSandboxResume: sandboxConsent, pauseAfterRead: true });
       signal.throwIfAborted();
       if (resolved.size > maxBytes) throw new HttpError(413, "Attachment exceeds the download limit.");
@@ -140,7 +140,7 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
       if (error instanceof HttpError) throw error;
       options.logger.warn("website attachment unavailable", { fileId: file.id });
       throw new HttpError(502, "This attachment could not be retrieved. Try again later.");
-    } finally { downloads--; }
+    } finally { release(); }
   };
   const chat = createChatRoutes(options, shutdownSignal, attachment, auth);
   return {

@@ -176,10 +176,15 @@ describe("persistent Pi server compaction", () => {
     const last = requests.at(-1)!;
     expect(JSON.stringify(last.input)).toContain("first request after compaction");
     expect(JSON.stringify(last.input)).toContain("second request after compaction");
-    expect(last.tools).toEqual(expect.arrayContaining([expect.objectContaining({ type: "function", name: "inspect" })]));
+    // Pi 1.4 declares Codex tools in additional_tools transcript items when supported.
+    const tools = (body: Record<string, unknown>) => [
+      ...Array.isArray(body.tools) ? body.tools : [],
+      ...(body.input as Record<string, unknown>[]).flatMap(item => item.type === "additional_tools" && Array.isArray(item.tools) ? item.tools : []),
+    ];
+    expect(tools(last)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "function", name: "inspect" })]));
     await session.compact();
     const native = requests.filter(body => JSON.stringify(body.input).includes("compaction_trigger")).at(-1)!;
-    expect(native.tools).toEqual(last.tools);
+    expect(tools(native)).toEqual(tools(last));
     expect(JSON.stringify(native.input)).toContain("first request after compaction");
     expect(JSON.stringify(native.input)).toContain("second request after compaction");
   });

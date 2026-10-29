@@ -41,7 +41,7 @@ export class AttachmentCache {
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
 
-  constructor({ maxBytes = 32 * 1024 * 1024, maxConcurrent = 3, maxRetries = 2, retryDelayMs = 500 }: {
+  constructor({ maxBytes = 32 * 1024 * 1024, maxConcurrent = 1, maxRetries = 2, retryDelayMs = 500 }: {
     maxBytes?: number; maxConcurrent?: number; maxRetries?: number; retryDelayMs?: number;
   } = {}) {
     this.maxBytes = maxBytes;

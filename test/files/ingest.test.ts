@@ -8,6 +8,7 @@ import { chatFileIdsFromText } from "../../src/files/contextMarker.js";
 import { isUuid } from "../../src/utils/uuid.js";
 import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
 import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
+import { MAX_INDEXED_TEXT_BYTES } from "../../src/files/limits.js";
 
 describe("file ingestion", () => {
   let db: AppDatabase;
@@ -119,6 +120,29 @@ describe("file ingestion", () => {
     await expect(db.search.searchMessages([thread.id], "JAN", 10)).resolves.toEqual([
       expect.objectContaining({ id: message.id }),
     ]);
+  });
+
+  it.each([
+    ["large.csv", "a,b\n".repeat(MAX_INDEXED_TEXT_BYTES / 4 + 1)],
+    ["large.txt", "x".repeat(MAX_INDEXED_TEXT_BYTES + 1)],
+    ["wide.csv", ",".repeat(3_000)],
+    ["many-rows.csv", "a\n".repeat(10_001)],
+    ["many-cells.csv", ("a,".repeat(100) + "a\n").repeat(500)],
+    ["large-record.csv", "x".repeat(65_537)],
+  ])("keeps %s available as a source without parsing or indexing excessive content", async (name, content) => {
+    const user = await repos.users.ensure({ tgId: 333 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const input = { config: loadTestConfig(), repo: repos.files, userId: user.tg_id, threadId: thread.id, name };
+    const result = await ingestFileBytes({ ...input, bytes: Buffer.from(content) });
+    expect(result).toMatchObject({ inline: false });
+    expect(result.card).toContain("materialize_chat_files");
+    expect(await repos.files.get(result.fileId)).toMatchObject({ extraction_status: "source_only", content_md: null, size: Buffer.byteLength(content) });
+    expect(await repos.files.chunks(result.fileId)).toEqual([]);
+    const small = await ingestFileBytes({ ...input, config: loadTestConfig({ FILE_INLINE_TOKENS: 1 }), bytes: Buffer.from("oldneedle\n1\n") });
+    expect(await repos.files.chunks(small.fileId)).not.toEqual([]);
+    await refreshExtractedFileBytes({ ...input, file: (await repos.files.get(small.fileId))!, bytes: Buffer.from(content) });
+    expect(await repos.files.chunks(small.fileId)).toEqual([]);
+    expect(await db.search.searchChunks([small.fileId], "oldneedle", 8)).toEqual([]);
   });
 
   it("indexes CSV headers and record ranges consistently when creating and refreshing files", async () => {

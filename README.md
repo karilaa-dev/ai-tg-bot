@@ -43,7 +43,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Requirements
 
-- Bun 1.4.2
+- Bun 1.4.4
 - A Telegram BotFather token
 - E2B and OpenRouter API keys. Web search needs Codex login or an optional Tavily key.
 - Optional Codex CLI OAuth credentials for primary inference
@@ -52,7 +52,7 @@ The [2.0.7 review fixes](docs/office-review-2.0.7.md) cover formula and relation
 
 ## Local setup
 
-Install [Bun 1.4.2](https://bun.com/docs/installation). The application and its scripts run on Bun. SQLite uses Bun's built-in `node:sqlite` API, including Unicode name search; existing database files need no conversion.
+Install [Bun 1.4.4](https://bun.com/docs/installation). The application and its scripts run on Bun. SQLite uses Bun's built-in `node:sqlite` API, including Unicode name search; existing database files need no conversion.
 
 Bun loads `.env` automatically; environment variables supplied by your deployment take precedence. Configuration still passes through the same validation at startup.
 
@@ -85,7 +85,7 @@ The shared backend in `src/application` owns conversation authorization, turn ac
 
 ## Dokploy
 
-Dokploy can deploy this repository with Railpack auto-detection. The `packageManager` field pins Bun 1.4.2, and `bun.lock` fixes dependency versions. Railpack runs `bun run build` and starts the bot with `bun run start`.
+Dokploy can deploy this repository with Railpack auto-detection. The `packageManager` field pins Bun 1.4.4, and `bun.lock` fixes dependency versions. Railpack runs `bun run build` and starts the bot with `bun run start`.
 
 Mount persistent storage at `/app/data`. SQLite remains the default; leave `DB_URL` unset or set it to `sqlite:/app/data/bot.db`, and set `PI_CODING_AGENT_DIR=/app/data/pi` and `FILE_STORAGE_PATH=/app/data/files`. To use PostgreSQL, set `DB_URL` to an explicit `postgres://` or `postgresql://` URL.
 
@@ -120,7 +120,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.4` uses `ai-tg-bot-tools:v2.1.4`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.6` uses `ai-tg-bot-tools:v2.1.6`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -136,8 +136,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.4 is ai-tg-bot-tools:v2.1.4.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.4
+# Optional override. The default for version 2.1.6 is ai-tg-bot-tools:v2.1.6.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.6
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -163,7 +163,7 @@ The bot creates secure sandboxes with outbound internet and public port traffic 
 - `load_message` can add selected attachment bytes to model context.
 - `materialize_chat_files` restores explicitly selected, visible files from either frontend into `/home/user/telegram-files` for sandbox work.
 - Agent-created files retain local bytes before they enter the outgoing queue. Final delivery verifies and repairs that copy before publishing the attachment. Reused gallery images and recommendation thumbnails are also retained before the visual response is published. Downloading these files does not require a running sandbox.
-- CSV and text content is placed inline or split into searchable chunks. DOCX and PDF uploads retain their original source and are inspected in the sandbox with the document tools. Images receive model-generated descriptions that exclude private attachment captions.
+- TXT/CSV files up to 256 KiB are placed inline or split into searchable chunks. CSV indexing is limited to 10,000 records, 2,048 columns, 50,000 cells, and 64 KiB per record, and parses each file once. Larger or more complex files retain their original source for sandbox inspection. DOCX and PDF uploads also retain their original source and are inspected in the sandbox with the document tools. Images receive model-generated descriptions that exclude private attachment captions.
 - Website uploads and created files support 50 MiB per file, matching the Telegram cloud Bot API multipart sending limit. Telegram-only downloads and audio transcription retain their separate 20 MiB limits. One answer can attach at most 25 created files.
 
 Existing Telegram-only attachments and legacy database upload blobs are cached locally when read. New uploads are downloaded eagerly; no file extension is blocked. Keep the local storage folder accessible to every app instance using the same database.
@@ -314,6 +314,8 @@ WEB_ADMIN_USER_IDS=123456789
 WEB_HOST=0.0.0.0
 WEB_PORT=3000
 WEB_AUTOLOAD_MAX_BYTES=5242880
+WEB_UPLOAD_USER_MAX_BYTES=5368709120
+WEB_UPLOAD_MIN_FREE_BYTES=536870912
 ```
 
 `WEB_ADMIN_USER_IDS` is a comma-separated list of numeric Telegram IDs; leave it empty to keep the admin dashboard closed. The retired `WEB_ADMIN_TOKEN` and `BOT_ALLOWED_USER_IDS` settings are ignored.
@@ -344,7 +346,9 @@ The user API exposes `GET /api/chat/session`, `DELETE /api/chat/session`, `GET /
 
 Every authenticated chat request, including downloads and logout, requires `X-Chat-User` matching the signed-in Telegram ID returned by the public session endpoint. This is an account assertion, never authentication: a tab left open for another account receives 401 before reading or changing the current account's data. Every user API write also requires `X-Chat-Request: 1`. Browser Origin and Sec-Fetch-Site must identify the same origin; CORS is not enabled. Download `GET /api/chat/threads/:threadId/files/:fileId?mode=download` uses the existing bounded resolver. Resuming a sandbox additionally requires a POST with `mode=download&sandbox=start` and `X-Conversation-Sandbox-Consent: start`. OAuth starts and API requests are rate-limited; oversized or slow bodies are rejected.
 
-Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both modes use Bun 1.4.2, pinned in `package.json`. The website defaults to disabled and opens no listener in that mode.
+Web uploads have a durable storage budget of 5 GiB per user by default. Existing uploads and concurrent reservations count toward this limit, including after restarts. `WEB_UPLOAD_USER_MAX_BYTES` configures the per-user budget. `WEB_UPLOAD_MIN_FREE_BYTES` keeps 512 MiB free on temporary and persistent upload volumes by default; uploads fail before writing when space is low. These limits do not automatically delete existing files. Attachment downloads allow one outstanding request per user, three active users globally, and at most 24 distinct users waiting in FIFO order. Cancellation and timeouts release waiting and active slots.
+
+Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both modes use Bun 1.4.4, pinned in `package.json`. The website defaults to disabled and opens no listener in that mode.
 
 `bun run dev` watches the backend and enables Bun's HTML development server when `WEB_ENABLED=true`. React and Tailwind edits update the browser through HMR, preserving React state without a separate frontend build. Use this mode for local development: Bun serves source maps and development diagnostics. API responses and attachments retain the production privacy and consent checks.
 

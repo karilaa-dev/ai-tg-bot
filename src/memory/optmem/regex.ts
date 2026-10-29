@@ -44,7 +44,7 @@ function namedCharacter(name: string): string | undefined {
     const hex = name.slice(22);
     if (!/^[0-9A-F]{4,5}$/u.test(hex)) return;
     const code = Number.parseInt(hex, 16);
-    return names.get(code)?.startsWith("CJK Ideograph") ? String.fromCodePoint(code) : undefined;
+    return names.get(code)?.startsWith("CJK UNIFIED IDEOGRAPH-") ? String.fromCodePoint(code) : undefined;
   }
   if (!byName) {
     byName = new Map();

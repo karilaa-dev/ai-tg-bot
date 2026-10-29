@@ -8,7 +8,7 @@ import { FileTooLargeError } from "../../src/files/limits.js";
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-it("loads at most three attachments, deduplicates refreshes, and cancels work on navigation", async () => {
+it("loads one attachment per session, deduplicates refreshes, and cancels work on navigation", async () => {
   const pending: Array<(response: Response) => void> = [];
   const signals: AbortSignal[] = [];
   const fetch = vi.fn((_url: string, options: RequestInit) => new Promise<Response>((resolve, reject) => {
@@ -25,16 +25,16 @@ it("loads at most three attachments, deduplicates refreshes, and cancels work on
   const file = (id: string) => ({ id, name: `${id}.txt`, size: 5, mimeType: "text/plain", caption: null });
   for (let id = 1; id <= 5; id++) loader.load(file(fixtureUuid(id)), "auto");
   loader.load(file(fixtureUuid(1)), "auto");
-  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(fetch).toHaveBeenCalledTimes(1);
   pending[0]!(new Response("hello", { headers: { "Content-Type": "text/plain" } }));
-  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   expect(states.get(fixtureUuid(1))).toMatchObject({ status: "ready", text: "hello", url: "blob:fixture" });
   expect(create).toHaveBeenCalledOnce();
   loader.dispose();
   expect(signals.every(signal => signal.aborted)).toBe(true);
   expect(revoke).toHaveBeenCalledWith("blob:fixture");
   await Promise.resolve();
-  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(fetch).toHaveBeenCalledTimes(2);
 });
 
 it("shows file errors and retries only when requested", async () => {

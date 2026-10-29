@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { MAX_CHAT_UPLOAD_BYTES, MAX_CHAT_UPLOAD_FILES, MAX_FILE_BYTES } from "../files/limits.js";
 import { WebHttpError } from "./auth.js";
 import type { ChatUploadFile } from "./chat-types.js";
+import { requireUploadSpace } from "./upload-budget.js";
 
 export const MAX_CHAT_BODY_BYTES = MAX_CHAT_UPLOAD_BYTES + 256 * 1024;
 const MAX_HEADERS_BYTES = 16 * 1024;
@@ -55,7 +56,7 @@ function partHeaders(bytes: Buffer): { name: string; filename: string | undefine
   return { name, filename: disposition.values.get("filename"), type: headers.get("content-type")?.toLowerCase() || "application/octet-stream" };
 }
 
-export async function readChatUpload(request: Request): Promise<{
+export async function readChatUpload(request: Request, minimumFreeBytes = 512 * 1024 ** 2): Promise<{
   text: string;
   requestId: string;
   files: ChatUploadFile[];
@@ -188,11 +189,17 @@ export async function readChatUpload(request: Request): Promise<{
         const filePath = join(directory, String(files.length));
         const file = await open(filePath, "wx", 0o600);
         let size = 0;
+        let spaceChecked = 0;
         try {
           final = await payload(async bytes => {
             size += bytes.length;
             uploaded += bytes.length;
             if (size > MAX_FILE_BYTES || uploaded > MAX_CHAT_UPLOAD_BYTES) throw new WebHttpError(413, "Upload exceeds the file size limit.");
+            if (size > spaceChecked) {
+              // Check each MiB before writing it, preserving space for the application and DB.
+              await requireUploadSpace(directory!, 1024 ** 2, minimumFreeBytes);
+              spaceChecked = size + 1024 ** 2;
+            }
             let offset = 0;
             while (offset < bytes.length) {
               const result = await file.write(bytes, offset, bytes.length - offset);

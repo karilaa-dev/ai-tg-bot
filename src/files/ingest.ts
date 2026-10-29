@@ -1,11 +1,11 @@
-import { parse } from "csv-parse/sync";
 import { isUtf8 } from "node:buffer";
 import type { AppConfig } from "../config.js";
 import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
-import { chunkCsv, chunkMarkdown } from "./chunker.js";
+import { chunkCsv, chunkMarkdown, CsvIndexLimitError, parseIndexedCsv, type CsvRecord } from "./chunker.js";
+import { MAX_INDEXED_TEXT_BYTES } from "./limits.js";
 import { chatFileMarker } from "./contextMarker.js";
 import { sha256Hex } from "./hash.js";
 import { audioFormat } from "../audio/transcription.js";
@@ -77,6 +77,7 @@ interface FileRefreshInput {
 
 export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
   const type = classifyFile(input.name, input.mime, input.bytes);
+  const text = type === "csv" || type === "txt" ? indexedText(type, input.bytes) : null;
   const startedAt = Date.now();
   input.logger?.info("file ingest starting", {
     name: input.name,
@@ -109,7 +110,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: true, type };
   }
-  if (type === "pdf" || type === "docx" || type === "audio" || type === "other") {
+  if (type === "pdf" || type === "docx" || type === "audio" || type === "other" || !text) {
     throwIfAborted(input.signal);
     const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
     const file = await input.repo.insertFile({
@@ -161,10 +162,10 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     throwIfAborted(input.signal);
 
     await reportStage(input.onStage, { stage: "extracting" }, input.signal);
-    const content = await contentFor(type, input.name, bytes, input.logger, input.signal);
+    const content = text.content;
     throwIfAborted(input.signal);
     const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
-    const chunks = inline ? [] : type === "csv" ? chunkCsv(bytes.toString("utf8").replace(/^\uFEFF/, "")) : chunkMarkdown(content);
+    const chunks = inline ? [] : text.records ? chunkCsv(text.records) : chunkMarkdown(content);
     input.logger?.debug("file content extracted", {
       name: input.name,
       type,
@@ -222,6 +223,7 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
   }
   const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
   const contentSha256 = sha256Hex(bytes);
+  const text = type === "csv" || type === "txt" ? indexedText(type, bytes) : null;
   if (type === "image") {
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
@@ -235,7 +237,12 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  if (type === "pdf" || type === "docx" || type === "audio" || type === "other") {
+  if (type === "pdf" || type === "docx" || type === "audio" || type === "other" || !text) {
+    // Also remove old searchable text when a refresh crosses the indexing limits.
+    await input.repo.replaceDocumentExtraction(input.file.id, {
+      contentSha256, mimeType: input.mime ?? input.file.mime_type, size: bytes.length,
+      contentMd: null, summary: sourceFileSummary(type), isInline: false, chunks: [],
+    });
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
       mimeType: input.mime ?? input.file.mime_type,
@@ -248,10 +255,10 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     });
   }
 
-  const content = await contentFor(type, input.file.name, bytes, input.logger, input.signal);
+  const content = text.content;
   throwIfAborted(input.signal);
   const inline = content.length <= input.config.FILE_INLINE_TOKENS * APPROX_CHARS_PER_TOKEN;
-  const chunks = inline ? [] : type === "csv" ? chunkCsv(bytes.toString("utf8").replace(/^\uFEFF/, "")) : chunkMarkdown(content);
+  const chunks = inline ? [] : text.records ? chunkCsv(text.records) : chunkMarkdown(content);
   for (let index = 0; index < chunks.length; index += 1) {
     await reportStage(input.onStage, {
       stage: "indexing",
@@ -336,7 +343,7 @@ export function cardForFile(
     return `${marker} File #${file.id}: ${displayName} (${file.size} bytes, original file). Use materialize_chat_files to access the original bytes in the sandbox.`;
   }
   if (file.extraction_status === "source_only") {
-    return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : "docx-cli"}.`;
+    return `${marker} File #${file.id}: ${displayName} (${file.type}, sandbox source). Use materialize_chat_files, then ${file.type === "pdf" ? "PDF Inspector or render_pdf_pages" : file.type === "docx" ? "docx-cli" : "inspect the original file in the sandbox"}.`;
   }
   if (file.is_inline) {
     return [
@@ -357,30 +364,21 @@ export function cardForFile(
   ].filter(Boolean).join(" ");
 }
 
-async function contentFor(
-  type: AcceptedFileType,
-  name: string,
-  bytes: Buffer,
-  logger?: Logger,
-  signal?: AbortSignal,
-): Promise<string> {
-  throwIfAborted(signal);
-  if (type === "txt") {
-    logger?.debug("extracting text file content", { name, bytes: bytes.length });
-    return bytes.toString("utf8").replace(/^\uFEFF/, "");
+function indexedText(type: "csv" | "txt", bytes: Uint8Array): { content: string; records?: CsvRecord[] } | null {
+  if (bytes.byteLength > MAX_INDEXED_TEXT_BYTES) return null;
+  const raw = Buffer.from(bytes).toString("utf8").replace(/^\uFEFF/, "");
+  if (type === "txt") return { content: raw };
+  try {
+    const records = parseIndexedCsv(raw);
+    return { content: `columns: ${records[0]?.record.join(", ") ?? ""} · ${Math.max(0, records.length - 1)} rows\n\n${raw}`, records };
+  } catch (error) {
+    if (error instanceof CsvIndexLimitError || (error instanceof Error && "code" in error && error.code === "CSV_MAX_RECORD_SIZE")) return null;
+    throw error;
   }
-  if (type === "csv") {
-    logger?.debug("extracting csv file content", { name, bytes: bytes.length });
-    const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
-    const rows = parse(raw, { relax_column_count: true, relax_quotes: true, skip_empty_lines: true }) as string[][];
-    const columns = rows[0]?.join(", ") ?? "";
-    logger?.debug("csv file content extracted", { name, rows: Math.max(0, rows.length - 1), columns: rows[0]?.length ?? 0 });
-    return `columns: ${columns} · ${Math.max(0, rows.length - 1)} rows\n\n${raw}`;
-  }
-  throw new Error(`${type} content must be inspected in the sandbox`);
 }
 
-export function sourceFileSummary(type: "pdf" | "docx" | "audio" | "other"): string {
+export function sourceFileSummary(type: AcceptedFileType): string {
+  if (type === "txt" || type === "csv") return "File exceeds automatic indexing limits; inspect the original in the sandbox.";
   if (type === "other") return "Original file available through materialize_chat_files in the sandbox.";
   if (type === "audio") return "Original audio available for transcribe_audio.";
   return type === "pdf"

@@ -27,6 +27,8 @@ const ConfigSchema = z.object({
   WEB_HOST: z.string().trim().min(1).default("0.0.0.0"),
   WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   WEB_AUTOLOAD_MAX_BYTES: z.coerce.number().int().min(0).max(MAX_FILE_BYTES).default(5 * 1024 * 1024),
+  WEB_UPLOAD_USER_MAX_BYTES: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(5 * 1024 ** 3),
+  WEB_UPLOAD_MIN_FREE_BYTES: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(512 * 1024 ** 2),
   WEB_TRUSTED_PROXY_IPS: z.preprocess(value => typeof value === "string" ? value.trim() === "" ? [] : value.split(",").map(ip => ip.trim()) : value,
     z.array(z.string().refine(ip => isIP(ip) !== 0, "Use exact proxy IP addresses.")).default([])),
   BOT_TOKEN: z.string().min(1),
