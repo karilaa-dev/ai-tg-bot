@@ -17,6 +17,30 @@ export async function requireUploadSpace(directory: string, bytes: number, minim
   }
 }
 
+export async function createTemporaryUploadLease(db: SqlExecutor, userId: number) {
+  const id = randomUUID();
+  await db.execute(sql`insert into web_upload_reservations(id, user_id, bytes, expires_at)
+    values (${id}, ${userId}, 0, ${Date.now() + LEASE_MS})`);
+  return diskLease(db, id);
+}
+
+function diskLease(db: SqlExecutor, id: string) {
+  return {
+    beforeWrite: (directory: string, size: number, minimumFree: number) => db.transaction(async tx => {
+      if (tx.dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472616)`);
+      const lease = await queryOne(tx, sql`update web_upload_reservations set expires_at = ${Date.now() + LEASE_MS}
+        where id = ${id} and expires_at > ${Date.now()} returning id`);
+      if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
+      const pending = await queryOne<{ bytes: number }>(tx, sql`select coalesce(sum(write_bytes), 0) as bytes
+        from web_upload_reservations where expires_at > ${Date.now()}`);
+      await requireUploadSpace(directory, size + Number(pending?.bytes ?? 0), minimumFree);
+      await tx.execute(sql`update web_upload_reservations set write_bytes = write_bytes + ${size} where id = ${id}`);
+    }),
+    written: (size: number) => db.execute(sql`update web_upload_reservations set write_bytes = write_bytes - ${size} where id = ${id}`),
+    release: () => db.execute(sql`delete from web_upload_reservations where id = ${id}`),
+  };
+}
+
 /** Database reservations serialize budgets across requests, service instances and restarts. */
 export class UploadBudget {
   constructor(private readonly db: SqlExecutor, private readonly config: BudgetConfig) {}
@@ -42,6 +66,7 @@ export class UploadBudget {
       await tx.execute(sql`insert into web_upload_reservations(id, user_id, bytes, expires_at)
         values (${id}, ${userId}, ${bytes}, ${Date.now() + LEASE_MS})`);
     });
+    const disk = diskLease(this.db, id);
     return {
       prepareFile: <T>(size: number, prepare: (repo: FilesRepo) => Promise<T>): Promise<T> => this.db.transaction(async tx => {
         // Transfer reserved bytes to the stored file in one commit, so other instances count them once.
@@ -52,19 +77,10 @@ export class UploadBudget {
       }),
       beforeWrite: async (size: number) => {
         await mkdir(this.config.FILE_STORAGE_PATH, { recursive: true, mode: 0o700 });
-        await this.db.transaction(async tx => {
-          if (tx.dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472616)`);
-          const lease = await queryOne(tx, sql`update web_upload_reservations set expires_at = ${Date.now() + LEASE_MS}
-            where id = ${id} and expires_at > ${Date.now()} returning id`);
-          if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
-          const pending = await queryOne<{ bytes: number }>(tx, sql`select coalesce(sum(write_bytes), 0) as bytes
-            from web_upload_reservations where expires_at > ${Date.now()}`);
-          await requireUploadSpace(this.config.FILE_STORAGE_PATH, size + Number(pending?.bytes ?? 0), this.config.WEB_UPLOAD_MIN_FREE_BYTES);
-          await tx.execute(sql`update web_upload_reservations set write_bytes = write_bytes + ${size} where id = ${id}`);
-        });
+        await disk.beforeWrite(this.config.FILE_STORAGE_PATH, size, this.config.WEB_UPLOAD_MIN_FREE_BYTES);
       },
-      written: (size: number) => this.db.execute(sql`update web_upload_reservations set write_bytes = write_bytes - ${size} where id = ${id}`),
-      release: () => this.db.execute(sql`delete from web_upload_reservations where id = ${id}`),
+      written: disk.written,
+      release: disk.release,
     };
   }
 }

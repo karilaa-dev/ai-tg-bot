@@ -151,7 +151,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           if (submitting.size >= 3) throw new WebHttpError(503, "Other uploads are processing. Try again shortly.");
           submitting.add(userId);
           try {
-            const input = await sendInput(request, options.config.WEB_UPLOAD_MIN_FREE_BYTES);
+            const input = await sendInput(request, userId, options);
             try { return Response.json(await chat.send(userId, threadId, input.value), { status: 202 }); }
             finally { await input.dispose(); }
           }
@@ -217,12 +217,12 @@ async function json(request: Request): Promise<unknown> {
   try { return JSON.parse(body); }
   catch { throw new WebHttpError(400, "Invalid JSON."); }
 }
-async function sendInput(request: Request, minimumFreeBytes: number): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
+async function sendInput(request: Request, userId: number, options: WebServerOptions): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
   if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data;")) {
     const input = SendSchema.parse(await json(request));
     if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
     return { value: input, async dispose() {} };
   }
-  const { dispose, ...value } = await readChatUpload(request, minimumFreeBytes);
+  const { dispose, ...value } = await readChatUpload(request, options.db, userId, options.config.WEB_UPLOAD_MIN_FREE_BYTES);
   return { value, dispose };
 }

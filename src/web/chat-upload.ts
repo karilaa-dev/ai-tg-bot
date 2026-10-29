@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { MAX_CHAT_UPLOAD_BYTES, MAX_CHAT_UPLOAD_FILES, MAX_FILE_BYTES } from "../files/limits.js";
 import { WebHttpError } from "./auth.js";
 import type { ChatUploadFile } from "./chat-types.js";
-import { requireUploadSpace } from "./upload-budget.js";
+import type { SqlExecutor } from "../db/sql.js";
+import { createTemporaryUploadLease } from "./upload-budget.js";
 
 export const MAX_CHAT_BODY_BYTES = MAX_CHAT_UPLOAD_BYTES + 256 * 1024;
 const MAX_HEADERS_BYTES = 16 * 1024;
@@ -56,7 +57,7 @@ function partHeaders(bytes: Buffer): { name: string; filename: string | undefine
   return { name, filename: disposition.values.get("filename"), type: headers.get("content-type")?.toLowerCase() || "application/octet-stream" };
 }
 
-export async function readChatUpload(request: Request, minimumFreeBytes = 512 * 1024 ** 2): Promise<{
+export async function readChatUpload(request: Request, db: SqlExecutor, userId: number, minimumFreeBytes = 512 * 1024 ** 2): Promise<{
   text: string;
   requestId: string;
   files: ChatUploadFile[];
@@ -65,6 +66,10 @@ export async function readChatUpload(request: Request, minimumFreeBytes = 512 * 
   if (!request.body) throw invalid();
   const reader = request.body.getReader();
   let directory: string | undefined;
+  let disk: Awaited<ReturnType<typeof createTemporaryUploadLease>> | undefined;
+  let allowance = 0;
+  let writtenBytes = 0;
+  let renewAt = 0;
   let disposal: Promise<void> | undefined;
   const dispose = (): Promise<void> => disposal ??= directory ? rm(directory, { recursive: true, force: true }) : Promise.resolve();
   let interruption: WebHttpError | undefined;
@@ -186,26 +191,33 @@ export async function readChatUpload(request: Request, minimumFreeBytes = 512 * 
         if (part.filename === undefined || !part.filename || part.filename.length > 255 || /\p{Cc}/u.test(part.filename)) throw invalid("Invalid file name.");
         if (files.length >= MAX_CHAT_UPLOAD_FILES) throw new WebHttpError(413, `Upload up to ${MAX_CHAT_UPLOAD_FILES} files.`);
         directory ??= await mkdtemp(join(tmpdir(), "chat-upload-"));
+        disk ??= await createTemporaryUploadLease(db, userId);
         const filePath = join(directory, String(files.length));
         const file = await open(filePath, "wx", 0o600);
         let size = 0;
-        let spaceChecked = 0;
         try {
           final = await payload(async bytes => {
             size += bytes.length;
             uploaded += bytes.length;
             if (size > MAX_FILE_BYTES || uploaded > MAX_CHAT_UPLOAD_BYTES) throw new WebHttpError(413, "Upload exceeds the file size limit.");
-            if (size > spaceChecked) {
-              // Check each MiB before writing it, preserving space for the application and DB.
-              await requireUploadSpace(directory!, 1024 ** 2, minimumFreeBytes);
-              spaceChecked = size + 1024 ** 2;
+            if (allowance < bytes.length || Date.now() >= renewAt) {
+              // Settle completed writes before reserving the next shared allowance.
+              if (writtenBytes) await disk!.written(writtenBytes);
+              writtenBytes = 0;
+              const additional = allowance < bytes.length ? Math.max(1024 ** 2, bytes.length - allowance) : 0;
+              await disk!.beforeWrite(directory!, additional, minimumFreeBytes);
+              allowance += additional;
+              renewAt = Date.now() + IDLE_TIMEOUT_MS;
             }
+            checkInterrupted();
             let offset = 0;
             while (offset < bytes.length) {
               const result = await file.write(bytes, offset, bytes.length - offset);
               if (!result.bytesWritten) throw new Error("Could not write the upload.");
               offset += result.bytesWritten;
             }
+            allowance -= bytes.length;
+            writtenBytes += bytes.length;
           });
         } finally { await file.close(); }
         if (!size) throw invalid("Empty files are not allowed.");
@@ -251,5 +263,6 @@ export async function readChatUpload(request: Request, minimumFreeBytes = 512 * 
     request.signal.removeEventListener("abort", abort);
     if (!ended) void reader.cancel().catch(() => {});
     reader.releaseLock();
+    await disk?.release();
   }
 }
