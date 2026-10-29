@@ -55,10 +55,13 @@
 .chat-side-action > kbd, .chat-search-hints kbd { display: inline-grid; place-items: center; min-width: 20px; padding: 1px 5px; border-radius: 5px; background: var(--color-kumo-base); box-shadow: inset 0 0 0 1px var(--color-kumo-line); color: var(--chat-subtle); font-family: inherit; font-size: 12px; line-height: 16px; }
 .chat-side-action > kbd { opacity: 0; transition: opacity .15s; }
 .chat-side-action:hover > kbd, .chat-side-action:focus-visible > kbd { opacity: 1; }
-.chat-sidebar-content { min-height: 0; padding-inline: 8px; }
+.chat-sidebar-content { min-height: 0; }
+/* Kumo's viewport adds 14px of its own; keep chats on the same edge as New chat and Search chats. */
+.chat-sidebar-content > [data-sidebar="viewport"] { padding-inline: 8px; }
 .chat-thread-group + .chat-thread-group { margin-top: 10px; }
 /* Expanded Kumo group labels drop their divider; the variant that does so is not generated here. */
 .chat-thread-group-label { border-bottom-color: transparent; color: var(--chat-subtle); font-size: 12px; font-weight: 500; }
+.chat-thread-group-label > div > div { padding-inline: 10px; }
 .chat-sidebar-empty { padding: 4px 10px 12px; color: var(--chat-subtle); white-space: normal; line-height: 1.5; }
 .chat-sidebar-banner { margin: 4px 0 8px; white-space: normal; }
 .chat-sidebar-more { padding: 4px 4px 12px; }
