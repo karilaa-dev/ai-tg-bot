@@ -76,6 +76,14 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
         if (!columns.some(column => column.name === name)) await tx.execute(sql.raw(`alter table ${table} add column ${definition}`));
       }
     }
+    await tx.execute(sql`create index if not exists files_web_upload_user_idx on files(user_id) where requires_message = 1`);
+    await tx.execute(sql`
+      create table if not exists web_upload_reservations (
+        id text primary key, user_id ${timeType} not null,
+        bytes ${timeType} not null check(bytes >= 0),
+        write_bytes ${timeType} not null default 0 check(write_bytes >= 0), disk_key text, expires_at ${timeType} not null
+      )
+    `);
   }, { rebuildSqliteTables: true });
 }
 

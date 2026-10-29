@@ -1,9 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_CHAT_UPLOAD_BYTES, MAX_CHAT_UPLOAD_FILES, MAX_FILE_BYTES } from "../../src/files/limits.js";
-import { MAX_CHAT_BODY_BYTES, readChatUpload } from "../../src/web/chat-upload.js";
+import { MAX_CHAT_BODY_BYTES, readChatUpload as parseChatUpload } from "../../src/web/chat-upload.js";
+import { createDatabase, type AppDatabase } from "../../src/db/index.js";
+import { sql } from "drizzle-orm";
+
+vi.mock("node:fs/promises", async importOriginal => {
+  const filesystem = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...filesystem, statfs: vi.fn(filesystem.statfs) };
+});
+
+let database: AppDatabase;
+function readChatUpload(request: Request, minimumFreeBytes?: number) {
+  return parseChatUpload(request, database.db, 42, minimumFreeBytes);
+}
 
 const boundary = "upload-boundary";
 const requestId = "request_0123456789";
@@ -50,10 +62,14 @@ let temporaryRoot: string;
 beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(tmpdir(), "chat-upload-test-"));
   vi.stubEnv("TMPDIR", temporaryRoot);
+  database = createDatabase({ DB_URL: "sqlite::memory:" });
+  await database.initialize();
 });
 afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.mocked(statfs).mockReset();
+  await database.destroy();
   await rm(temporaryRoot, { recursive: true, force: true });
 });
 
@@ -62,6 +78,39 @@ async function uploadDirectory(): Promise<string> {
   expect(entries).toHaveLength(1);
   return join(temporaryRoot, entries[0]);
 }
+
+it("rejects low disk space before writing upload data and removes temporary files", async () => {
+  const cancel = vi.fn();
+  await expect(readChatUpload(streamRequest(generatedUpload(1, 1024), { cancel }), Number.MAX_SAFE_INTEGER))
+    .rejects.toMatchObject({ status: 507 });
+  expect(await readdir(temporaryRoot)).toEqual([]);
+  expect(cancel).toHaveBeenCalledOnce();
+});
+
+it("reserves temporary write allowances across uploads and releases them on cancellation", async () => {
+  vi.mocked(statfs).mockResolvedValue({ bavail: BigInt(512 * 1024 ** 2 + 1.5 * 1024 ** 2), bsize: 1n } as never);
+  const controller = new AbortController();
+  const first = readChatUpload(new Request("https://chat.example/upload", {
+    method: "POST", signal: controller.signal, headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+    body: new ReadableStream({ start(stream) {
+      stream.enqueue(Buffer.concat([field("requestId", requestId), fileHeader(), Buffer.alloc(64 * 1024, 97)]));
+    } }),
+  }));
+  void first.catch(() => {});
+  let second: Awaited<ReturnType<typeof readChatUpload>> | undefined;
+  try {
+    await vi.waitFor(async () => { expect((await stat(join(await uploadDirectory(), "0"))).size).toBeGreaterThan(0); });
+    await expect(readChatUpload(streamRequest(generatedUpload(1, 1024))).then(value => { second = value; return value; }))
+      .rejects.toMatchObject({ status: 507 });
+  } finally {
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ status: 499 });
+    await second?.dispose();
+  }
+  expect(await database.db.query(sql`select * from web_upload_reservations`)).toEqual([]);
+  const next = await readChatUpload(streamRequest(generatedUpload(1, 1024)));
+  await next.dispose();
+});
 
 it.each([1, 2, 3, 13, 64 * 1024])("preserves binary content and false boundaries with %i-byte fragments", async size => {
   const bytes = Buffer.concat([

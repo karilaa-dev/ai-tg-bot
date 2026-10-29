@@ -11,14 +11,15 @@ Both `python` and `python3` include Pillow, Requests, NumPy, pandas, Matplotlib,
 Direct dependencies are listed in `assets/python/requirements.in`; `requirements.txt` pins the full dependency graph with SHA-256 hashes. Pillow uses the same version as the Office bundle. To refresh the lock for E2B Base's Python 3.11:
 
 ```sh
-uv pip compile --python-version 3.11 --generate-hashes --output-file e2b-template/assets/python/requirements.txt e2b-template/assets/python/requirements.in
+uv pip compile --upgrade --python-version 3.11 --generate-hashes --output-file e2b-template/assets/python/requirements.txt e2b-template/assets/python/requirements.in
+uv pip compile --upgrade --python-version 3.11 --generate-hashes --output-file e2b-template/assets/office/requirements.txt e2b-template/assets/office/requirements.in
 ```
 
 The toolbox contract runs `assets/python/contract.py` with both default interpreters as the sandbox user. It checks package versions, PNG creation and resizing, a local HTTP request, NumPy calculations, pandas CSV processing, headless chart rendering, HTML parsing, and YAML round trips. The package installer also runs `pip check`.
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.1.4` uses `ai-tg-bot-tools:v2.1.4`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.1.6` uses `ai-tg-bot-tools:v2.1.6`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 

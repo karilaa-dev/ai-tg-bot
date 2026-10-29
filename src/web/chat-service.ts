@@ -14,6 +14,7 @@ import { WebHttpError } from "./auth.js";
 import { ConversationRepository, WebNotFound } from "./repository.js";
 import type { ChatService, ChatSettings, ChatSettingsPatch, ChatThread, ChatSendResult, ChatUploadFile } from "./chat-types.js";
 import { deleteUserMemory } from "../memory/view.js";
+import { UploadBudget } from "./upload-budget.js";
 
 const sendSchema = z.object({ text: z.string().max(32_000), requestId: z.string().regex(/^[a-zA-Z0-9_-]{16,128}$/) });
 type Avatar = { bytes: Uint8Array; mime: string };
@@ -130,23 +131,28 @@ export class BotChatService implements ChatService {
     if (thread.archived) throw new WebHttpError(409, "Fork this archived conversation to continue it.");
     const files = input.files ?? [];
     if (!input.text.trim() && !files.length) throw new WebHttpError(400, "Write a message or attach a file.");
-    if (files.length > MAX_CHAT_UPLOAD_FILES || files.some(file => file.size > MAX_FILE_BYTES) || files.reduce((sum, file) => sum + file.size, 0) > MAX_CHAT_UPLOAD_BYTES) {
+    if (files.length > MAX_CHAT_UPLOAD_FILES || files.some(file => !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAX_FILE_BYTES) || files.reduce((sum, file) => sum + file.size, 0) > MAX_CHAT_UPLOAD_BYTES) {
       throw new WebHttpError(413, "Attach up to 10 files, each at most 50 MiB (500 MiB total).");
     }
     await this.user(userId);
+    const budget = files.length ? await new UploadBudget(this.input.services.db.db, this.input.services.config)
+      .reserve(userId, files.reduce((sum, file) => sum + file.size, 0)) : undefined;
     const prepared: Awaited<ReturnType<typeof ingestFileBytes>>[] = [];
     const createdIds: FileRow["id"][] = [];
     try {
       for (const file of files) {
+        await budget!.beforeWrite(file.size);
         const bytes = Buffer.from(await file.arrayBuffer());
-        const result = await ingestFileBytes({ config: this.input.services.config, repo: this.repos.files,
+        if (bytes.length !== file.size) throw new WebHttpError(400, "Upload size changed.");
+        const result = await budget!.prepareFile(file.size, repo => ingestFileBytes({ config: this.input.services.config, repo,
           requireMessage: true,
           userId, threadId, name: file.name.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 240) || "attachment",
-          mime: file.type, bytes, logger: this.input.services.logger });
+          mime: file.type, bytes, logger: this.input.services.logger }));
         createdIds.push(result.fileId);
         const stored = await this.repos.files.get(result.fileId);
         if (!stored) throw new Error("Upload record disappeared.");
         await this.input.services.fileResolver.persistFile(stored, bytes);
+        await budget!.written(file.size);
         prepared.push(result);
       }
       const text = [input.text.trim(), ...prepared.map(file => file.card)].filter(Boolean).join("\n\n");
@@ -160,12 +166,14 @@ export class BotChatService implements ChatService {
       });
       return sendResult(accepted);
     } finally {
-      // Failed preparations and losing retries never leave unreferenced upload blobs.
-      for (const id of createdIds) {
-        if (await this.repos.files.deleteFileIfUnattached(id)) {
-          await this.input.services.fileResolver.removeLocalFile(id);
+      try {
+        // Failed preparations and losing retries never leave unreferenced upload blobs.
+        for (const id of createdIds) {
+          if (await this.repos.files.deleteFileIfUnattached(id)) {
+            await this.input.services.fileResolver.removeLocalFile(id);
+          }
         }
-      }
+      } finally { await budget?.release(); }
     }
   }
 

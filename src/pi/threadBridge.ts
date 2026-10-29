@@ -323,7 +323,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               });
               continue;
             }
-            if (file.type === "pdf" || file.type === "docx") {
+            if (file.type === "pdf" || file.type === "docx" || file.extraction_status === "source_only") {
               injectedIds.add(file.id);
               additions.push(sandboxDocumentContext(file));
               continue;
@@ -346,8 +346,7 @@ export function createChatFileContextExtension(bridge: ThreadBridge): InlineExte
               const contentChanged = Boolean(resolved.contentSha256
                 && file.content_sha256 !== resolved.contentSha256);
               const needsExtractionRetry = file.type !== "image"
-                && file.extraction_status !== "ready"
-                && file.extraction_status !== "source_only";
+                && file.extraction_status !== "ready";
               if (contentChanged || needsExtractionRetry) {
                 bridge.logger.warn(contentChanged ? "chat file content hash changed" : "chat file extraction retrying", {
                   fileId: file.id,
@@ -420,7 +419,9 @@ function durableDocumentContext(file: FileRow): TextContent {
 function sandboxDocumentContext(file: FileRow): TextContent {
   const next = file.type === "pdf"
     ? "Call materialize_chat_files, then use pdf-inspector for native text or render_pdf_pages for vision."
-    : "Call materialize_chat_files, read the docx-cli skill, and inspect it with docx.";
+    : file.type === "docx"
+    ? "Call materialize_chat_files, read the docx-cli skill, and inspect it with docx."
+    : "Call materialize_chat_files, then inspect the original file with suitable sandbox commands.";
   const fallback = file.extraction_status === "ready"
     ? " If the original source cannot be restored, use search_in_file/read_file_section as a legacy extracted-text fallback."
     : "";

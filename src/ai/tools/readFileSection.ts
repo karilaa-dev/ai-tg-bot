@@ -31,7 +31,7 @@ export function createReadFileSectionTool(input: ToolBuildInput) {
         return {
           error: "sandbox_required",
           file_id,
-          message: "This PDF or DOCX is source-only. Call materialize_chat_files, then use PDF Inspector, render_pdf_pages, or docx-cli.",
+          message: "This file is source-only. Call materialize_chat_files, then inspect it with the recommended sandbox tools.",
         };
       }
       const chunks = await input.repos.files.chunks(file_id);

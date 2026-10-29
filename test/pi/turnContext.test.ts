@@ -9,6 +9,11 @@ import { createLogger } from "../../src/logger.js";
 import { officeSkillPaths } from "../../src/pi/officeSkills.js";
 import { createChatFileContextExtension, ThreadBridge } from "../../src/pi/threadBridge.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
+import { ingestFileBytes } from "../../src/files/ingest.js";
+import { MAX_INDEXED_TEXT_BYTES } from "../../src/files/limits.js";
+import { createLoadMessageTool } from "../../src/ai/tools/loadMessage.js";
+import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
+import { createSearchInFileTool } from "../../src/ai/tools/searchInFile.js";
 import { deferred } from "../helpers/async.js";
 import {
   createTurnPromptContextExtension,
@@ -283,6 +288,54 @@ describe("ThreadBridge turn prompt lifecycle", () => {
     } finally {
       await db.destroy();
     }
+  });
+
+  it.each([
+    ["large.csv", "a,b\n".repeat(MAX_INDEXED_TEXT_BYTES / 4 + 1)],
+    ["wide.csv", ",".repeat(3_000)],
+    ["large.txt", "x".repeat(MAX_INDEXED_TEXT_BYTES + 1)],
+  ])("routes source-only %s through sandbox metadata and inspection guidance", async (name, content) => {
+    const config = loadTestConfig();
+    const db = createDatabase(config);
+    await db.initialize();
+    try {
+      const repos = createRepos(db.db, db.search);
+      const user = await repos.users.ensure({ tgId: 987_659, lang: "en" });
+      const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+      const file = await ingestFileBytes({ config, repo: repos.files, userId: user.tg_id, threadId: thread.id, name, bytes: Buffer.from(content) });
+      const message = await repos.messages.insert({ threadId: thread.id, role: "user", kind: "file", content: {}, textPlain: `Inspect [[chat-file:${file.fileId}]]` });
+      await repos.files.setMessageId(file.fileId, message.id);
+      await repos.files.rememberTelegramObservation(file.fileId, telegramFileSource({ fileId: "source-only-text" }), {
+        direction: "inbound", mediaKind: "document", telegramMessageId: 7,
+        refs: [{ fileId: "source-only-text", size: Buffer.byteLength(content), primary: true }],
+      });
+      const bridge = new ThreadBridge({ config, db, repos, logger: createLogger(config), user, thread, modelRegistry: {} as never, providerRouter: {} as never });
+      await bridge.beginTurn({ ...turnTransport(), currentFileIds: [file.fileId] });
+      expect(bridge.currentTurnSessionContext()).toMatch(/"mode":\s*"sandbox source"/u);
+      const resolveFile = vi.spyOn(bridge, "resolveFile");
+      const input = { config, db, repos, user, thread, resolveFile, selectContextFiles: (ids: string[]) => bridge.selectContextFiles(ids) };
+      const loaded = await createLoadMessageTool(input).execute({ message_id: message.id, file_ids: [file.fileId] });
+      expect(loaded).toMatchObject({
+        files: [expect.objectContaining({ source_only: true, recommended_tool: "materialize_chat_files" })],
+        sandbox_file_ids: [file.fileId], materialized_file_ids: [],
+      });
+      const handlers = await inlineExtensionHandlers(createChatFileContextExtension(bridge));
+      const result = await handlers.context({ messages: [{ role: "user", content: message.text_plain, timestamp: 1 }] });
+      const context = JSON.stringify(result.messages);
+      expect(context).toContain("materialize_chat_files");
+      expect(context).toContain("sandbox");
+      expect(context).not.toContain("docx");
+      expect(resolveFile).not.toHaveBeenCalled();
+      const responses = [
+        await createSearchInFileTool(input).execute({ file_id: file.fileId, query: "needle", limit: 1 }),
+        await createReadFileSectionTool(input).execute({ file_id: file.fileId, chunk_index: 0, count: 1 }),
+      ];
+      for (const response of responses) {
+        expect(response).toMatchObject({ error: "sandbox_required", message: expect.stringContaining("materialize_chat_files") });
+        expect(JSON.stringify(response)).not.toMatch(/PDF|DOCX|docx/u);
+      }
+      await bridge.endTurn();
+    } finally { await db.destroy(); }
   });
 
   it("keeps audio as metadata without downloading it again for model context", async () => {

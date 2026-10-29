@@ -15,7 +15,7 @@ const MAX_RELOADED_FILES = 5;
 export function createLoadMessageTool(input: ToolBuildInput) {
   return defineBotTool<{ message_id: number; file_ids?: string[] }, LoadMessageResult>({
     description:
-      "Load one previous chat message and its attachment metadata. Pass file_ids only for image bytes or legacy extracted document context. For source-only PDF/DOCX files, this selects their metadata without downloading bytes; call materialize_chat_files next.",
+      "Load one previous chat message and its attachment metadata. Pass file_ids only for image bytes or legacy extracted document context. For source-only files, this selects their metadata without downloading bytes; call materialize_chat_files next.",
     inputSchema: z.object({
       message_id: z.number().int().positive(),
       file_ids: z.array(z.string().uuid()).max(MAX_RELOADED_FILES).optional(),
@@ -40,7 +40,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
         for (const fileId of requestedIds) {
           const file = byId.get(fileId)!;
           if (file.type === "audio") continue;
-          if (file.type === "pdf" || file.type === "docx") {
+          if (file.type === "pdf" || file.type === "docx" || file.extraction_status === "source_only") {
             sandboxIds.push(fileId);
             continue;
           }
@@ -88,7 +88,7 @@ export function createLoadMessageTool(input: ToolBuildInput) {
           source_only: file.extraction_status === "source_only",
           recommended_tool: file.type === "audio"
             ? "transcribe_audio" as const
-            : file.type === "pdf" || file.type === "docx"
+            : file.type === "pdf" || file.type === "docx" || file.extraction_status === "source_only"
             ? "materialize_chat_files" as const
             : "load_message" as const,
         })),

@@ -108,7 +108,7 @@ function fileCardEnd(text: string, file: WebAttachment, inlineContent?: string |
     const framed = `${opening}${inlineContent}\n</attachment>`;
     return body.startsWith(framed) ? prefix.length + framed.length : null;
   }
-  const card = body.match(/^(?:txt|csv|pdf|docx|other), (?:sandbox source\)\. Use materialize_chat_files, then (?:PDF Inspector or render_pdf_pages|docx-cli)\.|\d+ chunks\)\.[\s\S]*?Use search_in_file or read_file_section\.)(?=\n\n|$)/);
+  const card = body.match(/^(?:txt|csv|pdf|docx|other), (?:sandbox source\)\. Use materialize_chat_files, then (?:PDF Inspector or render_pdf_pages|docx-cli|inspect the original file in the sandbox)\.|\d+ chunks\)\.[\s\S]*?Use search_in_file or read_file_section\.)(?=\n\n|$)/);
   return card ? prefix.length + card[0].length : null;
 }
 

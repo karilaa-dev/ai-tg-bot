@@ -2,6 +2,9 @@
   "name": "ai-tg-bot-office",
   "version": "1.0.0",
   "private": true,
+  "overrides": {
+    "image-size": "2.0.4"
+  },
   "dependencies": {
     "jszip": "3.10.2",
     "pptxgenjs": "4.0.1"

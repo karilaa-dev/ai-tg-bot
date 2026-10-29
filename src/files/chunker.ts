@@ -1,4 +1,26 @@
 import { parse } from "csv-parse/sync";
+import { MAX_INDEXED_TEXT_BYTES } from "./limits.js";
+
+export class CsvIndexLimitError extends Error {}
+export interface CsvRecord { raw: string; record: string[] }
+
+/** Bound work before parsing, then stop at record/cell limits. Used once per ingestion. */
+export function parseIndexedCsv(raw: string): CsvRecord[] {
+  if (Buffer.byteLength(raw) > MAX_INDEXED_TEXT_BYTES) throw new CsvIndexLimitError();
+  let rows = 0;
+  let cells = 0;
+  return parse(raw, {
+    raw: true, relax_column_count: true, relax_quotes: true, skip_empty_lines: true,
+    max_record_size: 64 * 1024,
+    on_record(record) {
+      // csv-parse's types omit the raw:true wrapper passed to on_record.
+      const value = record as unknown as CsvRecord;
+      cells += value.record.length;
+      if (++rows > 10_000 || value.record.length > 2_048 || cells > 50_000 || Buffer.byteLength(value.raw) > 64 * 1024) throw new CsvIndexLimitError();
+      return record;
+    },
+  }) as unknown as CsvRecord[];
+}
 
 interface Chunk {
   idx: number;
@@ -29,10 +51,8 @@ export function chunkMarkdown(md: string, targetChars = 1800, overlapChars = 270
   return chunks.filter((chunk) => chunk.content);
 }
 
-export function chunkCsv(raw: string, targetRows = 500): Chunk[] {
-  const records = parse(raw, {
-    raw: true, relax_column_count: true, relax_quotes: true, skip_empty_lines: true,
-  }) as unknown as Array<{ raw: string }>;
+export function chunkCsv(raw: string | CsvRecord[], targetRows = 500): Chunk[] {
+  const records = typeof raw === "string" ? parseIndexedCsv(raw) : raw;
   const rows = records.map((record) => record.raw.replace(/(?:\r\n|\r|\n)$/, ""));
   const header = rows[0] ?? "";
   if (rows.length === 1) return [{ idx: 0, headingPath: "header", content: header }];

@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { downloadPublicBrowserFile } from "../../src/browserUse/download.js";
 
 describe("Browser Use direct downloads", () => {
+  it("survives an early close after excessive content encodings", async () => {
+    const child = Bun.spawn([process.execPath, new URL("./encoding-crash-child.ts", import.meta.url).pathname], { stdout: "pipe", stderr: "pipe" });
+    const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(stdout).toContain("safe rejection");
+  });
   it.each(["http://127.0.0.1/private", "http://[::1]/private", "http://[::ffff:127.0.0.1]/private"])("blocks private network target %s before fetching", async (url) => {
     const fetchMock = vi.fn();
     await expect(downloadPublicBrowserFile(url, 1_000, undefined, fetchMock))
