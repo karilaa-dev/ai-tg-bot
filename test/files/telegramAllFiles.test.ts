@@ -6,6 +6,7 @@ import { FileResolver } from "../../src/files/resolver.js";
 import { LocalFileStore } from "../../src/files/localStore.js";
 import { sha256Hex } from "../../src/files/hash.js";
 import { telegramFileSource } from "../../src/files/telegramSource.js";
+import { MAX_INDEXED_TEXT_BYTES } from "../../src/files/limits.js";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 
 describe("arbitrary Telegram documents", () => {
@@ -60,6 +61,28 @@ describe("arbitrary Telegram documents", () => {
     expect(unavailable).not.toHaveBeenCalled();
     expect(await readdir(directory)).toEqual([file.id]);
     expect(resolved.bytes).toEqual(bytes);
+    expect(downloads).toBe(1);
+  });
+
+  it.each([
+    ["large.csv", "text/csv", "a,b\n".repeat(MAX_INDEXED_TEXT_BYTES / 4 + 1)],
+    ["wide.csv", "text/csv", ",".repeat(3_000)],
+    ["large.txt", "text/plain", "x".repeat(MAX_INDEXED_TEXT_BYTES + 1)],
+  ])("accepts and resends source-only %s from the Telegram cache", async (name, mime, content) => {
+    const document = env.bot.server.fileState.storeDocument(name, mime, { content: Buffer.from(content) });
+    for (let index = 0; index < 2; index++) {
+      await env.bot.processUpdatesConcurrently([env.bot.server.updateFactory.createDocumentMessage(env.user, env.chat, document)]);
+    }
+    const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+    const files = await env.repos.files.listForThreads([thread.id]);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ extraction_status: "source_only", content_md: null });
+    const messages = (await env.repos.messages.listThread(thread.id)).filter(message => message.role === "user" && message.kind === "file");
+    expect(messages).toHaveLength(2);
+    for (const message of messages) {
+      expect(message.text_plain).toContain("materialize_chat_files");
+      expect(await env.repos.files.listForMessage(message.id)).toMatchObject([{ id: files[0]!.id }]);
+    }
     expect(downloads).toBe(1);
   });
 

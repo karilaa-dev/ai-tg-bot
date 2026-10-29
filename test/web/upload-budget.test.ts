@@ -1,4 +1,4 @@
-import { mkdtemp, rm, statfs } from "node:fs/promises";
+import { mkdtemp, rm, stat, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -6,11 +6,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { requireUploadSpace, UploadBudget } from "../../src/web/upload-budget.js";
+import { createTemporaryUploadLease, requireUploadSpace, UploadBudget } from "../../src/web/upload-budget.js";
 
 vi.mock("node:fs/promises", async importOriginal => {
   const filesystem = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...filesystem, statfs: vi.fn(filesystem.statfs) };
+  return { ...filesystem, stat: vi.fn(filesystem.stat), statfs: vi.fn(filesystem.statfs) };
 });
 
 let database: AppDatabase;
@@ -20,7 +20,7 @@ beforeEach(async () => {
   database = createDatabase({ DB_URL: `sqlite:${path.join(directory, "test.db")}` });
   await database.initialize();
 });
-afterEach(async () => { vi.restoreAllMocks(); vi.mocked(statfs).mockReset(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); vi.mocked(stat).mockReset(); vi.mocked(statfs).mockReset(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
 const config = () => loadTestConfig({ FILE_STORAGE_PATH: directory, WEB_UPLOAD_USER_MAX_BYTES: 10 });
 
 it("serializes reservations across connections and preserves quotas after restart", async () => {
@@ -64,6 +64,21 @@ it("accounts for disk space promised to writes across connections", async () => 
     await second.beforeWrite(5);
     await second.written(5);
   } finally { await first.release(); await second.release(); await other.destroy(); }
+});
+
+it("keeps temporary and persistent write promises separate on different filesystems", async () => {
+  const limits = { ...config(), WEB_UPLOAD_MIN_FREE_BYTES: 10 };
+  const persistent = await new UploadBudget(database.db, limits).reserve(42, 5);
+  const temporary = await createTemporaryUploadLease(database.db, 84);
+  const temporaryDirectory = await mkdtemp(path.join(directory, "temporary-"));
+  vi.mocked(statfs).mockResolvedValue({ bavail: 16n, bsize: 1n } as never);
+  vi.mocked(stat).mockResolvedValueOnce({ dev: 1n } as never).mockResolvedValueOnce({ dev: 2n } as never);
+  try {
+    await persistent.beforeWrite(5);
+    await temporary.beforeWrite(temporaryDirectory, 5, 10);
+    await persistent.written(5);
+    await temporary.written(5);
+  } finally { await persistent.release(); await temporary.release(); }
 });
 
 it("rolls back failed file preparation without losing its reservation", async () => {

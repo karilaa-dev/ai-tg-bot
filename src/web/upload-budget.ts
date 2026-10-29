@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, statfs } from "node:fs/promises";
+import { mkdir, stat, statfs } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import { FilesRepo } from "../db/repos/files.js";
@@ -26,16 +26,19 @@ export async function createTemporaryUploadLease(db: SqlExecutor, userId: number
 
 function diskLease(db: SqlExecutor, id: string) {
   return {
-    beforeWrite: (directory: string, size: number, minimumFree: number) => db.transaction(async tx => {
-      if (tx.dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472616)`);
-      const lease = await queryOne(tx, sql`update web_upload_reservations set expires_at = ${Date.now() + LEASE_MS}
-        where id = ${id} and expires_at > ${Date.now()} returning id`);
-      if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
-      const pending = await queryOne<{ bytes: number }>(tx, sql`select coalesce(sum(write_bytes), 0) as bytes
-        from web_upload_reservations where expires_at > ${Date.now()}`);
-      await requireUploadSpace(directory, size + Number(pending?.bytes ?? 0), minimumFree);
-      await tx.execute(sql`update web_upload_reservations set write_bytes = write_bytes + ${size} where id = ${id}`);
-    }),
+    beforeWrite: async (directory: string, size: number, minimumFree: number) => {
+      const diskKey = String((await stat(directory, { bigint: true })).dev);
+      return db.transaction(async tx => {
+        if (tx.dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472616)`);
+        const lease = await queryOne(tx, sql`update web_upload_reservations set disk_key = ${diskKey}, expires_at = ${Date.now() + LEASE_MS}
+          where id = ${id} and expires_at > ${Date.now()} returning id`);
+        if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
+        const pending = await queryOne<{ bytes: number }>(tx, sql`select coalesce(sum(write_bytes), 0) as bytes
+          from web_upload_reservations where disk_key = ${diskKey} and expires_at > ${Date.now()}`);
+        await requireUploadSpace(directory, size + Number(pending?.bytes ?? 0), minimumFree);
+        await tx.execute(sql`update web_upload_reservations set write_bytes = write_bytes + ${size} where id = ${id}`);
+      });
+    },
     written: (size: number) => db.execute(sql`update web_upload_reservations set write_bytes = write_bytes - ${size} where id = ${id}`),
     release: () => db.execute(sql`delete from web_upload_reservations where id = ${id}`),
   };

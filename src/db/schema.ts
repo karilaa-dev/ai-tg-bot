@@ -81,7 +81,7 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
       create table if not exists web_upload_reservations (
         id text primary key, user_id ${timeType} not null,
         bytes ${timeType} not null check(bytes >= 0),
-        write_bytes ${timeType} not null default 0 check(write_bytes >= 0), expires_at ${timeType} not null
+        write_bytes ${timeType} not null default 0 check(write_bytes >= 0), disk_key text, expires_at ${timeType} not null
       )
     `);
   }, { rebuildSqliteTables: true });

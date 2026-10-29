@@ -467,7 +467,7 @@ function assertCompatibleTelegramFile(file: FileRow, input: TelegramFileInput): 
 
 function isCompatibleStoredFile(file: FileRow, input: TelegramFileInput): boolean {
   if (file.type !== input.type) return false;
-  if (input.type === "pdf" || input.type === "docx" || input.type === "audio" || input.type === "other") {
+  if (input.type !== "image") {
     return file.extraction_status === "source_only" || file.extraction_status === "ready";
   }
   return file.extraction_status === "ready";
