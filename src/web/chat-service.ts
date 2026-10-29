@@ -144,14 +144,15 @@ export class BotChatService implements ChatService {
         await budget!.beforeWrite(file.size);
         const bytes = Buffer.from(await file.arrayBuffer());
         if (bytes.length !== file.size) throw new WebHttpError(400, "Upload size changed.");
-        const result = await ingestFileBytes({ config: this.input.services.config, repo: this.repos.files,
+        const result = await budget!.prepareFile(file.size, repo => ingestFileBytes({ config: this.input.services.config, repo,
           requireMessage: true,
           userId, threadId, name: file.name.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 240) || "attachment",
-          mime: file.type, bytes, logger: this.input.services.logger });
+          mime: file.type, bytes, logger: this.input.services.logger }));
         createdIds.push(result.fileId);
         const stored = await this.repos.files.get(result.fileId);
         if (!stored) throw new Error("Upload record disappeared.");
         await this.input.services.fileResolver.persistFile(stored, bytes);
+        await budget!.written(file.size);
         prepared.push(result);
       }
       const text = [input.text.trim(), ...prepared.map(file => file.card)].filter(Boolean).join("\n\n");

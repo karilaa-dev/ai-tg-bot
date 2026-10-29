@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, statfs } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
+import { FilesRepo } from "../db/repos/files.js";
+import { createTextSearch } from "../db/search.js";
 import { queryOne, type SqlExecutor } from "../db/sql.js";
 import { WebHttpError } from "./auth.js";
 
@@ -41,13 +43,27 @@ export class UploadBudget {
         values (${id}, ${userId}, ${bytes}, ${Date.now() + LEASE_MS})`);
     });
     return {
-      beforeWrite: async (size: number) => {
-        const lease = await queryOne(this.db, sql`update web_upload_reservations set expires_at = ${Date.now() + LEASE_MS}
-          where id = ${id} and expires_at > ${Date.now()} returning id`);
+      prepareFile: <T>(size: number, prepare: (repo: FilesRepo) => Promise<T>): Promise<T> => this.db.transaction(async tx => {
+        // Transfer reserved bytes to the stored file in one commit, so other instances count them once.
+        const lease = await queryOne(tx, sql`update web_upload_reservations set bytes = bytes - ${size}, expires_at = ${Date.now() + LEASE_MS}
+          where id = ${id} and expires_at > ${Date.now()} and bytes >= ${size} returning id`);
         if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
+        return prepare(new FilesRepo(tx, createTextSearch(tx, tx.dialect)));
+      }),
+      beforeWrite: async (size: number) => {
         await mkdir(this.config.FILE_STORAGE_PATH, { recursive: true, mode: 0o700 });
-        await requireUploadSpace(this.config.FILE_STORAGE_PATH, size, this.config.WEB_UPLOAD_MIN_FREE_BYTES);
+        await this.db.transaction(async tx => {
+          if (tx.dialect === "postgres") await tx.execute(sql`select pg_advisory_xact_lock(938472616)`);
+          const lease = await queryOne(tx, sql`update web_upload_reservations set expires_at = ${Date.now() + LEASE_MS}
+            where id = ${id} and expires_at > ${Date.now()} returning id`);
+          if (!lease) throw new WebHttpError(503, "Upload reservation expired. Try again.");
+          const pending = await queryOne<{ bytes: number }>(tx, sql`select coalesce(sum(write_bytes), 0) as bytes
+            from web_upload_reservations where expires_at > ${Date.now()}`);
+          await requireUploadSpace(this.config.FILE_STORAGE_PATH, size + Number(pending?.bytes ?? 0), this.config.WEB_UPLOAD_MIN_FREE_BYTES);
+          await tx.execute(sql`update web_upload_reservations set write_bytes = write_bytes + ${size} where id = ${id}`);
+        });
       },
+      written: (size: number) => this.db.execute(sql`update web_upload_reservations set write_bytes = write_bytes - ${size} where id = ${id}`),
       release: () => this.db.execute(sql`delete from web_upload_reservations where id = ${id}`),
     };
   }

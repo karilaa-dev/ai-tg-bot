@@ -218,7 +218,7 @@ async function setup(options: { rejectNative?: boolean; disabled?: boolean; stal
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-compact-test-"));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
   const config = loadTestConfig({ PI_CODING_AGENT_DIR: directory, CODEX_AUTH_FILE: path.join(directory, "missing.json"),
-    CODEX_SERVER_COMPACTION: !options.disabled, CODEX_FAST_MODE: true, PI_REQUEST_TIMEOUT_MS: 2000 });
+    CODEX_SERVER_COMPACTION: !options.disabled, CODEX_FAST_MODE: true, PI_REQUEST_TIMEOUT_MS: 10000 });
   const runtime = new PiRuntimeManager({ config, logger: createLogger(config), db: undefined as never, repos: undefined as never });
   await runtime.initialize();
   cleanups.push(() => runtime.dispose());

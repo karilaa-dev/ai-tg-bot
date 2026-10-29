@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -8,6 +8,11 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { requireUploadSpace, UploadBudget } from "../../src/web/upload-budget.js";
 
+vi.mock("node:fs/promises", async importOriginal => {
+  const filesystem = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...filesystem, statfs: vi.fn(filesystem.statfs) };
+});
+
 let database: AppDatabase;
 let directory: string;
 beforeEach(async () => {
@@ -15,7 +20,7 @@ beforeEach(async () => {
   database = createDatabase({ DB_URL: `sqlite:${path.join(directory, "test.db")}` });
   await database.initialize();
 });
-afterEach(async () => { vi.restoreAllMocks(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); vi.mocked(statfs).mockReset(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
 const config = () => loadTestConfig({ FILE_STORAGE_PATH: directory, WEB_UPLOAD_USER_MAX_BYTES: 10 });
 
 it("serializes reservations across connections and preserves quotas after restart", async () => {
@@ -44,6 +49,39 @@ it("serializes reservations across connections and preserves quotas after restar
     const next = await new UploadBudget(database.db, config()).reserve(84, 7);
     await next.release();
   } finally { await other.destroy(); }
+});
+
+it("accounts for disk space promised to writes across connections", async () => {
+  const other = createDatabase({ DB_URL: `sqlite:${path.join(directory, "test.db")}` });
+  const limits = { ...config(), WEB_UPLOAD_MIN_FREE_BYTES: 10 };
+  const first = await new UploadBudget(database.db, limits).reserve(42, 5);
+  const second = await new UploadBudget(other.db, limits).reserve(84, 5);
+  vi.mocked(statfs).mockResolvedValue({ bavail: 16n, bsize: 1n } as never);
+  try {
+    await first.beforeWrite(5);
+    await expect(second.beforeWrite(5)).rejects.toMatchObject({ status: 507 });
+    await first.written(5);
+    await second.beforeWrite(5);
+    await second.written(5);
+  } finally { await first.release(); await second.release(); await other.destroy(); }
+});
+
+it("rolls back failed file preparation without losing its reservation", async () => {
+  const repos = createRepos(database.db, database.search);
+  await repos.users.ensure({ tgId: 42 });
+  const thread = await repos.threads.activeForUserTopic(42, null);
+  const budget = new UploadBudget(database.db, config());
+  const reservation = await budget.reserve(42, 8);
+  await expect(reservation.prepareFile(8, async repo => {
+    await repo.insertFile({ userId: 42, threadId: thread.id, requireMessage: true,
+      type: "other", name: "failed.bin", size: 8, isInline: false });
+    throw new Error("preparation failed");
+  })).rejects.toThrow("preparation failed");
+  expect(await repos.files.listForThreads([thread.id])).toEqual([]);
+  await expect(budget.reserve(42, 3)).rejects.toMatchObject({ status: 413 });
+  await reservation.release();
+  const next = await budget.reserve(42, 10);
+  await next.release();
 });
 
 it("allows each user their full quota beyond the former shared limit", async () => {
