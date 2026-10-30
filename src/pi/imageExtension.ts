@@ -376,6 +376,7 @@ async function requestCodexImage(
   }
   const imageTool: Record<string, unknown> = {
     type: "image_generation",
+    moderation: "low",
     output_format: request.outputFormat,
   };
   if (request.mode !== "auto") imageTool.action = request.mode;
@@ -464,6 +465,7 @@ async function requestOpenRouterImage(
     body: JSON.stringify({
       model: bridge.config.OPENROUTER_IMAGE_MODEL,
       prompt: request.prompt,
+      moderation: "low",
       n: 1,
       output_format: request.outputFormat,
       input_references: request.references.map((image) => ({
