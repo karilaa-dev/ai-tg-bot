@@ -104,7 +104,7 @@ Chat search shows message snippets and a conversation preview without marking th
 - The bot creates a sandbox only when a thread calls a shell-backed tool.
 - `/home/user/workspace` is writable and persists across pause and resume.
 - `/home/user/telegram-files` contains only files explicitly restored with `materialize_chat_files`. The bot keeps previous restorations additive and makes the directory read-only to agent commands. Copy a file into the workspace before editing it.
-- `generate_image` synthesizes or generatively edits one workspace asset when the user clearly requests it. Finding or arranging existing images uses retrieval and installed editing tools. A request for a document or presentation alone does not request generated artwork. The tool returns a model-only image preview, path, dimensions, and provider metadata. It neither queues delivery nor ends inference. Use chat-file IDs or workspace paths as references, five total. Explicitly requested artwork can be embedded in an Office file or sent through normal file delivery.
+- `generate_image` synthesizes or generatively edits one workspace asset when the user clearly requests it. Finding or arranging existing images uses retrieval and installed editing tools. A request for a document or presentation alone does not request generated artwork. The tool returns a model-only image preview, path, dimensions, and provider metadata. It neither queues delivery nor ends inference. Use chat-file IDs or workspace paths as references, five total. Explicitly requested artwork can be embedded in an Office file or sent through normal file delivery. Both Codex OAuth and OpenRouter image requests use `moderation: "low"` globally for generation and edits; provider safety restrictions still apply.
 - `validate_office_file` returns named package, format, rendering, and formula checks plus visual review coverage. `render_office_preview` converts actual saved DOCX/PPTX/XLSX files through LibreOffice and Poppler, returning up to four model-only page images without Browser Use. Record per-page `visual_reviews` with the returned `source_sha256`; rendering alone does not approve delivery.
 - Office delivery requires every applicable check and every page review to pass for the exact exported bytes. Edits invalidate approval. Unvalidated browser downloads are staged in the workspace for review. Failed or incomplete checks withhold the file; successful delivery preserves the requested caption and keeps validation metadata internal. These checks do not certify Microsoft Office rendering, animations, or external workbook connections.
 - `inspect_workspace_images` returns normalized workspace images to model vision for final raster and collage checks without sending the previews to Telegram.
@@ -120,7 +120,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.7` uses `ai-tg-bot-tools:v2.1.7`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.8` uses `ai-tg-bot-tools:v2.1.8`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -136,8 +136,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.7 is ai-tg-bot-tools:v2.1.7.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.7
+# Optional override. The default for version 2.1.8 is ai-tg-bot-tools:v2.1.8.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.8
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648

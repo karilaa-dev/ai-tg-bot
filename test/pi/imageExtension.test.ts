@@ -292,6 +292,7 @@ describe("Pi generate_image extension", () => {
     expect(requestBody).toMatchObject({
       model: "test/image-model",
       prompt: "edit the reference",
+      moderation: "low",
       n: 1,
       output_format: "png",
     });
@@ -371,7 +372,7 @@ describe("Pi generate_image extension", () => {
       store: false,
       stream: true,
       tool_choice: { type: "image_generation" },
-      tools: [{ type: "image_generation", output_format: "webp", action: "generate" }],
+      tools: [{ type: "image_generation", moderation: "low", output_format: "webp", action: "generate" }],
     });
     expect(bridge.commandRuntime!.writeWorkspaceFile).toHaveBeenCalledWith(expect.objectContaining({bytes:TEST_PNG}));
     expect(bridge.outgoingFiles.items).toHaveLength(0);
