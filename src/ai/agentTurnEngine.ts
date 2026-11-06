@@ -452,6 +452,9 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
     ? new TurnDraftStreamer(input, startedAt)
     : undefined;
   const status = streamer ? undefined : new TurnStatusMessage(input);
+  const onAbort = () => streamer?.stop();
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
   input.logger.debug("turn response mode selected", {
     threadId: input.thread.id,
     streamMode: Boolean(streamer),
@@ -476,6 +479,7 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
     streamer,
     status,
     stop: () => {
+      input.signal?.removeEventListener("abort", onAbort);
       streamer?.stop();
       if (typing) clearInterval(typing);
     },
@@ -504,6 +508,7 @@ class TurnDraftStreamer {
       startedAt,
       updateMs: input.config.DRAFT_UPDATE_MS,
       t: input.t,
+      onStop: input.onCancel,
     };
     this.thinking = new DraftStreamer(common);
     this.answer = new DraftStreamer({ ...common, answerOnly: true });

@@ -92,7 +92,8 @@ try {
   await bot.api.setMyCommands(localizedCommands("en"));
   await bot.api.setMyCommands(localizedCommands("ru"), { scope: { type: "all_private_chats" }, language_code: "ru" });
   logger.info("database initialized, runner polling started");
-  const handle = run(bot);
+  // Reset Telegram's saved update filter so native draft-stop updates arrive.
+  const handle = run(bot, { runner: { fetch: { allowed_updates: [] } } });
   logger.info("bot started", { username: bot.botInfo.username });
   const stop = async () => {
     if (!handle.isRunning()) return;

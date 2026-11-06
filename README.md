@@ -15,6 +15,10 @@
 
 Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
 
+Streaming drafts show Telegram's native Stop button. Pressing it cancels the task that produced that draft and stops further draft updates. `/stop` also cancels the active task when streaming is disabled.
+
+Tables in Telegram drafts and final replies use compact cells. Markdown tables retain their alignment, links and inline formatting when converted to Telegram's compact HTML table format.
+
 Telegram voice messages and audio messages are transcribed and used as prompts in the current thread. Captions are preserved alongside the transcript. `/stop` cancels downloading or transcription. Empty transcripts and failed requests show an error without starting an assistant turn. Audio is registered only after transcription succeeds, so failed or cancelled transcription leaves no unattached file records.
 
 Long transcripts are saved in the database. Prompts and tool results include a bounded preview (up to 8,000 UTF-8 bytes, reduced for smaller model context settings) and a continuation ID. Call `transcribe_audio` with `transcript_id` and the returned `next_offset` as `offset` to read more without another transcription request. Saved transcripts follow thread and message visibility, including forks. Redelivered Telegram updates that already have an accepted turn skip downloading and transcription; failed updates remain retryable.
@@ -120,7 +124,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.8` uses `ai-tg-bot-tools:v2.1.8`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.9` uses `ai-tg-bot-tools:v2.1.9`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -136,8 +140,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.8 is ai-tg-bot-tools:v2.1.8.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.8
+# Optional override. The default for version 2.1.9 is ai-tg-bot-tools:v2.1.9.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.9
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648

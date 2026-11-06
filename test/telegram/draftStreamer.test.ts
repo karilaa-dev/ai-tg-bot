@@ -1,11 +1,72 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GrammyError } from "grammy";
+import type { MessageGenerationStopped } from "grammy/types";
 import { DraftStreamer } from "../../src/telegram/draftStreamer.js";
 import { deferred } from "../helpers/async.js";
 
 describe("DraftStreamer", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("only stops the matching live draft and discards queued frames and retries", async () => {
+    vi.useFakeTimers();
+    const first = deferred<boolean>();
+    const sendRichMessageDraft = vi.fn((_payload: unknown, _signal?: AbortSignal) => first.promise);
+    const api = { raw: { sendRichMessageDraft } };
+    const onStop = vi.fn(async () => true);
+    const streamer = new DraftStreamer({ api, chatId: 1, messageThreadId: 42,
+      startedAt: Date.now(), updateMs: 1000, t: testT, onStop });
+    try {
+      streamer.update({ thinkingMd: "", answerMd: "first" });
+      streamer.update({ thinkingMd: "", answerMd: "queued" });
+      const payload = sendRichMessageDraft.mock.calls[0]![0] as { draft_id: number; can_stop: boolean };
+      expect(payload.can_stop).toBe(true);
+      const stopped: MessageGenerationStopped = {
+        chat: { id: 1, type: "private", first_name: "Test" }, message_thread_id: 42, draft_id: payload.draft_id,
+      };
+      for (const mismatch of [
+        { ...stopped, draft_id: payload.draft_id + 1 },
+        { ...stopped, message_thread_id: 43 },
+        { ...stopped, chat: { ...stopped.chat, id: 2 } },
+      ]) expect(await DraftStreamer.stopGeneration(api, mismatch)).toBe(false);
+      expect(await DraftStreamer.stopGeneration({ raw: {} }, stopped)).toBe(false);
+      expect(onStop).not.toHaveBeenCalled();
+      expect(await DraftStreamer.stopGeneration(api, stopped)).toBe(true);
+      expect(onStop).toHaveBeenCalledOnce();
+      expect(sendRichMessageDraft.mock.calls[0]![1]?.aborted).toBe(true);
+      expect(await DraftStreamer.stopGeneration(api, stopped)).toBe(false);
+
+      first.reject(floodWaitError(2));
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await streamer.finish({ thinkingMd: "", answerMd: "late final frame" });
+      expect(sendRichMessageDraft).toHaveBeenCalledOnce();
+    } finally { streamer.stop(); }
+  });
+
+  it("matches native stop updates after falling back from a deleted topic", async () => {
+    const payloads: Array<{ draft_id: number; message_thread_id?: number; can_stop?: boolean }> = [];
+    const api = { raw: { sendRichMessageDraft: async (payload: typeof payloads[number]) => {
+      payloads.push(payload);
+      if (payload.message_thread_id) throw new GrammyError("thread missing", {
+        ok: false, error_code: 400, description: "Bad Request: message thread not found",
+      }, "sendRichMessageDraft", payload);
+      return true;
+    } } };
+    const onStop = vi.fn(async () => true);
+    const streamer = new DraftStreamer({ api, chatId: 1, messageThreadId: 42,
+      startedAt: Date.now(), updateMs: 0, t: testT, onStop });
+    try {
+      streamer.update({ thinkingMd: "", answerMd: "draft" });
+      await streamer.finish();
+      expect(payloads).toHaveLength(2);
+      expect(payloads[1]).toMatchObject({ can_stop: true, message_thread_id: undefined });
+      expect(await DraftStreamer.stopGeneration(api, {
+        chat: { id: 1, type: "private", first_name: "Test" }, draft_id: payloads[1]!.draft_id,
+      })).toBe(true);
+      expect(onStop).toHaveBeenCalledOnce();
+    } finally { streamer.stop(); }
   });
 
   it("shows the plain thinking placeholder before any response content", async () => {

@@ -24,6 +24,32 @@ describe("ThreadTurnCoordinator", () => {
     await db.destroy();
   });
 
+  it("ignores a stale cancellation callback after the next turn starts", async () => {
+    const { userId, threadId } = await ownership(repos, 898);
+    const started = deferred<TurnInput>();
+    let previousCancel: TurnInput["onCancel"];
+    const coordinator = createCoordinator(db, repos, async input => {
+      if (input.text === "first") {
+        previousCancel = input.onCancel;
+        await confirmDelivery(input);
+      } else {
+        started.resolve(input);
+        await waitForAbort(input.signal!);
+      }
+    });
+    try {
+      await coordinator.accept(request(userId, threadId, 58_001, "first"));
+      await coordinator.waitForIdle();
+      await coordinator.accept(request(userId, threadId, 58_002, "second"));
+      const current = await started.promise;
+      expect(await previousCancel?.()).toBe(false);
+      expect(current.signal?.aborted).toBe(false);
+      expect(await current.onCancel?.()).toBe(true);
+      await coordinator.waitForIdle();
+      expect((await repos.turnRuns.listForThread(threadId)).map(run => run.status)).toEqual(["succeeded", "cancelled"]);
+    } finally { await coordinator.shutdown(); }
+  });
+
   it.each(["failure", "cancel"])("retains inference usage when a turn ends in %s before delivery", async outcome => {
     const { userId, threadId } = await ownership(repos, 899);
     const started = deferred<void>();

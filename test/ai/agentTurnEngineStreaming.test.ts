@@ -5,8 +5,52 @@ import { runTurn } from "../../src/ai/agentTurnEngine.js";
 import { type TurnInput } from "../../src/ai/types.js";
 import { loadTestConfig } from "../../src/config.js";
 import { deferred } from "../helpers/async.js";
+import { DraftStreamer } from "../../src/telegram/draftStreamer.js";
 
 describe("turn streaming", () => {
+  it("stops drafts immediately while the cancelled model is still settling", async () => {
+    const controller = new AbortController();
+    const prompt = deferred<void>();
+    const abort = vi.fn(async () => undefined);
+    const sendRichMessageDraft = vi.fn(async (_payload: unknown) => true);
+    const sendRichMessage = vi.fn(async () => ({ message_id: 1 }));
+    const api = { raw: { sendRichMessageDraft, sendRichMessage } };
+    const onCancel = vi.fn(async () => { controller.abort(); return true; });
+    const execution = runTurn({
+      api, chatId: 1, config: loadTestConfig({ DRAFT_UPDATE_MS: 60_000 }),
+      repos: { messages: { insert: async () => ({ id: 1 }) }, files: { listForMessage: async () => [] } },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      user: { tg_id: 1, stream_mode: true, lang: "en" },
+      thread: { id: fixtureUuid(1), title: "Test" }, text: "work", t: (key: string) => key,
+      signal: controller.signal, onCancel,
+      pi: { runtime: async () => ({
+        bridge: { beginTurn: async () => undefined, endTurn: async () => undefined },
+        session: {
+          sessionManager: { getEntries: () => [] },
+          getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
+          subscribe: () => () => undefined, prompt: () => prompt.promise, abort,
+        },
+      }) },
+    } as unknown as TurnInput);
+    try {
+      await vi.waitFor(() => expect(sendRichMessageDraft).toHaveBeenCalledOnce());
+      const payload = sendRichMessageDraft.mock.calls[0]![0] as { draft_id: number; can_stop: boolean };
+      expect(payload.can_stop).toBe(true);
+      expect(await DraftStreamer.stopGeneration(api, {
+        chat: { id: 1, type: "private", first_name: "Test" }, draft_id: payload.draft_id,
+      })).toBe(true);
+      expect(onCancel).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+      expect(sendRichMessage).not.toHaveBeenCalled();
+    } finally {
+      controller.abort();
+      prompt.resolve();
+      await execution;
+    }
+    expect(sendRichMessageDraft).toHaveBeenCalledOnce();
+    expect(sendRichMessage).not.toHaveBeenCalled();
+  });
+
   it("keeps working after provisional text and subsequent tool calls", async () => {
     const prompt = deferred<void>();
     const releaseStarted = deferred<void>();
