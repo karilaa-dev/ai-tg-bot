@@ -564,7 +564,9 @@ class TurnDraftStreamer {
     if (this.answerStarted) return;
     this.answerStarted = true;
     this.deliveredThinkingMd = finalThinkingMd;
-    this.thinking.stop();
+    // Keep the old draft's Stop route during the final-thinking send. The turn
+    // remains cancellable until delivery starts, and stop() cleans up the route.
+    this.thinking.stopUpdates();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
     this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
       this.thinkingDeliveryError = err;

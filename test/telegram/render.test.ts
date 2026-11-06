@@ -15,6 +15,48 @@ describe("renderFinal", () => {
     expect(renderFinal({ answerMd: answer, elapsedMs: 0, t })).toEqual([{ markdown: answer }]);
   });
 
+  it.each(["characters", "blocks", "single cell"])("keeps compact tables valid when splitting by %s", kind => {
+    const rows = kind === "blocks" ? 600 : kind === "single cell" ? 1 : 200;
+    const size = kind === "single cell" ? 70_000 : kind === "characters" ? 160 : 5;
+    const data = Array.from({ length: rows }, (_, index) => `row-${index}-${"x".repeat(size)}-end-${index}`);
+    const answer = `| Value |\n| --- |\n${data.map(value => `| ${value} |`).join("\n")}`;
+    const parts = renderFinal({ answerMd: answer, elapsedMs: 0, t });
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) {
+      const markdown = part.markdown ?? "";
+      const stack: string[] = [];
+      for (const match of markdown.matchAll(/<(\/?)(table|tr|th|td)\b[^>]*>/g)) {
+        if (match[1]) expect(stack.pop()).toBe(match[2]);
+        else stack.push(match[2]!);
+      }
+      expect(stack).toEqual([]);
+      expect(markdown).toContain("<table compact>");
+      expect(Array.from(markdown).length).toBeLessThanOrEqual(32768);
+      expect((markdown.match(/<tr>/g)?.length ?? 0) + 2).toBeLessThanOrEqual(500);
+    }
+    const text = parts.map(part => (part.markdown ?? "").replace(/<[^>]*>/g, "")).join("");
+    for (const value of data) expect(text).toContain(value);
+    const draft = renderAnswerDraft(answer).markdown ?? "";
+    expect(draft).toContain("<table compact>");
+    expect(draft).toContain(`-end-${rows - 1}`);
+    expect(draft.trimEnd()).toMatch(/<\/table>$/);
+    const thinkingDraft = renderDraft({ thinkingMd: answer, answerMd: "", elapsedMs: 0, t }).markdown ?? "";
+    expect(thinkingDraft.match(/<table\b/g)?.length ?? 0).toBe(thinkingDraft.match(/<\/table>/g)?.length ?? 0);
+    expect(thinkingDraft).not.toContain("[truncated]");
+  });
+
+  it("caps thinking without cutting through blank lines inside an HTML table", () => {
+    const rows = Array.from({ length: 165 }, (_, index) => `<tr><td>row-${index}-${"x".repeat(160)}-end-${index}</td></tr>`);
+    const thinking = `<table>\n\n${rows.join("\n\n")}\n\n</table>`;
+    const draft = renderDraft({ thinkingMd: thinking, answerMd: "", elapsedMs: 0, t });
+    const final = renderFinal({ thinkingLog: thinking, answerMd: "Answer", elapsedMs: 0, t });
+    for (const payload of [draft, ...final]) {
+      const markdown = payload.markdown ?? "";
+      expect(markdown.match(/<table\b/g)?.length ?? 0).toBe(markdown.match(/<\/table>/g)?.length ?? 0);
+      expect(Array.from(markdown).length).toBeLessThanOrEqual(32768);
+    }
+  });
+
   it("splits long rich messages instead of truncating before split", () => {
     const answer = `${"long paragraph\n\n".repeat(2600)}tail-marker`;
     const parts = renderFinal({

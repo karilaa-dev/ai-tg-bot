@@ -8,6 +8,62 @@ import { deferred } from "../helpers/async.js";
 import { DraftStreamer } from "../../src/telegram/draftStreamer.js";
 
 describe("turn streaming", () => {
+  it("honors Stop for the thinking draft while its final summary is being sent", async () => {
+    const controller = new AbortController();
+    const summaryStarted = deferred<void>();
+    const releaseSummary = deferred<void>();
+    let emit: ((event: AgentSessionEvent) => void) | undefined;
+    let draftId: number | undefined;
+    const sent: string[] = [];
+    const api = { raw: {
+      sendRichMessageDraft: async (payload: { draft_id: number }) => { draftId ??= payload.draft_id; return true; },
+      sendRichMessage: async (payload: { rich_message: { markdown: string } }) => {
+        sent.push(payload.rich_message.markdown);
+        summaryStarted.resolve();
+        await releaseSummary.promise;
+        return { message_id: 1 };
+      },
+    } };
+    const execution = runTurn({
+      api, chatId: 1, config: loadTestConfig(),
+      repos: { messages: { insert: async () => ({ id: 1 }) }, files: { listForMessage: async () => [] } },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      user: { tg_id: 1, stream_mode: true, lang: "en" }, thread: { id: fixtureUuid(1), title: "Test" },
+      text: "work", t: (key: string) => key, signal: controller.signal,
+      onCancel: async () => { controller.abort(); return true; },
+      pi: { runtime: async () => ({
+        bridge: { beginTurn: async () => undefined, endTurn: async () => undefined,
+          currentTurnBudget: () => undefined,
+          attachments: [], publishedWebsites: [], outgoingFiles: { verifyOfficeAttachments: async () => undefined, unresolved: [] } },
+        session: {
+          sessionManager: { getEntries: () => [] },
+          getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
+          subscribe: (listener: typeof emit) => { emit = listener; return () => undefined; },
+          prompt: async () => {
+            for (const [type, delta] of [["thinking_delta", "Preparing the answer"], ["text_delta", "Completed answer"]]) {
+              emit?.({ type: "message_update", assistantMessageEvent: {
+                type, delta, contentIndex: 0, partial: { content: [] },
+              } } as unknown as AgentSessionEvent);
+            }
+          },
+        },
+      }) },
+    } as unknown as TurnInput);
+    try {
+      await summaryStarted.promise;
+      expect(draftId).toBeDefined();
+      expect(await DraftStreamer.stopGeneration(api, {
+        chat: { id: 1, type: "private", first_name: "Test" }, draft_id: draftId!,
+      })).toBe(true);
+      expect(controller.signal.aborted).toBe(true);
+    } finally { controller.abort(); releaseSummary.resolve(); await execution; }
+    expect(sent).toHaveLength(1);
+    expect(sent).not.toContain("Completed answer");
+    expect(await DraftStreamer.stopGeneration(api, {
+      chat: { id: 1, type: "private", first_name: "Test" }, draft_id: draftId!,
+    })).toBe(false);
+  });
+
   it("stops drafts immediately while the cancelled model is still settling", async () => {
     const controller = new AbortController();
     const prompt = deferred<void>();

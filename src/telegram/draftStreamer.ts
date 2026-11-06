@@ -73,13 +73,17 @@ export class DraftStreamer {
   }
 
   stop(): void {
+    this.stopUpdates();
+    activeDrafts.get(this.options.api)?.delete(this.draftId);
+  }
+
+  stopUpdates(): void {
     if (this.timer) clearTimeout(this.timer);
     this.stopElapsedTick();
     this.timer = undefined;
     this.timerAt = 0;
     this.pending = undefined;
     this.closed = true;
-    activeDrafts.get(this.options.api)?.delete(this.draftId);
     this.controller.abort();
     this.resolveIdle();
   }
