@@ -1,5 +1,6 @@
 import { telegramTurnFrontend } from "../telegram/turnFrontend.js";
 import { DraftStreamer } from "../telegram/draftStreamer.js";
+import { withThreadNotFoundFallback } from "../telegram/richApi.js";
 import type { AccessControl } from "../access/control.js";
 import { createApplication } from "../application/runtime.js";
 import { compactionDescription, compactionDuration, compactionTime, savedCompactionAction } from "../application/compactionAction.js";
@@ -163,6 +164,13 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     services.logger.info("draft stop requested", {
       chatId: stopped.chat.id, topicId: stopped.message_thread_id, draftId: stopped.draft_id, cancelled,
     });
+    const user = await services.repos.users.get(stopped.chat.id);
+    const feedback = localizer.t(user?.lang, cancelled ? "draft-stopped" : "draft-stop-unavailable");
+    await withThreadNotFoundFallback(
+      { messageThreadId: stopped.message_thread_id },
+      () => ctx.api.sendMessage(stopped.chat.id, feedback, { message_thread_id: stopped.message_thread_id }),
+      () => ctx.api.sendMessage(stopped.chat.id, feedback),
+    );
   });
   bot.use(sequentialize<BotContext>(threadSequentializationKey));
   bot.use(privateOnly);

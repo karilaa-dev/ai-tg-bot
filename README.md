@@ -15,7 +15,7 @@
 
 Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
 
-Streaming drafts show Telegram's native Stop button. Pressing it cancels the task that produced that draft and stops further draft updates. `/stop` also cancels the active task when streaming is disabled.
+Streaming drafts show Telegram's native Stop button. Pressing it cancels the task that produced that draft, stops further draft updates, and posts a localized acknowledgement in the same topic. If the reply has already finished or started sending, the bot explains that it can no longer cancel it. `/stop` also cancels the active task when streaming is disabled.
 
 Tables in Telegram drafts and final replies use compact cells. Markdown tables retain their alignment, links and inline formatting when converted to Telegram's compact HTML table format.
 
