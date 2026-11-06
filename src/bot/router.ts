@@ -1,4 +1,6 @@
 import { telegramTurnFrontend } from "../telegram/turnFrontend.js";
+import { DraftStreamer } from "../telegram/draftStreamer.js";
+import { withThreadNotFoundFallback } from "../telegram/richApi.js";
 import type { AccessControl } from "../access/control.js";
 import { createApplication } from "../application/runtime.js";
 import { compactionDescription, compactionDuration, compactionTime, savedCompactionAction } from "../application/compactionAction.js";
@@ -152,6 +154,23 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     ctx.services = services;
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);
     await next();
+  });
+  // Native stop updates have no sender. Handle them before conversations and
+  // sequentialization so they can interrupt the update that started the turn.
+  bot.on("stopped_message_generation", async (ctx) => {
+    const stopped = ctx.stoppedMessageGeneration;
+    if (stopped.chat.type !== "private" || !await services.access.isAllowed(stopped.chat.id)) return;
+    const cancelled = await DraftStreamer.stopGeneration(bot.api, stopped);
+    services.logger.info("draft stop requested", {
+      chatId: stopped.chat.id, topicId: stopped.message_thread_id, draftId: stopped.draft_id, cancelled,
+    });
+    const user = await services.repos.users.get(stopped.chat.id);
+    const feedback = localizer.t(user?.lang, cancelled ? "draft-stopped" : "draft-stop-unavailable");
+    await withThreadNotFoundFallback(
+      { messageThreadId: stopped.message_thread_id },
+      () => ctx.api.sendMessage(stopped.chat.id, feedback, { message_thread_id: stopped.message_thread_id }),
+      () => ctx.api.sendMessage(stopped.chat.id, feedback),
+    );
   });
   bot.use(sequentialize<BotContext>(threadSequentializationKey));
   bot.use(privateOnly);

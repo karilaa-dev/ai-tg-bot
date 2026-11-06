@@ -45,6 +45,8 @@ export interface TurnInput {
   turnRunId?: number;
   origin?: TurnRunRow["origin"];
   signal?: AbortSignal;
+  /** Request cancellation of this exact turn, even if a later turn has started. */
+  onCancel?: () => Promise<boolean>;
   onDraft?: (draft: TurnDraft) => void;
   telegramPlaceholder?: { messageId: number; state: "pending" | "attempted" };
   outgoingBuffers?: OutgoingBuffers;

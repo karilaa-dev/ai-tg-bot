@@ -1,4 +1,5 @@
 import { GrammyError } from "grammy";
+import type { MessageGenerationStopped } from "grammy/types";
 import { isRichParseError, isThreadNotFound, prefixRichForThreadFallback, sendRichDraft, type InputRichMessage, type RawRichApi } from "./richApi.js";
 import { renderAnswerDraft, renderDraft, type RenderT, variantsForRichRetry } from "./render.js";
 
@@ -10,6 +11,7 @@ const floodWaitSafetyMs = 100;
 const thinkingElapsedTickMs = 10_000;
 const maxDraftId = 0x7fffffff;
 let lastDraftId = (Date.now() & maxDraftId) || 1;
+const activeDrafts = new WeakMap<RawRichApi, Map<string, DraftStreamer>>();
 
 function allocateDraftId(): number {
   lastDraftId = lastDraftId >= maxDraftId ? 1 : lastDraftId + 1;
@@ -25,10 +27,12 @@ interface DraftStreamerOptions {
   updateMs: number;
   t: RenderT;
   answerOnly?: boolean;
+  onStop?: () => Promise<boolean>;
 }
 
 export class DraftStreamer {
   private readonly draftId = allocateDraftId();
+  private readonly controller = new AbortController();
   private lastSentAt = 0;
   private lastHash = "";
   private latest?: DraftFrame;
@@ -46,6 +50,17 @@ export class DraftStreamer {
 
   constructor(private readonly options: DraftStreamerOptions) {}
 
+  static async stopGeneration(api: RawRichApi, stopped: MessageGenerationStopped): Promise<boolean> {
+    // Telegram may encode the identifier as a string even though grammY types
+    // it as a number. Use the same key for both wire representations.
+    const streamer = activeDrafts.get(api)?.get(String(stopped.draft_id));
+    if (!streamer || stopped.chat.type !== "private" || stopped.chat.id !== streamer.options.chatId) return false;
+    const topicId = streamer.threadUnavailable ? undefined : streamer.options.messageThreadId;
+    if ((stopped.message_thread_id ?? 1) !== (topicId ?? 1)) return false;
+    streamer.stop();
+    return await streamer.options.onStop?.() ?? false;
+  }
+
   update(frame: DraftFrame): void {
     const thinkingChanged = this.trackThinking(frame);
     this.queue(frame, false, this.titleElapsedMs);
@@ -60,12 +75,18 @@ export class DraftStreamer {
   }
 
   stop(): void {
+    this.stopUpdates();
+    activeDrafts.get(this.options.api)?.delete(String(this.draftId));
+  }
+
+  stopUpdates(): void {
     if (this.timer) clearTimeout(this.timer);
     this.stopElapsedTick();
     this.timer = undefined;
     this.timerAt = 0;
     this.pending = undefined;
     this.closed = true;
+    this.controller.abort();
     this.resolveIdle();
   }
 
@@ -228,12 +249,19 @@ export class DraftStreamer {
   }
 
   private sendDraft(payload: InputRichMessage): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
+    if (this.options.onStop) {
+      let drafts = activeDrafts.get(this.options.api);
+      if (!drafts) activeDrafts.set(this.options.api, drafts = new Map());
+      drafts.set(String(this.draftId), this);
+    }
     return sendRichDraft(this.options.api, {
       chat_id: this.options.chatId,
       message_thread_id: this.threadUnavailable ? undefined : this.options.messageThreadId,
       draft_id: this.draftId,
       rich_message: this.threadUnavailable ? this.prefixForThreadFallback(payload) : payload,
-    });
+      can_stop: Boolean(this.options.onStop),
+    }, this.controller.signal);
   }
 
   private prefixForThreadFallback(payload: InputRichMessage): InputRichMessage {

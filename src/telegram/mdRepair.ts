@@ -1,3 +1,5 @@
+import { compactMarkdownTables } from "./compactTables.js";
+
 export const RICH_MESSAGE_CHARACTER_LIMIT = 32768;
 export const RICH_MESSAGE_BLOCK_LIMIT = 500;
 export const RICH_MESSAGE_MEDIA_LIMIT = 50;
@@ -71,7 +73,7 @@ export function sanitize(md: string, options: { allowThinking?: boolean; enforce
     out = out.replace(/<\/?tg-thinking[^>]*>/gi, "");
   }
   out = escapeUnknownHtml(out);
-  out = normalizeTables(out);
+  out = compactMarkdownTables(out);
   out = escapeOrphanFootnoteRefs(out);
   out = flattenDeepNesting(out);
   out = closeOpenStructures(out);
@@ -125,46 +127,12 @@ function escapeUnknownHtml(md: string): string {
   });
 }
 
-function normalizeTables(md: string): string {
-  const lines = md.split("\n");
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? "";
-    const next = lines[i + 1] ?? "";
-    if (line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(next)) {
-      const headerCells = splitRow(line).slice(0, 20);
-      const width = headerCells.length;
-      out.push(formatRow(headerCells, width));
-      out.push(formatRow(Array.from({ length: width }, () => "---"), width));
-      i += 1;
-      while (i + 1 < lines.length && lines[i + 1]?.includes("|")) {
-        i += 1;
-        out.push(formatRow(splitRow(lines[i] ?? ""), width));
-      }
-      continue;
-    }
-    out.push(line);
-  }
-  return out.join("\n");
-}
-
 function escapeOrphanFootnoteRefs(md: string): string {
   const definitions = new Set<string>();
   for (const match of md.matchAll(/^\[\^([^\]]+)\]:/gm)) {
     definitions.add(match[1]!);
   }
   return md.replace(/\[\^([^\]]+)\](?!:)/g, (ref, id: string) => (definitions.has(id) ? ref : `\\[\\^${id}\\]`));
-}
-
-function splitRow(row: string): string[] {
-  const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return trimmed.split("|").map((cell) => cell.trim());
-}
-
-function formatRow(cells: string[], width: number): string {
-  const capped = cells.length > width ? [...cells.slice(0, width - 1), cells.slice(width - 1).join(" | ")] : cells;
-  while (capped.length < width) capped.push("");
-  return `| ${capped.join(" | ")} |`;
 }
 
 function flattenDeepNesting(md: string): string {

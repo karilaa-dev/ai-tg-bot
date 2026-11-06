@@ -13,7 +13,7 @@ describe("mdRepair", () => {
 
   it("pads ragged table rows to match their headers", () => {
     const md = "| a | b |\n| --- | --- |\n| 1 |";
-    expect(sanitize(md)).toBe("| a | b |\n| --- | --- |\n| 1 |  |");
+    expect(sanitize(md)).toBe("<table compact><tr><th>a</th><th>b</th></tr><tr><td>1</td><td></td></tr></table>");
   });
 
   it("escapes orphan footnote refs while preserving defined footnotes", () => {

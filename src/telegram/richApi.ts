@@ -1,6 +1,7 @@
 import { GrammyError } from "grammy";
 import type { Message } from "grammy/types";
 import { escapeHtml, escapeMarkdownTitle } from "../util/text.js";
+import { compactHtmlTables, compactMarkdownTables } from "./compactTables.js";
 
 export interface RawRichApi {
   raw: Record<string, (...args: any[]) => Promise<unknown>>;
@@ -29,6 +30,7 @@ interface SendRichMessageDraftParams {
   message_thread_id?: number;
   draft_id: number;
   rich_message: InputRichMessage;
+  can_stop?: boolean;
 }
 
 interface EditRichMessageParams {
@@ -41,7 +43,7 @@ export async function sendRich(
   api: RawRichApi,
   params: SendRichMessageParams,
 ): Promise<Message> {
-  const result = await api.raw.sendRichMessage(params);
+  const result = await api.raw.sendRichMessage({ ...params, rich_message: compactRichTables(params.rich_message) });
   if (result === true) return placeholderMessageForBooleanResult(params.chat_id);
   // grammY 1.43 / @grammyjs/types lack Bot API 10.1 rich-message types (see PLAN.md),
   // so this is the single intentional trust boundary where the raw response is narrowed.
@@ -61,15 +63,22 @@ function placeholderMessageForBooleanResult(chatId: number | string): Message {
 export async function sendRichDraft(
   api: RawRichApi,
   params: SendRichMessageDraftParams,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  return Boolean(await api.raw.sendRichMessageDraft(params));
+  return Boolean(await api.raw.sendRichMessageDraft({ ...params, rich_message: compactRichTables(params.rich_message) }, signal));
 }
 
 export async function editRich(
   api: RawRichApi,
   params: EditRichMessageParams,
 ): Promise<boolean> {
-  return Boolean(await api.raw.editMessageText(params));
+  return Boolean(await api.raw.editMessageText({ ...params, rich_message: compactRichTables(params.rich_message) }));
+}
+
+function compactRichTables(rich: InputRichMessage): InputRichMessage {
+  return rich.markdown !== undefined
+    ? { ...rich, markdown: compactMarkdownTables(rich.markdown) }
+    : { ...rich, html: compactHtmlTables(rich.html) };
 }
 
 export function isThreadNotFound(err: unknown): boolean {

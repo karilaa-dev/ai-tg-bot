@@ -452,6 +452,9 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
     ? new TurnDraftStreamer(input, startedAt)
     : undefined;
   const status = streamer ? undefined : new TurnStatusMessage(input);
+  const onAbort = () => streamer?.stop();
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
   input.logger.debug("turn response mode selected", {
     threadId: input.thread.id,
     streamMode: Boolean(streamer),
@@ -476,6 +479,7 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
     streamer,
     status,
     stop: () => {
+      input.signal?.removeEventListener("abort", onAbort);
       streamer?.stop();
       if (typing) clearInterval(typing);
     },
@@ -504,6 +508,7 @@ class TurnDraftStreamer {
       startedAt,
       updateMs: input.config.DRAFT_UPDATE_MS,
       t: input.t,
+      onStop: input.onCancel,
     };
     this.thinking = new DraftStreamer(common);
     this.answer = new DraftStreamer({ ...common, answerOnly: true });
@@ -559,7 +564,9 @@ class TurnDraftStreamer {
     if (this.answerStarted) return;
     this.answerStarted = true;
     this.deliveredThinkingMd = finalThinkingMd;
-    this.thinking.stop();
+    // Keep the old draft's Stop route during the final-thinking send. The turn
+    // remains cancellable until delivery starts, and stop() cleans up the route.
+    this.thinking.stopUpdates();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
     this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
       this.thinkingDeliveryError = err;

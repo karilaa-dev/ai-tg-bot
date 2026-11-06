@@ -55,7 +55,7 @@ export function renderDraft(input: RenderDraftInput): InputRichMessage {
     return { markdown: sanitize(input.t("thinking-placeholder")) };
   }
   const title = draftThinkingTitle(input.t, input.thinkingMd, input.elapsedMs);
-  const thinking = renderThinkingDetails(input.thinkingMd, title);
+  const thinking = renderThinkingDetails(capFinalThinking(input.thinkingMd), title);
   const answer = input.answerMd.trim() ? `${thinking ? "" : "\n\n"}${input.answerMd}` : "";
   return { markdown: sanitize(`${thinking || title}${answer}`) };
 }
@@ -79,7 +79,13 @@ function capFinalThinking(thinkingLog: string | undefined): string | undefined {
   if (richCharacterLength(sanitized) <= maxCharacters && estimateRichBlocks(sanitized) <= maxBlocks) return sanitized;
 
   const marker = `\n\n${THINKING_TRUNCATION_MARKER}`;
-  const blocks = sanitized.split(/\n{2,}/);
+  const blocks: string[] = [];
+  let tableDepth = 0;
+  for (const block of sanitized.split(/\n{2,}/)) {
+    if (tableDepth > 0) blocks[blocks.length - 1] += `\n\n${block}`;
+    else blocks.push(block);
+    tableDepth += (block.match(/<table(?=[\s>])/gi)?.length ?? 0) - (block.match(/<\/table>/gi)?.length ?? 0);
+  }
   let capped = "";
   for (const block of blocks) {
     const candidate = capped ? `${capped}\n\n${block}` : block;
@@ -102,7 +108,23 @@ function splitRich(md: string): string[] {
   let current = "";
   let inFence = false;
   let fenceOpener = "```";
-  for (const line of linesWithEndings(md)) {
+  const lines = linesWithEndings(md);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (!inFence && /^\s*(?:>\s*)*<table(?=[\s>])/i.test(line)) {
+      let tableText = line;
+      let tableEnd = index;
+      while (!/<\/table>/i.test(tableText) && tableEnd + 1 < lines.length) tableText += lines[++tableEnd];
+      const table = /^(\s*(?:>\s*)*)(<table\b[\s\S]*?<\/table>)([\s\S]*)$/i.exec(tableText);
+      if (table) {
+        index = tableEnd;
+        if (current.trim()) pushRichPart(parts, current, false);
+        current = "";
+        parts.push(...splitRichTable(table[2]!, table[1]!));
+        lines.splice(index + 1, 0, ...linesWithEndings(table[3]!));
+        continue;
+      }
+    }
     const characters = Array.from(line);
     const togglesFence = /^```/.test(line.trim());
     let offset = 0;
@@ -156,6 +178,58 @@ function splitRich(md: string): string[] {
     }
   }
   if (current.trim()) pushRichPart(parts, current, inFence);
+  return parts;
+}
+
+function splitRichTable(table: string, prefix: string): string[] {
+  const parts: string[] = [];
+  const stack: Array<{ open: string; close: string }> = [];
+  let current = prefix;
+  let hasContent = false;
+  const closing = () => stack.map(tag => tag.close).reverse().join("");
+  const flush = () => {
+    parts.push(`${current}${closing()}`.trimEnd());
+    current = prefix + stack.map(tag => tag.open).join("");
+    hasContent = false;
+  };
+  const rows = new Map(Array.from(table.matchAll(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi), match => [match.index, match[0]]));
+  const tokens = table.matchAll(/<!--[\s\S]*?-->|<\/?[a-z][\w-]*(?:\s+(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>|&(?:#x[\da-f]+|#\d+|[a-z][\da-z]+);|[^<&]+|[<&]/gi);
+  for (const match of tokens) {
+    const token = match[0];
+    const row = rows.get(match.index);
+    if (row && hasContent && !withinRichLimits(`${current}${row}${closing()}`)) flush();
+    const tag = /^<(\/?)([a-z][\w-]*)\b/i.exec(token);
+    if (tag || token.startsWith("&") && token.endsWith(";")) {
+      const previous = [...stack];
+      if (tag?.[1]) stack.pop();
+      else if (tag && !/\/>$/.test(token) && !/^(?:br|img|hr|input)$/i.test(tag[2]!)) {
+        stack.push({ open: token, close: `</${tag[2]}>` });
+      }
+      const next = [...stack];
+      if (!withinRichLimits(`${current}${token}${closing()}`)) {
+        stack.splice(0, stack.length, ...previous);
+        flush();
+        stack.splice(0, stack.length, ...next);
+      }
+      current += token;
+      continue;
+    }
+    const characters = Array.from(token);
+    let offset = 0;
+    while (offset < characters.length) {
+      const split = takeFittingPrefix(characters, offset, current, closing());
+      if (!split) {
+        if (!hasContent) throw new Error("Table formatting exceeds Telegram rich-message limits.");
+        flush();
+        continue;
+      }
+      current += split.head;
+      hasContent ||= Boolean(split.head.trim());
+      offset = split.end;
+      if (offset < characters.length) flush();
+    }
+  }
+  if (current.trim() !== prefix.trim()) parts.push(current.trimEnd());
   return parts;
 }
 

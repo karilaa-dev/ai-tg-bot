@@ -112,11 +112,12 @@ export class ThreadTurnCoordinator {
     if (this.accepting) this.schedule(threadId);
   }
 
-  async cancelActive(threadId: string): Promise<boolean> {
+  async cancelActive(threadId: string, turnRunId?: number): Promise<boolean> {
     await this.recovery;
-    const active = this.active.get(threadId);
+    const current = this.active.get(threadId);
+    const active = turnRunId === undefined || current?.run.id === turnRunId ? current : undefined;
     if (active && !active.finalizer.canCancel()) return false;
-    const requested = await this.input.repos.turnRuns.requestCancellation(threadId);
+    const requested = await this.input.repos.turnRuns.requestCancellation(threadId, turnRunId);
     if (!requested) return false;
     if (requested.status === "cancelled") {
       this.activity.schedule(requested.id, threadId);
@@ -558,6 +559,7 @@ export class ThreadTurnCoordinator {
         turnRunId: run.id,
         origin: run.origin,
         signal: controller.signal,
+        onCancel: () => this.cancelActive(thread.id, run.id),
         onDraft: (draft) => {
           if (!controller.signal.aborted) this.drafts.set(thread.id, {
             text: draft.text.slice(-64_000), thinking: draft.thinking.slice(-32_000),
