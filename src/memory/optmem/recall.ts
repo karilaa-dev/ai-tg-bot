@@ -9,9 +9,24 @@ const Reply = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("error"), message: z.string() }),
 ]);
 
+/**
+ * One deadline covers worker startup and every batch of a recall. A pattern
+ * that backtracks badly then returns a recoverable tool error instead of
+ * holding the turn, which itself has no time limit by default.
+ */
+export const RECALL_DEADLINE_MS = 5_000;
+
+class RecallDeadlineError extends Error {}
+
 // Only regex matching runs in the worker; database ownership stays in the caller.
-export async function recallInWorker(input: Omit<MemoInput, "args">, pattern: string, signal?: AbortSignal): Promise<MemoResult> {
+export async function recallInWorker(
+  input: Omit<MemoInput, "args">,
+  pattern: string,
+  signal?: AbortSignal,
+  options: { deadlineMs?: number } = {},
+): Promise<MemoResult> {
   signal?.throwIfAborted();
+  const deadlineMs = options.deadlineMs ?? RECALL_DEADLINE_MS;
   const entry = import.meta.url.endsWith(".ts") ? "./recallWorker.ts" : "./recallWorker.js";
   const worker = new Worker(new URL(entry, import.meta.url), { workerData: pattern });
   let pending: { resolve: (value: boolean[]) => void; reject: (error: unknown) => void } | undefined;
@@ -35,6 +50,7 @@ export async function recallInWorker(input: Omit<MemoInput, "args">, pattern: st
   worker.once("exit", code => fail(new Error(`Memory search worker exited (${code}).`)));
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
+  const deadline = setTimeout(() => fail(new RecallDeadlineError()), deadlineMs);
   try {
     await ready;
     return await runMemo({ ...input, args: ["recall", pattern], matchRecall: async lines => {
@@ -47,8 +63,13 @@ export async function recallInWorker(input: Omit<MemoInput, "args">, pattern: st
     } });
   } catch (error) {
     if (error instanceof MemoError) return { stdout: "", stderr: error.message + "\n", exit_code: 1 };
+    // The caller's cancellation keeps its own reason; only the deadline becomes a tool error.
+    if (error instanceof RecallDeadlineError && !signal?.aborted) {
+      return { stdout: "", stderr: `Memory search stopped after ${deadlineMs / 1_000} seconds. Use a simpler or more specific pattern, for example literal words or an anchored date, and avoid nested repetition such as (a+)+.\n`, exit_code: 1 };
+    }
     throw error;
   } finally {
+    clearTimeout(deadline);
     signal?.removeEventListener("abort", abort);
     await worker.terminate();
   }

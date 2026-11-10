@@ -9,7 +9,7 @@ import { UsersRepo } from "../../src/db/repos/users.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import { DEFAULT_MEMORY_SIZES, type MemorySizes } from "../../src/memory/optmem/settings.js";
 import { cover } from "../../src/memory/optmem/blocks.js";
-import { recallInWorker } from "../../src/memory/optmem/recall.js";
+import { RECALL_DEADLINE_MS, recallInWorker } from "../../src/memory/optmem/recall.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 const now = new Date(2026, 9, 7, 12);
@@ -202,6 +202,29 @@ describe("OptMem commands", () => {
     abort.abort(new Error("cancelled search"));
     await rejection;
     expect((await run("note", "event loop still serves writes")).stdout).toContain("Saved as #1.");
+  });
+
+  it("stops a costly recall at its deadline without a caller signal", async () => {
+    const { run, store, settings } = await fixture();
+    for (let i = 0; i < 3; i++) await run("note", "a".repeat(260) + "!");
+    const cleanup = new AbortController();
+    const started = Date.now();
+    const search = recallInWorker({ store, settings }, "(a+)+$", cleanup.signal, { deadlineMs: 200 });
+    try {
+      const outcome = await Promise.race([search, delay(3_000).then(() => "still running" as const)]);
+      expect(outcome).toMatchObject({ stdout: "", exit_code: 1 });
+      expect(outcome).toHaveProperty("stderr", expect.stringContaining("Memory search stopped after 0.2 seconds"));
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      cleanup.abort(new Error("test cleanup"));
+      await search.catch(() => undefined);
+    }
+    expect((await run("note", "event loop still serves writes")).stdout).toContain("Saved as #3.");
+    await expect(recallInWorker({ store, settings }, "^#1 ", undefined, { deadlineMs: 2_000 })).resolves.toMatchObject({ exit_code: 0 });
+    await expect(recallInWorker({ store, settings }, "[", undefined, { deadlineMs: 2_000 })).resolves.toMatchObject({
+      exit_code: 1, stderr: expect.stringContaining("bad regex:"),
+    });
+    expect(RECALL_DEADLINE_MS).toBe(5_000);
   });
 
   it("only displays global settings and rejects per-user overrides", async () => {
