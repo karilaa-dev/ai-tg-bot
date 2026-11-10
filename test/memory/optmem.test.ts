@@ -34,11 +34,17 @@ function nextBlock(result: MemoResult): string | undefined {
   return /^Run: memo nap (\d+-\d+) /mu.exec(result.stdout)?.[1];
 }
 
+/** The source revision a nap prompt asks for; forgetting summaries advances it. */
+function promptRevision(result: MemoResult): string[] {
+  const revision = /^Run: memo nap \d+-\d+ "<your line>" (\d+)$/mu.exec(result.stdout)?.[1];
+  return revision ? [revision] : [];
+}
+
 async function settle(run: (...args: string[]) => Promise<MemoResult>): Promise<number> {
   let result = await run("nap"), count = 0;
   while (nextBlock(result)) {
     const id = nextBlock(result)!;
-    result = await run("nap", id, `summary of ${id}`);
+    result = await run("nap", id, `summary of ${id}`, ...promptRevision(result));
     expect(result.stderr).toBe("");
     expect(result.exit_code).toBe(0);
     count++;

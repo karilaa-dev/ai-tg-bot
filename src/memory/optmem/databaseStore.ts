@@ -145,6 +145,9 @@ export class DatabaseMemoryStore implements MemoryStore {
         for (let i = k; i < n; i++) gone.push([i * size, (i + 1) * size]);
         await store.db.execute(sql`delete from optmem_summaries where user_id = ${this.userId} and size = ${size} and block_index >= ${k}`);
       }
+      // A compression prompted before this point may still be written after the
+      // children are rebuilt. A new revision makes that stale parent fail.
+      if (gone.length) await store.db.execute(sql`update optmem_stores set revision = revision + 1 where user_id = ${this.userId}`);
       return gone;
     });
   }

@@ -176,9 +176,63 @@ for (const postgres of [false, true]) describe.skipIf(postgres && !process.env.T
     expect(result.stdout).not.toContain("0-31 saved.");
     expect(await store.summary(0, 32)).toBeUndefined();
     expect(await store.pending(32, 1)).toEqual([[16, 32]]);
-    expect((await run("nap", "16-31", "corrected child")).exit_code).toBe(0);
-    expect((await run("nap", "0-31", "corrected parent")).stdout).toContain("0-31 saved.");
+    const revision = String(await store.revision());
+    expect(result.stdout).toContain(`Run: memo nap 16-31 "<your line>" ${revision}`);
+    expect((await run("nap", "16-31", "corrected child", revision)).exit_code).toBe(0);
+    expect((await run("nap", "0-31", "corrected parent", revision)).stdout).toContain("0-31 saved.");
     expect(await store.summary(0, 32)).toBe("corrected parent");
+  });
+
+  it("rejects a stale parent that resumes after a forgotten child was rebuilt", async () => {
+    const { db, store } = await fixture(postgres);
+    // Separate stores model separate memo tool calls.
+    const call = (...args: string[]) => runMemo({ store: new DatabaseMemoryStore(db.db, 42), args });
+    const revisionIn = (stdout: string, block: string) => {
+      const match = new RegExp(`nap ${block} "<your line>"(?: (\\d+))?`).exec(stdout);
+      if (!match) throw new Error(`no nap prompt for ${block}: ${stdout}`);
+      return match[1] ? [match[1]] : [];
+    };
+    await store.append(Array.from({ length: 32 }, (_, i) => ["2026-10-07", `note ${i}`] as const));
+    for (let size = 2; size <= 16; size *= 2) {
+      for (let lo = 0; lo < 32; lo += size) expect(await store.put(lo, lo + size, `original ${lo}-${lo + size - 1}`)).toBe(true);
+    }
+    const parentPrompt = revisionIn((await call("nap")).stdout, "0-31");
+    const ready = deferred<void>(), release = deferred<void>();
+    class PausedCompressor extends DatabaseMemoryStore {
+      override async put(...args: Parameters<DatabaseMemoryStore["put"]>): Promise<boolean> {
+        ready.resolve();
+        await release.promise;
+        return super.put(...args);
+      }
+    }
+    const stale = runMemo({ store: new PausedCompressor(db.db, 42), args: ["nap", "0-31", "stale parent with forgotten facts", ...parentPrompt] });
+    await ready.promise;
+    const before = await store.revision();
+    try {
+      expect((await call("forget", "16-31")).exit_code).toBe(0);
+      const childPrompt = (await call("nap")).stdout;
+      expect((await call("nap", "16-31", "corrected child", ...revisionIn(childPrompt, "16-31"))).stdout).toContain("16-31 saved.");
+      expect(await store.pending(32, 1)).toEqual([[0, 32]]);
+    } finally { release.resolve(); }
+
+    const result = await stale;
+    expect(result.stdout).toContain("0-31 was settled or forgotten meanwhile");
+    expect(await store.summary(0, 32)).toBeUndefined();
+    const refreshed = revisionIn(result.stdout, "0-31");
+    expect(refreshed).not.toEqual(parentPrompt);
+    expect((await call("nap", "0-31", "corrected parent", ...refreshed)).stdout).toContain("0-31 saved.");
+    expect(await store.summary(0, 32)).toBe("corrected parent");
+    expect(await store.revision()).toBe(before + 1);
+    expect((await store.slice(0, 32)).map(([id]) => id)).toEqual(Array.from({ length: 32 }, (_, i) => i));
+  });
+
+  it("keeps the source revision when forget finds no summary", async () => {
+    const { store, run } = await fixture(postgres);
+    await store.append([["2026-10-07", "one"], ["2026-10-07", "two"]]);
+    const before = await store.revision();
+    expect((await run("forget", "0-1")).exit_code).toBe(1);
+    expect(await store.revision()).toBe(before);
+    expect((await run("nap", "0-1", "both notes", ...(before ? [String(before)] : []))).stdout).toContain("0-1 saved.");
   });
 
   it.each([
