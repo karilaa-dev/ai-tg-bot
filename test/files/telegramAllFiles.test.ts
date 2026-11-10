@@ -68,6 +68,7 @@ describe("arbitrary Telegram documents", () => {
     ["large.csv", "text/csv", "a,b\n".repeat(MAX_INDEXED_TEXT_BYTES / 4 + 1)],
     ["wide.csv", "text/csv", ",".repeat(3_000)],
     ["large.txt", "text/plain", "x".repeat(MAX_INDEXED_TEXT_BYTES + 1)],
+    ["broken.csv", "text/csv", 'id,note\n1,"never closed\n2,last\n'],
   ])("accepts and resends source-only %s from the Telegram cache", async (name, mime, content) => {
     const document = env.bot.server.fileState.storeDocument(name, mime, { content: Buffer.from(content) });
     for (let index = 0; index < 2; index++) {

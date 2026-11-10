@@ -161,6 +161,23 @@ describe("all file formats through HTTP, storage, and Telegram", () => {
     expect((await request(`/api/chat/threads/${thread.id}/files/${stored[0]!.id}`, { headers: { ...headers(), Cookie: otherCookie, "X-Chat-User": "2002" } })).status).toBe(404);
   });
 
+  it("accepts a malformed CSV with other attachments and keeps its exact bytes for repair", async () => {
+    const thread = await chat.createThread(env.user.id, "Broken table");
+    const broken = { name: "broken.csv", mime: "text/csv", bytes: Buffer.from('id,note\n1,"never closed\n2,last\n') };
+    const files = [rich[0]!, rich[1]!, broken];
+    const response = await upload(thread.id, files);
+    expect(response.status).toBe(202);
+    const accepted = acceptedSchema.parse(await response.json());
+    const stored = await env.repos.files.listForThreads([thread.id]);
+    expect(stored.map(file => file.name).sort()).toEqual(files.map(file => file.name).sort());
+    const file = stored.find(item => item.name === "broken.csv")!;
+    expect(file).toMatchObject({ type: "csv", extraction_status: "source_only", message_id: accepted.messageId, size: broken.bytes.length });
+    expect(stored.find(item => item.name === "table.csv")).toMatchObject({ extraction_status: "ready" });
+    const download = await request(`/api/chat/threads/${thread.id}/files/${file.id}`, { headers: headers() });
+    expect(download.status).toBe(200);
+    expect(Buffer.from(await download.arrayBuffer())).toEqual(broken.bytes);
+  });
+
   it("keeps failed Telegram mirrors downloadable, materializable, and idempotent", async () => {
     const thread = await chat.createThread(env.user.id, "Telegram unavailable");
     rejectDocuments = true;

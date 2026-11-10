@@ -3,7 +3,9 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
-import { classifyFile, ingestFileBytes, refreshExtractedFileBytes, type FileIngestProgress } from "../../src/files/ingest.js";
+import { classifyFile, ingestFileBytes, isMalformedCsvError, refreshExtractedFileBytes, type FileIngestProgress } from "../../src/files/ingest.js";
+import { CsvError } from "csv-parse/sync";
+import { sha256Hex } from "../../src/files/hash.js";
 import { chatFileIdsFromText } from "../../src/files/contextMarker.js";
 import { isUuid } from "../../src/utils/uuid.js";
 import { createReadFileSectionTool } from "../../src/ai/tools/readFileSection.js";
@@ -143,6 +145,45 @@ describe("file ingestion", () => {
     await refreshExtractedFileBytes({ ...input, file: (await repos.files.get(small.fileId))!, bytes: Buffer.from(content) });
     expect(await repos.files.chunks(small.fileId)).toEqual([]);
     expect(await db.search.searchChunks([small.fileId], "oldneedle", 8)).toEqual([]);
+  });
+
+  it.each([
+    ["an unclosed quote", 'id,note\n1,"never closed\n2,last\n'],
+    ["a dangling escaped quote", 'id,note\n1,"ends with ""\n'],
+  ])("keeps a CSV with %s as an unchanged source instead of rejecting it", async (_label, content) => {
+    const user = await repos.users.ensure({ tgId: 334 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const bytes = Buffer.from(content);
+    const input = { config: loadTestConfig(), repo: repos.files, userId: user.tg_id, threadId: thread.id, name: "broken.csv", mime: "text/csv" };
+    const result = await ingestFileBytes({ ...input, bytes });
+    expect(result).toMatchObject({ type: "csv", inline: false });
+    expect(result.card).toContain("materialize_chat_files");
+    const file = (await repos.files.get(result.fileId))!;
+    expect(file).toMatchObject({ extraction_status: "source_only", content_md: null, size: bytes.length, content_sha256: sha256Hex(bytes) });
+    expect(file.summary).toContain("could not be parsed");
+    expect(file.summary).not.toContain("limits");
+    expect(await repos.files.chunks(result.fileId)).toEqual([]);
+
+    const valid = await ingestFileBytes({ ...input, config: loadTestConfig({ FILE_INLINE_TOKENS: 1 }), name: "valid.csv", bytes: Buffer.from('id,note\n1,"two\nlines"\nneedle,x\n') });
+    expect(await repos.files.chunks(valid.fileId)).not.toEqual([]);
+    const refreshed = await refreshExtractedFileBytes({ ...input, file: (await repos.files.get(valid.fileId))!, bytes });
+    expect(refreshed).toMatchObject({ extraction_status: "source_only", content_md: null, content_sha256: sha256Hex(bytes) });
+    expect(refreshed.summary).toContain("could not be parsed");
+    expect(await repos.files.chunks(valid.fileId)).toEqual([]);
+    expect(await db.search.searchChunks([valid.fileId], "needle", 8)).toEqual([]);
+  });
+
+  it("still cancels malformed CSV ingestion and only treats CSV content errors as malformed", async () => {
+    const user = await repos.users.ensure({ tgId: 335 });
+    const thread = await repos.threads.activeForUserTopic(user.tg_id, null);
+    const controller = new AbortController();
+    controller.abort(new Error("upload cancelled"));
+    await expect(ingestFileBytes({ config: loadTestConfig(), repo: repos.files, userId: user.tg_id, threadId: thread.id,
+      name: "broken.csv", bytes: Buffer.from('a\n"open'), signal: controller.signal })).rejects.toThrow("upload cancelled");
+    expect(await repos.files.listForThreads([thread.id])).toEqual([]);
+    expect(isMalformedCsvError(new CsvError("CSV_QUOTE_NOT_CLOSED", "open quote"))).toBe(true);
+    expect(isMalformedCsvError(new CsvError("CSV_INVALID_OPTION_DELIMITER", "bad option"))).toBe(false);
+    expect(isMalformedCsvError(new TypeError("programming error"))).toBe(false);
   });
 
   it("indexes CSV headers and record ranges consistently when creating and refreshing files", async () => {

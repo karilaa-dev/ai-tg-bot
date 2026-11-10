@@ -4,6 +4,7 @@ import type { FilesRepo } from "../db/repos/files.js";
 import type { FileChunkRow, FileRow } from "../db/types.js";
 import type { Logger } from "../logger.js";
 import { isAbortError, throwIfAborted } from "./cancel.js";
+import { CsvError } from "csv-parse/sync";
 import { chunkCsv, chunkMarkdown, CsvIndexLimitError, parseIndexedCsv, type CsvRecord } from "./chunker.js";
 import { MAX_INDEXED_TEXT_BYTES } from "./limits.js";
 import { chatFileMarker } from "./contextMarker.js";
@@ -77,7 +78,7 @@ interface FileRefreshInput {
 
 export async function ingestFileBytes(input: FileIngestInput): Promise<FileIngestResult> {
   const type = classifyFile(input.name, input.mime, input.bytes);
-  const text = type === "csv" || type === "txt" ? indexedText(type, input.bytes) : null;
+  const { text, reason: sourceOnlyReason } = extractedText(type, input.bytes);
   const startedAt = Date.now();
   input.logger?.info("file ingest starting", {
     name: input.name,
@@ -124,7 +125,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       type,
       name: input.name,
       size: bytes.length,
-      summary: sourceFileSummary(type),
+      summary: sourceFileSummary(type, sourceOnlyReason),
       isInline: false,
     });
     input.logger?.info("file source registered", {
@@ -223,7 +224,7 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
   }
   const bytes = Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes);
   const contentSha256 = sha256Hex(bytes);
-  const text = type === "csv" || type === "txt" ? indexedText(type, bytes) : null;
+  const { text, reason: sourceOnlyReason } = extractedText(type, bytes);
   if (type === "image") {
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
@@ -241,14 +242,14 @@ export async function refreshExtractedFileBytes(input: FileRefreshInput): Promis
     // Also remove old searchable text when a refresh crosses the indexing limits.
     await input.repo.replaceDocumentExtraction(input.file.id, {
       contentSha256, mimeType: input.mime ?? input.file.mime_type, size: bytes.length,
-      contentMd: null, summary: sourceFileSummary(type), isInline: false, chunks: [],
+      contentMd: null, summary: sourceFileSummary(type, sourceOnlyReason), isInline: false, chunks: [],
     });
     return input.repo.updateExtraction(input.file.id, {
       contentSha256,
       mimeType: input.mime ?? input.file.mime_type,
       size: bytes.length,
       contentMd: null,
-      summary: sourceFileSummary(type),
+      summary: sourceFileSummary(type, sourceOnlyReason),
       outline: null,
       isInline: false,
       status: "source_only",
@@ -364,20 +365,44 @@ export function cardForFile(
   ].filter(Boolean).join(" ");
 }
 
-function indexedText(type: "csv" | "txt", bytes: Uint8Array): { content: string; records?: CsvRecord[] } | null {
-  if (bytes.byteLength > MAX_INDEXED_TEXT_BYTES) return null;
+type SourceOnlyReason = "limits" | "malformed";
+type IndexedText = { content: string; records?: CsvRecord[] } | { sourceOnly: SourceOnlyReason };
+
+// Parser content errors. Option and argument errors are programming errors and still throw.
+const malformedCsvCodes = new Set<string>([
+  "CSV_QUOTE_NOT_CLOSED", "CSV_INVALID_CLOSING_QUOTE", "INVALID_OPENING_QUOTE",
+  "CSV_NON_TRIMABLE_CHAR_AFTER_CLOSING_QUOTE", "CSV_RECORD_INCONSISTENT_FIELDS_LENGTH",
+  "CSV_RECORD_INCONSISTENT_COLUMNS",
+]);
+
+/** Whether csv-parse rejected the file's contents, as opposed to failing for another reason. */
+export function isMalformedCsvError(error: unknown): boolean {
+  return error instanceof CsvError && malformedCsvCodes.has(error.code);
+}
+
+/** Text to index, or why the original is kept without indexing. Indexing is optional; acceptance never depends on it. */
+function indexedText(type: "csv" | "txt", bytes: Uint8Array): IndexedText {
+  if (bytes.byteLength > MAX_INDEXED_TEXT_BYTES) return { sourceOnly: "limits" };
   const raw = Buffer.from(bytes).toString("utf8").replace(/^\uFEFF/, "");
   if (type === "txt") return { content: raw };
   try {
     const records = parseIndexedCsv(raw);
     return { content: `columns: ${records[0]?.record.join(", ") ?? ""} · ${Math.max(0, records.length - 1)} rows\n\n${raw}`, records };
   } catch (error) {
-    if (error instanceof CsvIndexLimitError || (error instanceof Error && "code" in error && error.code === "CSV_MAX_RECORD_SIZE")) return null;
+    if (error instanceof CsvIndexLimitError || (error instanceof CsvError && error.code === "CSV_MAX_RECORD_SIZE")) return { sourceOnly: "limits" };
+    if (isMalformedCsvError(error)) return { sourceOnly: "malformed" };
     throw error;
   }
 }
 
-export function sourceFileSummary(type: AcceptedFileType): string {
+function extractedText(type: AcceptedFileType, bytes: Uint8Array): { text: { content: string; records?: CsvRecord[] } | null; reason: SourceOnlyReason } {
+  if (type !== "csv" && type !== "txt") return { text: null, reason: "limits" };
+  const extracted = indexedText(type, bytes);
+  return "sourceOnly" in extracted ? { text: null, reason: extracted.sourceOnly } : { text: extracted, reason: "limits" };
+}
+
+export function sourceFileSummary(type: AcceptedFileType, reason: SourceOnlyReason = "limits"): string {
+  if (type === "csv" && reason === "malformed") return "CSV could not be parsed (for example, an unclosed quote); the original is kept unchanged for inspection or repair in the sandbox.";
   if (type === "txt" || type === "csv") return "File exceeds automatic indexing limits; inspect the original in the sandbox.";
   if (type === "other") return "Original file available through materialize_chat_files in the sandbox.";
   if (type === "audio") return "Original audio available for transcribe_audio.";
