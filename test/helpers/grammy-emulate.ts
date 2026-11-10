@@ -9,6 +9,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { installBot } from "../../src/bot/router.js";
+import { drainTelegramIntake } from "../../src/bot/batching.js";
 import type { BotContext, BotServices } from "../../src/bot/context.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import { type TurnRunner } from "../../src/ai/types.js";
@@ -125,6 +126,7 @@ export async function createGrammyEmulator(options: {
     user,
     chat,
     dispose: async () => {
+      await drainTelegramIntake(services, 5_000);
       await services.turnCoordinator.shutdown();
       await services.threadTitles.waitForIdle();
       bot.dispose();

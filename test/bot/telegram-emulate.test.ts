@@ -1295,6 +1295,160 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain("album caption");
   });
 
+  describe("durable Telegram intake", () => {
+    function failAcceptOnce(error: Error = new Error("database is temporarily unavailable")) {
+      const real = env.services.conversations.accept.bind(env.services.conversations);
+      return vi.spyOn(env.services.conversations, "accept").mockImplementationOnce(async () => { throw error; })
+        .mockImplementation(real);
+    }
+
+    function intakeNotices(res: BotResponse) {
+      return res.apiCalls.filter(call => typeof call.payload.text === "string" && call.payload.text.includes("could not confirm"));
+    }
+
+    async function turnRows() {
+      const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+      return {
+        messages: (await env.repos.messages.listThread(thread.id)).map(row => [row.role, row.text_plain]),
+        turns: await env.repos.turnRuns.listForThread(thread.id),
+      };
+    }
+
+    it("retries a short text after a transient acceptance failure", async () => {
+      await startBot();
+      const accept = failAcceptOnce();
+      const res = await env.bot.sendMessage(env.user, env.chat, "keep this short message");
+      expect(accept).toHaveBeenCalledTimes(2);
+      expectRichCall(res, "Echo: keep this short message");
+      expect((await turnRows()).messages).toEqual([
+        ["user", "keep this short message"], ["assistant", "Echo: keep this short message"],
+      ]);
+    });
+
+    it("keeps a split text burst until its acceptance retry succeeds", async () => {
+      await startBot();
+      const accept = failAcceptOnce();
+      const chunk = "s".repeat(4096);
+      await env.bot.processUpdatesConcurrently([env.bot.server.updateFactory.createTextMessage(env.user, env.chat, chunk)]);
+      await waitUntil(async () => (await turnRows()).messages.length === 2, 5_000);
+      expect(accept).toHaveBeenCalledTimes(2);
+      expect((await turnRows()).messages).toEqual([["user", chunk], ["assistant", `Echo: ${chunk}`]]);
+    });
+
+    it("keeps an album until its acceptance retry succeeds", async () => {
+      await startBot();
+      const accept = failAcceptOnce();
+      const updates = [Buffer.from([9, 8, 7, 1]), Buffer.from([9, 8, 7, 2])].map(content => {
+        const update = env.bot.server.updateFactory.createPhotoMessage(env.user, env.chat,
+          env.bot.server.fileState.storePhoto(640, 480, { content }));
+        update.message!.media_group_id = "retry-album";
+        return update;
+      });
+      await env.bot.processUpdatesConcurrently(updates);
+      await waitUntil(async () => (await turnRows()).messages.length === 2, 5_000);
+      expect(accept).toHaveBeenCalledTimes(2);
+      const { turns } = await turnRows();
+      expect(turns).toHaveLength(1);
+      const thread = await env.repos.threads.activeForUserTopic(env.user.id, null);
+      expect(await env.repos.files.listForThreads([thread.id])).toHaveLength(2);
+    });
+
+    it("resolves an acceptance whose commit succeeded before the error to the same turn", async () => {
+      await startBot();
+      const real = env.services.conversations.accept.bind(env.services.conversations);
+      const accept = vi.spyOn(env.services.conversations, "accept")
+        .mockImplementationOnce(async (input) => { await real(input); throw new Error("connection reset after commit"); })
+        .mockImplementation(real);
+      const res = await env.bot.sendMessage(env.user, env.chat, "committed once");
+      expect(accept).toHaveBeenCalledTimes(2);
+      expect((await turnRows()).turns).toHaveLength(1);
+      expect(expectResponseSurface(res)).not.toContain("could not confirm");
+    });
+
+    it("does not reaccept or report failure when the busy acknowledgement fails", async () => {
+      await startBot();
+      const real = env.services.conversations.accept.bind(env.services.conversations);
+      const accept = vi.spyOn(env.services.conversations, "accept")
+        .mockImplementation(async (input) => ({ ...await real(input), queuedBehind: true }));
+      env.bot.api.config.use(async (prev, method, payload, signal) => {
+        if (method === "sendMessage" && "text" in payload && String(payload.text).includes("still working")) {
+          throw new Error("Telegram acknowledgement failed");
+        }
+        return prev(method, payload, signal);
+      });
+      const res = await env.bot.sendDocument(env.user, env.chat, {
+        fileName: "ack.txt", mimeType: "text/plain", content: Buffer.from("ack file"),
+      });
+      expect(accept).toHaveBeenCalledOnce();
+      expect((await turnRows()).turns).toHaveLength(1);
+      expect(expectResponseSurface(res)).not.toContain("Something went wrong");
+      expect(expectResponseSurface(res)).toContain("File <code>ack.txt</code> processed");
+    });
+
+    it("tells the user once when acceptance keeps failing", async () => {
+      await startBot();
+      const accept = vi.spyOn(env.services.conversations, "accept").mockRejectedValue(new Error("database is down"));
+      const res = await env.bot.sendMessage(env.user, env.chat, "lost message");
+      expect(accept).toHaveBeenCalledTimes(4);
+      expect(intakeNotices(res)).toHaveLength(1);
+      expect((await turnRows()).turns).toEqual([]);
+    }, 10_000);
+
+    it("does not retry a terminal acceptance refusal", async () => {
+      await startBot();
+      const { ConversationError } = await import("../../src/application/errors.js");
+      const accept = vi.spyOn(env.services.conversations, "accept")
+        .mockRejectedValue(new ConversationError(409, "Fork this archived conversation to continue it."));
+      const res = await env.bot.sendMessage(env.user, env.chat, "refused message");
+      expect(accept).toHaveBeenCalledOnce();
+      expect(intakeNotices(res)).toHaveLength(1);
+    });
+
+    it("cancels input that is waiting to retry when /stop arrives", async () => {
+      await startBot();
+      const accept = failAcceptOnce();
+      const sending = env.bot.processUpdatesConcurrently([
+        env.bot.server.updateFactory.createTextMessage(env.user, env.chat, "stop me while retrying"),
+      ]);
+      await waitUntil(async () => accept.mock.calls.length === 1, 2_000);
+      const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+      await sending;
+      await wait(800);
+      expect(expectResponseSurface(stop)).toContain("Pending message cancelled");
+      expect(accept).toHaveBeenCalledOnce();
+      expect((await turnRows()).turns).toEqual([]);
+    });
+
+    it("keeps a new arrival separate from a burst that is retrying", async () => {
+      await startBot();
+      const gate = deferred<void>();
+      const real = env.services.conversations.accept.bind(env.services.conversations);
+      const accept = vi.spyOn(env.services.conversations, "accept")
+        .mockImplementationOnce(async () => { gate.resolve(); throw new Error("transient"); })
+        .mockImplementation(real);
+      const chunk = "r".repeat(4096);
+      await env.bot.processUpdatesConcurrently([env.bot.server.updateFactory.createTextMessage(env.user, env.chat, chunk)]);
+      await gate.promise;
+      await env.bot.sendMessage(env.user, env.chat, "arrived during retry");
+      await waitUntil(async () => (await turnRows()).turns.length === 2, 5_000);
+      expect(accept).toHaveBeenCalledTimes(3);
+      const texts = (await turnRows()).messages.filter(([role]) => role === "user").map(([, text]) => text);
+      expect(texts.sort()).toEqual([chunk, "arrived during retry"].sort());
+    });
+
+    it("accepts a pending burst while draining intake for shutdown", async () => {
+      await startBot();
+      const { drainTelegramIntake } = await import("../../src/bot/batching.js");
+      const chunk = "d".repeat(4096);
+      await env.bot.processUpdatesConcurrently([env.bot.server.updateFactory.createTextMessage(env.user, env.chat, chunk)]);
+      expect((await turnRows()).turns).toEqual([]);
+      const residue = await drainTelegramIntake(env.services, 5_000);
+      expect(residue).toEqual([]);
+      expect((await turnRows()).messages[0]).toEqual(["user", chunk]);
+      expect(env.services.routerState.pendingTextBursts.size).toBe(0);
+    });
+  });
+
   async function startBot(user = env.user, chat = env.chat): Promise<BotResponse> {
     await env.services.access.allow(user.id);
     return env.bot.sendCommand(user, chat, "/start");
@@ -1337,6 +1491,14 @@ async function createTopic(
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(check: () => Promise<boolean> | boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!await check()) {
+    if (Date.now() > deadline) throw new Error("condition was not reached in time");
+    await wait(25);
+  }
 }
 
 async function waitForRelease(release: Promise<void>, signal?: AbortSignal): Promise<void> {

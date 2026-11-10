@@ -155,6 +155,8 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     ctx.t = (key, params) => localizer.t(ctx.user?.lang ?? ctx.from?.language_code, key, params);
     await next();
   });
+  // Shutdown waits for updates that are still being handled before it closes the database.
+  bot.use((_ctx, next) => routerState.intake.track("telegram update", next()));
   // Native stop updates have no sender. Handle them before conversations and
   // sequentialization so they can interrupt the update that started the turn.
   bot.on("stopped_message_generation", async (ctx) => {
@@ -201,7 +203,8 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
   });
   bot.command("stop", async (ctx) => {
     logCommand(ctx, "stop");
-    const textStopped = cancelPendingTextBurstForContext(ctx);
+    const textStopped = cancelPendingTextBurstForContext(ctx)
+      || Boolean(ctx.thread && ctx.services.routerState.intake.cancel(ctx.thread.id));
     const mediaStopped = cancelPendingMediaGroupsForContext(ctx);
     const fileStopped = await stopActiveFileProcessing(ctx, true);
     const turnStopped = ctx.thread && ctx.user ? await ctx.services.conversations.stop(ctx.user.tg_id, ctx.thread.id) : false;

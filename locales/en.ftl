@@ -62,6 +62,7 @@ thinking-final-files-capped = Files prepared: { $sent } of { $requested } (limit
 compacting = 🗜 Compacting memory...
 compacted = ✅ Compacted { $count } messages.
 busy = ⏳ I am still working in this thread. I saved your message for the next turn.
+intake-failed = ⚠️ I could not confirm that your message was saved. If I do not reply soon, please send it again.
 error-generic = ⚠️ Something went wrong.
 empty-answer = ⚠️ I finished the tool work, but no final answer was returned. Please try again, or ask for a smaller section.
 file-unsupported = 📎 This file type is not supported.

@@ -9,6 +9,7 @@ import type { FileProcessingStatus } from "./files.js";
 import type { ThreadTitleCoordinator } from "./threadTitles.js";
 import type { CommandRuntime } from "../sandbox/types.js";
 import type { TelegramTurnSource } from "../db/repos/turnRuns.js";
+import { TelegramIntake } from "./intake.js";
 
 interface ActiveFileJob {
   controller: AbortController;
@@ -46,10 +47,12 @@ interface RouterState {
   pendingMediaGroups: Map<string, PendingMediaGroup>;
   cancelledMediaGroups: Set<string>;
   pendingTextBursts: Map<string, PendingTextBurst>;
+  intake: TelegramIntake;
 }
 
-export function createRouterState(): RouterState {
+export function createRouterState(intake = new TelegramIntake()): RouterState {
   return {
+    intake,
     activeFileJobs: new Map<string, ActiveFileJob>(),
     pendingMediaGroups: new Map<string, PendingMediaGroup>(),
     cancelledMediaGroups: new Set<string>(),
