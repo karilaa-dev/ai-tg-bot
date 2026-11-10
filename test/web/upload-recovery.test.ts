@@ -41,13 +41,14 @@ afterEach(async () => {
 const config = (quota = 10) => loadTestConfig({ FILE_STORAGE_PATH: storage, WEB_UPLOAD_USER_MAX_BYTES: quota });
 
 /** An application instance. Opening another one against the same database file is a restart or a second worker. */
-async function instance(options: { revokeFile?: (id: string) => Promise<void>; quota?: number } = {}) {
+async function instance(options: { revokeFile?: (id: string) => Promise<void>; batched?: boolean; quota?: number } = {}) {
   const database = createDatabase({ DB_URL: databaseUrl });
   databases.push(database);
   await database.initialize();
   const repos = createRepos(database.db, database.search);
   const store = new LocalFileStore(storage);
   const recovery = new UploadRecovery({ db: database.db, config: config(), revokeFile: options.revokeFile ?? (id => store.revoke(id)),
+    ...options.batched ? { revokeFiles: (ids: string[]) => store.revokeMany(ids) } : {},
     logger: { info: vi.fn(), warn: vi.fn() } });
   return { database, repos, store, recovery, budget: new UploadBudget(database.db, config(options.quota)) };
 }
@@ -269,6 +270,30 @@ describe("abandoned web upload preparations", () => {
     await app.database.db.execute(sql`update web_upload_cleanup set next_attempt_at = 0`);
     expect(await app.recovery.recover()).toMatchObject({ retried: 1, failed: 0 });
     expect(await hasBytes(storedPath(file.id))).toBe(false);
+    expect(await count(app, "web_upload_cleanup")).toBe(0);
+  });
+
+  it("revokes a batch of owed files together and keeps only the debt of a key that failed", async () => {
+    const app = await instance({ batched: true, quota: 1_000 });
+    const revokeMany = vi.spyOn(app.store, "revokeMany");
+    const thread = await seed(app);
+    const files = [];
+    for (const label of ["one", "two", "three"]) files.push((await prepareUpload(app, USER, thread.id, Buffer.from(`abandoned ${label}`))).file);
+    // One key's staging copy cannot be removed yet.
+    const blocked = path.join(storage, `${files[1]!.id}.${randomUUID()}.tmp`);
+    await mkdir(blocked);
+    await writeFile(path.join(blocked, "inside"), "x");
+    await expireLeases(app);
+
+    expect(await app.recovery.recover()).toMatchObject({ files: 3, retried: 2, failed: 1 });
+    expect(revokeMany).toHaveBeenCalledTimes(1);
+    expect([...revokeMany.mock.calls[0]![0]].sort()).toEqual(files.map(file => file.id).sort());
+    for (const file of files) expect((await stat(storedPath(file.id))).isDirectory()).toBe(true);
+    expect(await app.database.db.query(sql`select target, attempts from web_upload_cleanup`)).toEqual([{ target: files[1]!.id, attempts: 1 }]);
+
+    await rm(blocked, { recursive: true });
+    await app.database.db.execute(sql`update web_upload_cleanup set next_attempt_at = 0`);
+    expect(await app.recovery.recover()).toMatchObject({ retried: 1, failed: 0 });
     expect(await count(app, "web_upload_cleanup")).toBe(0);
   });
 

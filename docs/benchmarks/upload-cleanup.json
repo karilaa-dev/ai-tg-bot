@@ -1,0 +1,340 @@
+{
+  "benchmark": "scripts/benchmark-upload-cleanup.ts",
+  "command": "TMPDIR=<directory on the filesystem to test> bun scripts/benchmark-upload-cleanup.ts <checkout> --entries 1000,10000,50000 --batch 25",
+  "environment": {
+    "runtime": "bun 1.4.4",
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "date": "2026-11-10"
+  },
+  "notes": "Each run revokes one recovery batch (25 abandoned keys, each with a stranded staging copy) in a flat directory that also holds N unrelated attachments. revokeBatchMs is the median of 3 runs and includes fencing, staging removal and directory fsync. listingMs separately times the directory listings that the checkout's cleanup performs (one per key before, one per batch after).",
+  "runs": {
+    "disk-before": {
+      "checkout": "a469b81 (before)",
+      "runtime": "bun 1.4.4",
+      "filesystem": "ext4 (LVM, local disk)",
+      "results": [
+        {
+          "entries": 1000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 401,
+          "listingMs": 13.5,
+          "listingShare": 0.03,
+          "runs": [
+            {
+              "revokeMs": 401.004518,
+              "listingMs": 11.852732000000003,
+              "listings": 25
+            },
+            {
+              "revokeMs": 437.72347999999994,
+              "listingMs": 13.946602999999982,
+              "listings": 25
+            },
+            {
+              "revokeMs": 386.88880200000006,
+              "listingMs": 13.530166999999892,
+              "listings": 25
+            }
+          ]
+        },
+        {
+          "entries": 10000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 510.2,
+          "listingMs": 98,
+          "listingShare": 0.19,
+          "runs": [
+            {
+              "revokeMs": 551.6374020000001,
+              "listingMs": 124.66795400000024,
+              "listings": 25
+            },
+            {
+              "revokeMs": 510.16659800000025,
+              "listingMs": 75.47676499999989,
+              "listings": 25
+            },
+            {
+              "revokeMs": 503.875172,
+              "listingMs": 98.00214500000038,
+              "listings": 25
+            }
+          ]
+        },
+        {
+          "entries": 50000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 804.9,
+          "listingMs": 353.9,
+          "listingShare": 0.44,
+          "runs": [
+            {
+              "revokeMs": 802.003557,
+              "listingMs": 349.3864309999999,
+              "listings": 25
+            },
+            {
+              "revokeMs": 804.925972,
+              "listingMs": 353.9121930000001,
+              "listings": 25
+            },
+            {
+              "revokeMs": 837.3443050000005,
+              "listingMs": 405.1964630000002,
+              "listings": 25
+            }
+          ]
+        }
+      ]
+    },
+    "disk-after": {
+      "checkout": "this branch (after)",
+      "runtime": "bun 1.4.4",
+      "filesystem": "ext4 (LVM, local disk)",
+      "results": [
+        {
+          "entries": 1000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 21.9,
+          "listingMs": 0.4,
+          "listingShare": 0.02,
+          "runs": [
+            {
+              "revokeMs": 38.127428,
+              "listingMs": 0.8083400000000012,
+              "listings": 1
+            },
+            {
+              "revokeMs": 21.91215799999999,
+              "listingMs": 0.3779690000000073,
+              "listings": 1
+            },
+            {
+              "revokeMs": 16.84445199999999,
+              "listingMs": 0.41009900000000243,
+              "listings": 1
+            }
+          ]
+        },
+        {
+          "entries": 10000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 30.5,
+          "listingMs": 4.8,
+          "listingShare": 0.16,
+          "runs": [
+            {
+              "revokeMs": 30.509924000000012,
+              "listingMs": 3.922189000000003,
+              "listings": 1
+            },
+            {
+              "revokeMs": 37.17013200000008,
+              "listingMs": 4.835968999999977,
+              "listings": 1
+            },
+            {
+              "revokeMs": 25.562531000000035,
+              "listingMs": 4.891334000000029,
+              "listings": 1
+            }
+          ]
+        },
+        {
+          "entries": 50000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 54.8,
+          "listingMs": 14.5,
+          "listingShare": 0.26,
+          "runs": [
+            {
+              "revokeMs": 59.69865400000003,
+              "listingMs": 13.576835999999957,
+              "listings": 1
+            },
+            {
+              "revokeMs": 54.794174999999996,
+              "listingMs": 14.506181000000197,
+              "listings": 1
+            },
+            {
+              "revokeMs": 50.53675999999996,
+              "listingMs": 18.47282099999984,
+              "listings": 1
+            }
+          ]
+        }
+      ]
+    },
+    "tmpfs-before": {
+      "checkout": "a469b81 (before)",
+      "runtime": "bun 1.4.4",
+      "filesystem": "tmpfs",
+      "results": [
+        {
+          "entries": 1000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 14.6,
+          "listingMs": 7.3,
+          "listingShare": 0.5,
+          "runs": [
+            {
+              "revokeMs": 21.934425999999995,
+              "listingMs": 6.796277999999994,
+              "listings": 25
+            },
+            {
+              "revokeMs": 14.620835999999997,
+              "listingMs": 7.40217100000001,
+              "listings": 25
+            },
+            {
+              "revokeMs": 12.769781000000009,
+              "listingMs": 7.322394000000003,
+              "listings": 25
+            }
+          ]
+        },
+        {
+          "entries": 10000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 101.2,
+          "listingMs": 83.2,
+          "listingShare": 0.82,
+          "runs": [
+            {
+              "revokeMs": 111.74055899999996,
+              "listingMs": 98.15651400000002,
+              "listings": 25
+            },
+            {
+              "revokeMs": 101.17473299999995,
+              "listingMs": 83.181963,
+              "listings": 25
+            },
+            {
+              "revokeMs": 83.77144500000009,
+              "listingMs": 69.75690099999997,
+              "listings": 25
+            }
+          ]
+        },
+        {
+          "entries": 50000,
+          "batch": 25,
+          "directoryListings": 25,
+          "revokeBatchMs": 354.3,
+          "listingMs": 315.4,
+          "listingShare": 0.89,
+          "runs": [
+            {
+              "revokeMs": 358.38699199999996,
+              "listingMs": 323.329888,
+              "listings": 25
+            },
+            {
+              "revokeMs": 354.30554800000004,
+              "listingMs": 315.3655219999996,
+              "listings": 25
+            },
+            {
+              "revokeMs": 348.33007499999985,
+              "listingMs": 314.33020199999964,
+              "listings": 25
+            }
+          ]
+        }
+      ]
+    },
+    "tmpfs-after": {
+      "checkout": "this branch (after)",
+      "runtime": "bun 1.4.4",
+      "filesystem": "tmpfs",
+      "results": [
+        {
+          "entries": 1000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 5.2,
+          "listingMs": 0.3,
+          "listingShare": 0.06,
+          "runs": [
+            {
+              "revokeMs": 6.506087999999998,
+              "listingMs": 0.3843119999999942,
+              "listings": 1
+            },
+            {
+              "revokeMs": 4.682130000000001,
+              "listingMs": 0.2581350000000029,
+              "listings": 1
+            },
+            {
+              "revokeMs": 5.239084999999996,
+              "listingMs": 0.32817999999998904,
+              "listings": 1
+            }
+          ]
+        },
+        {
+          "entries": 10000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 6.8,
+          "listingMs": 2.7,
+          "listingShare": 0.39,
+          "runs": [
+            {
+              "revokeMs": 6.439364999999995,
+              "listingMs": 2.6645619999999894,
+              "listings": 1
+            },
+            {
+              "revokeMs": 6.800171000000006,
+              "listingMs": 2.5841369999999984,
+              "listings": 1
+            },
+            {
+              "revokeMs": 9.335001000000005,
+              "listingMs": 4.123709000000019,
+              "listings": 1
+            }
+          ]
+        },
+        {
+          "entries": 50000,
+          "batch": 25,
+          "directoryListings": 1,
+          "revokeBatchMs": 17.7,
+          "listingMs": 12,
+          "listingShare": 0.68,
+          "runs": [
+            {
+              "revokeMs": 17.74500900000004,
+              "listingMs": 11.351298999999983,
+              "listings": 1
+            },
+            {
+              "revokeMs": 17.849409000000037,
+              "listingMs": 12.376810000000091,
+              "listings": 1
+            },
+            {
+              "revokeMs": 17.21852100000001,
+              "listingMs": 11.997601000000031,
+              "listings": 1
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

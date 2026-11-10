@@ -79,6 +79,11 @@ export class FileResolver {
     await this.localStore?.revoke(String(fileId));
   }
 
+  /** Revokes several local files with one directory listing; returns the IDs that failed with their errors. */
+  async revokeLocalFiles(fileIds: readonly FileRow["id"][]): Promise<Map<string, unknown>> {
+    return await this.localStore?.revokeMany(fileIds.map(String)) ?? new Map();
+  }
+
   /** Removes staging copies stranded by writers that died after their key was revoked. */
   async sweepRevokedStaging(): Promise<number> {
     return await this.localStore?.sweepFencedStaging() ?? 0;
