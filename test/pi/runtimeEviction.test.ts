@@ -224,6 +224,29 @@ describe("Pi runtime cache ownership", () => {
     } finally { dispose.mockRestore(); }
   });
 
+  it("never leaks a session when a stale cached runtime is revalidated concurrently", async () => {
+    const h = await harness();
+    const target = await h.thread();
+    // An empty session has no transcript file, so a cached copy is stale on every reacquisition.
+    const old = await h.manager.acquireRuntime(target, h.user);
+    await old.release();
+    expect(h.cache().get(target.id)).toBe(old.runtime);
+    const created = vi.spyOn(AgentSession.prototype, "dispose");
+    try {
+      const leases = await Promise.all([h.manager.acquireRuntime(target, h.user), h.manager.acquireRuntime(target, h.user)]);
+      const sessions = new Set([old.runtime.session, ...leases.map(lease => lease.runtime.session)]);
+      // Owned runtimes stay usable and pinned while their owners work, whichever generation they are.
+      expect(created.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(leases.every(lease => (lease.runtime as unknown as { disposed: boolean }).disposed === false)).toBe(true);
+      expect(h.cache().get(target.id)).toBe(leases.find(lease => lease.runtime === h.cache().get(target.id))?.runtime);
+      for (const lease of leases) await lease.release();
+      await h.manager.dispose();
+      // Every runtime ever created was either in the cache at shutdown or disposed after its last owner.
+      expect(new Set(created.mock.instances)).toEqual(sessions);
+      expect(created.mock.calls).toHaveLength(sessions.size);
+    } finally { created.mockRestore(); }
+  });
+
   it("does not hand out a runtime whose eviction cleanup is still running, nor let it remove its replacement", async () => {
     const h = await harness();
     const [victim] = await h.fill(CACHE_LIMIT);

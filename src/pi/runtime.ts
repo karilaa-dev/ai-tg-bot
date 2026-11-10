@@ -204,16 +204,22 @@ export class PiRuntimeManager implements PiRuntimeService {
     for (let pending = this.settling.get(thread.id); pending; pending = this.settling.get(thread.id)) await pending;
     const cached = this.runtimes.get(thread.id);
     if (!cached) return this.track(thread.id, this.createRuntime(thread, user));
+    // Active sessions own their in-flight state. Durable thread ownership
+    // serializes ordinary turns and barrier operations before this idle path.
+    if (!cached.session.isIdle) {
+      cached.lastUsedAt = Date.now();
+      return this.pin(cached);
+    }
+    // Revalidation may replace the runtime, so it runs as the thread's single in-flight creation: a concurrent
+    // caller waits for it and then revalidates whatever it left in the cache, never the entry it replaced.
+    return this.track(thread.id, this.revalidateRuntime(cached, thread, user));
+  }
+
+  private async revalidateRuntime(cached: CachedRuntime, thread: ThreadRow, user: UserRow): Promise<PiRuntimeLease> {
     // Pin before the first await so no other request can evict the entry while it is revalidated.
     const lease = this.pin(cached);
     let persistedSession: SessionManager;
     try {
-      // Active sessions own their in-flight state. Durable thread ownership
-      // serializes ordinary turns and barrier operations before this idle path.
-      if (!cached.session.isIdle) {
-        cached.lastUsedAt = Date.now();
-        return lease;
-      }
       // A barrier caller may have captured its row before another worker created
       // the transcript. Always use the current persisted session pointer.
       thread = await this.input.repos.threads.get(thread.id) ?? thread;
@@ -233,7 +239,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     // Another owner appended or compacted this session while our cache was
     // idle. Rebuild Pi's agent state and active tools from that transcript.
     this.retire(thread.id, cached);
-    return this.track(thread.id, this.createRuntime(thread, user, { stale: lease, persistedSession }));
+    return this.createRuntime(thread, user, { stale: lease, persistedSession });
   }
 
   private async createRuntime(
