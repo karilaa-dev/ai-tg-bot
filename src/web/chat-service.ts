@@ -2,6 +2,7 @@ import type { ChatScheduleInput, ChatSchedulePatch } from "../scheduling/types.j
 import type { Api } from "grammy";
 import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
+import type { SqlExecutor } from "../db/sql.js";
 import type { ApplicationServices } from "../application/services.js";
 import { ConversationService } from "../application/conversations.js";
 import { telegramConversationLink } from "../telegram/conversationLink.js";
@@ -143,6 +144,7 @@ export class BotChatService implements ChatService {
     const prepared: Awaited<ReturnType<typeof ingestFileBytes>>[] = [];
     const createdIds: FileRow["id"][] = [];
     let settled = false;
+    let unresolved = false;
     try {
       for (const file of files) {
         await budget!.beforeWrite(file.size);
@@ -184,22 +186,42 @@ export class BotChatService implements ChatService {
         // stays recorded in the database and is retried by recovery.
         for (const id of createdIds) {
           const deleted = await this.repos.files.deleteFileIfUnattached(id, tx => budget!.queueFileCleanup(tx, id));
-          // A missing row means recovery already reclaimed the file; any bytes written since are ours to remove.
-          if (deleted || !await this.repos.files.get(id)) {
-            try {
-              await this.input.services.fileResolver.removeLocalFile(id);
-              await budget!.fileCleaned(id);
-            } catch (error) {
-              this.input.services.logger.warn("upload file removal will be retried", { fileId: id, error: String(error) });
+          // An attached file belongs to an accepted message and is never removed.
+          if (!deleted && await this.repos.files.get(id)) continue;
+          // A missing row means recovery already reclaimed the file and may have forgotten its ownership, so any
+          // bytes written since need their own durable record before removal can fail.
+          const recorded = deleted || await this.recordFileCleanup(budget!, id);
+          try {
+            await this.input.services.fileResolver.removeLocalFile(id);
+            if (recorded) await budget!.fileCleaned(id);
+          } catch (error) {
+            if (recorded) this.input.services.logger.warn("upload file removal will be retried", { fileId: id, error: String(error) });
+            else {
+              this.input.services.logger.error("upload file removal failed and could not be recorded for retry", { fileId: id, error: String(error) });
+              unresolved = true;
             }
           }
         }
-        settled = true;
+        settled = !unresolved;
       } finally {
         // Unresolved ownership is left to expire so recovery finishes it, instead of being forgotten.
         if (settled) await budget?.release(); else budget?.abandon();
       }
     }
+  }
+
+  /** Retries briefly: this is the last chance to keep the removal owed if the file can't be deleted right now. */
+  private async recordFileCleanup(budget: { queueFileCleanup(tx: SqlExecutor, fileId: string): Promise<unknown> }, fileId: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await budget.queueFileCleanup(this.input.services.db.db, fileId);
+        return true;
+      } catch (error) {
+        this.input.services.logger.warn("could not record upload cleanup", { fileId, attempt, error: String(error) });
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 50 * attempt));
+      }
+    }
+    return false;
   }
 
   async stop(userId: number, threadId: ThreadRow["id"]): Promise<void> {

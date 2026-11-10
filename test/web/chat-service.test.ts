@@ -418,6 +418,72 @@ describe("shared web and Telegram conversations", () => {
     for (const table of ["web_upload_items", "web_upload_cleanup"]) expect(await env.db.db.query(sql.raw(`select * from ${table}`)), table).toEqual([]);
   });
 
+  /** The original writer publishes its bytes only after recovery reclaimed its file and forgot its ownership. */
+  async function reclaimedWhileWriting(faults: { failFirstRemoval?: boolean; refuseRecording?: boolean; failEveryRemoval?: boolean }) {
+    const recovery = new UploadRecovery({ db: env.db.db, config: env.config, removeFile: id => env.services.fileResolver.removeLocalFile(id) });
+    const thread = await chat.createThread(env.user.id, "Orphan");
+    const written = deferred<void>();
+    const resume = deferred<void>();
+    const persist = env.services.fileResolver.persistFile.bind(env.services.fileResolver);
+    vi.spyOn(env.services.fileResolver, "persistFile").mockImplementationOnce(async (...args) => {
+      written.resolve();
+      await resume.promise;
+      return persist(...args);
+    });
+    const remove = env.services.fileResolver.removeLocalFile.bind(env.services.fileResolver);
+    let removals = 0;
+    // Recovery below must keep using the real removal; only the request's own attempts are faulty.
+    const faulty = vi.spyOn(env.services.fileResolver, "removeLocalFile").mockImplementation(async id => {
+      removals++;
+      if (faults.failEveryRemoval || (faults.failFirstRemoval && removals === 1)) throw new Error("EIO: transient");
+      return remove(id);
+    });
+    const pending = chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [new File(["12345678"], "orphan.bin")] });
+    const outcome = expect(pending).rejects.toBeDefined();
+    await written.promise;
+    await env.db.db.execute(sql`update web_upload_reservations set expires_at = 0`);
+    faulty.mockImplementation(remove);
+    await recovery.recover();
+    expect(await env.db.db.query(sql`select * from web_upload_items`)).toEqual([]);
+    removals = 0;
+    faulty.mockImplementation(async id => {
+      removals++;
+      if (faults.failEveryRemoval || (faults.failFirstRemoval && removals === 1)) throw new Error("EIO: transient");
+      return remove(id);
+    });
+    if (faults.refuseRecording) {
+      await env.db.db.execute(sql`create trigger refuse_cleanup before insert on web_upload_cleanup begin select raise(abort, 'database unavailable'); end`);
+    }
+    resume.resolve();
+    await outcome;
+    faulty.mockImplementation(remove);
+    return { recovery, files: () => readdir(env.config.FILE_STORAGE_PATH).then(entries => entries.filter(entry => !entry.startsWith("."))) };
+  }
+
+  it("keeps a durable retry for bytes published after recovery reclaimed the file, when removal fails transiently", async () => {
+    const { recovery, files } = await reclaimedWhileWriting({ failFirstRemoval: true });
+    // The request could not delete the orphan, but its ownership was recorded before it tried.
+    const orphan = await files();
+    expect(orphan).toHaveLength(1);
+    expect(await env.db.db.query(sql`select kind, target from web_upload_cleanup`)).toEqual([{ kind: "file", target: orphan[0] }]);
+    // Once the fault clears, recovery removes the orphan and the record.
+    await recovery.recover();
+    expect(await files()).toEqual([]);
+    expect(await env.db.db.query(sql`select * from web_upload_cleanup`)).toEqual([]);
+  });
+
+  it("still removes the orphan itself when its cleanup record cannot be written", async () => {
+    const { files } = await reclaimedWhileWriting({ refuseRecording: true });
+    expect(await files()).toEqual([]);
+  });
+
+  it("reports, rather than hides, an orphan that can be neither recorded nor removed", async () => {
+    const error = vi.spyOn(env.services.logger, "error");
+    const { files } = await reclaimedWhileWriting({ refuseRecording: true, failEveryRemoval: true });
+    expect(await files()).toHaveLength(1);
+    expect(error).toHaveBeenCalledWith("upload file removal failed and could not be recorded for retry", expect.objectContaining({ fileId: (await files())[0] }));
+  });
+
   it("releases failed upload reservations without leaving files or bytes behind", async () => {
     const thread = await chat.createThread(env.user.id, "Failure");
     await expect(chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [{ name: "broken.bin", size: 8, type: "", async arrayBuffer() { throw new Error("failed read"); } }] })).rejects.toThrow("failed read");
