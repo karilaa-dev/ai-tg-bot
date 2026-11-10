@@ -1,5 +1,6 @@
 import { fixtureUuid } from "./uuid-fixtures.js";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
@@ -32,6 +33,9 @@ try {
   let userId: number | null = null;
   let sessionReads = 0;
   let posts = 0;
+  let historyNotModified = 0;
+  let savedText = "A saved message";
+  const historyTime = Date.now();
   let holdSend: ReturnType<typeof deferred<Route>> | undefined;
   let holdCreate: ReturnType<typeof deferred<Route>> | undefined;
   let holdFork: ReturnType<typeof deferred<Route>> | undefined;
@@ -98,16 +102,23 @@ try {
         return;
       }
       const history: ChatHistory = {
-        user: { ...profile(userId), lastActivity: Date.now(), threadCount: 1 }, thread: thread(1, userId), chain: [],
+        user: { ...profile(userId), lastActivity: historyTime, threadCount: 1 }, thread: { ...thread(1, userId), lastActivity: historyTime }, chain: [],
         messages: [
-          { id: 1, threadId: fixtureUuid(1), role: "user", text: "A saved message", thinking: null, attachments: [], createdAt: Date.now(), telegramSyncFailed: true },
-          { id: 284, threadId: fixtureUuid(1), role: "assistant", text: "Restaurant comparison fallback", thinking: null, attachments: [], createdAt: Date.now(), openui: savedRestaurantOpenUi },
+          { id: 1, threadId: fixtureUuid(1), role: "user", text: savedText, thinking: null, attachments: [], createdAt: historyTime, telegramSyncFailed: true },
+          { id: 284, threadId: fixtureUuid(1), role: "assistant", text: "Restaurant comparison fallback", thinking: null, attachments: [], createdAt: historyTime, openui: savedRestaurantOpenUi },
         ],
         olderCursor: null, newerCursor: null, autoLoadMaxBytes: 0, maxFileBytes: MAX_FILE_BYTES,
         draft: { text: "**Live answer** <script>window.leaked = true</script>", thinking: "Thinking about the answer", toolActivity: { version: 1, omittedCalls: 0, reasoning: [],
           calls: [{ id: "tool-1", name: "web_search", status: "running", durationMs: null, args: { format: "json", text: JSON.stringify({ query: "<img src=x onerror=leaked=1>" }), truncated: false }, result: null }] } },
       };
-      return json(route, history);
+      // Mirror the server's conditional history responses.
+      const body = JSON.stringify(history);
+      const etag = `"${createHash("sha256").update(body).digest("base64url")}"`;
+      if (request.headers()["if-none-match"] === etag) {
+        historyNotModified++;
+        return route.fulfill({ status: 304, headers: { ETag: etag } });
+      }
+      return route.fulfill({ status: 200, contentType: "application/json", headers: { ETag: etag }, body });
     }
     throw new Error(`Unexpected fixture request: ${request.method()} ${url.pathname}`);
   });
@@ -149,6 +160,17 @@ try {
   assert.equal(await comparison.locator("td").count(), 16);
   assert(await page.getByText("Restaurant comparison fallback", { exact: true }).isVisible());
   assert.equal(await page.evaluate(() => Reflect.get(window, "leaked")), undefined);
+  // Unchanged polls are revalidated with 304 and keep the rendered history; a later in-place edit still appears.
+  const revalidated = historyNotModified;
+  for (let attempt = 0; historyNotModified === revalidated; attempt++) {
+    assert.ok(attempt < 50, "History polling never revalidated with If-None-Match");
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.waitForTimeout(100);
+  }
+  assert(await page.getByText("Restaurant comparison fallback", { exact: true }).isVisible());
+  savedText = "A saved message, edited after it was first shown";
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.getByText(savedText, { exact: true }).waitFor();
   // Live tool calls use the finished-response renderer with readable names.
   const live = page.getByRole("article", { name: "Assistant response in progress" });
   // Collapsed, the chain names the running step; expanded, it lists that call.
@@ -294,7 +316,7 @@ try {
 
   assert.deepEqual(errors, []);
   assert.deepEqual(remoteRequests, []);
-  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, deep-link sign-in, failed-send navigation/retry/files, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion`);
+  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, deep-link sign-in, failed-send navigation/retry/files, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion, 304 history revalidation`);
 } finally {
   server.kill("SIGTERM");
   await stopped;

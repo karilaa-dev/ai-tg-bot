@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { BunRequest, Server } from "bun";
 import { ScheduleError, ScheduleInputSchema, SchedulePatchSchema } from "../scheduling/types.js";
 import { z } from "zod";
@@ -144,7 +145,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           const before = query.has("before") ? integer(query.get("before")) : undefined;
           const after = query.has("after") ? integer(query.get("after")) : undefined;
           if (before !== undefined && after !== undefined) throw new WebHttpError(400, "Use either before or after.");
-          return Response.json({ ...await chat.history(userId, threadId, before, after), autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES });
+          return conditionalJson(request, JSON.stringify({ ...await chat.history(userId, threadId, before, after), autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES }));
         }),
         POST: user<"/api/chat/threads/:threadId/messages">(async (request, userId, chat) => {
           const threadId = await owned(request, userId, chat);
@@ -205,6 +206,18 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
     },
     async drain() { await Promise.allSettled([...tasks]); },
   };
+}
+
+/**
+ * Polling repeats identical history, so the client sends back the ETag of its
+ * last copy and gets an empty 304 when nothing changed. The tag hashes the
+ * whole body after authorization, so any mutation, including in-place edits,
+ * produces a new tag. Responses stay no-store; only the page keeps the copy.
+ */
+export function conditionalJson(request: Request, body: string): Response {
+  const etag = `"${createHash("sha256").update(body).digest("base64url")}"`;
+  if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+  return new Response(body, { headers: { "Content-Type": "application/json;charset=utf-8", ETag: etag } });
 }
 
 function integer(value: string | null, fallback?: number): number {

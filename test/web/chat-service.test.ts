@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { GrammyError } from "grammy";
 import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emulate.js";
 import { BotChatService } from "../../src/web/chat-service.js";
+import { conditionalJson } from "../../src/web/chat-routes.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
@@ -541,6 +542,32 @@ describe("shared web and Telegram conversations", () => {
     await env.db.initialize();
     expect((await env.repos.threads.get(thread.id))?.origin).toBe("web");
     expect((await chat.send(env.user.id, thread.id, input)).turnId).toBe(sent.turnId);
+  });
+
+  it("changes the conditional history tag for every in-place change a poll must deliver", async () => {
+    const thread = await chat.createThread(env.user.id, "Mutable history");
+    const user = await env.repos.messages.insert({ threadId: thread.id, role: "user", content: { text: "question" }, textPlain: "question" });
+    const reply = await env.repos.messages.insert({ threadId: thread.id, role: "assistant", content: { text: "draft answer" }, textPlain: "draft answer" });
+    const now = Date.now();
+    const action = await env.repos.messages.insert({ threadId: thread.id, role: "system", kind: "system",
+      content: { action: { kind: "compaction", status: "running", requestedAt: now, startedAt: now, updatedAt: now } }, textPlain: "Compacting" });
+    const tag = async () => conditionalJson(new Request("http://local.invalid"), JSON.stringify(await chat.history(env.user.id, thread.id, undefined, user.id)))
+      .headers.get("ETag");
+    const seen = new Set<string | null>([await tag()]);
+    expect(await tag()).toBe([...seen][0]);
+    const changes: Array<() => Promise<unknown>> = [
+      () => env.repos.messages.setDeliveryContent({ messageId: reply.id, content: { text: "final answer" }, textPlain: "final answer", tgMessageId: null }),
+      () => env.repos.files.insertFile({ userId: env.user.id, threadId: thread.id, messageId: reply.id, type: "txt", name: "late.txt", size: 4, contentMd: "late", isInline: true }),
+      () => env.repos.messages.setDeliveryContent({ messageId: action.id, content: { action: { kind: "compaction", status: "succeeded", requestedAt: now,
+        startedAt: now, finishedAt: now + 1, updatedAt: now + 1, messagesCompacted: 2 } }, textPlain: "Compacted", tgMessageId: null }),
+      () => env.repos.threadReads.markRead(env.user.id, thread.id, reply.id),
+    ];
+    for (const change of changes) {
+      await change();
+      const next = await tag();
+      expect(seen.has(next)).toBe(false);
+      seen.add(next);
+    }
   });
 
   it("exposes a live draft only to the owner and removes it when the answer is persisted", async () => {

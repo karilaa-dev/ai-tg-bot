@@ -461,6 +461,35 @@ it("releases an upload slot after a malformed upload or a failed acceptance", as
   expect((await upload(cookie, 42, fixtureUuid(1), "request_upload_next")).status).toBe(202);
 });
 
+it("answers an unchanged history poll with an empty 304 only after authorization", async () => {
+  const cookie = await login();
+  const headers = { ...mutation, Cookie: cookie };
+  const path = `/api/chat/threads/${fixtureUuid(1)}/messages?after=5`;
+  const first = await request(path, { headers });
+  expect(first.status).toBe(200);
+  const etag = first.headers.get("ETag")!;
+  expect(etag).toMatch(/^"[A-Za-z0-9_-]{43}"$/);
+  const body = await first.json() as { thread: { id: string } };
+  expect(body.thread.id).toBe(fixtureUuid(1));
+
+  const same = await request(path, { headers: { ...headers, "If-None-Match": etag } });
+  expect(same.status).toBe(304);
+  expect(await same.text()).toBe("");
+  expect(same.headers.get("ETag")).toBe(etag);
+  expect(same.headers.get("Cache-Control")).toBe("no-store");
+  // Authorization and the account assertion still run before any 304.
+  expect((await request(path, { headers: { ...mutation, "If-None-Match": etag } })).status).toBe(401);
+  expect((await request(path, { headers: { ...headers, "X-Chat-User": "84", "If-None-Match": etag } })).status).toBe(401);
+  expect((await request(`/api/chat/threads/${fixtureUuid(2)}/messages?after=5`, { headers: { ...headers, "If-None-Match": etag } })).status).toBe(404);
+  // Any change to the projected history, such as an edited message, is a new body and tag.
+  chat.history = vi.fn(async (userId, threadId) => ({ thread: thread(threadId), user: { ...profile(userId), lastActivity: 2, threadCount: 1 }, chain: [],
+    messages: [], olderCursor: null, newerCursor: null, autoLoadMaxBytes: 0, maxFileBytes: 0 }));
+  const changed = await request(path, { headers: { ...headers, "If-None-Match": etag } });
+  expect(changed.status).toBe(200);
+  expect(changed.headers.get("ETag")).not.toBe(etag);
+  expect(((await changed.json()) as { user: { lastActivity: number } }).user.lastActivity).toBe(2);
+});
+
 it("shares the read budget with authenticated session profile queries", async () => {
   const cookie = await login();
   const headers = { Cookie: cookie, "X-Chat-User": "42" };
