@@ -148,11 +148,13 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         }),
         POST: user<"/api/chat/threads/:threadId/messages">(async (request, userId, chat) => {
           const threadId = await owned(request, userId, chat);
+          // Text is small, size-bounded JSON under the write rate limit, so it never waits for an upload slot.
+          if (!isMultipart(request)) return Response.json(await chat.send(userId, threadId, await textInput(request)), { status: 202 });
           if (submitting.has(userId)) throw new WebHttpError(429, "Your previous message is still being accepted. Try again shortly.", { "Retry-After": "1" });
           if (submitting.size >= 3) throw new WebHttpError(503, "Other uploads are processing. Try again shortly.");
           submitting.add(userId);
           try {
-            const input = await sendInput(request, userId, options);
+            const input = await uploadInput(request, userId, options);
             try { return Response.json(await chat.send(userId, threadId, input.value), { status: 202 }); }
             finally { await input.dispose(); }
           }
@@ -212,18 +214,24 @@ function integer(value: string | null, fallback?: number): number {
   if (!Number.isSafeInteger(number) || number < (fallback === undefined ? 1 : 0)) throw new WebHttpError(400, "Invalid pagination value or ID.");
   return number;
 }
+function mediaType(request: Request): string | undefined {
+  return request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
+}
+function isMultipart(request: Request): boolean {
+  return mediaType(request) === "multipart/form-data";
+}
 async function json(request: Request): Promise<unknown> {
-  if (request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") throw new WebHttpError(415, "Send JSON.");
+  if (mediaType(request) !== "application/json") throw new WebHttpError(415, "Send JSON.");
   const body = await readBoundedBody(request, MAX_JSON_BYTES);
   try { return JSON.parse(body); }
   catch { throw new WebHttpError(400, "Invalid JSON."); }
 }
-async function sendInput(request: Request, userId: number, options: WebServerOptions): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
-  if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data;")) {
-    const input = SendSchema.parse(await json(request));
-    if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
-    return { value: input, async dispose() {} };
-  }
+async function textInput(request: Request): Promise<Parameters<ChatService["send"]>[2]> {
+  const input = SendSchema.parse(await json(request));
+  if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
+  return input;
+}
+async function uploadInput(request: Request, userId: number, options: WebServerOptions): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
   const instance = await uploadStorageInstance(options.config.FILE_STORAGE_PATH);
   const { dispose, ...value } = await readChatUpload(request, options.db, userId, options.config.WEB_UPLOAD_MIN_FREE_BYTES, instance);
   return { value, dispose };

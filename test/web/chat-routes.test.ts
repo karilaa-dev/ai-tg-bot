@@ -368,7 +368,7 @@ it("rate-limits read acknowledgements per verified account", async () => {
   expect(chat.markRead).toHaveBeenCalledTimes(30);
 });
 
-it("holds a user's submission slot through ingestion while admitting another user's message", async () => {
+it("holds a user's upload slot through ingestion while admitting another user's upload", async () => {
   const a = await login(42);
   const b = await login(84);
   let release = () => {};
@@ -379,7 +379,7 @@ it("holds a user's submission slot through ingestion while admitting another use
     if (userId === 42) { entered(); await held; }
     return { turnId: 1, messageId: 1, queued: false };
   });
-  const send = (cookie: string, threadId: string, requestId: string) => request(`/api/chat/threads/${threadId}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookie, "X-Chat-User": cookie === a ? "42" : "84" }, body: JSON.stringify({ text: "hello", requestId }) });
+  const send = (cookie: string, threadId: string, requestId: string) => upload(cookie, cookie === a ? 42 : 84, threadId, requestId);
   const first = send(a, fixtureUuid(1), "request_first_123");
   try {
     await started;
@@ -390,6 +390,75 @@ it("holds a user's submission slot through ingestion while admitting another use
   } finally { release(); }
   expect((await first).status).toBe(202);
   expect((await send(a, fixtureUuid(1), "request_after_123")).status).toBe(202);
+});
+
+function upload(cookie: string, userId: number, threadId: string, requestId: string) {
+  const form = new FormData();
+  form.set("text", "with a file");
+  form.set("requestId", requestId);
+  form.append("files", new File(["bytes"], "note.txt", { type: "text/plain" }));
+  return request(`/api/chat/threads/${threadId}/messages`, { method: "POST",
+    headers: { "X-Chat-Request": "1", "X-Chat-User": String(userId), Origin: publicOrigin, "Sec-Fetch-Site": "same-origin", Cookie: cookie }, body: form });
+}
+
+function sendText(cookie: string, userId: number, threadId: string, requestId: string, contentType = "application/json") {
+  return request(`/api/chat/threads/${threadId}/messages`, { method: "POST",
+    headers: { ...mutation, "Content-Type": contentType, "X-Chat-User": String(userId), Cookie: cookie }, body: JSON.stringify({ text: "plain text", requestId }) });
+}
+
+it("accepts text while uploads hold every upload slot, and still bounds uploads", async () => {
+  const owners = [42, 84, 126, 168];
+  for (const id of [126, 168]) await access.allow(id);
+  const third = fixtureUuid(3);
+  const threads: Record<number, string> = { 42: fixtureUuid(1), 84: fixtureUuid(2), 126: fixtureUuid(4), 168: fixtureUuid(5) };
+  chat.profile = vi.fn(async id => { if (!owners.includes(id)) throw new WebNotFound(); return profile(id); });
+  chat.requireThread = vi.fn(async (userId, threadId) => {
+    if (threads[userId] !== threadId && !(userId === 42 && threadId === third)) throw new WebNotFound();
+  });
+  const cookies: Record<number, string> = {};
+  for (const id of owners) cookies[id] = await login(id);
+  const releases: Array<() => void> = [];
+  let entered = 0;
+  const allHeld = new Promise<void>(resolve => {
+    chat.send = vi.fn(async (_userId, _threadId, input) => {
+      if ("files" in input && input.files?.length && entered < 3) {
+        entered += 1;
+        if (entered === 3) resolve();
+        await new Promise<void>(done => releases.push(done));
+      }
+      return { turnId: 1, messageId: 1, queued: false };
+    });
+  });
+  const uploads = [42, 84, 126].map((id, index) => upload(cookies[id]!, id, threads[id]!, `request_upload_${index}0000`));
+  try {
+    await allHeld;
+    // The same user writes in another of their conversations while their upload is still held.
+    expect((await sendText(cookies[42]!, 42, third, "request_text_same_user")).status).toBe(202);
+    expect((await sendText(cookies[42]!, 42, threads[42]!, "request_text_same_thread", "Application/JSON; charset=utf-8")).status).toBe(202);
+    // Another user is not blocked by three active uploads.
+    expect((await sendText(cookies[168]!, 168, threads[168]!, "request_text_other_user")).status).toBe(202);
+    // Uploads remain bounded per user and globally.
+    expect((await upload(cookies[42]!, 42, third, "request_upload_again")).status).toBe(429);
+    const fourth = await upload(cookies[168]!, 168, threads[168]!, "request_upload_fourth");
+    expect(fourth.status).toBe(503);
+    // Text keeps its JSON validation and size limits.
+    expect((await request(`/api/chat/threads/${third}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookies[42]! }, body: "{" })).status).toBe(400);
+    expect((await request(`/api/chat/threads/${third}/messages`, { method: "POST", headers: { ...mutation, Cookie: cookies[42]! }, body: "x".repeat(256 * 1024 + 1) })).status).toBe(413);
+  } finally { for (const release of releases) release(); }
+  for (const response of await Promise.all(uploads)) expect(response.status).toBe(202);
+  expect((await upload(cookies[168]!, 168, threads[168]!, "request_upload_later")).status).toBe(202);
+});
+
+it("releases an upload slot after a malformed upload or a failed acceptance", async () => {
+  const cookie = await login(42);
+  const headers = { "X-Chat-Request": "1", "X-Chat-User": "42", Origin: publicOrigin, "Sec-Fetch-Site": "same-origin", Cookie: cookie };
+  const malformed = await request(`/api/chat/threads/${fixtureUuid(1)}/messages`, { method: "POST",
+    headers: { ...headers, "Content-Type": "multipart/form-data; boundary=missing" }, body: "not multipart" });
+  expect(malformed.status).toBe(400);
+  chat.send = vi.fn().mockRejectedValueOnce(new ConversationError(409, "Fork this archived conversation to continue it."))
+    .mockResolvedValue({ turnId: 1, messageId: 1, queued: false });
+  expect((await upload(cookie, 42, fixtureUuid(1), "request_upload_fail")).status).toBe(409);
+  expect((await upload(cookie, 42, fixtureUuid(1), "request_upload_next")).status).toBe(202);
 });
 
 it("shares the read budget with authenticated session profile queries", async () => {
