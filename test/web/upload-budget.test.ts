@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -181,16 +181,33 @@ describe("storage identity", () => {
 
   it("makes concurrent first starters in separate processes agree on one identity", async () => {
     const root = path.resolve(import.meta.dirname, "../..");
+    // Each child loads the module, announces it is ready, and only initializes once released, so all six are
+    // alive and racing on the same fresh volume at the same moment.
     const script = `const { uploadStorageInstance } = await import(process.env.ROOT + "/src/web/upload-budget.js");
-      console.log(await uploadStorageInstance(process.env.VOLUME));`;
-    const children = await Promise.all(Array.from({ length: 6 }, () => new Promise<{ status: number | null; stdout: string }>(resolve => {
-      resolve(spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { ...process.env, ROOT: root, VOLUME: volume() } }));
-    })));
-    expect(children.map(child => child.status)).toEqual([0, 0, 0, 0, 0, 0]);
-    const identities = new Set(children.map(child => child.stdout.trim()));
+      console.log("ready");
+      await new Promise(resolve => process.stdin.once("data", resolve));
+      process.stdout.write("identity " + await uploadStorageInstance(process.env.VOLUME) + "\\n", () => process.exit(0));`;
+    const children = Array.from({ length: 6 }, () => {
+      const child = spawn(process.execPath, ["-e", script], { env: { ...process.env, ROOT: root, VOLUME: volume() }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      const ready = new Promise<void>(resolve => child.stdout.on("data", chunk => { stdout += chunk; if (stdout.includes("ready")) resolve(); }));
+      child.stderr.on("data", chunk => { stderr += chunk; });
+      const exited = new Promise<{ status: number | null; identity: string; stderr: string }>(resolve => child.on("close", status =>
+        resolve({ status, identity: /identity (\S+)/.exec(stdout)?.[1] ?? "", stderr })));
+      return { child, ready, exited };
+    });
+    await Promise.all(children.map(entry => entry.ready));
+    // Nothing exists yet: every child is waiting at the barrier before the first creation.
+    expect(await readdir(directory).then(entries => entries.includes("volume"))).toBe(false);
+    for (const { child } of children) child.stdin.write("go\n");
+    const results = await Promise.all(children.map(entry => entry.exited));
+    expect(results.map(result => [result.status, result.stderr])).toEqual(Array.from({ length: 6 }, () => [0, ""]));
+    const identities = new Set(results.map(result => result.identity));
     expect(identities.size).toBe(1);
     expect([...identities][0]).toMatch(uuid);
     expect(await readFile(marker(), "utf8")).toBe(`${[...identities][0]}\n`);
+    expect((await stat(marker())).mode & 0o777).toBe(0o600);
     expect(await readdir(volume())).toEqual([".upload-instance"]);
   });
 });
