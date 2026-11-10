@@ -197,7 +197,7 @@ Browser creation passes no custom proxy, sets `proxyCountryCode` to `null`, and 
 
 `browser_open` accepts 5 to 240 minutes for a new session. `browser_extend_session` replaces the active session with a longer one, using the same profile and restoring owned URLs, scroll positions, and tab IDs. Form values and other transient JavaScript state do not survive that replacement. `browser_close_session` stops billing and saves profile state.
 
-Screenshots normally use a desktop viewport and go to Telegram as photos. Full-page capture and document delivery happen only when the user asks for them. Browser downloads bypass E2B, accept all file formats, enforce size limits, and refuse URLs that resolve to private or local addresses.
+Screenshots normally use a desktop viewport and go to Telegram as photos. Full-page capture and document delivery happen only when the user asks for them. Browser downloads bypass E2B, accept all file formats, enforce size limits, and refuse URLs that resolve to private or local addresses. A download is sent only when it can be attributed to the requesting thread's tab; if another tab in the shared session downloaded a file with the same name, it is reported as ambiguous instead (see [browser download identity](docs/browser-download-identity.md)).
 
 Keep the Browser Use key in `.env`. Client errors redact it.
 

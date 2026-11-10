@@ -357,27 +357,29 @@ export class BrowserUseRuntimeManager {
   ): Promise<Record<string, unknown>> {
     return this.withTab(userId, threadId, tabId, signal, async (session) => {
       const files = await this.allDownloads(session, false, signal);
-      const hints = session.downloadHints.filter((hint) => hint.tabId === tabId);
-      const used = new Set<string>();
-      const matched = hints.flatMap((hint) => {
-        const file = files.find((candidate) => {
-          if (used.has(candidate.path) || path.posix.basename(candidate.path) !== hint.filename) return false;
-          const modified = Date.parse(candidate.lastModified);
-          return !Number.isFinite(modified) || modified >= hint.startedAt - 10_000;
-        });
-        if (!file) return [];
-        used.add(file.path);
-        return [file];
-      });
-      session.downloadSelections.set(tabId, matched.map((file) => file.path));
+      const { owned, ambiguous } = tabDownloads(session.downloadHints, tabId, files);
+      // Keep earlier indexes pointing at the same files when the provider reorders its listing.
+      const previous = session.downloadSelections.get(tabId) ?? [];
+      const ownedPaths = new Map(owned.map((file) => [file.path, file]));
+      const ordered = [
+        ...previous.flatMap((selected) => ownedPaths.get(selected) ?? []),
+        ...owned.filter((file) => !previous.includes(file.path)),
+      ];
+      session.downloadSelections.set(tabId, ordered.map((file) => file.path));
       return {
         tab_id: tabId,
-        downloads: matched.map((file, downloadIndex) => ({
+        downloads: ordered.map((file, downloadIndex) => ({
           download_index: downloadIndex,
           filename: path.posix.basename(file.path),
           size: file.size,
           state: "complete",
         })),
+        ...ambiguous.length ? {
+          ambiguous_downloads: ambiguous.map((filename) => ({
+            filename,
+            reason: "Another tab in this browser session downloaded a file with the same name, so this file cannot be attributed to this tab. Download it again with a distinct name, or open its source URL in this tab and save it under a new name.",
+          })),
+        } : {},
         session_remaining_seconds: remainingSeconds(session),
       };
     });
@@ -395,8 +397,12 @@ export class BrowserUseRuntimeManager {
       const selectedPath = session.downloadSelections.get(tabId)?.[downloadIndex];
       if (!selectedPath) throw new BrowserUseRuntimeError("stale_download", "List browser downloads again before sending this file.");
       const files = await this.allDownloads(session, true, signal);
-      const file = files.find((candidate) => candidate.path === selectedPath);
-      if (!file?.url) throw new BrowserUseRuntimeError("download_unavailable", "Browser download URL is unavailable or expired.");
+      // Ownership is checked again: a same-named download may have started in another tab since listing.
+      const file = tabDownloads(session.downloadHints, tabId, files).owned.find((candidate) => candidate.path === selectedPath);
+      if (!file) {
+        throw new BrowserUseRuntimeError("ambiguous_download", "This download can no longer be attributed to this tab because another tab downloaded a file with the same name. List browser downloads again.");
+      }
+      if (!file.url) throw new BrowserUseRuntimeError("download_unavailable", "Browser download URL is unavailable or expired.");
       return { url: file.url, filename: path.posix.basename(file.path) };
     });
   }
@@ -824,6 +830,32 @@ export class BrowserUseRuntimeManager {
     }
     return files;
   }
+}
+
+/**
+ * Browser Use lists downloads only by path, and Playwright over CDP exposes no
+ * identity that maps a download event to that path. A file is attributed to a
+ * tab only when every download event with its name in this session came from
+ * that tab and there are no more files with the name than such events.
+ * Anything else is reported as ambiguous instead of guessed.
+ */
+function tabDownloads(hints: DownloadHint[], tabId: string, files: BrowserUseDownload[]): { owned: BrowserUseDownload[]; ambiguous: string[] } {
+  const owned: BrowserUseDownload[] = [];
+  const ambiguous: string[] = [];
+  const names = [...new Set(hints.filter((hint) => hint.tabId === tabId).map((hint) => hint.filename))];
+  for (const filename of names) {
+    const named = hints.filter((hint) => hint.filename === filename);
+    const earliest = Math.min(...named.map((hint) => hint.startedAt));
+    const candidates = files.filter((file) => {
+      if (path.posix.basename(file.path) !== filename) return false;
+      const modified = Date.parse(file.lastModified);
+      return !Number.isFinite(modified) || modified >= earliest - 10_000;
+    });
+    if (!candidates.length) continue;
+    if (named.some((hint) => hint.tabId !== tabId) || candidates.length > named.length) ambiguous.push(filename);
+    else owned.push(...candidates);
+  }
+  return { owned, ambiguous };
 }
 
 function targetLocator(tab: TabState, target: { ref?: string; selector?: string }) {

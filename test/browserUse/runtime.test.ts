@@ -265,6 +265,94 @@ describe("BrowserUseRuntimeManager", () => {
     });
   });
 
+  describe("download ownership", () => {
+    type File = { path: string; size: number; lastModified: string; url?: string };
+    async function twoTabs() {
+      const fixture = await runtimeFixture();
+      await fixture.manager.beginTurn(7, THREAD_ID);
+      await fixture.manager.beginTurn(7, OTHER_THREAD_ID);
+      const first = fixture.manager.forThread(7, THREAD_ID);
+      const second = fixture.manager.forThread(7, OTHER_THREAD_ID);
+      const a = await first.open("https://example.com/a") as { tab_id: string };
+      const b = await second.open("https://example.com/b") as { tab_id: string };
+      const pages = fixture.browsers[0]!.context.pageList as unknown as FakePage[];
+      const page = (url: string) => pages.find(item => item.currentUrl === url)!;
+      let files: File[] = [];
+      fixture.api.listDownloads.mockImplementation(async (_id: string, input?: { includeUrls?: boolean; cursor?: string }) => {
+        const pageSize = 2, start = Number(input?.cursor ?? 0);
+        const slice = files.slice(start, start + pageSize).map(file => input?.includeUrls ? { ...file, url: `https://files.example/${file.path}?sig=${file.size}` } : { ...file, url: undefined });
+        const more = start + pageSize < files.length;
+        return { files: slice, hasMore: more, nextCursor: more ? String(start + pageSize) : null };
+      });
+      const now = new Date().toISOString();
+      const setFiles = (next: Array<[string, number]>) => { files = next.map(([path, size]) => ({ path, size, lastModified: now })); };
+      return { fixture, first, second, a: a.tab_id, b: b.tab_id, pageA: page("https://example.com/a"), pageB: page("https://example.com/b"), setFiles };
+    }
+
+    it("refuses a filename that two threads' tabs downloaded instead of guessing", async () => {
+      const { first, second, a, b, pageA, pageB, setFiles } = await twoTabs();
+      pageA.emitDownload("report.pdf");
+      pageB.emitDownload("report.pdf");
+      setFiles([["report.pdf", 10], ["unrelated.txt", 20]]);
+      for (const [browser, tab] of [[first, a], [second, b]] as const) {
+        const listed = await browser.listDownloads(tab);
+        expect(listed.downloads).toEqual([]);
+        expect(listed.ambiguous_downloads).toEqual([expect.objectContaining({ filename: "report.pdf" })]);
+        await expect(browser.resolveDownload(tab, 0)).rejects.toSatisfy((error: BrowserUseRuntimeError) => error.code === "stale_download");
+      }
+    });
+
+    it("lists one tab's own downloads, including a repeated name, with indexes stable across relisting and pages", async () => {
+      const { first, second, a, b, pageA, pageB, setFiles } = await twoTabs();
+      pageA.emitDownload("data.csv");
+      pageA.emitDownload("data.csv");
+      pageA.emitDownload("chart.png");
+      pageB.emitDownload("other.zip");
+      // Two listing pages; the provider keeps one object per path.
+      setFiles([["other.zip", 5], ["data.csv", 1], ["chart.png", 2]]);
+      const listed = await first.listDownloads(a);
+      expect(listed.downloads).toEqual([
+        expect.objectContaining({ download_index: 0, filename: "data.csv", size: 1 }),
+        expect.objectContaining({ download_index: 1, filename: "chart.png", size: 2 }),
+      ]);
+      expect(listed.ambiguous_downloads).toBeUndefined();
+      await expect(second.listDownloads(b)).resolves.toMatchObject({ downloads: [expect.objectContaining({ filename: "other.zip", size: 5 })] });
+      // Provider order changes between listings; selected indexes keep their files.
+      setFiles([["chart.png", 2], ["other.zip", 5], ["data.csv", 1]]);
+      await expect(first.resolveDownload(a, 1)).resolves.toEqual({ url: "https://files.example/chart.png?sig=2", filename: "chart.png" });
+      await expect(first.listDownloads(a)).resolves.toMatchObject({ downloads: [
+        expect.objectContaining({ download_index: 0, filename: "data.csv" }),
+        expect.objectContaining({ download_index: 1, filename: "chart.png" }),
+      ] });
+      await expect(second.resolveDownload(b, 0)).resolves.toEqual({ url: "https://files.example/other.zip?sig=5", filename: "other.zip" });
+    });
+
+    it("refuses a selected download that becomes ambiguous after a late completion or a closed tab", async () => {
+      const { fixture, first, second, a, b, pageA, pageB, setFiles } = await twoTabs();
+      pageA.emitDownload("invoice.pdf");
+      setFiles([["invoice.pdf", 7]]);
+      await expect(first.listDownloads(a)).resolves.toMatchObject({ downloads: [expect.objectContaining({ filename: "invoice.pdf" })] });
+      // Another thread's tab starts a download with the same name before this one is sent.
+      pageB.emitDownload("invoice.pdf");
+      await expect(first.resolveDownload(a, 0)).rejects.toSatisfy((error: BrowserUseRuntimeError) => error.code === "ambiguous_download");
+      setFiles([["invoice.pdf", 7], ["invoice.pdf", 8]]);
+      await expect(second.listDownloads(b)).resolves.toMatchObject({ downloads: [] });
+      // Closing the other tab does not make its earlier download ours.
+      await second.closeTab(b);
+      await expect(first.listDownloads(a)).resolves.toMatchObject({ downloads: [], ambiguous_downloads: [expect.objectContaining({ filename: "invoice.pdf" })] });
+      expect(fixture.api.listDownloads).toHaveBeenCalled();
+    });
+
+    it("reports an expired URL for an owned download", async () => {
+      const { fixture, first, a, pageA, setFiles } = await twoTabs();
+      pageA.emitDownload("photo.png");
+      setFiles([["photo.png", 3]]);
+      await first.listDownloads(a);
+      fixture.api.listDownloads.mockResolvedValueOnce({ files: [{ path: "photo.png", size: 3, lastModified: new Date().toISOString() }], hasMore: false });
+      await expect(first.resolveDownload(a, 0)).rejects.toSatisfy((error: BrowserUseRuntimeError) => error.code === "download_unavailable");
+    });
+  });
+
   async function runtimeFixture(
     overrides: Parameters<typeof loadTestConfig>[0] = {},
     storageStateUnavailable = false,
@@ -320,7 +408,9 @@ function fakeApi() {
       profileRevision += 1;
       return stoppedBrowser(id);
     }),
-    listDownloads: vi.fn(async () => ({ files: [], hasMore: false })),
+    listDownloads: vi.fn(async (_sessionId: string, _input?: { includeUrls?: boolean; cursor?: string; limit?: number }): Promise<{
+      files: Array<{ path: string; size: number; lastModified: string; url?: string }>; hasMore: boolean; nextCursor?: string | null;
+    }> => ({ files: [], hasMore: false })),
   };
 }
 
@@ -470,8 +560,15 @@ class FakePage {
     return `Title ${this.currentUrl}`;
   }
 
-  on(): this {
+  downloadListeners: Array<(download: { suggestedFilename(): string }) => void> = [];
+
+  on(event: string, listener: (download: { suggestedFilename(): string }) => void): this {
+    if (event === "download") this.downloadListeners.push(listener);
     return this;
+  }
+
+  emitDownload(filename: string): void {
+    for (const listener of this.downloadListeners) listener({ suggestedFilename: () => filename });
   }
 
   once(event: string, listener: () => void): this {
