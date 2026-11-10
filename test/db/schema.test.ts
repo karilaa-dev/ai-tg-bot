@@ -22,6 +22,23 @@ describe("SQLite schema initialization", () => {
     expect(await database.db.query<{ tg_id: number }>(sql`select tg_id from users`)).toEqual([{ tg_id: 42 }]);
   });
 
+  it("creates upload recovery storage once and keeps its rows when initialization is repeated", async () => {
+    database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
+    await database.initialize();
+    await database.db.execute(sql`insert into web_upload_items(id, lease_id, user_id, kind, target, instance, created_at)
+      values ('item', 'lease', 42, 'directory', 'chat-upload-0123456789abcdef01234567', 'volume', 1)`);
+    await database.db.execute(sql`insert into web_upload_cleanup(id, kind, target, instance, attempts, next_attempt_at, created_at)
+      values ('cleanup', 'file', '00000000-0000-4000-8000-000000000001', 'volume', 2, 5, 1)`);
+    await database.initialize();
+    expect(await database.db.query(sql`select id, kind from web_upload_items`)).toEqual([{ id: "item", kind: "directory" }]);
+    expect(await database.db.query(sql`select id, attempts from web_upload_cleanup`)).toEqual([{ id: "cleanup", attempts: 2 }]);
+    // One record per artifact keeps concurrent reclaimers from queueing the same removal twice.
+    await expect(database.db.execute(sql`insert into web_upload_cleanup(id, kind, target, instance, attempts, next_attempt_at, created_at)
+      values ('again', 'file', '00000000-0000-4000-8000-000000000001', 'volume', 0, 5, 1)`)).rejects.toThrow();
+    await expect(database.db.execute(sql`insert into web_upload_items(id, lease_id, user_id, kind, target, instance, created_at)
+      values ('bad', 'lease', 42, 'socket', 'x', 'volume', 1)`)).rejects.toThrow();
+  });
+
   it("enables foreign keys and applies declared delete cascades", async () => {
     database = createDatabase(loadTestConfig({ DB_URL: "sqlite::memory:" }));
     await database.initialize();

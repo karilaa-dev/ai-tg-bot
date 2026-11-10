@@ -489,7 +489,8 @@ export class FilesRepo {
     return chunkIds;
   }
 
-  async deleteFileIfUnattached(fileId: string): Promise<boolean> {
+  /** `onDeleted` runs in the deleting transaction, e.g. to record filesystem cleanup that is still owed. */
+  async deleteFileIfUnattached(fileId: string, onDeleted?: (tx: SqlExecutor) => Promise<void>): Promise<boolean> {
     return this.db.transaction(async tx => {
       const file = await queryOne<FileRow>(tx, sql`
         select * from files where id = ${fileId} ${tx.dialect === "postgres" ? sql`for update` : sql``}
@@ -498,6 +499,7 @@ export class FilesRepo {
       const attachment = await queryOne(tx, sql`select 1 from message_files where file_id = ${fileId} limit 1`);
       if (attachment) return false;
       await new FilesRepo(tx, createTextSearch(tx, tx.dialect)).deleteFile(fileId);
+      await onDeleted?.(tx);
       return true;
     });
   }

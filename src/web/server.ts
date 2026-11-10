@@ -25,7 +25,7 @@ import { DownloadPool } from "./download-pool.js";
 export interface WebServerOptions {
   db: SqlExecutor;
   config: Pick<AppConfig, "WEB_ENABLED" | "WEB_ADMIN_USER_IDS" | "WEB_HOST" | "WEB_PORT" | "WEB_AUTOLOAD_MAX_BYTES"
-    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS" | "WEB_UPLOAD_MIN_FREE_BYTES">;
+    | "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIENT_SECRET" | "WEB_PUBLIC_URL" | "WEB_TRUSTED_PROXY_IPS" | "WEB_UPLOAD_MIN_FREE_BYTES" | "FILE_STORAGE_PATH">;
   access: AccessControl;
   repository: ConversationRepository;
   fileResolver: FileResolver;

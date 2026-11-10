@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { link, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readdir, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { throwIfAborted } from "./cancel.js";
@@ -117,6 +117,13 @@ export class LocalFileStore {
     const filename = await this.filename(key);
     try { await unlink(filename); }
     catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
+    // A writer that died mid-publication leaves staging copies named after this file; they are never read.
+    const staging = new RegExp(`^${localFileKey(key)}\\.[0-9a-f-]{36}\\.tmp$`);
+    for (const entry of await readdir(path.dirname(filename))) {
+      if (!staging.test(entry)) continue;
+      try { await unlink(path.join(path.dirname(filename), entry)); }
+      catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
+    }
     await this.syncDirectory();
   }
 

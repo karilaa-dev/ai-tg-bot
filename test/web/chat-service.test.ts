@@ -9,6 +9,9 @@ import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import { deferred } from "../helpers/async.js";
 import { savedRestaurantOpenUi } from "./openui-saved-fixture.js";
+import { UploadBudget } from "../../src/web/upload-budget.js";
+import { UploadRecovery } from "../../src/web/upload-recovery.js";
+import { readdir } from "node:fs/promises";
 
 describe("shared web and Telegram conversations", () => {
   let env: GrammyEmulator;
@@ -354,6 +357,65 @@ describe("shared web and Telegram conversations", () => {
       await other.send(env.user.id, second.id, { text: "", requestId: randomUUID(), files: [new File(["12"], "second.bin")] });
       expect(await env.db.db.query(sql`select sum(size) as bytes from files where requires_message = 1`)).toEqual([{ bytes: 10 }]);
     } finally { resume.resolve(); await pending; stalled.mockRestore(); }
+  });
+
+  it("frees quota abandoned by a crashed upload when the user tries again", async () => {
+    env.config.WEB_UPLOAD_USER_MAX_BYTES = 10;
+    const recovery = new UploadRecovery({ db: env.db.db, config: env.config, removeFile: id => env.services.fileResolver.removeLocalFile(id) });
+    const recovering = new BotChatService({ services: env.services, uploadRecovery: recovery,
+      repository: new ConversationRepository(env.db.db, env.repos, 999), api: env.bot.api });
+    const thread = await chat.createThread(env.user.id, "Crash");
+    // A request that died after preparing its file and writing the bytes: no finally block ever ran.
+    const dead = await new UploadBudget(env.db.db, env.config).reserve(env.user.id, 8);
+    const abandoned = await dead.prepareFile(8, async (repo, own) => {
+      const file = await repo.insertFile({ userId: env.user.id, threadId: thread.id, requireMessage: true, type: "other",
+        name: "dead.bin", size: 8, isInline: false });
+      await own(file.id);
+      return file;
+    });
+    dead.abandon();
+    await env.services.fileResolver.persistFile((await env.repos.files.get(abandoned.id))!, Buffer.from("12345678"));
+    await env.db.db.execute(sql`update web_upload_reservations set expires_at = 0`);
+    const files = () => readdir(env.config.FILE_STORAGE_PATH).then(entries => entries.filter(entry => !entry.startsWith(".")));
+
+    // Without recovery the invisible file keeps counting forever.
+    await expect(chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [new File(["123"], "retry.bin")] }))
+      .rejects.toMatchObject({ status: 413 });
+    expect(await files()).toEqual([abandoned.id]);
+
+    const sent = await recovering.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [new File(["123"], "retry.bin")] });
+    expect(sent.messageId).toBeGreaterThan(0);
+    expect(await env.repos.files.get(abandoned.id)).toBeUndefined();
+    expect(await files()).toHaveLength(1);
+    expect(await files()).not.toContain(abandoned.id);
+  });
+
+  it("stops a request whose lease was reclaimed while it wrote, leaving no files, bytes or message", async () => {
+    const recovery = new UploadRecovery({ db: env.db.db, config: env.config, removeFile: id => env.services.fileResolver.removeLocalFile(id) });
+    const thread = await chat.createThread(env.user.id, "Lost lease");
+    const written = deferred<void>();
+    const resume = deferred<void>();
+    const persist = env.services.fileResolver.persistFile.bind(env.services.fileResolver);
+    const stalled = vi.spyOn(env.services.fileResolver, "persistFile").mockImplementationOnce(async (...args) => {
+      written.resolve();
+      await resume.promise;
+      return persist(...args);
+    });
+    const pending = chat.send(env.user.id, thread.id, { text: "", requestId: randomUUID(), files: [new File(["12345678"], "slow.bin")] });
+    const outcome = expect(pending).rejects.toBeDefined();
+    await written.promise;
+    // The request stalls past its lease; recovery wins and reclaims what it prepared.
+    await env.db.db.execute(sql`update web_upload_reservations set expires_at = 0`);
+    await recovery.recover();
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([]);
+    resume.resolve();
+    await outcome;
+    stalled.mockRestore();
+
+    expect(await env.repos.files.listForThreads([thread.id])).toEqual([]);
+    expect((await chat.history(env.user.id, thread.id)).messages).toEqual([]);
+    expect(await readdir(env.config.FILE_STORAGE_PATH).then(entries => entries.filter(entry => !entry.startsWith(".")))).toEqual([]);
+    for (const table of ["web_upload_items", "web_upload_cleanup"]) expect(await env.db.db.query(sql.raw(`select * from ${table}`)), table).toEqual([]);
   });
 
   it("releases failed upload reservations without leaving files or bytes behind", async () => {

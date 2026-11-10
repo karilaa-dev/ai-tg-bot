@@ -1,11 +1,11 @@
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { MAX_CHAT_UPLOAD_BYTES, MAX_CHAT_UPLOAD_FILES, MAX_FILE_BYTES } from "../files/limits.js";
 import { WebHttpError } from "./auth.js";
 import type { ChatUploadFile } from "./chat-types.js";
 import type { SqlExecutor } from "../db/sql.js";
 import { createTemporaryUploadLease } from "./upload-budget.js";
+import { createUploadDirectory } from "./upload-recovery.js";
 
 export const MAX_CHAT_BODY_BYTES = MAX_CHAT_UPLOAD_BYTES + 256 * 1024;
 const MAX_HEADERS_BYTES = 16 * 1024;
@@ -57,7 +57,11 @@ function partHeaders(bytes: Buffer): { name: string; filename: string | undefine
   return { name, filename: disposition.values.get("filename"), type: headers.get("content-type")?.toLowerCase() || "application/octet-stream" };
 }
 
-export async function readChatUpload(request: Request, db: SqlExecutor, userId: number, minimumFreeBytes = 512 * 1024 ** 2): Promise<{
+/**
+ * `storageInstance` names the local storage volume that owns the spool directory (see uploadStorageInstance).
+ * The returned `dispose` owns cleanup: the upload lease and its directory record last until it finishes.
+ */
+export async function readChatUpload(request: Request, db: SqlExecutor, userId: number, minimumFreeBytes = 512 * 1024 ** 2, storageInstance = "local"): Promise<{
   text: string;
   requestId: string;
   files: ChatUploadFile[];
@@ -66,12 +70,24 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
   if (!request.body) throw invalid();
   const reader = request.body.getReader();
   let directory: string | undefined;
+  let directoryToken: string | undefined;
   let disk: Awaited<ReturnType<typeof createTemporaryUploadLease>> | undefined;
   let allowance = 0;
   let writtenBytes = 0;
   let renewAt = 0;
   let disposal: Promise<void> | undefined;
-  const dispose = (): Promise<void> => disposal ??= directory ? rm(directory, { recursive: true, force: true }) : Promise.resolve();
+  const dispose = (): Promise<void> => disposal ??= (async () => {
+    let removal: Error | undefined;
+    if (directory) {
+      try { await rm(directory, { recursive: true, force: true }); }
+      catch (error) { removal = error instanceof Error ? error : new Error(String(error)); }
+    }
+    // A failed removal stays owed: the lease ends but a retryable record keeps the directory tracked.
+    // If ending the lease fails, it expires and recovery resolves everything it still owns.
+    await disk?.release(removal && directoryToken ? [{ kind: "directory", target: directoryToken, instance: storageInstance }] : [])
+      .catch(() => undefined);
+    if (removal) throw removal;
+  })();
   let interruption: WebHttpError | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const interrupt = (error: WebHttpError) => {
@@ -190,8 +206,8 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
       if (part.name === "files") {
         if (part.filename === undefined || !part.filename || part.filename.length > 255 || /\p{Cc}/u.test(part.filename)) throw invalid("Invalid file name.");
         if (files.length >= MAX_CHAT_UPLOAD_FILES) throw new WebHttpError(413, `Upload up to ${MAX_CHAT_UPLOAD_FILES} files.`);
-        directory ??= await mkdtemp(join(tmpdir(), "chat-upload-"));
         disk ??= await createTemporaryUploadLease(db, userId);
+        if (!directory) ({ directory, token: directoryToken } = await createUploadDirectory(disk, storageInstance));
         const filePath = join(directory, String(files.length));
         const file = await open(filePath, "wx", 0o600);
         let size = 0;
@@ -252,6 +268,8 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
     // MIME epilogues count toward the body limit even though they are not fields.
     do { buffer = Buffer.alloc(0); } while (await fill());
     checkInterrupted();
+    // The spooled bytes are on disk now; only the lease and directory record remain until disposal.
+    await disk?.settleWrites();
     if (requestId === undefined) throw invalid("A request ID is required.");
     if (!text.trim() && !files.length) throw invalid("Write a message or attach a file.");
     return { text, requestId, files, dispose };
@@ -263,6 +281,5 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
     request.signal.removeEventListener("abort", abort);
     if (!ended) void reader.cancel().catch(() => {});
     reader.releaseLock();
-    await disk?.release();
   }
 }

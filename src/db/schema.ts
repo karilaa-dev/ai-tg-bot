@@ -84,6 +84,27 @@ export async function initializeSchema(db: SqlExecutor, dialect: DialectName): P
         write_bytes ${timeType} not null default 0 check(write_bytes >= 0), disk_key text, expires_at ${timeType} not null
       )
     `);
+    // Durable ownership of unaccepted upload artifacts, so a crashed request's files, bytes and temporary
+    // directories can be reclaimed after its lease expires. Directories are recorded by generated token only.
+    await tx.execute(sql`
+      create table if not exists web_upload_items (
+        id text primary key, lease_id text not null, user_id ${timeType} not null,
+        kind text not null check(kind in ('file', 'directory')), target text not null,
+        instance text not null, created_at ${timeType} not null
+      )
+    `);
+    await tx.execute(sql`create index if not exists web_upload_items_lease_idx on web_upload_items(lease_id)`);
+    await tx.execute(sql`create unique index if not exists web_upload_items_target_idx on web_upload_items(kind, target)`);
+    // Filesystem removals still owed after their database rows are gone; retried until they succeed.
+    await tx.execute(sql`
+      create table if not exists web_upload_cleanup (
+        id text primary key, kind text not null check(kind in ('file', 'directory')), target text not null,
+        instance text not null, attempts integer not null default 0,
+        next_attempt_at ${timeType} not null, created_at ${timeType} not null
+      )
+    `);
+    await tx.execute(sql`create unique index if not exists web_upload_cleanup_target_idx on web_upload_cleanup(kind, target)`);
+    await tx.execute(sql`create index if not exists web_upload_cleanup_due_idx on web_upload_cleanup(instance, next_attempt_at)`);
   }, { rebuildSqliteTables: true });
 }
 
