@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../helpers/async.js";
 import { runMemo, type MemoResult } from "../../src/memory/optmem/index.js";
 import { createDatabase } from "../../src/db/index.js";
 import { UsersRepo } from "../../src/db/repos/users.js";
@@ -225,6 +226,38 @@ describe("OptMem commands", () => {
       exit_code: 1, stderr: expect.stringContaining("bad regex:"),
     });
     expect(RECALL_DEADLINE_MS).toBe(5_000);
+  });
+
+  it.each(["open", "scan"] as const)("bounds recall while storage %s has not returned", async (phase) => {
+    const { store, settings } = await fixture();
+    const entered = deferred<void>(), release = deferred<void>();
+    const blocked = phase === "open"
+      ? vi.spyOn(store, "open").mockImplementation(async () => { entered.resolve(); await release.promise; })
+      : vi.spyOn(store, "scan").mockImplementation(async function* () { entered.resolve(); await release.promise; });
+    const search = recallInWorker({ store, settings }, "missing", undefined, { deadlineMs: 200 });
+    try {
+      await entered.promise;
+      const result = await Promise.race([search, delay(2_000).then(() => "still running")]);
+      expect(result).toMatchObject({ exit_code: 1, stderr: expect.stringContaining("Memory search stopped") });
+    } finally {
+      release.resolve();
+      await search;
+      blocked.mockRestore();
+    }
+    expect(await recallInWorker({ store, settings }, "missing")).toMatchObject({ exit_code: 0, stdout: "No match.\n" });
+  });
+
+  it("preserves caller cancellation while recall waits for an empty scan", async () => {
+    const { store, settings } = await fixture();
+    const entered = deferred<void>(), release = deferred<void>();
+    const blocked = vi.spyOn(store, "scan").mockImplementation(async function* () { entered.resolve(); await release.promise; });
+    const controller = new AbortController(), reason = new Error("caller stopped scan");
+    const search = recallInWorker({ store, settings }, "missing", controller.signal).catch(error => error);
+    try {
+      await entered.promise;
+      controller.abort(reason);
+      expect(await Promise.race([search, delay(2_000).then(() => "still running")])).toBe(reason);
+    } finally { release.resolve(); await search; blocked.mockRestore(); }
   });
 
   it("only displays global settings and rejects per-user overrides", async () => {
