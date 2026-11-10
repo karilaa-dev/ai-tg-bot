@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getEventListeners } from "node:events";
 import type { BotResponse } from "@bonkers-agency/grammy-test";
 import { sql } from "drizzle-orm";
 import { deferred } from "../helpers/async.js";
@@ -369,6 +370,18 @@ describe("Telegram bot with grammy-emulate", () => {
     await env.bot.sendCommand(env.user, env.chat, "/compact");
     const edit = await waitForApiText("The available context is still too small");
     expect(edit.method).toBe("editMessageText");
+  });
+
+  it("releases each completed compaction report's shutdown listener", async () => {
+    await startBot();
+    vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
+    const intake = env.services.routerState.intake;
+    const listeners = getEventListeners(intake.stopping, "abort").length;
+    for (let i = 0; i < 3; i++) {
+      await env.bot.sendCommand(env.user, env.chat, "/compact");
+      await intake.waitForIdle();
+      expect(getEventListeners(intake.stopping, "abort")).toHaveLength(listeners);
+    }
   });
 
   it("treats a Telegram-created topic as a clean thread", async () => {

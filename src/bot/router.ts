@@ -495,35 +495,41 @@ async function reportCompaction(
 ): Promise<void> {
   const stopping = ctx.services.routerState.intake.stopping;
   const done = run.completion.then(() => true, () => true);
+  let onStopping!: () => void;
   const stopped = new Promise<false>((resolve) => {
-    if (stopping.aborted) resolve(false);
-    else stopping.addEventListener("abort", () => resolve(false), { once: true });
+    onStopping = () => resolve(false);
+    if (stopping.aborted) onStopping();
+    else stopping.addEventListener("abort", onStopping, { once: true });
   });
   let finished = false;
   let failedEdits = 0;
   let lastText: string | undefined;
-  while (!finished) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    finished = await Promise.race([done, stopped, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), compactionProgressMs); })]);
-    clearTimeout(timer);
-    if (stopping.aborted) return;
-    // After repeated failures only the final status is attempted, so a broken message is not retried every few seconds.
-    if (!finished && failedEdits >= compactionProgressEditFailures) continue;
-    const saved = await ctx.services.repos.messages.get(run.messageId);
-    const action = saved && savedCompactionAction(saved.content_json);
-    if (!action) continue;
-    const description = compactionDescription(action, ctx.user?.lang ?? "en");
-    const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
-    if (!finished && text === lastText) continue;
-    const edited = await ctx.api.editMessageText(ctx.chat!.id, statusMessageId, text).then(() => true, () => false);
-    if (edited) {
-      lastText = text;
-      failedEdits = 0;
-    } else if (finished) {
-      await replyWithThreadFallback(ctx, text, threadExtra(thread));
-    } else {
-      failedEdits += 1;
+  try {
+    while (!finished) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      finished = await Promise.race([done, stopped, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), compactionProgressMs); })]);
+      clearTimeout(timer);
+      if (stopping.aborted) return;
+      // After repeated failures only the final status is attempted, so a broken message is not retried every few seconds.
+      if (!finished && failedEdits >= compactionProgressEditFailures) continue;
+      const saved = await ctx.services.repos.messages.get(run.messageId);
+      const action = saved && savedCompactionAction(saved.content_json);
+      if (!action) continue;
+      const description = compactionDescription(action, ctx.user?.lang ?? "en");
+      const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
+      if (!finished && text === lastText) continue;
+      const edited = await ctx.api.editMessageText(ctx.chat!.id, statusMessageId, text).then(() => true, () => false);
+      if (edited) {
+        lastText = text;
+        failedEdits = 0;
+      } else if (finished) {
+        await replyWithThreadFallback(ctx, text, threadExtra(thread));
+      } else {
+        failedEdits += 1;
+      }
     }
+  } finally {
+    stopping.removeEventListener("abort", onStopping);
   }
 }
 

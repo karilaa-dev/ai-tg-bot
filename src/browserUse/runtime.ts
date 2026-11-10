@@ -397,6 +397,9 @@ export class BrowserUseRuntimeManager {
       const selectedPath = session.downloadSelections.get(tabId)?.[downloadIndex];
       if (!selectedPath) throw new BrowserUseRuntimeError("stale_download", "List browser downloads again before sending this file.");
       const files = await this.allDownloads(session, true, signal);
+      if (!files.some((file) => file.path === selectedPath)) {
+        throw new BrowserUseRuntimeError("download_unavailable", "Browser download is no longer available. Download it again before sending.");
+      }
       // Ownership is checked again: a same-named download may have started in another tab since listing.
       const file = tabDownloads(session.downloadHints, tabId, files).owned.find((candidate) => candidate.path === selectedPath);
       if (!file) {

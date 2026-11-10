@@ -10,7 +10,7 @@ import type { ToolActivity } from "../src/ai/toolActivity.js";
 // The fixture is synthetic and lives in an in-memory SQLite database (or the
 // PostgreSQL server in BENCH_POSTGRES_URL, in a temporary schema).
 const args = process.argv.slice(2);
-const root = path.resolve(args.find((arg) => !arg.startsWith("--")) ?? process.cwd());
+const root = path.resolve(args.find((arg, index) => !arg.startsWith("--") && !args[index - 1]?.startsWith("--")) ?? process.cwd());
 const polls = Number(args[args.indexOf("--polls") + 1] ?? 0) || 40;
 const moduleAt = (file: string) => import(pathToFileURL(path.join(root, "src", `${file}.ts`)).href);
 const { loadTestConfig }: typeof import("../src/config.js") = await moduleAt("config");

@@ -343,6 +343,15 @@ describe("BrowserUseRuntimeManager", () => {
       expect(fixture.api.listDownloads).toHaveBeenCalled();
     });
 
+    it("reports a selected download removed from the provider listing as unavailable", async () => {
+      const { first, a, pageA, setFiles } = await twoTabs();
+      pageA.emitDownload("photo.png");
+      setFiles([["photo.png", 3]]);
+      await first.listDownloads(a);
+      setFiles([]);
+      await expect(first.resolveDownload(a, 0)).rejects.toSatisfy((error: BrowserUseRuntimeError) => error.code === "download_unavailable");
+    });
+
     it("reports an expired URL for an owned download", async () => {
       const { fixture, first, a, pageA, setFiles } = await twoTabs();
       pageA.emitDownload("photo.png");
