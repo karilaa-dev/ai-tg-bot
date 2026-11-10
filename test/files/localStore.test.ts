@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir as mkdirSpy } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,8 +11,10 @@ import { LocalFileSourceAdapter } from "../../src/files/localSource.js";
 // Observes physical writes while every call still reaches the real filesystem.
 vi.mock("node:fs/promises", async importOriginal => {
   const filesystem = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...filesystem, open: vi.fn(filesystem.open), link: vi.fn(filesystem.link), rename: vi.fn(filesystem.rename) };
+  return { ...filesystem, open: vi.fn(filesystem.open), link: vi.fn(filesystem.link), rename: vi.fn(filesystem.rename), mkdir: vi.fn(filesystem.mkdir) };
 });
+
+const exists = (file: string) => stat(file).then(() => true, () => false);
 
 describe("durable local attachment storage", () => {
   let directory: string;
@@ -158,6 +161,82 @@ describe("durable local attachment storage", () => {
     const restarted = new LocalFileStore(store.rootDirectory);
     expect(await restarted.write(id, bytes)).toEqual({ size: bytes.length, contentSha256: sha256Hex(bytes) });
     expect([stagingWrites(), publications()]).toEqual([0, 0]);
+  });
+
+  describe("revoking a key", () => {
+    const isFence = async (id: string) => (await stat(path.join(store.rootDirectory, id))).isDirectory();
+
+    it("removes published bytes and leaves a fence that no late writer can cross", async () => {
+      const id = randomUUID();
+      const bytes = Buffer.from("published before the revocation");
+      const integrity = await store.write(id, bytes);
+      await store.revoke(id);
+      expect(await isFence(id)).toBe(true);
+      // A stale writer resuming after the revocation publishes nothing by any route.
+      await expect(store.write(id, bytes)).rejects.toThrow("regular file");
+      await expect(store.repair(id, bytes, integrity)).rejects.toThrow();
+      await expect(store.read(id)).rejects.toThrow("regular file");
+      expect(await isFence(id)).toBe(true);
+      expect((await readdir(store.rootDirectory)).sort()).toEqual([id]);
+      // Revoking again, or removing normally, is already the end state.
+      await store.revoke(id);
+      await store.remove(id);
+      expect(await isFence(id)).toBe(true);
+    });
+
+    it("fences a key that was never written, so a writer that has not started yet cannot publish", async () => {
+      const id = randomUUID();
+      await store.revoke(id);
+      await expect(store.write(id, Buffer.from("late"))).rejects.toThrow("regular file");
+      expect(await isFence(id)).toBe(true);
+    });
+
+    it("beats a writer that is staged and about to publish", async () => {
+      const id = randomUUID();
+      const bytes = Buffer.from("staged but not yet linked");
+      // A writer that finished its checks and staged its copy; the revocation lands before it links or renames.
+      const staging = path.join(directory, `${id}.staged`);
+      await writeFile(staging, bytes);
+      await store.revoke(id);
+      await expect(link(staging, path.join(store.rootDirectory, id))).rejects.toMatchObject({ code: "EEXIST" });
+      await expect(rename(staging, path.join(store.rootDirectory, id))).rejects.toBeDefined();
+      expect(await isFence(id)).toBe(true);
+      // A copy staged inside the store is removed outright, so its owner cannot even attempt to publish.
+      const inside = path.join(store.rootDirectory, `${id}.${randomUUID()}.tmp`);
+      await writeFile(inside, bytes);
+      await store.revoke(id);
+      expect(await exists(inside)).toBe(false);
+    });
+
+    it("removes the file when a racing writer publishes it between the attempts", async () => {
+      const id = randomUUID();
+      await store.revoke(randomUUID());
+      const canonical = path.join(store.rootDirectory, id);
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      let raced = false;
+      vi.mocked(mkdirSpy).mockImplementation(async (...args) => {
+        // The writer's link lands just before the revocation's first attempt.
+        if (String(args[0]) === canonical && !raced) { raced = true; await writeFile(canonical, "raced in"); }
+        return actual.mkdir(...args);
+      });
+      try { await store.revoke(id); }
+      finally { vi.mocked(mkdirSpy).mockImplementation(actual.mkdir); }
+      expect(raced).toBe(true);
+      expect(await isFence(id)).toBe(true);
+    });
+
+    it("sweeps staging copies of fenced keys only, leaving writes in progress alone", async () => {
+      const fenced = randomUUID();
+      const live = randomUUID();
+      await store.revoke(fenced);
+      const strandedFenced = path.join(store.rootDirectory, `${fenced}.${randomUUID()}.tmp`);
+      const inProgress = path.join(store.rootDirectory, `${live}.${randomUUID()}.tmp`);
+      await writeFile(strandedFenced, "stranded");
+      await writeFile(inProgress, "in progress");
+      expect(await store.sweepFencedStaging()).toBe(1);
+      expect(await exists(strandedFenced)).toBe(false);
+      expect(await exists(inProgress)).toBe(true);
+    });
   });
 
   it("does not publish or leave temporary bytes after cancellation", async () => {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -9,6 +9,7 @@ import { createTextSearch } from "../db/search.js";
 import { queryOne, valueList, type SqlExecutor } from "../db/sql.js";
 import type { Logger } from "../logger.js";
 import { isUuid } from "../utils/uuid.js";
+import { WebHttpError } from "./auth.js";
 import { queueUploadCleanup, uploadStorageInstance, type UploadArtifact, type UploadArtifactKind } from "./upload-budget.js";
 
 const DIRECTORY_TOKEN = /^chat-upload-[0-9a-f]{24}$/;
@@ -43,7 +44,12 @@ export async function createUploadDirectory(lease: DirectoryLease, storageInstan
   const instance = uploadSpoolInstance(storageInstance, root);
   await lease.track({ kind: "directory", target: token, instance });
   const directory = path.join(root, token);
-  await mkdir(directory, { mode: 0o700 });
+  try { await mkdir(directory, { mode: 0o700 }); }
+  catch (error) {
+    // Recovery claimed this lease between recording and creating the directory and fenced the path.
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") throw new WebHttpError(503, "Upload reservation expired. Try again.");
+    throw error;
+  }
   return { token, directory, instance };
 }
 
@@ -64,7 +70,10 @@ export class UploadRecovery {
   constructor(private readonly input: {
     db: SqlExecutor;
     config: Pick<AppConfig, "FILE_STORAGE_PATH">;
-    removeFile(fileId: string): Promise<void>;
+    /** Removes the stored bytes and fences the key against any later publication (FileResolver.revokeLocalFile). */
+    revokeFile(fileId: string): Promise<void>;
+    /** Removes staging copies stranded by writers that died after their key was revoked. */
+    sweepStaging?(): Promise<unknown>;
     logger?: Pick<Logger, "warn" | "info">;
     tempRoot?: () => string;
   }) {}
@@ -98,6 +107,8 @@ export class UploadRecovery {
 
   /** Repeats bounded passes until nothing more is claimed, e.g. at startup. */
   async drain(maxPasses = 40): Promise<void> {
+    // Writers that died after a fence was installed can only have left unpublishable staging copies.
+    await this.input.sweepStaging?.().catch(error => this.input.logger?.warn("upload staging sweep failed", { error: String(error) }));
     for (let pass = 0; pass < maxPasses; pass++) {
       const result = await this.recover();
       if (!result.leases && !result.retried) return;
@@ -188,20 +199,36 @@ export class UploadRecovery {
   private async remove(kind: UploadArtifactKind, target: string): Promise<void> {
     if (kind === "file") {
       if (!isUuid(target)) return;
-      await this.input.removeFile(target);
+      await this.input.revokeFile(target);
       return;
     }
     // A database value is never a path: rebuild it from a validated token under the trusted temporary root.
     if (!DIRECTORY_TOKEN.test(target)) return;
-    const directory = path.join(this.tempRoot(), target);
+    await fenceDirectory(path.join(this.tempRoot(), target));
+  }
+}
+
+/**
+ * Removes a spool directory and leaves a zero-byte regular file at its path. A writer that recorded the directory
+ * but has not created it yet then fails to `mkdir`, and one already inside it can no longer create files there
+ * (ENOTDIR). The loop removes whatever a racing writer created in the meantime; anything that is not a spool
+ * directory or our own fence (a link, a foreign file) is left alone and never followed.
+ */
+async function fenceDirectory(directory: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
     let stats;
     try { stats = await lstat(directory); }
     catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
-      throw error;
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      try { await (await open(directory, "wx", 0o600)).close(); return; }
+      catch (createError) {
+        if (!(createError instanceof Error && "code" in createError && createError.code === "EEXIST")) throw createError;
+        continue;
+      }
     }
-    // Never follow or delete a link or foreign entry that took the place of the spool directory.
-    if (!stats.isDirectory() || stats.isSymbolicLink()) return;
+    if (stats.isFile() && stats.size === 0) return;
+    if (!stats.isDirectory()) return;
+    if (attempt >= 8) throw new Error("A spool directory kept being recreated while it was being fenced.");
     await rm(directory, { recursive: true, force: true });
   }
 }

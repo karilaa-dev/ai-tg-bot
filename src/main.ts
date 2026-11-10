@@ -57,7 +57,8 @@ try {
   fileResolver.registry.register(new WebFileSourceAdapter(db.db));
   // Uploads abandoned by a crash are reclaimed now and then periodically, so their quota and bytes come back.
   const recovery = uploadRecovery = new UploadRecovery({
-    db: db.db, config, logger, removeFile: fileId => fileResolver.removeLocalFile(fileId),
+    db: db.db, config, logger, revokeFile: fileId => fileResolver.revokeLocalFile(fileId),
+    sweepStaging: () => fileResolver.sweepRevokedStaging(),
   });
   await recovery.drain().catch((err) => logger.warn("upload recovery at startup failed", { err: String(err) }));
   recovery.start();

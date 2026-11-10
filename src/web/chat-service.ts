@@ -192,7 +192,9 @@ export class BotChatService implements ChatService {
           // bytes written since need their own durable record before removal can fail.
           const recorded = deleted || await this.recordFileCleanup(budget!, id);
           try {
-            await this.input.services.fileResolver.removeLocalFile(id);
+            // Reclaimed files are fenced, not just deleted, so nothing can publish them afterwards.
+            if (deleted) await this.input.services.fileResolver.removeLocalFile(id);
+            else await this.input.services.fileResolver.revokeLocalFile(id);
             if (recorded) await budget!.fileCleaned(id);
           } catch (error) {
             if (recorded) this.input.services.logger.warn("upload file removal will be retried", { fileId: id, error: String(error) });

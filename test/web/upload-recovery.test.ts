@@ -9,9 +9,10 @@ import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
 import { LocalFileStore } from "../../src/files/localStore.js";
+import { FileResolver } from "../../src/files/resolver.js";
 import { readChatUpload } from "../../src/web/chat-upload.js";
-import { UploadBudget, uploadStorageInstance } from "../../src/web/upload-budget.js";
-import { UploadRecovery, uploadSpoolInstance } from "../../src/web/upload-recovery.js";
+import { createTemporaryUploadLease, UploadBudget, uploadStorageInstance } from "../../src/web/upload-budget.js";
+import { createUploadDirectory, UploadRecovery, uploadSpoolInstance } from "../../src/web/upload-recovery.js";
 
 const USER = 42;
 const root = path.resolve(import.meta.dirname, "../..");
@@ -40,13 +41,13 @@ afterEach(async () => {
 const config = (quota = 10) => loadTestConfig({ FILE_STORAGE_PATH: storage, WEB_UPLOAD_USER_MAX_BYTES: quota });
 
 /** An application instance. Opening another one against the same database file is a restart or a second worker. */
-async function instance(options: { removeFile?: (id: string) => Promise<void>; quota?: number } = {}) {
+async function instance(options: { revokeFile?: (id: string) => Promise<void>; quota?: number } = {}) {
   const database = createDatabase({ DB_URL: databaseUrl });
   databases.push(database);
   await database.initialize();
   const repos = createRepos(database.db, database.search);
   const store = new LocalFileStore(storage);
-  const recovery = new UploadRecovery({ db: database.db, config: config(), removeFile: options.removeFile ?? (id => store.remove(id)),
+  const recovery = new UploadRecovery({ db: database.db, config: config(), revokeFile: options.revokeFile ?? (id => store.revoke(id)),
     logger: { info: vi.fn(), warn: vi.fn() } });
   return { database, repos, store, recovery, budget: new UploadBudget(database.db, config(options.quota)) };
 }
@@ -74,6 +75,19 @@ async function prepareUpload(app: App, userId: number, threadId: string, bytes: 
 const expireLeases = (app: App) => app.database.db.execute(sql`update web_upload_reservations set expires_at = 0`);
 const count = async (app: App, table: string) => Number((await app.database.db.query<{ n: number }>(sql.raw(`select count(*) as n from ${table}`)))[0]!.n);
 const exists = (file: string) => stat(file).then(() => true, () => false);
+/** Stored bytes, as opposed to the fence a reclaimed key leaves behind. */
+/** Regular stored files, ignoring the identity marker and the fences reclaimed keys leave behind. */
+const storedFiles = async () => {
+  const entries = (await readdir(storage)).filter(entry => !entry.startsWith("."));
+  return (await Promise.all(entries.map(async entry => (await stat(path.join(storage, entry))).isFile() ? entry : undefined))).filter(Boolean);
+};
+/** Live spool directories; a fenced path is a zero-byte file and holds nothing. */
+const spools = async (root = temporaryRoot) => {
+  const entries = await readdir(root);
+  return (await Promise.all(entries.map(async entry => (await stat(path.join(root, entry))).isDirectory() ? entry : undefined))).filter(Boolean);
+};
+const spoolExists = (directory: string) => stat(directory).then(info => info.isDirectory(), () => false);
+const hasBytes = (file: string) => stat(file).then(info => info.isFile(), () => false);
 const storedPath = (id: string) => path.join(storage, id);
 
 async function accept(app: App, userId: number, threadId: string, fileId: string, requestId = "accept_request_0123456") {
@@ -99,7 +113,7 @@ describe("abandoned web upload preparations", () => {
     await restarted.recovery.recover();
 
     expect(await restarted.repos.files.get(file.id)).toBeUndefined();
-    expect(await exists(storedPath(file.id))).toBe(false);
+    expect(await hasBytes(storedPath(file.id))).toBe(false);
     expect(await count(restarted, "web_upload_items")).toBe(0);
     expect(await count(restarted, "web_upload_cleanup")).toBe(0);
     expect(await count(restarted, "web_upload_reservations")).toBe(0);
@@ -143,7 +157,7 @@ describe("abandoned web upload preparations", () => {
     await expireLeases(parent);
     await parent.recovery.recover();
     expect(await parent.repos.files.get(fileId)).toBeUndefined();
-    expect(await exists(storedPath(fileId))).toBe(false);
+    expect(await hasBytes(storedPath(fileId))).toBe(false);
     const next = await parent.budget.reserve(USER, 10);
     await next.release();
   });
@@ -155,7 +169,7 @@ describe("abandoned web upload preparations", () => {
     await expireLeases(app);
     await app.recovery.recover();
     expect(await app.repos.files.get(file.id)).toBeUndefined();
-    expect(await readdir(storage).then(entries => entries.filter(entry => !entry.startsWith(".")))).toEqual([]);
+    expect(await storedFiles()).toEqual([]);
   });
 
   it("keeps active, accepted, shared, other users' and untracked legacy files", async () => {
@@ -181,7 +195,7 @@ describe("abandoned web upload preparations", () => {
     await app.recovery.recover();
 
     expect(await app.repos.files.get(abandoned.file.id)).toBeUndefined();
-    expect(await exists(storedPath(abandoned.file.id))).toBe(false);
+    expect(await hasBytes(storedPath(abandoned.file.id))).toBe(false);
     for (const survivor of [acceptedUpload.file, sharedUpload.file, activeUpload.file, legacy]) {
       expect(await app.repos.files.get(survivor.id), survivor.name).toBeDefined();
       expect(await exists(storedPath(survivor.id))).toBe(true);
@@ -234,7 +248,7 @@ describe("abandoned web upload preparations", () => {
   it("keeps a failed filesystem removal as a retryable record after the database rows are gone", async () => {
     let healthy = false;
     const store = new LocalFileStore(storage);
-    const app = await instance({ removeFile: async id => { if (!healthy) throw new Error("disk is busy"); await store.remove(id); } });
+    const app = await instance({ revokeFile: async id => { if (!healthy) throw new Error("disk is busy"); await store.revoke(id); } });
     const thread = await seed(app);
     const { file } = await prepareUpload(app, USER, thread.id, Buffer.from("retry!!!"));
     await expireLeases(app);
@@ -254,7 +268,7 @@ describe("abandoned web upload preparations", () => {
     healthy = true;
     await app.database.db.execute(sql`update web_upload_cleanup set next_attempt_at = 0`);
     expect(await app.recovery.recover()).toMatchObject({ retried: 1, failed: 0 });
-    expect(await exists(storedPath(file.id))).toBe(false);
+    expect(await hasBytes(storedPath(file.id))).toBe(false);
     expect(await count(app, "web_upload_cleanup")).toBe(0);
   });
 
@@ -271,7 +285,7 @@ describe("abandoned web upload preparations", () => {
     expect(results.reduce((sum, result) => sum + result.files, 0)).toBeGreaterThanOrEqual(3);
     for (const file of files) {
       expect(await first.repos.files.get(file.id)).toBeUndefined();
-      expect(await exists(storedPath(file.id))).toBe(false);
+      expect(await hasBytes(storedPath(file.id))).toBe(false);
     }
     for (const table of ["web_upload_items", "web_upload_cleanup", "web_upload_reservations"]) expect(await count(first, table), table).toBe(0);
     const usage = await first.database.db.query<{ n: number }>(sql`select coalesce(sum(size), 0) as n from files where requires_message = 1`);
@@ -289,6 +303,121 @@ describe("abandoned web upload preparations", () => {
     expect(await app.repos.files.get(file.id)).toBeDefined();
     await expect(reservation.assertActive()).resolves.toBeUndefined();
     await reservation.release();
+  });
+});
+
+describe("a stale writer after reclamation", () => {
+  const bytes = Buffer.from("12345678");
+  const ledgerIsEmpty = async (app: App) => {
+    for (const table of ["web_upload_items", "web_upload_cleanup", "web_upload_reservations"]) expect(await count(app, table), table).toBe(0);
+  };
+
+  it("cannot publish a file that was reclaimed while it was paused after preparation, even across a restart", async () => {
+    const app = await instance();
+    const thread = await seed(app);
+    const { file } = await prepareUpload(app, USER, thread.id, bytes, { persist: false });
+    await expireLeases(app);
+    await app.recovery.recover();
+    // Recovery is complete and has forgotten the upload, as far as the database goes.
+    await ledgerIsEmpty(app);
+    expect(await app.repos.files.get(file.id)).toBeUndefined();
+
+    // The paused writer resumes and tries every way of publishing: the plain write and the resolver's repair path.
+    await expect(app.store.write(file.id, bytes)).rejects.toThrow();
+    const resolver = new FileResolver(app.repos.files, undefined, app.store);
+    await expect(resolver.persistFile(file, bytes)).rejects.toThrow();
+    await expect(app.store.repair(file.id, bytes, { size: bytes.length, contentSha256: hash(bytes) })).rejects.toThrow();
+    expect(await hasBytes(storedPath(file.id))).toBe(false);
+
+    // The process dies before its request-finally; a restarted instance finds nothing to recover and nothing published.
+    const restarted = await instance();
+    await restarted.recovery.drain();
+    expect(await storedFiles()).toEqual([]);
+    expect((await stat(storedPath(file.id))).isDirectory()).toBe(true);
+    await ledgerIsEmpty(restarted);
+    const next = await restarted.budget.reserve(USER, 10);
+    await next.release();
+  });
+
+  it("removes bytes a stale writer published after recovery resolved the database but before it revoked the key", async () => {
+    let published = false;
+    const app = await instance();
+    const late = await instance({ revokeFile: async id => {
+      // The writer's publication lands in the window between reclamation's database work and its revocation.
+      if (!published) { published = true; await app.store.write(id, bytes); }
+      await app.store.revoke(id);
+    } });
+    const thread = await seed(app);
+    const { file } = await prepareUpload(app, USER, thread.id, bytes, { persist: false });
+    await expireLeases(app);
+    await late.recovery.recover();
+    expect(published).toBe(true);
+    expect(await storedFiles()).toEqual([]);
+    await expect(app.store.write(file.id, bytes)).rejects.toThrow();
+    await ledgerIsEmpty(app);
+  });
+
+  it("keeps the revocation owed until it succeeds, however long the writer stays paused", async () => {
+    let healthy = false;
+    const app = await instance({ revokeFile: async id => { if (!healthy) throw new Error("disk is busy"); await app.store.revoke(id); } });
+    const thread = await seed(app);
+    const { file } = await prepareUpload(app, USER, thread.id, bytes, { persist: false });
+    await expireLeases(app);
+    await app.recovery.recover();
+    // The writer publishes while revocation is failing: nothing is fenced yet, but the debt is durable.
+    await app.store.write(file.id, bytes);
+    expect(await hasBytes(storedPath(file.id))).toBe(true);
+    expect(await app.database.db.query(sql`select kind, target from web_upload_cleanup`)).toEqual([{ kind: "file", target: file.id }]);
+    healthy = true;
+    await app.database.db.execute(sql`update web_upload_cleanup set next_attempt_at = 0`);
+    const fresh = await instance();
+    await fresh.recovery.recover();
+    expect(await storedFiles()).toEqual([]);
+    await expect(fresh.store.write(file.id, bytes)).rejects.toThrow();
+    await ledgerIsEmpty(fresh);
+  });
+
+  it("fences a spool path recorded but not yet created, so the paused writer's mkdir fails", async () => {
+    const app = await instance();
+    const storageInstance = await uploadStorageInstance(storage);
+    const lease = await createTemporaryUploadLease(app.database.db, USER);
+    let token = "";
+    // Recovery claims the lease after the directory is recorded and before createUploadDirectory creates it.
+    const racing = {
+      track: async (artifact: { kind: "file" | "directory"; target: string; instance: string }) => {
+        await lease.track(artifact);
+        token = artifact.target;
+        await expireLeases(app);
+        await app.recovery.recover();
+      },
+    };
+    await expect(createUploadDirectory(racing, storageInstance)).rejects.toMatchObject({ status: 503 });
+    lease.abandon();
+    // Nothing a writer could use exists, only the zero-byte fence, and the ledger holds no debt.
+    expect(await spools()).toEqual([]);
+    const fence = await stat(path.join(temporaryRoot, token));
+    expect(fence.isFile() && fence.size === 0).toBe(true);
+    await ledgerIsEmpty(app);
+    const restarted = await instance();
+    await restarted.recovery.drain();
+    expect(await spools()).toEqual([]);
+    await ledgerIsEmpty(restarted);
+  });
+
+  it("stops a writer already inside a reclaimed spool from creating files there", async () => {
+    const app = await instance();
+    const storageInstance = await uploadStorageInstance(storage);
+    const lease = await createTemporaryUploadLease(app.database.db, USER);
+    const { directory: spool } = await createUploadDirectory(lease, storageInstance);
+    await writeFile(path.join(spool, "0"), "partial upload");
+    lease.abandon();
+    await expireLeases(app);
+    await app.recovery.recover();
+    expect(await spools()).toEqual([]);
+    await expect(writeFile(path.join(spool, "1"), "late", { flag: "wx" })).rejects.toBeDefined();
+    await expect(mkdir(spool)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await spools()).toEqual([]);
+    await ledgerIsEmpty(app);
   });
 });
 
@@ -315,7 +444,7 @@ describe("abandoned upload directories", () => {
     await app.recovery.recover();
     expect(await exists(spool[0]!)).toBe(true);
     await live.dispose();
-    expect(await readdir(temporaryRoot)).toEqual([]);
+    expect(await spools()).toEqual([]);
     expect(await count(app, "web_upload_items")).toBe(0);
     expect(await count(app, "web_upload_reservations")).toBe(0);
 
@@ -326,7 +455,7 @@ describe("abandoned upload directories", () => {
     await expireLeases(app);
     void crashed;
     await app.recovery.recover();
-    expect(await readdir(temporaryRoot)).toEqual([]);
+    expect(await spools()).toEqual([]);
     expect(await count(app, "web_upload_items")).toBe(0);
     expect(await count(app, "web_upload_cleanup")).toBe(0);
   });
@@ -345,16 +474,16 @@ describe("abandoned upload directories", () => {
     expect(token).toMatch(/^chat-upload-/);
     await expireLeases(worker);
 
-    const other = new UploadRecovery({ db: worker.database.db, config: config(), removeFile: id => worker.store.remove(id), tempRoot: () => rootB });
+    const other = new UploadRecovery({ db: worker.database.db, config: config(), revokeFile: id => worker.store.revoke(id), tempRoot: () => rootB });
     await other.recover();
     // The other worker's recovery can neither see the directory nor erase the record of it.
-    expect(await exists(path.join(rootA, token!))).toBe(true);
+    expect(await spoolExists(path.join(rootA, token!))).toBe(true);
     expect(await worker.database.db.query(sql`select kind, target from web_upload_items`)).toEqual([{ kind: "directory", target: token }]);
     expect(await count(worker, "web_upload_cleanup")).toBe(0);
 
-    const owner = new UploadRecovery({ db: worker.database.db, config: config(), removeFile: id => worker.store.remove(id), tempRoot: () => rootA });
+    const owner = new UploadRecovery({ db: worker.database.db, config: config(), revokeFile: id => worker.store.revoke(id), tempRoot: () => rootA });
     await owner.recover();
-    expect(await readdir(rootA)).toEqual([]);
+    expect(await spools(rootA)).toEqual([]);
     expect(await count(worker, "web_upload_items")).toBe(0);
   });
 
@@ -369,11 +498,11 @@ describe("abandoned upload directories", () => {
     await mkdir(path.join(rootA, token));
     await worker.database.db.execute(sql`insert into web_upload_cleanup(id, kind, target, instance, attempts, next_attempt_at, created_at)
       values ('owed', 'directory', ${token}, ${uploadSpoolInstance(volume, rootA)}, 0, 0, 1)`);
-    await new UploadRecovery({ db: worker.database.db, config: config(), removeFile: async () => undefined, tempRoot: () => rootB }).recover();
-    expect(await exists(path.join(rootA, token))).toBe(true);
+    await new UploadRecovery({ db: worker.database.db, config: config(), revokeFile: async () => undefined, tempRoot: () => rootB }).recover();
+    expect(await spoolExists(path.join(rootA, token))).toBe(true);
     expect(await count(worker, "web_upload_cleanup")).toBe(1);
-    await new UploadRecovery({ db: worker.database.db, config: config(), removeFile: async () => undefined, tempRoot: () => rootA }).recover();
-    expect(await exists(path.join(rootA, token))).toBe(false);
+    await new UploadRecovery({ db: worker.database.db, config: config(), revokeFile: async () => undefined, tempRoot: () => rootA }).recover();
+    expect(await spoolExists(path.join(rootA, token))).toBe(false);
     expect(await count(worker, "web_upload_cleanup")).toBe(0);
   });
 
@@ -491,7 +620,7 @@ describe.skipIf(!process.env.TEST_POSTGRES_URL)("upload recovery on PostgreSQL",
     await Promise.all([first.recovery.recover(), second.recovery.recover()]);
 
     expect(await first.repos.files.get(abandoned.file.id)).toBeUndefined();
-    expect(await exists(storedPath(abandoned.file.id))).toBe(false);
+    expect(await hasBytes(storedPath(abandoned.file.id))).toBe(false);
     expect(await first.repos.files.get(acceptedUpload.file.id)).toMatchObject({ message_id: accepted.userMessage.id });
     expect(await first.repos.files.get(sharedUpload.file.id)).toBeDefined();
     expect(await exists(storedPath(sharedUpload.file.id))).toBe(true);
