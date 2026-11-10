@@ -2,6 +2,7 @@ import type { ChatScheduleInput, ChatSchedulePatch } from "../scheduling/types.j
 import type { Api } from "grammy";
 import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
+import type { SqlExecutor } from "../db/sql.js";
 import type { ApplicationServices } from "../application/services.js";
 import { ConversationService } from "../application/conversations.js";
 import { telegramConversationLink } from "../telegram/conversationLink.js";
@@ -15,6 +16,7 @@ import { ConversationRepository, WebNotFound } from "./repository.js";
 import type { ChatService, ChatSettings, ChatSettingsPatch, ChatThread, ChatSendResult, ChatUploadFile } from "./chat-types.js";
 import { deleteUserMemory } from "../memory/view.js";
 import { UploadBudget } from "./upload-budget.js";
+import type { UploadRecovery } from "./upload-recovery.js";
 
 const sendSchema = z.object({ text: z.string().max(32_000), requestId: z.string().regex(/^[a-zA-Z0-9_-]{16,128}$/) });
 type Avatar = { bytes: Uint8Array; mime: string };
@@ -26,7 +28,7 @@ export class BotChatService implements ChatService {
   private readonly submitting = new Map<string, Promise<ChatSendResult>>();
   private readonly avatars = new Map<number, { expires: number; value: Promise<Avatar | null> }>();
   private readonly conversations: ConversationService;
-  constructor(private readonly input: { services: ApplicationServices; repository: ConversationRepository; api: Api; downloadFile?: TelegramFileDownloader }) {
+  constructor(private readonly input: { services: ApplicationServices; repository: ConversationRepository; api: Api; downloadFile?: TelegramFileDownloader; uploadRecovery?: UploadRecovery }) {
     this.conversations = new ConversationService(input.services);
   }
 
@@ -135,29 +137,42 @@ export class BotChatService implements ChatService {
       throw new WebHttpError(413, "Attach up to 10 files, each at most 50 MiB (500 MiB total).");
     }
     await this.user(userId);
+    // A retry frees quota abandoned by an earlier crash before this upload is measured against it.
+    if (files.length) await this.input.uploadRecovery?.recover().catch(error => this.input.services.logger.warn("upload recovery failed", { error: String(error) }));
     const budget = files.length ? await new UploadBudget(this.input.services.db.db, this.input.services.config)
       .reserve(userId, files.reduce((sum, file) => sum + file.size, 0)) : undefined;
     const prepared: Awaited<ReturnType<typeof ingestFileBytes>>[] = [];
     const createdIds: FileRow["id"][] = [];
+    let settled = false;
+    let unresolved = false;
     try {
       for (const file of files) {
         await budget!.beforeWrite(file.size);
         const bytes = Buffer.from(await file.arrayBuffer());
         if (bytes.length !== file.size) throw new WebHttpError(400, "Upload size changed.");
-        const result = await budget!.prepareFile(file.size, repo => ingestFileBytes({ config: this.input.services.config, repo,
-          requireMessage: true,
-          userId, threadId, name: file.name.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 240) || "attachment",
-          mime: file.type, bytes, logger: this.input.services.logger }));
+        const result = await budget!.prepareFile(file.size, async (repo, own) => {
+          const ingested = await ingestFileBytes({ config: this.input.services.config, repo,
+            requireMessage: true,
+            userId, threadId, name: file.name.replace(/[\x00-\x1f/\\]/g, "_").slice(0, 240) || "attachment",
+            mime: file.type, bytes, logger: this.input.services.logger });
+          // Recorded in the transaction that creates the file, before anything can interrupt this request.
+          await own(ingested.fileId);
+          return ingested;
+        });
         createdIds.push(result.fileId);
         const stored = await this.repos.files.get(result.fileId);
         if (!stored) throw new Error("Upload record disappeared.");
         await this.input.services.fileResolver.persistFile(stored, bytes);
+        // Recovery may have claimed this request's lease and removed its files while bytes were being written.
+        await budget!.assertActive();
         await budget!.written(file.size);
         prepared.push(result);
       }
       const text = [input.text.trim(), ...prepared.map(file => file.card)].filter(Boolean).join("\n\n");
       const content = { text, webText: input.text.trim(), caption: input.text.trim(),
         files: prepared.map(file => ({ id: file.fileId, type: file.type, inline: file.inline })) };
+      // Acceptance must not outlive the lease that owns these files.
+      await budget?.assertActive();
       const accepted = await this.conversations.accept({
         userId, threadId, source: { kind: "web", requestId: input.requestId },
         kind: prepared.length ? (prepared.every(file => file.type === "image") ? "image" : "file") : "text",
@@ -167,14 +182,48 @@ export class BotChatService implements ChatService {
       return sendResult(accepted);
     } finally {
       try {
-        // Failed preparations and losing retries never leave unreferenced upload blobs.
+        // Failed preparations and losing retries never leave unreferenced upload blobs. A removal that fails
+        // stays recorded in the database and is retried by recovery.
         for (const id of createdIds) {
-          if (await this.repos.files.deleteFileIfUnattached(id)) {
-            await this.input.services.fileResolver.removeLocalFile(id);
+          const deleted = await this.repos.files.deleteFileIfUnattached(id, tx => budget!.queueFileCleanup(tx, id));
+          // An attached file belongs to an accepted message and is never removed.
+          if (!deleted && await this.repos.files.get(id)) continue;
+          // A missing row means recovery already reclaimed the file and may have forgotten its ownership, so any
+          // bytes written since need their own durable record before removal can fail.
+          const recorded = deleted || await this.recordFileCleanup(budget!, id);
+          try {
+            // Reclaimed files are fenced, not just deleted, so nothing can publish them afterwards.
+            if (deleted) await this.input.services.fileResolver.removeLocalFile(id);
+            else await this.input.services.fileResolver.revokeLocalFile(id);
+            if (recorded) await budget!.fileCleaned(id);
+          } catch (error) {
+            if (recorded) this.input.services.logger.warn("upload file removal will be retried", { fileId: id, error: String(error) });
+            else {
+              this.input.services.logger.error("upload file removal failed and could not be recorded for retry", { fileId: id, error: String(error) });
+              unresolved = true;
+            }
           }
         }
-      } finally { await budget?.release(); }
+        settled = !unresolved;
+      } finally {
+        // Unresolved ownership is left to expire so recovery finishes it, instead of being forgotten.
+        if (settled) await budget?.release(); else budget?.abandon();
+      }
     }
+  }
+
+  /** Retries briefly: this is the last chance to keep the removal owed if the file can't be deleted right now. */
+  private async recordFileCleanup(budget: { queueFileCleanup(tx: SqlExecutor, fileId: string): Promise<unknown> }, fileId: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await budget.queueFileCleanup(this.input.services.db.db, fileId);
+        return true;
+      } catch (error) {
+        this.input.services.logger.warn("could not record upload cleanup", { fileId, attempt, error: String(error) });
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 50 * attempt));
+      }
+    }
+    return false;
   }
 
   async stop(userId: number, threadId: ThreadRow["id"]): Promise<void> {

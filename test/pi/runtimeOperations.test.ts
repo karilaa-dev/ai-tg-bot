@@ -12,6 +12,10 @@ import { PiRuntimeManager } from "../../src/pi/runtime.js";
 import { deferred } from "../helpers/async.js";
 import { TEST_PNG } from "../helpers/workspaceRuntime.js";
 
+function lease(runtime: object) {
+  return { runtime, release: vi.fn(async () => undefined) } as unknown as Awaited<ReturnType<PiRuntimeManager["acquireRuntime"]>> & { release: ReturnType<typeof vi.fn> };
+}
+
 describe("Pi runtime barrier operations", () => {
   it("aborts and disposes the caption helper when image processing is cancelled", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-caption-cancel-"));
@@ -55,7 +59,7 @@ describe("Pi runtime barrier operations", () => {
       compact: async () => { sessionManager.appendCompaction("Earlier requests", sessionManager.getLeafId()!, 1000); },
     };
     const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
-    vi.spyOn(manager, "runtime").mockResolvedValue({ session, bridge: {}, lastUsedAt: 0 } as never);
+    vi.spyOn(manager, "acquireRuntime").mockResolvedValue(lease({ session, bridge: {}, lastUsedAt: 0 }));
 
     await expect(manager.compact({} as never, {} as never)).resolves.toBe(3);
     expect(sessionManager.getEntries().filter(entry => entry.type === "message")).toHaveLength(4);
@@ -68,7 +72,7 @@ describe("Pi runtime barrier operations", () => {
       compact: vi.fn(async () => undefined),
     };
     const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
-    vi.spyOn(manager, "runtime").mockResolvedValue({ session, bridge: {}, lastUsedAt: 0 } as never);
+    vi.spyOn(manager, "acquireRuntime").mockResolvedValue(lease({ session, bridge: {}, lastUsedAt: 0 }));
     await expect(manager.compact({} as never, {} as never)).rejects.toMatchObject({ reason: "too_small" });
     expect(session.compact).not.toHaveBeenCalled();
     for (let i = 0; i < 4; i++) session.sessionManager.appendMessage({ role: "user", content: "More context ".repeat(1500), timestamp: i });
@@ -87,11 +91,11 @@ describe("Pi runtime barrier operations", () => {
     };
     for (let i = 0; i < 4; i++) session.sessionManager.appendMessage({ role: "user", content: "More context ".repeat(1500), timestamp: i });
     const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
-    vi.spyOn(manager, "runtime").mockResolvedValue({
+    vi.spyOn(manager, "acquireRuntime").mockResolvedValue(lease({
       session,
       bridge: {},
       lastUsedAt: Date.now(),
-    } as never);
+    }));
     const controller = new AbortController();
     const execution = manager.compact({} as never, {} as never, controller.signal);
     await vi.waitFor(() => expect(session.compact).toHaveBeenCalledOnce());
@@ -103,22 +107,24 @@ describe("Pi runtime barrier operations", () => {
   });
 
   it("does not fork a Pi session after its barrier signal is cancelled", async () => {
-    const runtime = deferred<never>();
+    const runtime = deferred<ReturnType<typeof lease>>();
     const manager = Object.create(PiRuntimeManager.prototype) as PiRuntimeManager;
-    vi.spyOn(manager, "runtime").mockReturnValue(runtime.promise);
+    vi.spyOn(manager, "acquireRuntime").mockReturnValue(runtime.promise);
     const controller = new AbortController();
     const execution = manager.fork({} as never, {} as never, {} as never, null, controller.signal);
 
     controller.abort(new Error("Thread operation barrier lease was lost."));
-    runtime.resolve({
+    const owned = lease({
       session: {
         sessionManager: { getLeafId: vi.fn(() => "entry") },
       },
       bridge: {},
       lastUsedAt: Date.now(),
-    } as never);
+    });
+    runtime.resolve(owned);
 
     await expect(execution).rejects.toThrow("barrier lease was lost");
+    expect(owned.release).toHaveBeenCalledOnce();
   });
 
   it("keeps original and forked sessions independent when both conversations continue", async () => {
@@ -135,7 +141,7 @@ describe("Pi runtime barrier operations", () => {
         config, logger: createLogger(config), db: undefined as never,
         repos: { threads: { setPiSession } } as never,
       });
-      vi.spyOn(manager, "runtime").mockResolvedValue({ session: { sessionManager: source }, bridge: {}, lastUsedAt: 0 } as never);
+      vi.spyOn(manager, "acquireRuntime").mockResolvedValue(lease({ session: { sessionManager: source }, bridge: {}, lastUsedAt: 0 }));
 
       await manager.fork({ id: "00000000-0000-4000-8000-000000000001" } as never, { id: "00000000-0000-4000-8000-000000000002" } as never, {} as never, branchPoint);
 

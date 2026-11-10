@@ -17,6 +17,31 @@ import type { WebMemories } from "./types.js";
 
 export class WebNotFound extends Error {}
 
+/**
+ * Attachment rows for the selected messages. Candidate (message, file) pairs come from two lookups bounded by
+ * the selected message IDs (files owned by the message and message_files links); UNION removes pairs that appear
+ * in both, so a file is returned once per message however it is associated.
+ */
+export function attachmentRowsQuery(messageIds: number[], scopes: MessageSearchScope[]) {
+  if (!messageIds.length) return null;
+  const visibleOwner = messageScopePredicate(sql`owner.thread_id`, sql`owner.id`, scopes.map(scope => scope.threadId), scopes);
+  const ids = valueList(messageIds);
+  return sql`
+    with candidate(message_id, file_id) as (
+      select direct.message_id, direct.id from files direct where direct.message_id in (${ids})
+      union
+      select link.message_id, link.file_id from message_files link where link.message_id in (${ids})
+    )
+    select m.id as "messageId", f.id as "fileId", mf.caption,
+      coalesce(mf.display_name, case when ${visibleOwner} then f.name else null end) as name,
+      case when f.type = 'image' and ${visibleOwner} then f.summary else null end as description
+    from candidate c join messages m on m.id = c.message_id join files f on f.id = c.file_id
+    left join message_files mf on mf.file_id = c.file_id and mf.message_id = c.message_id
+    left join messages owner on owner.id = f.message_id
+    order by m.id, f.created_at, f.id
+  `;
+}
+
 export class ConversationRepository {
   private readonly usage: UsageRepository;
   constructor(private readonly db: SqlExecutor, private readonly repos: Repos, private readonly botUserId?: number, pricing?: UsagePricing) {
@@ -214,20 +239,9 @@ export class ConversationRepository {
   private async attachments(messageIds: number[], scopes: MessageSearchScope[]): Promise<Map<number, SavedAttachment[]>> {
     const result = new Map<number, SavedAttachment[]>();
     if (!messageIds.length) return result;
-    const visibleOwner = messageScopePredicate(sql`owner.thread_id`, sql`owner.id`, scopes.map(scope => scope.threadId), scopes);
     const rows = await this.db.query<{
       messageId: number; fileId: string; name: string | null; caption: string | null; description: string | null;
-    }>(sql`
-      select m.id as "messageId", f.id as "fileId", mf.caption,
-        coalesce(mf.display_name, case when ${visibleOwner} then f.name else null end) as name,
-        case when f.type = 'image' and ${visibleOwner} then f.summary else null end as description
-      from messages m join files f on f.message_id = m.id or exists (
-        select 1 from message_files link where link.file_id = f.id and link.message_id = m.id
-      )
-      left join message_files mf on mf.file_id = f.id and mf.message_id = m.id
-      left join messages owner on owner.id = f.message_id
-      where m.id in (${valueList(messageIds)}) order by m.id, f.created_at, f.id
-    `);
+    }>(attachmentRowsQuery(messageIds, scopes)!);
     // Empty scopes provide generic fallback names without borrowing another message's alias.
     const projected = await this.repos.files.listByIds([...new Set(rows.map(row => row.fileId))], []);
     const files = new Map(projected.map(file => [file.id, file]));

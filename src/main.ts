@@ -20,6 +20,7 @@ import { AccessControl } from "./access/control.js";
 import { FileResolver } from "./files/resolver.js";
 import { LocalFileStore } from "./files/localStore.js";
 import { ChatScheduler } from "./scheduling/runner.js";
+import { UploadRecovery } from "./web/upload-recovery.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -29,6 +30,7 @@ let pi: PiRuntimeManager | undefined;
 let codexLogin: CodexLoginManager | undefined;
 let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 let scheduler: ChatScheduler | undefined;
+let uploadRecovery: UploadRecovery | undefined;
 let turnCoordinator: ThreadTurnCoordinator | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
@@ -53,6 +55,13 @@ try {
   const repos = createRepos(db.db, db.search);
   const fileResolver = new FileResolver(repos.files, undefined, new LocalFileStore(config.FILE_STORAGE_PATH));
   fileResolver.registry.register(new WebFileSourceAdapter(db.db));
+  // Uploads abandoned by a crash are reclaimed now and then periodically, so their quota and bytes come back.
+  const recovery = uploadRecovery = new UploadRecovery({
+    db: db.db, config, logger, revokeFile: fileId => fileResolver.revokeLocalFile(fileId),
+    sweepStaging: () => fileResolver.sweepRevokedStaging(),
+  });
+  await recovery.drain().catch((err) => logger.warn("upload recovery at startup failed", { err: String(err) }));
+  recovery.start();
   sandboxRuntime = new ThreadE2BSandboxRuntimeManager({
     config,
     repos,
@@ -86,7 +95,7 @@ try {
     db: db.db,
     development: process.argv.includes("--web-dev"), config, repository,
     fileResolver: services.fileResolver, logger, codexLogin, access,
-    chat: { service: new BotChatService({ services, repository, api: bot.api }), botUsername: bot.botInfo.username },
+    chat: { service: new BotChatService({ services, repository, api: bot.api, uploadRecovery: recovery }), botUsername: bot.botInfo.username },
   });
   logger.debug("registering bot commands");
   await bot.api.setMyCommands(localizedCommands("en"));
@@ -108,6 +117,7 @@ try {
   process.exitCode = 1;
 } finally {
   await scheduler?.stop();
+  await uploadRecovery?.stop().catch((err) => logger.warn("upload recovery shutdown failed", { err: String(err) }));
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
   await codexLogin?.stop().catch(() => logger.warn("Codex login shutdown failed"));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));

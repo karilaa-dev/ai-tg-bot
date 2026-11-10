@@ -64,6 +64,76 @@ describe("turn streaming", () => {
     })).toBe(false);
   });
 
+  it("keeps the Pi runtime owned through final delivery and bridge cleanup, and releases it afterwards", async () => {
+    const events: string[] = [];
+    const deliveryStarted = deferred<void>();
+    const releaseDelivery = deferred<void>();
+    let emit: ((event: AgentSessionEvent) => void) | undefined;
+    const api = { raw: {
+      sendRichMessageDraft: async () => true,
+      sendRichMessage: async () => {
+        events.push("deliver");
+        deliveryStarted.resolve();
+        await releaseDelivery.promise;
+        return { message_id: 1 };
+      },
+    } };
+    const runtime = {
+      bridge: { beginTurn: async () => { events.push("beginTurn"); }, endTurn: async () => { events.push("endTurn"); },
+        currentTurnBudget: () => undefined, releaseCommandActivity: async () => undefined,
+        attachments: [], publishedWebsites: [], outgoingFiles: { verifyOfficeAttachments: async () => undefined, unresolved: [] } },
+      session: {
+        sessionManager: { getEntries: () => [] },
+        getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
+        subscribe: (listener: typeof emit) => { emit = listener; return () => undefined; },
+        prompt: async () => {
+          events.push("prompt");
+          emit?.({ type: "message_update", assistantMessageEvent: {
+            type: "text_delta", delta: "Completed answer", contentIndex: 0, partial: { content: [] },
+          } } as unknown as AgentSessionEvent);
+        },
+      },
+    };
+    const execution = runTurn({
+      api, chatId: 1, config: loadTestConfig(),
+      repos: { messages: { insert: async () => ({ id: 1 }) }, files: { listForMessage: async () => [] } },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      user: { tg_id: 1, stream_mode: true, lang: "en" }, thread: { id: fixtureUuid(1), title: "Test" },
+      text: "work", t: (key: string) => key,
+      pi: {
+        runtime: async () => { throw new Error("The engine must pin the runtime instead of borrowing it."); },
+        acquireRuntime: async () => { events.push("acquire"); return { runtime, release: async () => { events.push("release"); } }; },
+      },
+    } as unknown as TurnInput);
+    await deliveryStarted.promise;
+    // Streaming has ended, but delivery and attachment cleanup still depend on this runtime.
+    expect(events).toEqual(["acquire", "beginTurn", "prompt", "deliver"]);
+    releaseDelivery.resolve();
+    await execution;
+    expect(events).toEqual(["acquire", "beginTurn", "prompt", "deliver", "endTurn", "release"]);
+  });
+
+  it("releases the Pi runtime when the turn is cancelled during preparation, before streaming", async () => {
+    const controller = new AbortController();
+    const release = vi.fn(async () => undefined);
+    const endTurn = vi.fn(async () => undefined);
+    await runTurn({
+      api: { raw: { sendRichMessageDraft: async () => true, sendRichMessage: async () => ({ message_id: 1 }) } },
+      chatId: 1, config: loadTestConfig(), signal: controller.signal,
+      repos: { messages: { insert: async () => ({ id: 1 }) }, files: { listForMessage: async () => [] } },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      user: { tg_id: 1, stream_mode: false, lang: "en" }, thread: { id: fixtureUuid(1), title: "Test" },
+      text: "work", t: (key: string) => key,
+      pi: { runtime: async () => { throw new Error("unused"); }, acquireRuntime: async () => ({
+        runtime: { bridge: { beginTurn: async () => { controller.abort(); throw new Error("preparation aborted"); }, endTurn, currentTurnBudget: () => undefined }, session: {} },
+        release,
+      }) },
+    } as unknown as TurnInput);
+    expect(endTurn).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(endTurn.mock.invocationCallOrder[0]!);
+  });
+
   it("stops drafts immediately while the cancelled model is still settling", async () => {
     const controller = new AbortController();
     const prompt = deferred<void>();

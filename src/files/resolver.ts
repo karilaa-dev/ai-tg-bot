@@ -74,6 +74,16 @@ export class FileResolver {
     await this.localStore?.remove(String(fileId));
   }
 
+  /** Removes the local bytes and fences the key so a stale writer can never publish them again. */
+  async revokeLocalFile(fileId: FileRow["id"]): Promise<void> {
+    await this.localStore?.revoke(String(fileId));
+  }
+
+  /** Removes staging copies stranded by writers that died after their key was revoked. */
+  async sweepRevokedStaging(): Promise<number> {
+    return await this.localStore?.sweepFencedStaging() ?? 0;
+  }
+
   async resolveFile(file: FileRow, signal?: AbortSignal, maxBytes = MAX_FILE_BYTES, policy?: FileReadPolicy): Promise<ResolvedChatFile> {
     throwIfAborted(signal);
     // Callers may retain pre-backfill rows. Once established, the hash is canonical.

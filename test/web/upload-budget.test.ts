@@ -1,26 +1,28 @@
-import { mkdtemp, rm, stat, statfs } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadTestConfig } from "../../src/config.js";
 import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos } from "../../src/db/repos/index.js";
-import { createTemporaryUploadLease, requireUploadSpace, UploadBudget } from "../../src/web/upload-budget.js";
+import { createTemporaryUploadLease, requireUploadSpace, UploadBudget, uploadStorageInstance } from "../../src/web/upload-budget.js";
 
 vi.mock("node:fs/promises", async importOriginal => {
   const filesystem = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...filesystem, stat: vi.fn(filesystem.stat), statfs: vi.fn(filesystem.statfs) };
+  return { ...filesystem, stat: vi.fn(filesystem.stat), statfs: vi.fn(filesystem.statfs), link: vi.fn(filesystem.link) };
 });
 
 let database: AppDatabase;
 let directory: string;
 beforeEach(async () => {
+  vi.mocked(link).mockImplementation((...args) => vi.importActual<typeof import("node:fs/promises")>("node:fs/promises").then(filesystem => filesystem.link(...args)));
   directory = await mkdtemp(path.join(tmpdir(), "upload-budget-"));
   database = createDatabase({ DB_URL: `sqlite:${path.join(directory, "test.db")}` });
   await database.initialize();
 });
-afterEach(async () => { vi.restoreAllMocks(); vi.mocked(stat).mockReset(); vi.mocked(statfs).mockReset(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); vi.mocked(stat).mockReset(); vi.mocked(statfs).mockReset(); vi.mocked(link).mockReset(); await database.destroy(); await rm(directory, { recursive: true, force: true }); });
 const config = () => loadTestConfig({ FILE_STORAGE_PATH: directory, WEB_UPLOAD_USER_MAX_BYTES: 10 });
 
 it("serializes reservations across connections and preserves quotas after restart", async () => {
@@ -118,4 +120,94 @@ it("expires abandoned reservations, renews active ones, and fails closed when di
   await reservation.release();
   await next.release();
   expect(await database.db.query(sql`select * from web_upload_reservations`)).toEqual([]);
+});
+
+describe("storage identity", () => {
+  const marker = () => path.join(directory, "volume", ".upload-instance");
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const volume = () => path.join(directory, "volume");
+
+  it("publishes only a complete, durable identity and leaves no staging files", async () => {
+    let staged = "";
+    vi.mocked(link).mockImplementationOnce(async (from, to) => {
+      // At the moment it becomes visible, the identity is already complete.
+      staged = await readFile(String(from), "utf8");
+      const filesystem = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      return filesystem.link(from, to);
+    });
+    const identity = await uploadStorageInstance(volume());
+    expect(staged).toBe(`${identity}\n`);
+    expect(await readFile(marker(), "utf8")).toBe(`${identity}\n`);
+    expect(await readdir(volume())).toEqual([".upload-instance"]);
+    expect((await stat(marker())).mode & 0o777).toBe(0o600);
+  });
+
+  it("recovers from an interruption before publication without leaving an invalid identity", async () => {
+    vi.mocked(link).mockRejectedValueOnce(Object.assign(new Error("interrupted"), { code: "EIO" }));
+    await expect(uploadStorageInstance(volume())).rejects.toThrow("interrupted");
+    // Nothing was published and the failed attempt cleaned its staging copy.
+    expect(await readdir(volume())).toEqual([]);
+    const identity = await uploadStorageInstance(volume());
+    expect(identity).toMatch(uuid);
+    // A staging file stranded by a crash is never mistaken for the identity, then or later.
+    await rm(marker());
+    await writeFile(path.join(volume(), ".upload-instance.crashed.tmp"), "half");
+    const other = path.join(directory, "other");
+    await mkdir(other);
+    await writeFile(path.join(other, ".upload-instance.crashed.tmp"), "half");
+    expect(await uploadStorageInstance(other)).toMatch(uuid);
+    expect((await readFile(path.join(other, ".upload-instance"), "utf8")).trim()).toMatch(uuid);
+  });
+
+  it("adopts the identity another creator published first instead of overwriting it", async () => {
+    vi.mocked(link).mockImplementationOnce(async () => {
+      await writeFile(marker(), "11111111-1111-4111-8111-111111111111\n");
+      throw Object.assign(new Error("exists"), { code: "EEXIST" });
+    });
+    await mkdir(volume());
+    expect(await uploadStorageInstance(volume())).toBe("11111111-1111-4111-8111-111111111111");
+    expect(await readFile(marker(), "utf8")).toBe("11111111-1111-4111-8111-111111111111\n");
+    expect(await readdir(volume())).toEqual([".upload-instance"]);
+  });
+
+  it.each(["", "half-written", "11111111-1111-4111"])("never replaces a corrupt existing identity %j", async contents => {
+    await mkdir(volume());
+    await writeFile(marker(), contents);
+    await expect(uploadStorageInstance(volume())).rejects.toThrow("will not be replaced");
+    await expect(uploadStorageInstance(volume())).rejects.toThrow("will not be replaced");
+    expect(await readFile(marker(), "utf8")).toBe(contents);
+    expect(await readdir(volume())).toEqual([".upload-instance"]);
+  });
+
+  it("makes concurrent first starters in separate processes agree on one identity", async () => {
+    const root = path.resolve(import.meta.dirname, "../..");
+    // Each child loads the module, announces it is ready, and only initializes once released, so all six are
+    // alive and racing on the same fresh volume at the same moment.
+    const script = `const { uploadStorageInstance } = await import(process.env.ROOT + "/src/web/upload-budget.js");
+      console.log("ready");
+      await new Promise(resolve => process.stdin.once("data", resolve));
+      process.stdout.write("identity " + await uploadStorageInstance(process.env.VOLUME) + "\\n", () => process.exit(0));`;
+    const children = Array.from({ length: 6 }, () => {
+      const child = spawn(process.execPath, ["-e", script], { env: { ...process.env, ROOT: root, VOLUME: volume() }, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      const ready = new Promise<void>(resolve => child.stdout.on("data", chunk => { stdout += chunk; if (stdout.includes("ready")) resolve(); }));
+      child.stderr.on("data", chunk => { stderr += chunk; });
+      const exited = new Promise<{ status: number | null; identity: string; stderr: string }>(resolve => child.on("close", status =>
+        resolve({ status, identity: /identity (\S+)/.exec(stdout)?.[1] ?? "", stderr })));
+      return { child, ready, exited };
+    });
+    await Promise.all(children.map(entry => entry.ready));
+    // Nothing exists yet: every child is waiting at the barrier before the first creation.
+    expect(await readdir(directory).then(entries => entries.includes("volume"))).toBe(false);
+    for (const { child } of children) child.stdin.write("go\n");
+    const results = await Promise.all(children.map(entry => entry.exited));
+    expect(results.map(result => [result.status, result.stderr])).toEqual(Array.from({ length: 6 }, () => [0, ""]));
+    const identities = new Set(results.map(result => result.identity));
+    expect(identities.size).toBe(1);
+    expect([...identities][0]).toMatch(uuid);
+    expect(await readFile(marker(), "utf8")).toBe(`${[...identities][0]}\n`);
+    expect((await stat(marker())).mode & 0o777).toBe(0o600);
+    expect(await readdir(volume())).toEqual([".upload-instance"]);
+  });
 });

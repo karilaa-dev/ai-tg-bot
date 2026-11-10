@@ -44,6 +44,10 @@ describe.skipIf(!postgresUrl)("PostgreSQL schema initialization", () => {
       expect(await sessions.userId(tokenHash)).toBeUndefined();
     } finally { await other.destroy(); }
 
+    await database.db.execute(sql`insert into web_upload_cleanup(id, kind, target, instance, attempts, next_attempt_at, created_at)
+      values ('cleanup', 'file', '00000000-0000-4000-8000-000000000001', 'volume', 2, 5, 1)`);
+    await database.initialize();
+    expect(await database.db.query(sql`select id, attempts from web_upload_cleanup`)).toEqual([{ id: "cleanup", attempts: 2 }]);
     const repos = createRepos(database.db, database.search);
     const user = await repos.users.ensure({ tgId: 42, firstName: "Current", lang: "en" });
     const threads = await Promise.all(Array.from({ length: 5 }, () => repos.threads.activeForUserTopic(user.tg_id, null)));

@@ -11,6 +11,7 @@ import { uuid } from "./ids.js";
 import type { WebServerOptions } from "./server.js";
 
 import { readChatUpload } from "./chat-upload.js";
+import { uploadStorageInstance } from "./upload-budget.js";
 export { MAX_CHAT_BODY_BYTES } from "./chat-upload.js";
 const MAX_JSON_BYTES = 256 * 1024;
 const TitleSchema = z.object({ title: z.string().trim().min(1).refine(value => Array.from(value).length <= 128).optional() }).strict();
@@ -223,6 +224,7 @@ async function sendInput(request: Request, userId: number, options: WebServerOpt
     if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
     return { value: input, async dispose() {} };
   }
-  const { dispose, ...value } = await readChatUpload(request, options.db, userId, options.config.WEB_UPLOAD_MIN_FREE_BYTES);
+  const instance = await uploadStorageInstance(options.config.FILE_STORAGE_PATH);
+  const { dispose, ...value } = await readChatUpload(request, options.db, userId, options.config.WEB_UPLOAD_MIN_FREE_BYTES, instance);
   return { value, dispose };
 }

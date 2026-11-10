@@ -52,8 +52,27 @@ interface PiThreadRuntime {
   lastUsedAt: number;
 }
 
+/** Cache bookkeeping. Owners pin a runtime for the whole operation, including work after model streaming ends. */
+interface CachedRuntime extends PiThreadRuntime {
+  owners: number;
+  /** No longer in the cache; disposed once the last owner releases it. */
+  retired: boolean;
+  disposed: boolean;
+}
+
+/**
+ * Exclusive-use pin on a cached runtime. The runtime cannot be evicted or disposed (except by shutdown) until
+ * `release()` runs; release is idempotent and must be called on success, failure and cancellation.
+ */
+export interface PiRuntimeLease {
+  runtime: PiThreadRuntime;
+  release(): Promise<void>;
+}
+
 export interface PiRuntimeService {
   runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime>;
+  /** Like runtime(), but the runtime stays pinned in the cache until the lease is released. */
+  acquireRuntime?(thread: ThreadRow, user: UserRow): Promise<PiRuntimeLease>;
   compact(thread: ThreadRow, user: UserRow, signal?: AbortSignal): Promise<number>;
   fork(
     source: ThreadRow,
@@ -73,7 +92,12 @@ export class PiRuntimeManager implements PiRuntimeService {
   modelRegistry!: ModelRegistry;
   providerRouter!: PiProviderRouter;
   readonly agentDir: string;
-  private readonly runtimes = new Map<string, PiThreadRuntime>();
+  private readonly runtimes = new Map<string, CachedRuntime>();
+  /** Runtimes removed from the cache while an operation still owns them. */
+  private readonly retiredOwned = new Set<CachedRuntime>();
+  /** Per-thread runtime creation or eviction cleanup in flight; a new owner waits instead of racing it. */
+  private readonly settling = new Map<string, Promise<void>>();
+  private pruneTail: Promise<void> = Promise.resolve();
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private initialization?: Promise<void>;
   private codexCredentials!: CodexCliCredentialStore;
@@ -168,20 +192,37 @@ export class PiRuntimeManager implements PiRuntimeService {
     this.providerRouter.circuit.reset();
   }
 
+  /** Returns the thread's runtime without pinning it. Operations that outlive this call must use acquireRuntime(). */
   async runtime(thread: ThreadRow, user: UserRow): Promise<PiThreadRuntime> {
+    const lease = await this.acquireRuntime(thread, user);
+    await lease.release();
+    return lease.runtime;
+  }
+
+  async acquireRuntime(thread: ThreadRow, user: UserRow): Promise<PiRuntimeLease> {
     await this.initialize();
+    for (let pending = this.settling.get(thread.id); pending; pending = this.settling.get(thread.id)) await pending;
     const cached = this.runtimes.get(thread.id);
+    if (!cached) return this.track(thread.id, this.createRuntime(thread, user));
     // Active sessions own their in-flight state. Durable thread ownership
     // serializes ordinary turns and barrier operations before this idle path.
-    if (cached && !cached.session.isIdle) {
+    if (!cached.session.isIdle) {
       cached.lastUsedAt = Date.now();
-      return cached;
+      return this.pin(cached);
     }
-    // A barrier caller may have captured its row before another worker created
-    // the transcript. Always use the current persisted session pointer.
-    thread = await this.input.repos.threads.get(thread.id) ?? thread;
-    let persistedSession: SessionManager | undefined;
-    if (cached) {
+    // Revalidation may replace the runtime, so it runs as the thread's single in-flight creation: a concurrent
+    // caller waits for it and then revalidates whatever it left in the cache, never the entry it replaced.
+    return this.track(thread.id, this.revalidateRuntime(cached, thread, user));
+  }
+
+  private async revalidateRuntime(cached: CachedRuntime, thread: ThreadRow, user: UserRow): Promise<PiRuntimeLease> {
+    // Pin before the first await so no other request can evict the entry while it is revalidated.
+    const lease = this.pin(cached);
+    let persistedSession: SessionManager;
+    try {
+      // A barrier caller may have captured its row before another worker created
+      // the transcript. Always use the current persisted session pointer.
+      thread = await this.input.repos.threads.get(thread.id) ?? thread;
       persistedSession = await this.openSessionManager(thread);
       if (persistedSession.getSessionFile() === cached.session.sessionFile
         && persistedSession.getSessionId() === cached.session.sessionId
@@ -189,14 +230,26 @@ export class PiRuntimeManager implements PiRuntimeService {
         cached.bridge.user = user;
         cached.bridge.thread = thread;
         cached.lastUsedAt = Date.now();
-        return cached;
+        return lease;
       }
-      // Another owner appended or compacted this session while our cache was
-      // idle. Rebuild Pi's agent state and active tools from that transcript.
-      await cached.bridge.endTurn();
-      cached.session.dispose();
-      this.runtimes.delete(thread.id);
+    } catch (error) {
+      await lease.release();
+      throw error;
     }
+    // Another owner appended or compacted this session while our cache was
+    // idle. Rebuild Pi's agent state and active tools from that transcript.
+    this.retire(thread.id, cached);
+    return this.createRuntime(thread, user, { stale: lease, persistedSession });
+  }
+
+  private async createRuntime(
+    thread: ThreadRow,
+    user: UserRow,
+    previous?: { stale: PiRuntimeLease; persistedSession: SessionManager },
+  ): Promise<PiRuntimeLease> {
+    await previous?.stale.release();
+    thread = previous ? thread : await this.input.repos.threads.get(thread.id) ?? thread;
+    const persistedSession = previous?.persistedSession;
     user = await this.input.repos.users.get(user.tg_id) ?? user;
     if (user.memory_enabled) await initializeUserMemory(this.input.db.db, user.tg_id);
     const systemPrompt = await renderSystemPrompt({
@@ -285,42 +338,50 @@ export class PiRuntimeManager implements PiRuntimeService {
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("Pi persistent session did not return a session file.");
     await this.input.repos.threads.setPiSession(thread.id, sessionFile, session.sessionId);
-    const runtime = { session, bridge, lastUsedAt: Date.now() };
+    const runtime: CachedRuntime = { session, bridge, lastUsedAt: Date.now(), owners: 0, retired: false, disposed: false };
+    // The creator owns the runtime from the moment it becomes visible to eviction.
+    const lease = this.pin(runtime);
     this.runtimes.set(thread.id, runtime);
-    await this.evictIdleRuntimes(thread.id);
+    await this.prune(thread.id);
     this.input.logger.info("Pi thread session ready", {
       threadId: thread.id,
       sessionId: session.sessionId,
       resumed: Boolean(thread.pi_session_file),
       skills: loadedSkillNames,
     });
-    return runtime;
+    return lease;
   }
 
   async compact(thread: ThreadRow, user: UserRow, signal?: AbortSignal): Promise<number> {
     signal?.throwIfAborted();
-    const runtime = await this.runtime(thread, user);
-    signal?.throwIfAborted();
-    assertCompactionUseful(runtime.session);
-    const priorCompaction = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction")?.id;
-    const before = contextMessageCount(runtime.session);
-    const compaction = runtime.session.compact();
-    const onAbort = () => runtime.session.abortCompaction();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
+    // Compaction is neither streaming nor guaranteed to be visible as idle; own the runtime throughout.
+    const lease = await this.acquireRuntime(thread, user);
     try {
-      await compaction;
+      const { runtime } = lease;
       signal?.throwIfAborted();
-      const checkpoint = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
-      if (!checkpoint?.summary.trim() || checkpoint.id === priorCompaction) throw new Error("Compaction did not save a new checkpoint.");
-      const after = contextMessageCount(runtime.session);
-      return Math.max(0, before - after);
-    } catch (error) {
-      if (error instanceof Error && error.message === "Nothing to compact (session too small)") throw new CompactionGuardError("too_small");
-      if (error instanceof Error && error.message === "Already compacted") throw new CompactionGuardError("unchanged");
-      throw error;
+      assertCompactionUseful(runtime.session);
+      const priorCompaction = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction")?.id;
+      const before = contextMessageCount(runtime.session);
+      const compaction = runtime.session.compact();
+      const onAbort = () => runtime.session.abortCompaction();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      try {
+        await compaction;
+        signal?.throwIfAborted();
+        const checkpoint = runtime.session.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+        if (!checkpoint?.summary.trim() || checkpoint.id === priorCompaction) throw new Error("Compaction did not save a new checkpoint.");
+        const after = contextMessageCount(runtime.session);
+        return Math.max(0, before - after);
+      } catch (error) {
+        if (error instanceof Error && error.message === "Nothing to compact (session too small)") throw new CompactionGuardError("too_small");
+        if (error instanceof Error && error.message === "Already compacted") throw new CompactionGuardError("unchanged");
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
     } finally {
-      signal?.removeEventListener("abort", onAbort);
+      await lease.release();
     }
   }
 
@@ -332,8 +393,22 @@ export class PiRuntimeManager implements PiRuntimeService {
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const runtime = await this.runtime(source, user);
-    signal?.throwIfAborted();
+    const lease = await this.acquireRuntime(source, user);
+    try {
+      signal?.throwIfAborted();
+      await this.forkSession(lease.runtime, source, target, entryId, signal);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private async forkSession(
+    runtime: PiThreadRuntime,
+    source: ThreadRow,
+    target: ThreadRow,
+    entryId: string | null | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
     const sourceManager = runtime.session.sessionManager;
     const branchPoint = entryId ?? sourceManager.getLeafId();
     if (!branchPoint) return;
@@ -388,11 +463,12 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   async dispose(): Promise<void> {
-    for (const runtime of this.runtimes.values()) {
-      await runtime.bridge.endTurn();
-      runtime.session.dispose();
-    }
+    // Shutdown does not wait for owners: their operations are cancelled with the application.
+    await Promise.all([...this.settling.values()]);
+    const entries = [...this.runtimes.values(), ...this.retiredOwned];
     this.runtimes.clear();
+    this.retiredOwned.clear();
+    for (const runtime of entries) await this.disposeEntry(runtime);
     await this.browserRuntime?.dispose();
   }
 
@@ -471,16 +547,73 @@ export class PiRuntimeManager implements PiRuntimeService {
     return SessionManager.create(process.cwd(), sessionDir);
   }
 
-  private async evictIdleRuntimes(keepThreadId: string): Promise<void> {
+  private pin(runtime: CachedRuntime): PiRuntimeLease {
+    runtime.owners++;
+    let released = false;
+    return {
+      runtime,
+      release: async () => {
+        if (released) return;
+        released = true;
+        runtime.owners--;
+        runtime.lastUsedAt = Date.now();
+        if (runtime.owners === 0 && runtime.retired) {
+          this.retiredOwned.delete(runtime);
+          await this.disposeEntry(runtime);
+        } else if (runtime.owners === 0) {
+          // The cache may have grown past its bound while every runtime was owned.
+          await this.prune();
+        }
+      },
+    };
+  }
+
+  /** Removes the entry from the cache without disposing it; its last owner disposes it. */
+  private retire(threadId: string, runtime: CachedRuntime): void {
+    if (this.runtimes.get(threadId) === runtime) this.runtimes.delete(threadId);
+    runtime.retired = true;
+    if (runtime.owners > 0) this.retiredOwned.add(runtime);
+  }
+
+  /** Makes later acquisitions of the thread wait for this creation or cleanup. */
+  private track<T>(threadId: string, work: Promise<T>): Promise<T> {
+    const marker = work.then(() => undefined, () => undefined);
+    this.settling.set(threadId, marker);
+    void marker.then(() => { if (this.settling.get(threadId) === marker) this.settling.delete(threadId); });
+    return work;
+  }
+
+  private async disposeEntry(runtime: CachedRuntime): Promise<void> {
+    if (runtime.disposed) return;
+    runtime.disposed = true;
+    try {
+      await runtime.bridge.endTurn();
+    } catch (error) {
+      this.input.logger.warn("Pi bridge cleanup failed during runtime disposal", { error: String(error) });
+    } finally {
+      runtime.session.dispose();
+    }
+  }
+
+  /** Serialized so concurrent callers cannot each evict toward the bound. */
+  private prune(keepThreadId?: string): Promise<void> {
+    const run = this.pruneTail.then(() => this.evictIdleRuntimes(keepThreadId));
+    this.pruneTail = run.catch(() => undefined);
+    return run;
+  }
+
+  private async evictIdleRuntimes(keepThreadId?: string): Promise<void> {
     while (this.runtimes.size > MAX_CACHED_RUNTIMES) {
-      const candidates = [...this.runtimes.entries()]
-        .filter(([threadId, runtime]) => threadId !== keepThreadId && !runtime.session.isStreaming)
-        .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt);
-      const victim = candidates[0];
+      const victim = [...this.runtimes.entries()]
+        .filter(([threadId, runtime]) => threadId !== keepThreadId && runtime.owners === 0
+          && !runtime.session.isStreaming && runtime.session.isIdle)
+        .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)[0];
+      // Every remaining runtime is owned or active; the cache is pruned again when one is released.
       if (!victim) return;
-      await victim[1].bridge.endTurn();
-      victim[1].session.dispose();
-      this.runtimes.delete(victim[0]);
+      const [threadId, runtime] = victim;
+      // Leave the cache before awaiting cleanup so the runtime cannot be handed out half-disposed.
+      this.retire(threadId, runtime);
+      await this.track(threadId, this.disposeEntry(runtime));
     }
   }
 }
