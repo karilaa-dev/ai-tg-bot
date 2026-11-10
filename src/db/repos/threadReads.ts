@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { asRecord } from "../../util/records.js";
 import { messageScopePredicate } from "../search.js";
 import { queryOne, valueList, type SqlExecutor } from "../sql.js";
@@ -11,57 +11,88 @@ export interface ThreadReadState {
   unread: boolean;
 }
 
+const MAX_MESSAGE_ID = sql.raw("9223372036854775807");
+
+interface ReadStateRow {
+  id: string; origin: "web" | "telegram"; readMessageId: number | null; lastMessageId: number | null; unread: number;
+  pendingId: number | null; priorMessageId: number | null; turnId: number | null; lease: number | null;
+  content: string | null; hasText: number | null; hasFiles: number | null;
+}
+
+/**
+ * One statement, so every field comes from the same snapshot. The bounded ancestry is shared by three questions
+ * that each touch only the messages they need:
+ * - the newest visible message per chat, one indexed maximum per ancestor;
+ * - whether anything past the saved cursor is unread, which never looks at acknowledged history;
+ * - the pending-delivery candidates, found from the few active turns instead of from every message.
+ */
+export function threadReadStatesQuery(dialect: SqlExecutor["dialect"], userId: number, threadIds: string[]) {
+  const whitespace = " \t\n\r\v\f";
+  const text = (column: string) => dialect === "sqlite"
+    ? sql`trim(${sql.raw(column)}, ${whitespace})` : sql`btrim(${sql.raw(column)}, ${whitespace})`;
+  const lesser = (left: SQL, right: SQL) => dialect === "sqlite" ? sql`min(${left}, ${right})` : sql`least(${left}, ${right})`;
+  const marker = '%"attachmentDeliveryTurnId"%';
+  const activeRun = sql`r.user_id = ${userId} and r.status in ('running', 'awaiting_delivery')`;
+  return sql`
+    with recursive visible_threads(root_id, source_id, max_message_id, depth) as (
+      select id, id, cast(null as bigint), 0 from threads
+      where user_id = ${userId} and id in (${valueList(threadIds)})
+      union all
+      select v.root_id, parent.id,
+        case when v.max_message_id is null or child.fork_point_message_id < v.max_message_id
+          then child.fork_point_message_id else v.max_message_id end, v.depth + 1
+      from visible_threads v join threads child on child.id = v.source_id
+      join threads parent on parent.id = child.parent_thread_id and parent.user_id = ${userId}
+      where child.fork_point_message_id is not null and v.depth < 999
+    ), bounds as (
+      select root_id, source_id, coalesce(max_message_id, ${MAX_MESSAGE_ID}) as upper_id from visible_threads
+    ), last_visible as (
+      select root_id, max(last_id) as last_message_id from (
+        select b.root_id, (select max(m.id) from messages m where m.thread_id = b.source_id and m.id <= b.upper_id) as last_id
+        from bounds b
+      ) per_thread group by root_id
+    ), pending as (
+      select b.root_id, m.id, r.id as turn_id, r.lease_expires_at as lease, m.content_json as content,
+        case when ${text("m.text_plain")} <> '' then 1 else 0 end as has_text,
+        case when exists (select 1 from files f where f.message_id = m.id) or exists (
+          select 1 from message_files mf join files f on f.id = mf.file_id where mf.message_id = m.id
+        ) then 1 else 0 end as has_files
+      from bounds b join turn_runs r on r.thread_id = b.source_id and ${activeRun}
+      join messages m on m.thread_id = r.thread_id and m.id > r.user_message_id and m.id <= b.upper_id
+      where m.role = 'assistant' and m.content_json like ${marker}
+    ), summaries as (
+      select t.id, t.origin, rd.message_id as read_message_id, l.last_message_id,
+        case when exists (
+          select 1 from bounds b join messages m on m.thread_id = b.source_id
+            and m.id > coalesce(rd.message_id, 0) and m.id <= b.upper_id
+          where b.root_id = t.id and m.role = 'assistant'
+            and not exists (select 1 from turn_runs r where r.thread_id = m.thread_id and ${activeRun}
+              and m.id > r.user_message_id and m.content_json like ${marker})
+            and (${text("m.text_plain")} <> '' or exists (select 1 from files f where f.message_id = m.id) or exists (
+              select 1 from message_files mf join files f on f.id = mf.file_id where mf.message_id = m.id))
+        ) then 1 else 0 end as unread
+      from threads t left join thread_reads rd on rd.thread_id = t.id and rd.user_id = ${userId}
+      left join last_visible l on l.root_id = t.id
+      where t.user_id = ${userId} and t.id in (${valueList(threadIds)})
+    )
+    select s.id, s.origin, s.read_message_id as "readMessageId", s.last_message_id as "lastMessageId", s.unread,
+      p.id as "pendingId", p.turn_id as "turnId", p.lease, p.content,
+      p.has_text as "hasText", p.has_files as "hasFiles",
+      (select max(prior_id) from (
+        select (select max(x.id) from messages x where x.thread_id = bb.source_id
+          and x.id <= ${lesser(sql`bb.upper_id`, sql`p.id - 1`)}) as prior_id
+        from bounds bb where bb.root_id = s.id
+      ) prior) as "priorMessageId"
+    from summaries s left join pending p on p.root_id = s.id
+  `;
+}
+
 export class ThreadReadsRepo {
   constructor(private readonly db: SqlExecutor) {}
 
   async states(userId: number, threadIds: string[]): Promise<Map<string, ThreadReadState>> {
     if (!threadIds.length) return new Map();
-    const whitespace = " \t\n\r\v\f";
-    const text = this.db.dialect === "sqlite" ? sql`trim(m.text_plain, ${whitespace})` : sql`btrim(m.text_plain, ${whitespace})`;
-    const rows = await this.db.query<{
-      id: string; origin: "web" | "telegram"; readMessageId: number | null; lastMessageId: number | null; unread: number;
-      pendingId: number | null; priorMessageId: number | null; turnId: number | null; lease: number | null;
-      content: string | null; hasText: number | null; hasFiles: number | null;
-    }>(sql`
-      with recursive visible_threads(root_id, source_id, max_message_id, depth) as (
-        select id, id, cast(null as bigint), 0 from threads
-        where user_id = ${userId} and id in (${valueList(threadIds)})
-        union all
-        select v.root_id, parent.id,
-          case when v.max_message_id is null or child.fork_point_message_id < v.max_message_id
-            then child.fork_point_message_id else v.max_message_id end, v.depth + 1
-        from visible_threads v join threads child on child.id = v.source_id
-        join threads parent on parent.id = child.parent_thread_id and parent.user_id = ${userId}
-        where child.fork_point_message_id is not null and v.depth < 999
-      ), visible_messages as (
-        select v.root_id, m.id, m.role, r.id as turn_id, r.lease_expires_at as lease,
-          case when r.id is not null then m.content_json end as content,
-          case when ${text} <> '' then 1 else 0 end as has_text,
-          case when exists (select 1 from files f where f.message_id = m.id) or exists (
-            select 1 from message_files mf join files f on f.id = mf.file_id where mf.message_id = m.id
-          ) then 1 else 0 end as has_files
-        from visible_threads v join messages m on m.thread_id = v.source_id
-        left join turn_runs r on r.thread_id = m.thread_id and r.user_id = ${userId}
-          and r.status in ('running', 'awaiting_delivery') and m.role = 'assistant'
-          and m.id > r.user_message_id and m.content_json like ${'%"attachmentDeliveryTurnId"%'}
-        where v.max_message_id is null or m.id <= v.max_message_id
-      ), summaries as (
-        select t.id, t.origin, r.message_id as read_message_id, max(m.id) as last_message_id,
-          max(case when m.role = 'assistant' and m.turn_id is null
-            and m.id > coalesce(r.message_id, 0) and (m.has_text = 1 or m.has_files = 1)
-            then 1 else 0 end) as unread
-        from threads t left join thread_reads r on r.thread_id = t.id and r.user_id = ${userId}
-        left join visible_messages m on m.root_id = t.id
-        where t.user_id = ${userId} and t.id in (${valueList(threadIds)})
-        group by t.id, t.origin, r.message_id
-      )
-      select s.id, s.origin, s.read_message_id as "readMessageId", s.last_message_id as "lastMessageId", s.unread,
-        p.id as "pendingId", p.turn_id as "turnId", p.lease, p.content,
-        p.has_text as "hasText", p.has_files as "hasFiles",
-        (select max(previous.id) from visible_messages previous
-          where previous.root_id = s.id and previous.id < p.id) as "priorMessageId"
-      from summaries s left join visible_messages p on p.root_id = s.id and p.turn_id is not null
-    `);
+    const rows = await this.db.query<ReadStateRow>(threadReadStatesQuery(this.db.dialect, userId, threadIds));
     const result = new Map<string, ThreadReadState>();
     const now = Date.now();
     for (const row of rows) {
