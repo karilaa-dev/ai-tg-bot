@@ -128,6 +128,8 @@ try {
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
   await codexLogin?.stop().catch(() => logger.warn("Codex login shutdown failed"));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));
+  await botServices?.routerState.intake.waitForIdle();
+  await botServices?.conversations.waitForCompactions();
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;

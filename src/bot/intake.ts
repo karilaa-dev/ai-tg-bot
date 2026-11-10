@@ -73,6 +73,11 @@ export class TelegramIntake {
     return this.work.size;
   }
 
+  /** After producers have stopped and operations are cancelled, finish their cleanup before teardown. */
+  async waitForIdle(): Promise<void> {
+    while (this.work.size) await Promise.allSettled(this.work.keys());
+  }
+
   /** Aborted when shutdown stops waiting; detached work must then stop using Telegram and the database. */
   get stopping(): AbortSignal {
     return this.stopController.signal;

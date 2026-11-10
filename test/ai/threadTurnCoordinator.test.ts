@@ -952,6 +952,28 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("cancels a barrier still waiting for a running turn during shutdown", async () => {
+    const { userId, threadId } = await ownership(repos, 832);
+    const started = deferred<void>(), release = deferred<void>();
+    const coordinator = createCoordinator(db, repos, async () => {
+      started.resolve();
+      await release.promise;
+    });
+    await coordinator.accept(request(userId, threadId, 32_001, "active"));
+    await started.promise;
+    const callback = vi.fn();
+    const operation = coordinator.withThreadBarrier(threadId, "fork", callback);
+    const rejection = expect(operation).rejects.toThrow();
+    try {
+      await coordinator.shutdown(10);
+      await rejection;
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await coordinator.waitForIdle();
+    }
+  });
+
   it("runs a compaction before turns accepted after it was requested", async () => {
     const { userId, threadId } = await ownership(repos, 830);
     const started = deferred<void>();

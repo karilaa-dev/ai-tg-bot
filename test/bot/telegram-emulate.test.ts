@@ -1393,6 +1393,47 @@ describe("Telegram bot with grammy-emulate", () => {
       expect(laterMessage.id).toBeGreaterThan(child.fork_point_message_id!);
     });
 
+    it("waits for cancelled fork topic cleanup before shutdown permits database teardown", async () => {
+      await env.dispose();
+      env = await createGrammyEmulator({ privateTopics: true });
+      await startBot();
+      const entered = deferred<void>(), release = deferred<void>();
+      let topicSignal: { aborted: boolean } | undefined;
+      env.bot.api.config.use(async (prev, method, payload, signal) => {
+        if (method === "createForumTopic") {
+          topicSignal = signal;
+          entered.resolve();
+          // Model a request already accepted remotely; cancellation cannot undo its result.
+          await release.promise;
+          return prev(method, payload);
+        }
+        return prev(method, payload, signal);
+      });
+      const command = env.bot.sendCommand(env.user, env.chat, "/fork");
+      await entered.promise;
+      const { drainTelegramIntake } = await import("../../src/bot/batching.js");
+      await drainTelegramIntake(env.services, 10);
+      let shutdownFinished = false;
+      const shutdown = env.services.turnCoordinator.shutdown(10).then(() => { shutdownFinished = true; });
+      try {
+        await wait(50);
+        expect(shutdownFinished).toBe(false);
+        expect(topicSignal?.aborted).toBe(true);
+      } finally {
+        release.resolve();
+        await Promise.all([command, shutdown]);
+      }
+      expect(env.bot.getApiCalls().some(call => call.method === "deleteForumTopic")).toBe(true);
+      expect(await env.db.db.query(sql`select id from threads where parent_thread_id is not null`)).toEqual([]);
+      const queries = vi.spyOn(env.db.db, "query");
+      const writes = vi.spyOn(env.db.db, "execute");
+      const apiCalls = env.bot.getApiCalls().length;
+      await wait(50);
+      expect(queries).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
+      expect(env.bot.getApiCalls()).toHaveLength(apiCalls);
+    });
+
     it("stops reporting compaction progress when shutdown stops waiting", async () => {
       await startBot();
       const compacting = deferred<number>();

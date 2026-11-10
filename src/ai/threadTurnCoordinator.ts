@@ -10,6 +10,7 @@ import type { Logger } from "../logger.js";
 import type { PiRuntimeService } from "../pi/runtime.js";
 import type { TurnDraft } from "./types.js";
 import { TurnFinalizer } from "./turnFinalizer.js";
+import { raceWithAbort } from "../files/cancel.js";
 
 interface ActiveTurn {
   run: TurnRunRow;
@@ -21,6 +22,7 @@ export class ThreadTurnCoordinator {
   private readonly draining = new Map<string, Promise<void>>();
   private readonly active = new Map<string, ActiveTurn>();
   private readonly drafts = new Map<string, TurnDraft>();
+  private readonly barriers = new Set<Promise<unknown>>();
   /**
    * Turn IDs accepted before each pending compaction. Later turns stay queued
    * until it finishes, so new messages are stored without postponing it forever.
@@ -151,12 +153,14 @@ export class ThreadTurnCoordinator {
 
   async waitForIdle(threadId?: string, includeActivity = true, maxQueuedId?: number): Promise<void> {
     await this.recovery;
+    const signal = includeActivity ? undefined : this.lifecycle.signal;
     while (true) {
+      signal?.throwIfAborted();
       const tasks = threadId === undefined
         ? [...this.draining.values()]
         : [this.draining.get(threadId)].filter((task): task is Promise<void> => Boolean(task));
       if (tasks.length) {
-        await Promise.allSettled(tasks);
+        await raceWithAbort(Promise.allSettled(tasks), signal);
         continue;
       }
       if (threadId !== undefined) {
@@ -171,7 +175,7 @@ export class ThreadTurnCoordinator {
         if (!this.draining.has(threadId) && await this.input.repos.turnRuns.nextQueued(threadId)) {
           this.schedule(threadId);
         }
-        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
+        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS, signal);
         continue;
       }
       if (includeActivity) await this.activity.waitForIdle(threadId);
@@ -179,12 +183,25 @@ export class ThreadTurnCoordinator {
     }
   }
 
-  async withThreadBarrier<T>(
+  withThreadBarrier<T>(
     threadId: string,
     operation: "fork" | "compact",
     callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
+    const task = this.startThreadBarrier(threadId, operation, callback);
+    this.barriers.add(task);
+    void task.then(() => this.barriers.delete(task), () => this.barriers.delete(task));
+    return task;
+  }
+
+  private async startThreadBarrier<T>(
+    threadId: string,
+    operation: "fork" | "compact",
+    callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    this.lifecycle.signal.throwIfAborted();
     await this.recovery;
+    this.lifecycle.signal.throwIfAborted();
     const maxQueuedId = operation === "compact" ? await this.input.repos.turnRuns.latestId(threadId) : undefined;
     const release = maxQueuedId === undefined ? () => undefined : this.reserve(threadId, maxQueuedId);
     try {
@@ -233,7 +250,7 @@ export class ThreadTurnCoordinator {
         maxQueuedId,
       });
       if (!barrier) {
-        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
+        await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS, this.lifecycle.signal);
         continue;
       }
       this.input.logger.info("thread operation barrier acquired", {
@@ -246,6 +263,7 @@ export class ThreadTurnCoordinator {
       const operationController = new AbortController();
       const onShutdown = () => operationController.abort(new Error("Turn coordinator is shutting down."));
       this.lifecycle.signal.addEventListener("abort", onShutdown, { once: true });
+      if (this.lifecycle.signal.aborted) onShutdown();
       const abortBarrierOperation = (message: string) => {
         if (operationController.signal.aborted || !barrierMonitoring) return;
         this.input.logger.error(message, { threadId, operation });
@@ -284,6 +302,7 @@ export class ThreadTurnCoordinator {
       let operationError: unknown;
       let operationFailed = false;
       try {
+        operationController.signal.throwIfAborted();
         result = await callback(barrier.snapshotMessageId, operationController.signal);
         operationController.signal.throwIfAborted();
       } catch (error) {
@@ -336,6 +355,9 @@ export class ThreadTurnCoordinator {
       }),
     ]);
     if (timer) clearTimeout(timer);
+    // Barrier callbacks own rollback and remote-topic cleanup. Keep the database
+    // alive until that work settles, even if the ordinary turn grace period expires.
+    await Promise.allSettled(this.barriers);
     await this.activity.shutdown();
   }
 
