@@ -10,7 +10,7 @@ import { isThreadNotFound } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER } from "../files/limits.js";
 import { StreamShaper } from "./shaper.js";
 import type { CreatedFileAttachment } from "../files/types.js";
-import type { PiRuntimeService } from "../pi/runtime.js";
+import type { PiRuntimeLease, PiRuntimeService } from "../pi/runtime.js";
 import { asRecord, safeJson } from "../util/records.js";
 import { escapeHtml } from "../util/text.js";
 import {
@@ -31,6 +31,8 @@ const TYPING_ACTION_INTERVAL_MS = 5000;
 export const runTurn: TurnRunner = async (input) => {
   const startedAt = Date.now();
   let activeBridge: Awaited<ReturnType<PiRuntimeService["runtime"]>>["bridge"] | undefined;
+  // Pins the runtime from before turn preparation until delivery and cleanup finish, not just while streaming.
+  let runtimeLease: PiRuntimeLease | undefined;
   const afterCommandRelease = <T>(callback: ((result: T) => Promise<void>) | undefined) => async (result: T) => {
     // A terminal write lets another worker claim this thread. Finish sandbox
     // cleanup and its provider timeout update before handing ownership over.
@@ -80,7 +82,9 @@ export const runTurn: TurnRunner = async (input) => {
     if (!input.pi) throw new Error("Pi runtime is not configured.");
     const userMessage = await resolveTurnUserMessage(input);
     const currentFiles = userMessage ? await input.repos.files.listForMessage(userMessage.id) : [];
-    const runtime = await input.pi.runtime(input.thread, input.user);
+    const pi: Pick<PiRuntimeService, "runtime"> & Pick<PiRuntimeService, "acquireRuntime"> = input.pi;
+    runtimeLease = await pi.acquireRuntime?.(input.thread, input.user);
+    const runtime = runtimeLease?.runtime ?? await pi.runtime(input.thread, input.user);
     activeBridge = runtime.bridge;
     await runtime.bridge.beginTurn({
       fileResolver: input.fileResolver,
@@ -360,7 +364,16 @@ export const runTurn: TurnRunner = async (input) => {
         err: String(err),
       });
     } finally {
-      stop();
+      try {
+        await runtimeLease?.release();
+      } catch (err) {
+        input.logger.error("Pi runtime release failed", {
+          threadId: input.thread.id,
+          err: String(err),
+        });
+      } finally {
+        stop();
+      }
     }
   }
 };
