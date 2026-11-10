@@ -11,7 +11,8 @@ import { LocalFileSourceAdapter } from "../../src/files/localSource.js";
 // Observes physical writes while every call still reaches the real filesystem.
 vi.mock("node:fs/promises", async importOriginal => {
   const filesystem = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...filesystem, open: vi.fn(filesystem.open), link: vi.fn(filesystem.link), rename: vi.fn(filesystem.rename), mkdir: vi.fn(filesystem.mkdir) };
+  return { ...filesystem, open: vi.fn(filesystem.open), link: vi.fn(filesystem.link), rename: vi.fn(filesystem.rename), mkdir: vi.fn(filesystem.mkdir),
+    readdir: vi.fn(filesystem.readdir) };
 });
 
 const exists = (file: string) => stat(file).then(() => true, () => false);
@@ -236,6 +237,72 @@ describe("durable local attachment storage", () => {
       expect(await store.sweepFencedStaging()).toBe(1);
       expect(await exists(strandedFenced)).toBe(false);
       expect(await exists(inProgress)).toBe(true);
+    });
+  });
+
+  describe("revoking a batch of keys", () => {
+    const isFence = async (id: string) => (await stat(path.join(store.rootDirectory, id))).isDirectory();
+    const staged = async (id: string) => {
+      await mkdir(store.rootDirectory, { recursive: true });
+      const file = path.join(store.rootDirectory, `${id}.${randomUUID()}.tmp`);
+      await writeFile(file, "stranded staging copy");
+      return file;
+    };
+
+    it("fences every key and lists the directory once for the whole batch", async () => {
+      const accepted = randomUUID();
+      await store.write(accepted, Buffer.from("accepted attachment"));
+      const inProgress = await staged(accepted);
+      const keys = Array.from({ length: 5 }, () => randomUUID());
+      const stranded = [];
+      for (const key of keys) {
+        await store.write(key, Buffer.from(`abandoned ${key}`));
+        stranded.push(await staged(key));
+      }
+      vi.mocked(readdir).mockClear();
+      expect(await store.revokeMany(keys)).toEqual(new Map());
+      expect(vi.mocked(readdir)).toHaveBeenCalledTimes(1);
+      for (const key of keys) {
+        expect(await isFence(key)).toBe(true);
+        await expect(store.write(key, Buffer.from("late writer"))).rejects.toThrow("regular file");
+      }
+      for (const file of stranded) expect(await exists(file)).toBe(false);
+      // Accepted bytes and other keys' writes in progress are untouched.
+      expect(await store.read(accepted)).toEqual(Buffer.from("accepted attachment"));
+      expect(await exists(inProgress)).toBe(true);
+      // A single key still works the same way, and repeating a batch is already the end state.
+      const single = randomUUID();
+      const singleStaging = await staged(single);
+      await store.revoke(single);
+      expect(await isFence(single)).toBe(true);
+      expect(await exists(singleStaging)).toBe(false);
+      expect(await store.revokeMany(keys)).toEqual(new Map());
+    });
+
+    it("reports only the keys that failed and still revokes the others", async () => {
+      const healthy = randomUUID();
+      const blocked = randomUUID();
+      const healthyStaging = await staged(healthy);
+      // A staging name occupied by a non-empty directory cannot be unlinked.
+      const blockedStaging = path.join(store.rootDirectory, `${blocked}.${randomUUID()}.tmp`);
+      await mkdir(blockedStaging);
+      await writeFile(path.join(blockedStaging, "inside"), "x");
+      const failures = await store.revokeMany([healthy, "not-a-uuid", blocked]);
+      expect([...failures.keys()].sort()).toEqual([blocked, "not-a-uuid"].sort());
+      expect(await isFence(healthy)).toBe(true);
+      expect(await exists(healthyStaging)).toBe(false);
+      // The blocked key is fenced even though its cleanup is still owed, so it can never be published.
+      expect(await isFence(blocked)).toBe(true);
+      await expect(store.write(blocked, Buffer.from("late"))).rejects.toThrow("regular file");
+    });
+
+    it("leaves a staging copy created after the batch to the restart sweep", async () => {
+      const key = randomUUID();
+      await store.revokeMany([key]);
+      const late = await staged(key);
+      expect(await store.sweepFencedStaging()).toBe(1);
+      expect(await exists(late)).toBe(false);
+      expect(await isFence(key)).toBe(true);
     });
   });
 

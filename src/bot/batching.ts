@@ -67,11 +67,13 @@ export async function enqueueUserText(ctx: BotContext, text: string): Promise<vo
 }
 
 function scheduleTextBurstFlush(key: string, ctx: BotContext): NodeJS.Timeout {
-  return setTimeout(() => {
-    void flushPendingTextBurst(ctx, key).catch((err) => {
-      ctx.services.logger.error("text burst flush failed", { err: String(err) });
-    });
-  }, textBurstFlushMs);
+  return setTimeout(() => startTextBurstFlush(ctx, key), textBurstFlushMs);
+}
+
+function startTextBurstFlush(ctx: BotContext, key: string): void {
+  void ctx.services.routerState.intake.track("text burst", flushPendingTextBurst(ctx, key)).catch((err) => {
+    ctx.services.logger.error("text burst flush failed", { err: String(err) });
+  });
 }
 
 export async function flushPendingTextBurstForContext(ctx: BotContext): Promise<void> {
@@ -108,7 +110,7 @@ export function cancelPendingMediaGroupsForContext(ctx: BotContext): boolean {
 }
 
 export function cancelPendingForThread(state: BotServices["routerState"], threadId: string): boolean {
-  let cancelled = false;
+  let cancelled = state.intake.cancel(threadId);
   for (const pending of state.pendingTextBursts.values()) {
     if (pending.ctx.thread?.id === threadId) cancelled = cancelPendingTextBurstForContext(pending.ctx) || cancelled;
   }
@@ -186,11 +188,37 @@ export function holdPendingMediaGroup(ctx: BotContext, groupId?: string): () => 
 }
 
 function scheduleMediaGroupFlush(key: string, ctx: BotContext, groupId: string): NodeJS.Timeout {
-  return setTimeout(() => {
-    void flushMediaGroup(ctx, key).catch((err) => {
-      ctx.services.logger.error("media group flush failed", { err: String(err), groupId });
-    });
-  }, mediaGroupFlushMs);
+  return setTimeout(() => startMediaGroupFlush(ctx, key, groupId), mediaGroupFlushMs);
+}
+
+function startMediaGroupFlush(ctx: BotContext, key: string, groupId?: string): void {
+  void ctx.services.routerState.intake.track("media group", flushMediaGroup(ctx, key)).catch((err) => {
+    ctx.services.logger.error("media group flush failed", { err: String(err), groupId });
+  });
+}
+
+/**
+ * Send batches that are still collecting and wait for Telegram input to be
+ * accepted before shutdown closes the coordinator. Input that is still not
+ * accepted at the deadline is cancelled, logged and returned.
+ */
+export async function drainTelegramIntake(services: BotServices, timeoutMs = 10_000): Promise<string[]> {
+  const state = services.routerState;
+  const residue = await state.intake.drain(timeoutMs, () => {
+    for (const [key, pending] of state.pendingTextBursts) {
+      clearTimeout(pending.timer);
+      startTextBurstFlush(pending.ctx, key);
+    }
+    for (const [key, pending] of state.pendingMediaGroups) {
+      clearTimeout(pending.timer);
+      startMediaGroupFlush(pending.ctx, key);
+    }
+  });
+  if (residue.length) {
+    for (const job of state.activeFileJobs.values()) job.cancel();
+    services.logger.error("Telegram input was not accepted before shutdown", { pending: residue });
+  }
+  return residue;
 }
 
 async function flushMediaGroup(flushCtx: BotContext, key: string): Promise<void> {

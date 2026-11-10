@@ -9,6 +9,7 @@ import { createDatabase, type AppDatabase } from "../../src/db/index.js";
 import { createRepos, type Repos } from "../../src/db/repos/index.js";
 import { createLogger } from "../../src/logger.js";
 import { installBot } from "../../src/bot/router.js";
+import { drainTelegramIntake } from "../../src/bot/batching.js";
 import type { BotContext, BotServices } from "../../src/bot/context.js";
 import { sendFinal } from "../../src/ai/responseDelivery.js";
 import { type TurnRunner } from "../../src/ai/types.js";
@@ -33,6 +34,10 @@ export async function createGrammyEmulator(options: {
   imageCaptioner?: { caption(input: { bytes: Buffer; name: string; mime?: string }): Promise<string> };
   pi?: PiRuntimeService;
   downloadFile?: TelegramFileDownloader;
+  /** False lets acceptance return before the turn runs, as in production. */
+  awaitTurnProcessingOnAccept?: boolean;
+  /** Awaited by the default echo runner before it replies. */
+  turnGate?: (input: Parameters<TurnRunner>[0]) => Promise<void>;
 } = {}): Promise<GrammyEmulator> {
   const storageDirectory = await mkdtemp(path.join(tmpdir(), "ai-tg-bot-emulator-"));
   const config = loadTestConfig({ FILE_STORAGE_PATH: path.join(storageDirectory, "files"), ...options.config });
@@ -62,6 +67,7 @@ export async function createGrammyEmulator(options: {
   const turnRunner =
     options.turnRunner ??
     (async (input) => {
+      await options.turnGate?.(input);
       const accepted = input.userMessageId === undefined
         ? undefined
         : await input.repos.messages.get(input.userMessageId);
@@ -94,7 +100,7 @@ export async function createGrammyEmulator(options: {
     repos,
     turnRunner,
     pi,
-    awaitTurnProcessingOnAccept: true,
+    awaitTurnProcessingOnAccept: options.awaitTurnProcessingOnAccept ?? true,
     downloadFile: options.downloadFile ?? (async ({ fileId }) => {
       const content = bot.server.fileState.getFileContent(fileId);
       if (!content) throw new Error(`test file content not found: ${fileId}`);
@@ -125,6 +131,7 @@ export async function createGrammyEmulator(options: {
     user,
     chat,
     dispose: async () => {
+      await drainTelegramIntake(services, 5_000);
       await services.turnCoordinator.shutdown();
       await services.threadTitles.waitForIdle();
       bot.dispose();

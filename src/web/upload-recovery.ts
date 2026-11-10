@@ -72,6 +72,8 @@ export class UploadRecovery {
     config: Pick<AppConfig, "FILE_STORAGE_PATH">;
     /** Removes the stored bytes and fences the key against any later publication (FileResolver.revokeLocalFile). */
     revokeFile(fileId: string): Promise<void>;
+    /** Revokes several files at once and returns the IDs that failed (FileResolver.revokeLocalFiles). */
+    revokeFiles?(fileIds: string[]): Promise<Map<string, unknown>>;
     /** Removes staging copies stranded by writers that died after their key was revoked. */
     sweepStaging?(): Promise<unknown>;
     logger?: Pick<Logger, "warn" | "info">;
@@ -177,13 +179,24 @@ export class UploadRecovery {
       where instance in (${valueList(owned)}) and next_attempt_at <= ${Date.now()}
       order by next_attempt_at, id limit ${batch}
     `);
+    const claimed: typeof due = [];
     for (const entry of due) {
       // Claiming pushes the attempt back, so concurrent workers do not repeat the same removal.
-      const claimed = await queryOne(this.input.db, sql`update web_upload_cleanup set next_attempt_at = ${Date.now() + CLAIM_MS}
-        where id = ${entry.id} and next_attempt_at <= ${Date.now()} returning id`);
-      if (!claimed) continue;
+      if (await queryOne(this.input.db, sql`update web_upload_cleanup set next_attempt_at = ${Date.now() + CLAIM_MS}
+        where id = ${entry.id} and next_attempt_at <= ${Date.now()} returning id`)) claimed.push(entry);
+    }
+    // Owed file removals share one directory listing and sync; each record is still settled on its own outcome.
+    const files = claimed.filter(entry => entry.kind === "file" && isUuid(entry.target));
+    const failedFiles = this.input.revokeFiles && files.length
+      ? await this.input.revokeFiles(files.map(entry => entry.target)).catch(error => new Map(files.map(entry => [entry.target, error])))
+      : undefined;
+    for (const entry of claimed) {
       try {
-        await this.remove(entry.kind, entry.target);
+        if (failedFiles && files.includes(entry)) {
+          if (failedFiles.has(entry.target)) throw failedFiles.get(entry.target);
+        } else {
+          await this.remove(entry.kind, entry.target);
+        }
         await this.input.db.execute(sql`delete from web_upload_cleanup where id = ${entry.id}`);
         result.retried++;
       } catch (error) {

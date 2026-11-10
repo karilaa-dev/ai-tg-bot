@@ -2,14 +2,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../helpers/async.js";
 import { runMemo, type MemoResult } from "../../src/memory/optmem/index.js";
 import { createDatabase } from "../../src/db/index.js";
 import { UsersRepo } from "../../src/db/repos/users.js";
 import { DatabaseMemoryStore } from "../../src/memory/optmem/databaseStore.js";
 import { DEFAULT_MEMORY_SIZES, type MemorySizes } from "../../src/memory/optmem/settings.js";
 import { cover } from "../../src/memory/optmem/blocks.js";
-import { recallInWorker } from "../../src/memory/optmem/recall.js";
+import { RECALL_DEADLINE_MS, recallInWorker } from "../../src/memory/optmem/recall.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 const now = new Date(2026, 9, 7, 12);
@@ -34,11 +35,17 @@ function nextBlock(result: MemoResult): string | undefined {
   return /^Run: memo nap (\d+-\d+) /mu.exec(result.stdout)?.[1];
 }
 
+/** The source revision a nap prompt asks for; forgetting summaries advances it. */
+function promptRevision(result: MemoResult): string[] {
+  const revision = /^Run: memo nap \d+-\d+ "<your line>" (\d+)$/mu.exec(result.stdout)?.[1];
+  return revision ? [revision] : [];
+}
+
 async function settle(run: (...args: string[]) => Promise<MemoResult>): Promise<number> {
   let result = await run("nap"), count = 0;
   while (nextBlock(result)) {
     const id = nextBlock(result)!;
-    result = await run("nap", id, `summary of ${id}`);
+    result = await run("nap", id, `summary of ${id}`, ...promptRevision(result));
     expect(result.stderr).toBe("");
     expect(result.exit_code).toBe(0);
     count++;
@@ -196,6 +203,61 @@ describe("OptMem commands", () => {
     abort.abort(new Error("cancelled search"));
     await rejection;
     expect((await run("note", "event loop still serves writes")).stdout).toContain("Saved as #1.");
+  });
+
+  it("stops a costly recall at its deadline without a caller signal", async () => {
+    const { run, store, settings } = await fixture();
+    for (let i = 0; i < 3; i++) await run("note", "a".repeat(260) + "!");
+    const cleanup = new AbortController();
+    const started = Date.now();
+    const search = recallInWorker({ store, settings }, "(a+)+$", cleanup.signal, { deadlineMs: 200 });
+    try {
+      const outcome = await Promise.race([search, delay(3_000).then(() => "still running" as const)]);
+      expect(outcome).toMatchObject({ stdout: "", exit_code: 1 });
+      expect(outcome).toHaveProperty("stderr", expect.stringContaining("Memory search stopped after 0.2 seconds"));
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      cleanup.abort(new Error("test cleanup"));
+      await search.catch(() => undefined);
+    }
+    expect((await run("note", "event loop still serves writes")).stdout).toContain("Saved as #3.");
+    await expect(recallInWorker({ store, settings }, "^#1 ", undefined, { deadlineMs: 2_000 })).resolves.toMatchObject({ exit_code: 0 });
+    await expect(recallInWorker({ store, settings }, "[", undefined, { deadlineMs: 2_000 })).resolves.toMatchObject({
+      exit_code: 1, stderr: expect.stringContaining("bad regex:"),
+    });
+    expect(RECALL_DEADLINE_MS).toBe(5_000);
+  });
+
+  it.each(["open", "scan"] as const)("bounds recall while storage %s has not returned", async (phase) => {
+    const { store, settings } = await fixture();
+    const entered = deferred<void>(), release = deferred<void>();
+    const blocked = phase === "open"
+      ? vi.spyOn(store, "open").mockImplementation(async () => { entered.resolve(); await release.promise; })
+      : vi.spyOn(store, "scan").mockImplementation(async function* () { entered.resolve(); await release.promise; });
+    const search = recallInWorker({ store, settings }, "missing", undefined, { deadlineMs: 200 });
+    try {
+      await entered.promise;
+      const result = await Promise.race([search, delay(2_000).then(() => "still running")]);
+      expect(result).toMatchObject({ exit_code: 1, stderr: expect.stringContaining("Memory search stopped") });
+    } finally {
+      release.resolve();
+      await search;
+      blocked.mockRestore();
+    }
+    expect(await recallInWorker({ store, settings }, "missing")).toMatchObject({ exit_code: 0, stdout: "No match.\n" });
+  });
+
+  it("preserves caller cancellation while recall waits for an empty scan", async () => {
+    const { store, settings } = await fixture();
+    const entered = deferred<void>(), release = deferred<void>();
+    const blocked = vi.spyOn(store, "scan").mockImplementation(async function* () { entered.resolve(); await release.promise; });
+    const controller = new AbortController(), reason = new Error("caller stopped scan");
+    const search = recallInWorker({ store, settings }, "missing", controller.signal).catch(error => error);
+    try {
+      await entered.promise;
+      controller.abort(reason);
+      expect(await Promise.race([search, delay(2_000).then(() => "still running")])).toBe(reason);
+    } finally { release.resolve(); await search; blocked.mockRestore(); }
   });
 
   it("only displays global settings and rejects per-user overrides", async () => {

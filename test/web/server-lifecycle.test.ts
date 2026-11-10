@@ -52,6 +52,9 @@ beforeEach(async () => {
     writeFile(path.join(assetsDirectory, "app.js"), "window.loaded = true;"),
     writeFile(path.join(assetsDirectory, "style.css"), "body { color: blue; }"),
     writeFile(path.join(assetsDirectory, "index-123abc45.js"), "window.hashed = true;"),
+    // Route chunks as the split production build names them.
+    writeFile(path.join(assetsDirectory, "chat-app-9a0ntrzm.js"), "export const chat = true;"),
+    writeFile(path.join(assetsDirectory, "admin-app-7eafyjbe.js"), "export const admin = true;"),
     writeFile(path.join(assetsDirectory, "index-123abc45.css"), "body { color: red; }"),
     writeFile(path.join(assetsDirectory, "index-123abc45.html"), "<!doctype html><title>Uncached</title>"),
     writeFile(path.join(assetsDirectory, "index-123abc45.js.map"), "source code"),
@@ -95,6 +98,19 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
   expect((await request(new URL("/api/users", web!.url), { method: "POST", body: "ignored" })).status).toBe(405);
   await writeFile(path.join(assetsDirectory, "app.js"), "window.rebuilt = true;");
   expect(await (await request(new URL("/app.js", web!.url))).text()).toBe("window.rebuilt = true;");
+});
+
+it("serves split route chunks as immutable JavaScript and keeps the page itself uncached", async () => {
+  for (const chunk of ["/chat-app-9a0ntrzm.js", "/admin-app-7eafyjbe.js", "/index-123abc45.js"]) {
+    const response = await request(new URL(chunk, web!.url));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("set-cookie")).toBeNull();
+  }
+  for (const page of ["/", "/admin"]) expect((await request(new URL(page, web!.url))).headers.get("cache-control")).toBe("no-store");
+  expect((await request(new URL("/chat-app-unknown1.js", web!.url))).status).toBe(404);
 });
 
 it("canonicalizes the admin URL so relative assets resolve at the website root", async () => {

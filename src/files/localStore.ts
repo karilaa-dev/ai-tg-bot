@@ -151,19 +151,54 @@ export class LocalFileStore {
    * permanent and costs one empty directory entry; keys are random UUIDs, so it is never in the way.
    */
   async revoke(key: string): Promise<void> {
-    const filename = await this.filename(key);
+    const [failure] = (await this.revokeMany([key])).values();
+    if (failure !== undefined) throw failure;
+  }
+
+  /**
+   * Revokes several keys with one directory listing and one directory sync. Each key is fenced first, exactly as
+   * `revoke` does, then the staging copies of fenced keys are removed and the directory is synced. The result
+   * maps each key that failed to its error; every other key is fenced, its staging copies are gone and the
+   * change is durable. A failed key may already be fenced, which is safe; its cleanup is simply still owed.
+   */
+  async revokeMany(keys: readonly string[]): Promise<Map<string, unknown>> {
+    const failures = new Map<string, unknown>();
+    const fenced = new Map<string, string[]>();
+    for (const key of new Set(keys)) {
+      try {
+        const name = localFileKey(key);
+        await this.installFence(await this.filename(name));
+        fenced.set(name, [...fenced.get(name) ?? [], key]);
+      } catch (error) { failures.set(key, error); }
+    }
+    if (!fenced.size) return failures;
+    const fail = (name: string, error: unknown) => { for (const key of fenced.get(name) ?? []) if (!failures.has(key)) failures.set(key, error); };
+    try {
+      const directory = await this.directory!;
+      for (const entry of await readdir(directory)) {
+        const name = STAGING_ENTRY.exec(entry)?.[1];
+        if (!name || !fenced.has(name)) continue;
+        try { await unlink(path.join(directory, entry)); }
+        catch (error) { if (!hasCode(error, "ENOENT")) fail(name, error); }
+      }
+      await this.syncDirectory();
+    } catch (error) {
+      for (const name of fenced.keys()) fail(name, error);
+    }
+    return failures;
+  }
+
+  private async installFence(filename: string): Promise<void> {
     for (let attempt = 0; ; attempt++) {
-      try { await mkdir(filename, { mode: 0o700 }); break; }
+      try { await mkdir(filename, { mode: 0o700 }); return; }
       catch (error) {
         if (!hasCode(error, "EEXIST")) throw error;
-        if (await this.isFence(filename)) break;
+        if (await this.isFence(filename)) return;
         if (attempt >= 8) throw new Error("Local attachment kept being republished while it was being revoked.");
         try { await unlink(filename); }
         catch (unlinkError) { if (!hasCode(unlinkError, "ENOENT")) throw unlinkError; }
       }
     }
-    await this.removeStaging(key);
-    await this.syncDirectory();
   }
 
   /**
@@ -172,10 +207,9 @@ export class LocalFileStore {
    */
   async sweepFencedStaging(): Promise<number> {
     const root = path.dirname(await this.filename(randomUUID()));
-    const staging = /^([0-9a-f-]{36})\.[0-9a-f-]{36}\.tmp$/;
     let removed = 0;
     for (const entry of await readdir(root)) {
-      const key = staging.exec(entry)?.[1];
+      const key = STAGING_ENTRY.exec(entry)?.[1];
       if (!key || !isUuid(key) || !await this.isFence(path.join(root, key))) continue;
       try { await unlink(path.join(root, entry)); removed++; }
       catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
@@ -221,6 +255,9 @@ export class LocalFileStore {
     try { await handle.sync(); } finally { await handle.close(); }
   }
 }
+
+/** A staging copy: `<key>.<writer UUID>.tmp`, written next to the canonical name before publication. */
+const STAGING_ENTRY = /^([0-9a-f-]{36})\.[0-9a-f-]{36}\.tmp$/;
 
 export function assertLocalIntegrity(bytes: Uint8Array, expected: LocalFileIntegrity): void {
   if (bytes.byteLength !== expected.size) throw new Error("Local attachment size mismatch.");

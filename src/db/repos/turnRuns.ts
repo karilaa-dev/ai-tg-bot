@@ -325,13 +325,25 @@ export class TurnRunsRepo {
     return Boolean(renewed);
   }
 
-  async hasUnfinished(threadId: string): Promise<boolean> {
+  /**
+   * With `maxQueuedId`, queued turns accepted after that turn do not count;
+   * started turns always do.
+   */
+  async hasUnfinished(threadId: string, maxQueuedId?: number): Promise<boolean> {
     return Boolean(await queryOne<{ present: number }>(this.db, sql`
       select 1 as present from turn_runs
       where thread_id = ${threadId}
-        and status in ('queued', 'running', 'awaiting_delivery')
+        and ${unfinishedPredicate(maxQueuedId)}
       limit 1
     `));
+  }
+
+  /** The newest turn accepted for a thread, or zero. Later turns always receive larger IDs. */
+  async latestId(threadId: string): Promise<number> {
+    const row = await queryOne<{ id: number | null }>(this.db, sql`
+      select max(id) as id from turn_runs where thread_id = ${threadId}
+    `);
+    return Number(row?.id ?? 0);
   }
 
   async requestCancellation(
@@ -388,6 +400,8 @@ export class TurnRunsRepo {
     ownerId: string;
     operation: "fork" | "compact";
     leaseExpiresAt: number;
+    /** Queued turns after this one may wait behind the barrier instead of blocking it. */
+    maxQueuedId?: number;
   }): Promise<{ snapshotMessageId: number | null } | undefined> {
     return this.db.transaction(async (tx) => {
       await lockThreadTransaction(tx, input.threadId);
@@ -399,7 +413,7 @@ export class TurnRunsRepo {
       if (await queryOne<{ present: number }>(tx, sql`
         select 1 as present from turn_runs
         where thread_id = ${input.threadId}
-          and status in ('queued', 'running', 'awaiting_delivery')
+          and ${unfinishedPredicate(input.maxQueuedId)}
         limit 1
       `)) return undefined;
       const threads = new ThreadsRepo(tx);
@@ -662,4 +676,10 @@ async function attachFilesToAcceptedMessage(
         caption = excluded.caption
     `);
   }
+}
+
+function unfinishedPredicate(maxQueuedId: number | undefined) {
+  return maxQueuedId === undefined
+    ? sql`status in ('queued', 'running', 'awaiting_delivery')`
+    : sql`(status in ('running', 'awaiting_delivery') or (status = 'queued' and id <= ${maxQueuedId}))`;
 }

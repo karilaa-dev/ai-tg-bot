@@ -11,6 +11,15 @@ import { clearStoredDrafts, DraftStore } from "./drafts.js";
 import { deviceLanguage, DocumentLanguage } from "./preferences.js";
 import { useChatStrings } from "./strings.js";
 
+// Lets the page start downloading the workspace while the session is checked. It holds no account data.
+const SIGNED_IN_HINT = "chat-signed-in";
+export function probablySignedIn(): boolean {
+  try { return localStorage.getItem(SIGNED_IN_HINT) === "1"; } catch { return false; }
+}
+function rememberSignedIn(signedIn: boolean) {
+  try { if (signedIn) localStorage.setItem(SIGNED_IN_HINT, "1"); else localStorage.removeItem(SIGNED_IN_HINT); } catch { /* Storage can be disabled. */ }
+}
+
 export interface SignedIn { user: ChatProfile; botUsername: string; admin: boolean; drafts: DraftStore }
 
 type Notice = "none" | "signed-out" | "session-ended";
@@ -38,6 +47,15 @@ export function WorkspaceLoading() {
   return <AccessFrame busy><p className="chat-access-status" role="status"><Loader size="sm" /> {t.loadingWorkspace}</p></AccessFrame>;
 }
 
+/** Shown when the workspace code could not be downloaded; retrying requests it again. */
+export function WorkspaceLoadFailed({ retry }: { retry: () => void }) {
+  const t = useChatStrings();
+  return <AccessFrame busy={false}>
+    <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</span></p>
+    <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>{t.tryAgain}</Button>
+  </AccessFrame>;
+}
+
 export function ChatGate({ children }: { children: (session: SignedIn, signOut: () => Promise<void>) => ReactNode }) {
   const [state, setState] = useState<GateState>({ kind: "checking" });
   const [revision, setRevision] = useState(0);
@@ -63,9 +81,11 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
           drafts.current = new DraftStore(session.user.id);
           bindChatRequests(session.user.id);
         }
+        rememberSignedIn(true);
         setState({ kind: "signed-in", session: { user: session.user, botUsername: session.botUsername, admin: session.admin, drafts: drafts.current } });
       } else {
         endSession();
+        rememberSignedIn(false);
         setState({ kind: "signed-out", loginAvailable: session.loginAvailable, notice });
       }
     } catch (error) {
@@ -103,6 +123,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     generation.current++;
     const logout = chatApi.logout();
     endSession();
+    rememberSignedIn(false);
     setState({ kind: "checking" });
     try {
       await logout;

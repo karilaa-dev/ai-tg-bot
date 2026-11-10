@@ -22,6 +22,7 @@ const RAW_MAX = 16;
 const COMMANDS = ["init", "wake", "note", "nap", "recall", "zoom", "forget", "config", "import"];
 export interface MemoResult { stdout: string; stderr: string; exit_code: 0 | 1 }
 export interface MemoInput {
+  signal?: AbortSignal;
   matchRecall?: (lines: string[]) => Promise<boolean[]>;
   store: MemoryStore;
   settings?: MemorySizes;
@@ -96,6 +97,7 @@ class Command {
       else if (command === "init") await this.init(args);
       else {
         await this.store.open();
+        this.input.signal?.throwIfAborted();
         switch (command) {
           case "wake": return await this.wake(args);
           case "note": await this.note(args); break;
@@ -281,9 +283,11 @@ class Command {
       batch = [];
     };
     for await (const entry of this.store.scan()) {
+      this.input.signal?.throwIfAborted();
       batch.push(formatted(entry));
       if (batch.length === 256) await consume();
     }
+    this.input.signal?.throwIfAborted();
     if (batch.length) await consume();
     if (!hits) { this.print("No match."); return; }
     this.print(out.join("\n"));

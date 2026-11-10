@@ -81,6 +81,18 @@ describe("conversation backend without a Telegram client", () => {
     expect(app.compact).toHaveBeenCalledTimes(1);
   });
 
+  it("reports the fixed fork point before the model checkpoint is copied", async () => {
+    const thread = await app.conversations.create({ userId: 1001, title: "Point", origin: "telegram" });
+    await app.conversations.accept({ userId: 1001, threadId: thread.id, source: { kind: "web", requestId: randomUUID() },
+      kind: "text", text: "Before fork", content: { text: "Before fork" } });
+    const order: string[] = [];
+    app.fork.mockImplementationOnce(async () => { order.push("pi fork"); });
+    const fork = await app.conversations.fork({ userId: 1001, threadId: thread.id, origin: "telegram",
+      onPointFixed: () => order.push("point fixed") });
+    expect(order).toEqual(["point fixed", "pi fork"]);
+    expect(fork.fork_point_message_id).toBe((await app.repos.messages.latest(thread.id))!.id);
+  });
+
   it("records progress and duration, coalesces duplicate requests, and preserves the completed action", async () => {
     const thread = await app.conversations.create({ userId: 1001, title: "Compact", origin: "web" });
     const finish = deferred<number>();

@@ -9,6 +9,8 @@ const result = await Bun.build({
   outdir: output,
   target: "browser",
   minify: true,
+  // Routes load with dynamic imports; shared code goes into hashed chunks.
+  splitting: true,
   naming: { entry: "[name]-[hash].[ext]", chunk: "[name]-[hash].[ext]", asset: "[name]-[hash].[ext]" },
   define: { "process.env.NODE_ENV": '"production"' },
   plugins: [tailwind],

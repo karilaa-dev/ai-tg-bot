@@ -21,7 +21,7 @@ export type ConversationSettingsPatch = z.infer<typeof settingsSchema>;
 
 /** A frontend may link a conversation to its own channel without owning it. */
 export interface ConversationLink {
-  create(userId: number, title: string): Promise<number | null>;
+  create(userId: number, title: string, signal?: AbortSignal): Promise<number | null>;
   remove(userId: number, topicId: number): Promise<void>;
 }
 
@@ -50,12 +50,16 @@ export class ConversationService {
   async create(input: {
     userId: number; title: string; origin: ThreadRow["origin"]; link?: ConversationLink;
     parent?: { threadId: ThreadRow["id"]; messageId: number | null };
+    signal?: AbortSignal;
   }): Promise<ThreadRow> {
+    input.signal?.throwIfAborted();
     await this.user(input.userId);
     const title = input.title.trim() || "New conversation";
     if (Array.from(title).length > 128) throw new ConversationError(400, "Use a conversation title of at most 128 characters.");
-    const topicId = await input.link?.create(input.userId, title) ?? null;
+    input.signal?.throwIfAborted();
+    const topicId = await input.link?.create(input.userId, title, input.signal) ?? null;
     try {
+      input.signal?.throwIfAborted();
       await this.user(input.userId);
       return await this.services.repos.threads.create({
         userId: input.userId, title, topicId, origin: input.origin,
@@ -94,10 +98,18 @@ export class ConversationService {
     return incoming || turn;
   }
 
-  async fork(input: { userId: number; threadId: ThreadRow["id"]; origin: ThreadRow["origin"]; messageId?: number; link?: ConversationLink }) {
+  /**
+   * `onPointFixed` runs once the fork point is fixed. Messages accepted after
+   * that wait behind the fork and are not part of it.
+   */
+  async fork(input: {
+    userId: number; threadId: ThreadRow["id"]; origin: ThreadRow["origin"]; messageId?: number; link?: ConversationLink;
+    onPointFixed?: () => void;
+  }) {
     const thread = await this.thread(input.userId, input.threadId);
     const user = await this.user(input.userId);
     return this.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotId, signal) => {
+      input.onPointFixed?.();
       const point = input.messageId ?? snapshotId;
       const chain = await this.services.repos.threads.chain(thread);
       const visible = point === null || point === 0 ? undefined
@@ -108,7 +120,7 @@ export class ConversationService {
       }
       signal.throwIfAborted();
       const created = await this.create({ userId: user.tg_id, title: Array.from(`Fork: ${thread.title}`).slice(0, 128).join(""),
-        origin: input.origin, link: input.link, parent: { threadId: thread.id, messageId: point } });
+        origin: input.origin, link: input.link, parent: { threadId: thread.id, messageId: point }, signal });
       try {
         signal.throwIfAborted();
         await this.services.pi.fork(thread, created, user, visible?.pi_entry_id, signal);
@@ -133,6 +145,11 @@ export class ConversationService {
     this.compactions.set(threadId, starting);
     try { return await starting; }
     catch (error) { this.compactions.delete(threadId); throw error; }
+  }
+
+  /** Finish final status writes after coordinator shutdown has cancelled compaction. */
+  async waitForCompactions(): Promise<void> {
+    await Promise.allSettled([...this.compactions.values()].map(async starting => (await starting).completion));
   }
 
   private async startCompaction(thread: ThreadRow, user: UserRow): Promise<CompactionRun> {

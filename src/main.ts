@@ -7,6 +7,7 @@ import type { BotServices } from "./bot/context.js";
 import { run } from "@grammyjs/runner";
 import { localizedCommands } from "./bot/commands.js";
 import { createBot } from "./bot/router.js";
+import { drainTelegramIntake } from "./bot/batching.js";
 import { isBrowserUseConfigured, loadConfig, type AppConfig } from "./config.js";
 import { createBrowserUseClient } from "./browserUse/client.js";
 import { createDatabase } from "./db/index.js";
@@ -32,6 +33,7 @@ let sandboxRuntime: ThreadE2BSandboxRuntimeManager | undefined;
 let scheduler: ChatScheduler | undefined;
 let uploadRecovery: UploadRecovery | undefined;
 let turnCoordinator: ThreadTurnCoordinator | undefined;
+let botServices: BotServices | undefined;
 logger.info("bot process starting", {
   logLevel: logger.level,
   db: db.dialect,
@@ -58,6 +60,7 @@ try {
   // Uploads abandoned by a crash are reclaimed now and then periodically, so their quota and bytes come back.
   const recovery = uploadRecovery = new UploadRecovery({
     db: db.db, config, logger, revokeFile: fileId => fileResolver.revokeLocalFile(fileId),
+    revokeFiles: fileIds => fileResolver.revokeLocalFiles(fileIds),
     sweepStaging: () => fileResolver.sweepRevokedStaging(),
   });
   await recovery.drain().catch((err) => logger.warn("upload recovery at startup failed", { err: String(err) }));
@@ -87,6 +90,7 @@ try {
   });
   const services = (bot as typeof bot & { services: BotServices }).services;
   turnCoordinator = services.turnCoordinator;
+  botServices = services;
   await bot.init();
   scheduler = new ChatScheduler({ schedules: repos.schedules, access, logger, wake: id => services.turnCoordinator.wake(id) });
   scheduler.start();
@@ -116,11 +120,16 @@ try {
   logger.error("bot stopped", { err: String(err) });
   process.exitCode = 1;
 } finally {
+  // Polling has stopped. Accept Telegram input that is still collecting or retrying
+  // while the coordinator and database are still available.
+  if (botServices) await drainTelegramIntake(botServices).catch((err) => logger.warn("Telegram intake drain failed", { err: String(err) }));
   await scheduler?.stop();
   await uploadRecovery?.stop().catch((err) => logger.warn("upload recovery shutdown failed", { err: String(err) }));
   await web?.stop().catch((err) => logger.warn("website shutdown failed", { err: String(err) }));
   await codexLogin?.stop().catch(() => logger.warn("Codex login shutdown failed"));
   await turnCoordinator?.shutdown().catch((err) => logger.warn("turn coordinator shutdown failed", { err: String(err) }));
+  await botServices?.routerState.intake.waitForIdle();
+  await botServices?.conversations.waitForCompactions();
   await pi?.dispose().catch((err) => logger.warn("Pi runtime disposal failed", { err: String(err) }));
   await sandboxRuntime?.dispose().catch((err) => {
     process.exitCode = 1;

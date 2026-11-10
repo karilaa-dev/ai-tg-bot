@@ -219,6 +219,19 @@ describe("Browser Use Pi tools", () => {
       undefined,
     );
   });
+
+  it("tells the model when a download cannot be attributed to its tab and sends nothing", async () => {
+    const browserRuntime = fakeBrowserRuntime();
+    browserRuntime.sessionRemaining.mockResolvedValue(200);
+    browserRuntime.resolveDownload.mockRejectedValue(new BrowserUseRuntimeError("ambiguous_download", "This download can no longer be attributed to this tab."));
+    const createdFiles: unknown[] = [];
+    const tools = createPiToolAdapters(bridge(browserConfig(), browserRuntime, { createdFiles }));
+    const sendFile = tools.find((tool) => tool.name === "browser_send_file")!;
+    const result = await sendFile.execute("download", { tab_id: "tab-1", download_index: 0, delivery: "auto" }, undefined, undefined, {} as never);
+    expect(result.details).toMatchObject({ error: "ambiguous_download" });
+    expect(createdFiles).toEqual([]);
+    expect(browserDownload.download).not.toHaveBeenCalled();
+  });
 });
 
 function browserConfig() {

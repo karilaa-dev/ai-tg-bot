@@ -180,7 +180,7 @@ export function createBrowserTools(input: ToolBuildInput): BotToolRegistry {
       toToolDetails: ({ output }) => withoutImageData(output),
     }),
     browser_list_downloads: defineBotTool({
-      description: "List completed files downloaded by this Browser Use tab without exposing their private source URLs.",
+      description: "List completed files downloaded by this Browser Use tab without exposing their private source URLs. Files whose name another tab in the same session also downloaded are listed under ambiguous_downloads and cannot be sent.",
       inputSchema: z.object({ tab_id: tabIdSchema }),
       execute: async ({ tab_id }, signal) => {
         try {

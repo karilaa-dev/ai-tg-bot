@@ -1,0 +1,330 @@
+{
+  "benchmark": "scripts/benchmark-web-bundle.ts",
+  "command": "bun scripts/benchmark-web-bundle.ts <checkout>",
+  "environment": {
+    "runtime": "bun 1.4.4",
+    "browser": "chromium 156.0.8078.4",
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "date": "2026-11-10",
+    "server": "test/web/http-smoke.ts (synthetic fixture, loopback, no HTTP compression)"
+  },
+  "notes": "Bytes are JavaScript bodies the browser requested from a cold cache until the route's landmark was visible; gzip (level 9) and brotli (quality 11) sizes are computed locally to show what a compressing proxy would send. shellReadyMs is loopback wall time from navigation (including the fixture's sign-in redirects) to the landmark; it is a parse/waterfall proxy, not a field metric. Timing ends at the sign-in link, New chat button or admin navigation landmark; the signInOnlyChat fixture does not implement chat APIs, so this measures shell readiness, not a working conversation.",
+  "before": {
+    "checkout": "a469b81 (before)",
+    "runtime": "bun 1.4.4",
+    "browser": "chromium 156.0.8078.4",
+    "emitted": {
+      "files": [
+        {
+          "name": "index-tdptrszx.js",
+          "bytes": 1520593
+        }
+      ],
+      "totalBytes": 1520593
+    },
+    "routes": [
+      {
+        "route": "signed-out sign-in page",
+        "requests": 1,
+        "javascript": {
+          "raw": 1520593,
+          "gzip": 484271,
+          "brotli": 378488
+        },
+        "files": [
+          {
+            "path": "/index-tdptrszx.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 1520593,
+            "gzip": 484271,
+            "brotli": 378488
+          }
+        ],
+        "shellReadyMsRuns": [
+          219,
+          232,
+          249,
+          263
+        ],
+        "shellReadyMsMedian": 249
+      },
+      {
+        "route": "signed-in chat",
+        "requests": 1,
+        "javascript": {
+          "raw": 1520593,
+          "gzip": 484271,
+          "brotli": 378488
+        },
+        "files": [
+          {
+            "path": "/index-tdptrszx.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 1520593,
+            "gzip": 484271,
+            "brotli": 378488
+          }
+        ],
+        "shellReadyMsRuns": [
+          395,
+          401,
+          461,
+          532
+        ],
+        "shellReadyMsMedian": 461
+      },
+      {
+        "route": "admin dashboard",
+        "requests": 1,
+        "javascript": {
+          "raw": 1520593,
+          "gzip": 484271,
+          "brotli": 378488
+        },
+        "files": [
+          {
+            "path": "/index-tdptrszx.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 1520593,
+            "gzip": 484271,
+            "brotli": 378488
+          }
+        ],
+        "shellReadyMsRuns": [
+          370,
+          373,
+          377,
+          394
+        ],
+        "shellReadyMsMedian": 377
+      },
+      {
+        "route": "returning signed-in chat (cold cache)",
+        "requests": 1,
+        "javascript": {
+          "raw": 1520593,
+          "gzip": 484271,
+          "brotli": 378488
+        },
+        "files": [
+          {
+            "path": "/index-tdptrszx.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 1520593,
+            "gzip": 484271,
+            "brotli": 378488
+          }
+        ],
+        "shellReadyMsRuns": [
+          255,
+          269,
+          290,
+          381
+        ],
+        "shellReadyMsMedian": 290
+      }
+    ]
+  },
+  "after": {
+    "checkout": "this branch (after)",
+    "runtime": "bun 1.4.4",
+    "browser": "chromium 156.0.8078.4",
+    "emitted": {
+      "files": [
+        {
+          "name": "admin-app-28swv5fr.js",
+          "bytes": 167787
+        },
+        {
+          "name": "chat-app-yc6j3tjd.js",
+          "bytes": 451632
+        },
+        {
+          "name": "index-7fcder3k.js",
+          "bytes": 398974
+        },
+        {
+          "name": "index-x8dxtzcj.js",
+          "bytes": 5318
+        },
+        {
+          "name": "index-zaf82fee.js",
+          "bytes": 527389
+        }
+      ],
+      "totalBytes": 1551100
+    },
+    "routes": [
+      {
+        "route": "signed-out sign-in page",
+        "requests": 1,
+        "javascript": {
+          "raw": 527389,
+          "gzip": 168744,
+          "brotli": 145420
+        },
+        "files": [
+          {
+            "path": "/index-zaf82fee.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 527389,
+            "gzip": 168744,
+            "brotli": 145420
+          }
+        ],
+        "shellReadyMsRuns": [
+          125,
+          126,
+          126,
+          135
+        ],
+        "shellReadyMsMedian": 126
+      },
+      {
+        "route": "signed-in chat",
+        "requests": 3,
+        "javascript": {
+          "raw": 1377995,
+          "gzip": 438901,
+          "brotli": 376623
+        },
+        "files": [
+          {
+            "path": "/chat-app-yc6j3tjd.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 451632,
+            "gzip": 146272,
+            "brotli": 124231
+          },
+          {
+            "path": "/index-7fcder3k.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 398974,
+            "gzip": 123885,
+            "brotli": 106972
+          },
+          {
+            "path": "/index-zaf82fee.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 527389,
+            "gzip": 168744,
+            "brotli": 145420
+          }
+        ],
+        "shellReadyMsRuns": [
+          313,
+          320,
+          332,
+          359
+        ],
+        "shellReadyMsMedian": 332
+      },
+      {
+        "route": "admin dashboard",
+        "requests": 3,
+        "javascript": {
+          "raw": 1094150,
+          "gzip": 350423,
+          "brotli": 302899
+        },
+        "files": [
+          {
+            "path": "/admin-app-28swv5fr.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 167787,
+            "gzip": 57794,
+            "brotli": 50507
+          },
+          {
+            "path": "/index-7fcder3k.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 398974,
+            "gzip": 123885,
+            "brotli": 106972
+          },
+          {
+            "path": "/index-zaf82fee.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 527389,
+            "gzip": 168744,
+            "brotli": 145420
+          }
+        ],
+        "shellReadyMsRuns": [
+          287,
+          299,
+          317,
+          323
+        ],
+        "shellReadyMsMedian": 317
+      },
+      {
+        "route": "returning signed-in chat (cold cache)",
+        "requests": 3,
+        "javascript": {
+          "raw": 1377995,
+          "gzip": 438901,
+          "brotli": 376623
+        },
+        "files": [
+          {
+            "path": "/chat-app-yc6j3tjd.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 451632,
+            "gzip": 146272,
+            "brotli": 124231
+          },
+          {
+            "path": "/index-7fcder3k.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 398974,
+            "gzip": 123885,
+            "brotli": 106972
+          },
+          {
+            "path": "/index-zaf82fee.js",
+            "status": 200,
+            "cacheControl": "public, max-age=31536000, immutable",
+            "contentType": "text/javascript; charset=utf-8",
+            "raw": 527389,
+            "gzip": 168744,
+            "brotli": 145420
+          }
+        ],
+        "shellReadyMsRuns": [
+          218,
+          230,
+          235,
+          285
+        ],
+        "shellReadyMsMedian": 235
+      }
+    ]
+  }
+}

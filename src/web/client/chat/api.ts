@@ -7,6 +7,9 @@ export const CHAT_SESSION_EXPIRED_EVENT = "chat-session-expired";
 let sessionGeneration = 0;
 let sessionUserId: number | null = null;
 let attachmentSource: AttachmentSource | null = null;
+// The last history response per URL for this session, revalidated with its ETag.
+const historyCopies = new Map<string, { etag: string; body: ChatHistory }>();
+const maxHistoryCopies = 16;
 export function bindChatRequests(userId: number) {
   invalidateChatRequests();
   sessionUserId = userId;
@@ -23,6 +26,7 @@ export function bindChatRequests(userId: number) {
 export function invalidateChatRequests() {
   sessionGeneration++;
   sessionUserId = null;
+  historyCopies.clear();
   attachmentSource?.cache?.dispose();
   attachmentSource = null;
 }
@@ -70,6 +74,25 @@ async function chatJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** Reuse the parsed copy when the server confirms with 304 that the history is unchanged. */
+async function historyJson(url: string, signal: AbortSignal): Promise<ChatHistory> {
+  const generation = sessionGeneration;
+  const copy = historyCopies.get(url);
+  const response = await chatFetch(url, { signal, headers: copy ? { "If-None-Match": copy.etag } : undefined });
+  if (response.status === 304 && copy) return copy.body;
+  const raw = await response.text();
+  let body: unknown = null;
+  try { body = raw ? JSON.parse(raw) : null; } catch { /* Proxies can return HTML error pages. */ }
+  if (!response.ok) throw new ChatApiError(errorText(body) ?? fallbackMessage(response.status), response.status);
+  const etag = response.headers.get("ETag");
+  if (etag && generation === sessionGeneration) {
+    historyCopies.delete(url);
+    historyCopies.set(url, { etag, body: body as ChatHistory });
+    if (historyCopies.size > maxHistoryCopies) historyCopies.delete(historyCopies.keys().next().value!);
+  }
+  return body as ChatHistory;
+}
+
 const json = (method: string, body?: unknown): RequestInit => body === undefined
   ? { method }
   : { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -92,7 +115,7 @@ export const chatApi = {
   createThread: (title?: string) => chatJson<ChatThread>("/api/chat/threads", json("POST", title ? { title } : {})),
   history: (threadId: string, cursor: HistoryCursor, signal: AbortSignal) => {
     const query = cursor === null ? "" : "before" in cursor ? `?before=${cursor.before}` : `?after=${cursor.after}`;
-    return chatJson<ChatHistory>(`/api/chat/threads/${threadId}/messages${query}`, { signal });
+    return historyJson(`/api/chat/threads/${threadId}/messages${query}`, signal);
   },
   send: (threadId: string, input: { text: string; requestId: string; files: File[] }) => {
     const url = `/api/chat/threads/${threadId}/messages`;

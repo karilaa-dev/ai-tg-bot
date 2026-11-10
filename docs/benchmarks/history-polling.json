@@ -1,0 +1,177 @@
+{
+  "benchmark": "scripts/benchmark-history-polling.ts",
+  "command": "bun scripts/benchmark-history-polling.ts <checkout> [--polls 40]; set BENCH_POSTGRES_URL for PostgreSQL",
+  "environment": {
+    "runtime": "bun 1.4.4",
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "postgres": "PostgreSQL 18.4 (local disposable instance)",
+    "date": "2026-11-10"
+  },
+  "notes": "Synthetic fixture only. Bytes are JSON response bodies; HTTP headers (an ETag adds about 50 bytes) are not counted. medianMs is server-side repository work plus serialization and, after, hashing.",
+  "runs": {
+    "before-sqlite": {
+      "checkout": "a469b81 (before)",
+      "dialect": "sqlite",
+      "runtime": "bun 1.4.4",
+      "fixture": {
+        "messages": 160,
+        "assistantReplyBytes": 6000,
+        "toolCallsPerReply": 6,
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
+      },
+      "polls": 40,
+      "unchangedPoll": {
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
+        "identicalResponses": true,
+        "medianMs": 9.06,
+        "p95Ms": 12.2,
+        "conditionalResponses": false,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 419938,
+        "steadyNotModifiedPerPoll": 0
+      },
+      "perMinute": {
+        "busyEvery1500ms": {
+          "requests": 80,
+          "transferredBytes": 16797520
+        },
+        "idleEvery8000ms": {
+          "requests": 15,
+          "transferredBytes": 3149535
+        },
+        "compactingEvery1000ms": {
+          "requests": 120,
+          "transferredBytes": 25196280
+        }
+      }
+    },
+    "after-sqlite": {
+      "checkout": "this branch (after)",
+      "dialect": "sqlite",
+      "runtime": "bun 1.4.4",
+      "fixture": {
+        "messages": 160,
+        "assistantReplyBytes": 6000,
+        "toolCallsPerReply": 6,
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
+      },
+      "polls": 40,
+      "unchangedPoll": {
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
+        "identicalResponses": true,
+        "medianMs": 9.84,
+        "p95Ms": 14.95,
+        "conditionalResponses": true,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 0,
+        "steadyNotModifiedPerPoll": 2
+      },
+      "perMinute": {
+        "busyEvery1500ms": {
+          "requests": 80,
+          "transferredBytes": 0
+        },
+        "idleEvery8000ms": {
+          "requests": 15,
+          "transferredBytes": 0
+        },
+        "compactingEvery1000ms": {
+          "requests": 120,
+          "transferredBytes": 0
+        }
+      }
+    },
+    "before-pg": {
+      "checkout": "a469b81 (before)",
+      "dialect": "postgres",
+      "runtime": "bun 1.4.4",
+      "fixture": {
+        "messages": 160,
+        "assistantReplyBytes": 6000,
+        "toolCallsPerReply": 6,
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
+      },
+      "polls": 40,
+      "unchangedPoll": {
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
+        "identicalResponses": true,
+        "medianMs": 21.18,
+        "p95Ms": 26.29,
+        "conditionalResponses": false,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 419938,
+        "steadyNotModifiedPerPoll": 0
+      },
+      "perMinute": {
+        "busyEvery1500ms": {
+          "requests": 80,
+          "transferredBytes": 16797520
+        },
+        "idleEvery8000ms": {
+          "requests": 15,
+          "transferredBytes": 3149535
+        },
+        "compactingEvery1000ms": {
+          "requests": 120,
+          "transferredBytes": 25196280
+        }
+      }
+    },
+    "after-pg": {
+      "checkout": "this branch (after)",
+      "dialect": "postgres",
+      "runtime": "bun 1.4.4",
+      "fixture": {
+        "messages": 160,
+        "assistantReplyBytes": 6000,
+        "toolCallsPerReply": 6,
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
+      },
+      "polls": 40,
+      "unchangedPoll": {
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
+        "identicalResponses": true,
+        "medianMs": 23.1,
+        "p95Ms": 31.51,
+        "conditionalResponses": true,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 0,
+        "steadyNotModifiedPerPoll": 2
+      },
+      "perMinute": {
+        "busyEvery1500ms": {
+          "requests": 80,
+          "transferredBytes": 0
+        },
+        "idleEvery8000ms": {
+          "requests": 15,
+          "transferredBytes": 0
+        },
+        "compactingEvery1000ms": {
+          "requests": 120,
+          "transferredBytes": 0
+        }
+      }
+    }
+  }
+}

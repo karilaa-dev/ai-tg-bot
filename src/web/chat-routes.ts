@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { BunRequest, Server } from "bun";
 import { ScheduleError, ScheduleInputSchema, SchedulePatchSchema } from "../scheduling/types.js";
 import { z } from "zod";
@@ -144,15 +145,17 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
           const before = query.has("before") ? integer(query.get("before")) : undefined;
           const after = query.has("after") ? integer(query.get("after")) : undefined;
           if (before !== undefined && after !== undefined) throw new WebHttpError(400, "Use either before or after.");
-          return Response.json({ ...await chat.history(userId, threadId, before, after), autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES });
+          return conditionalJson(request, JSON.stringify({ ...await chat.history(userId, threadId, before, after), autoLoadMaxBytes: options.config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES }));
         }),
         POST: user<"/api/chat/threads/:threadId/messages">(async (request, userId, chat) => {
           const threadId = await owned(request, userId, chat);
+          // Text is small, size-bounded JSON under the write rate limit, so it never waits for an upload slot.
+          if (!isMultipart(request)) return Response.json(await chat.send(userId, threadId, await textInput(request)), { status: 202 });
           if (submitting.has(userId)) throw new WebHttpError(429, "Your previous message is still being accepted. Try again shortly.", { "Retry-After": "1" });
           if (submitting.size >= 3) throw new WebHttpError(503, "Other uploads are processing. Try again shortly.");
           submitting.add(userId);
           try {
-            const input = await sendInput(request, userId, options);
+            const input = await uploadInput(request, userId, options);
             try { return Response.json(await chat.send(userId, threadId, input.value), { status: 202 }); }
             finally { await input.dispose(); }
           }
@@ -205,6 +208,18 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
   };
 }
 
+/**
+ * Polling repeats identical history, so the client sends back the ETag of its
+ * last copy and gets an empty 304 when nothing changed. The tag hashes the
+ * whole body after authorization, so any mutation, including in-place edits,
+ * produces a new tag. Responses stay no-store; only the page keeps the copy.
+ */
+export function conditionalJson(request: Request, body: string): Response {
+  const etag = `"${createHash("sha256").update(body).digest("base64url")}"`;
+  if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+  return new Response(body, { headers: { "Content-Type": "application/json;charset=utf-8", ETag: etag } });
+}
+
 function integer(value: string | null, fallback?: number): number {
   if (value === null && fallback !== undefined) return fallback;
   if (!value || !/^\d+$/.test(value)) throw new WebHttpError(400, "Invalid pagination value or ID.");
@@ -212,18 +227,24 @@ function integer(value: string | null, fallback?: number): number {
   if (!Number.isSafeInteger(number) || number < (fallback === undefined ? 1 : 0)) throw new WebHttpError(400, "Invalid pagination value or ID.");
   return number;
 }
+function mediaType(request: Request): string | undefined {
+  return request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
+}
+function isMultipart(request: Request): boolean {
+  return mediaType(request) === "multipart/form-data";
+}
 async function json(request: Request): Promise<unknown> {
-  if (request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") throw new WebHttpError(415, "Send JSON.");
+  if (mediaType(request) !== "application/json") throw new WebHttpError(415, "Send JSON.");
   const body = await readBoundedBody(request, MAX_JSON_BYTES);
   try { return JSON.parse(body); }
   catch { throw new WebHttpError(400, "Invalid JSON."); }
 }
-async function sendInput(request: Request, userId: number, options: WebServerOptions): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
-  if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data;")) {
-    const input = SendSchema.parse(await json(request));
-    if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
-    return { value: input, async dispose() {} };
-  }
+async function textInput(request: Request): Promise<Parameters<ChatService["send"]>[2]> {
+  const input = SendSchema.parse(await json(request));
+  if (!input.text.trim()) throw new WebHttpError(400, "Write a message or attach a file.");
+  return input;
+}
+async function uploadInput(request: Request, userId: number, options: WebServerOptions): Promise<{ value: Parameters<ChatService["send"]>[2]; dispose(): Promise<void> }> {
   const instance = await uploadStorageInstance(options.config.FILE_STORAGE_PATH);
   const { dispose, ...value } = await readChatUpload(request, options.db, userId, options.config.WEB_UPLOAD_MIN_FREE_BYTES, instance);
   return { value, dispose };
