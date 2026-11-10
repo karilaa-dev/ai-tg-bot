@@ -71,6 +71,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
   const reader = request.body.getReader();
   let directory: string | undefined;
   let directoryToken: string | undefined;
+  let directoryInstance = storageInstance;
   let disk: Awaited<ReturnType<typeof createTemporaryUploadLease>> | undefined;
   let allowance = 0;
   let writtenBytes = 0;
@@ -84,7 +85,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
     }
     // A failed removal stays owed: the lease ends but a retryable record keeps the directory tracked.
     // If ending the lease fails, it expires and recovery resolves everything it still owns.
-    await disk?.release(removal && directoryToken ? [{ kind: "directory", target: directoryToken, instance: storageInstance }] : [])
+    await disk?.release(removal && directoryToken ? [{ kind: "directory", target: directoryToken, instance: directoryInstance }] : [])
       .catch(() => undefined);
     if (removal) throw removal;
   })();
@@ -207,7 +208,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
         if (part.filename === undefined || !part.filename || part.filename.length > 255 || /\p{Cc}/u.test(part.filename)) throw invalid("Invalid file name.");
         if (files.length >= MAX_CHAT_UPLOAD_FILES) throw new WebHttpError(413, `Upload up to ${MAX_CHAT_UPLOAD_FILES} files.`);
         disk ??= await createTemporaryUploadLease(db, userId);
-        if (!directory) ({ directory, token: directoryToken } = await createUploadDirectory(disk, storageInstance));
+        if (!directory) ({ directory, token: directoryToken, instance: directoryInstance } = await createUploadDirectory(disk, storageInstance));
         const filePath = join(directory, String(files.length));
         const file = await open(filePath, "wx", 0o600);
         let size = 0;

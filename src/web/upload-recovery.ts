@@ -1,12 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import { FilesRepo } from "../db/repos/files.js";
 import { createTextSearch } from "../db/search.js";
-import { queryOne, type SqlExecutor } from "../db/sql.js";
+import { queryOne, valueList, type SqlExecutor } from "../db/sql.js";
 import type { Logger } from "../logger.js";
 import { isUuid } from "../utils/uuid.js";
 import { queueUploadCleanup, uploadStorageInstance, type UploadArtifact, type UploadArtifactKind } from "./upload-budget.js";
@@ -18,6 +18,17 @@ const CLAIM_MS = 60_000;
 const DEFAULT_BATCH = 25;
 const DEFAULT_INTERVAL_MS = 60_000;
 
+/**
+ * Owner identity of spool directories. Spools live under the host's temporary root, which can differ between
+ * processes that share one persistent volume and database, so the volume identity alone cannot say who may
+ * touch (or forget) a directory. The root and host are part of it; ephemeral roots simply lose their records
+ * to no one rather than letting another root's recovery erase them.
+ */
+export function uploadSpoolInstance(storageInstance: string, tempRoot: string): string {
+  const root = createHash("sha256").update(`${hostname()}\0${path.resolve(tempRoot)}`).digest("hex").slice(0, 16);
+  return `${storageInstance}:spool:${root}`;
+}
+
 interface DirectoryLease {
   track(artifact: UploadArtifact): Promise<unknown>;
 }
@@ -26,12 +37,14 @@ interface DirectoryLease {
  * Creates a request's private spool directory. It is recorded durably *before* it exists, so a crash between the
  * two steps leaves a record that recovery can resolve. Only the generated token is recorded, never a path.
  */
-export async function createUploadDirectory(lease: DirectoryLease, instance: string): Promise<{ token: string; directory: string }> {
+export async function createUploadDirectory(lease: DirectoryLease, storageInstance: string): Promise<{ token: string; directory: string; instance: string }> {
   const token = `chat-upload-${randomBytes(12).toString("hex")}`;
+  const root = tmpdir();
+  const instance = uploadSpoolInstance(storageInstance, root);
   await lease.track({ kind: "directory", target: token, instance });
-  const directory = path.join(tmpdir(), token);
+  const directory = path.join(root, token);
   await mkdir(directory, { mode: 0o700 });
-  return { token, directory };
+  return { token, directory, instance };
 }
 
 export interface UploadRecoveryResult { leases: number; files: number; directories: number; retried: number; failed: number }
@@ -56,26 +69,30 @@ export class UploadRecovery {
     tempRoot?: () => string;
   }) {}
 
+  private tempRoot(): string { return this.input.tempRoot?.() ?? tmpdir(); }
+
   /** One bounded pass: claim expired leases, resolve what they owned, then retry owed removals. */
   async recover(options: { batch?: number } = {}): Promise<UploadRecoveryResult> {
     const batch = options.batch ?? DEFAULT_BATCH;
-    const instance = await uploadStorageInstance(this.input.config.FILE_STORAGE_PATH);
+    const volume = await uploadStorageInstance(this.input.config.FILE_STORAGE_PATH);
+    const spool = uploadSpoolInstance(volume, this.tempRoot());
+    const owned = [volume, spool];
     const result: UploadRecoveryResult = { leases: 0, files: 0, directories: 0, retried: 0, failed: 0 };
     const leases = await this.input.db.query<{ lease_id: string }>(sql`
       select distinct i.lease_id from web_upload_items i
       left join web_upload_reservations r on r.id = i.lease_id
-      where i.instance = ${instance} and (r.id is null or r.expires_at <= ${Date.now()})
+      where i.instance in (${valueList(owned)}) and (r.id is null or r.expires_at <= ${Date.now()})
       limit ${batch}
     `);
     for (const { lease_id: leaseId } of leases) {
       if (!await this.claim(leaseId)) continue;
       result.leases++;
-      for (const item of await this.input.db.query<{ id: string; kind: UploadArtifactKind; target: string }>(sql`
-        select id, kind, target from web_upload_items where lease_id = ${leaseId} and instance = ${instance}`)) {
-        if (await this.resolve(item, instance)) result[item.kind === "file" ? "files" : "directories"]++;
+      for (const item of await this.input.db.query<{ id: string; kind: UploadArtifactKind; target: string; instance: string }>(sql`
+        select id, kind, target, instance from web_upload_items where lease_id = ${leaseId} and instance in (${valueList(owned)})`)) {
+        if (await this.resolve(item, item.instance)) result[item.kind === "file" ? "files" : "directories"]++;
       }
     }
-    await this.retry(instance, batch, result);
+    await this.retry(owned, batch, result);
     return result;
   }
 
@@ -143,10 +160,10 @@ export class UploadRecovery {
     });
   }
 
-  private async retry(instance: string, batch: number, result: UploadRecoveryResult): Promise<void> {
+  private async retry(owned: string[], batch: number, result: UploadRecoveryResult): Promise<void> {
     const due = await this.input.db.query<{ id: string; kind: UploadArtifactKind; target: string; attempts: number }>(sql`
       select id, kind, target, attempts from web_upload_cleanup
-      where instance = ${instance} and next_attempt_at <= ${Date.now()}
+      where instance in (${valueList(owned)}) and next_attempt_at <= ${Date.now()}
       order by next_attempt_at, id limit ${batch}
     `);
     for (const entry of due) {
@@ -176,7 +193,7 @@ export class UploadRecovery {
     }
     // A database value is never a path: rebuild it from a validated token under the trusted temporary root.
     if (!DIRECTORY_TOKEN.test(target)) return;
-    const directory = path.join(this.input.tempRoot?.() ?? tmpdir(), target);
+    const directory = path.join(this.tempRoot(), target);
     let stats;
     try { stats = await lstat(directory); }
     catch (error) {

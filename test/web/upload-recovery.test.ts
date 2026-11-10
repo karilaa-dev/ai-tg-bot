@@ -11,7 +11,7 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { LocalFileStore } from "../../src/files/localStore.js";
 import { readChatUpload } from "../../src/web/chat-upload.js";
 import { UploadBudget, uploadStorageInstance } from "../../src/web/upload-budget.js";
-import { UploadRecovery } from "../../src/web/upload-recovery.js";
+import { UploadRecovery, uploadSpoolInstance } from "../../src/web/upload-recovery.js";
 
 const USER = 42;
 const root = path.resolve(import.meta.dirname, "../..");
@@ -331,12 +331,58 @@ describe("abandoned upload directories", () => {
     expect(await count(app, "web_upload_cleanup")).toBe(0);
   });
 
+  it("never forgets a spool that lives under another process's temporary root on the shared persistent volume", async () => {
+    const rootA = path.join(directory, "tmp-a");
+    const rootB = path.join(directory, "tmp-b");
+    await mkdir(rootA);
+    await mkdir(rootB);
+    // Two workers share the database and the storage volume (one volume identity) but not /tmp.
+    const worker = await instance();
+    vi.stubEnv("TMPDIR", rootA);
+    const crashed = await upload(worker, await uploadStorageInstance(storage));
+    void crashed;
+    const [token] = await readdir(rootA);
+    expect(token).toMatch(/^chat-upload-/);
+    await expireLeases(worker);
+
+    const other = new UploadRecovery({ db: worker.database.db, config: config(), removeFile: id => worker.store.remove(id), tempRoot: () => rootB });
+    await other.recover();
+    // The other worker's recovery can neither see the directory nor erase the record of it.
+    expect(await exists(path.join(rootA, token!))).toBe(true);
+    expect(await worker.database.db.query(sql`select kind, target from web_upload_items`)).toEqual([{ kind: "directory", target: token }]);
+    expect(await count(worker, "web_upload_cleanup")).toBe(0);
+
+    const owner = new UploadRecovery({ db: worker.database.db, config: config(), removeFile: id => worker.store.remove(id), tempRoot: () => rootA });
+    await owner.recover();
+    expect(await readdir(rootA)).toEqual([]);
+    expect(await count(worker, "web_upload_items")).toBe(0);
+  });
+
+  it("keeps an owed directory removal for the root that owns it", async () => {
+    const rootA = path.join(directory, "tmp-a");
+    const rootB = path.join(directory, "tmp-b");
+    await mkdir(rootA);
+    await mkdir(rootB);
+    const worker = await instance();
+    const volume = await uploadStorageInstance(storage);
+    const token = `chat-upload-${randomBytes(12).toString("hex")}`;
+    await mkdir(path.join(rootA, token));
+    await worker.database.db.execute(sql`insert into web_upload_cleanup(id, kind, target, instance, attempts, next_attempt_at, created_at)
+      values ('owed', 'directory', ${token}, ${uploadSpoolInstance(volume, rootA)}, 0, 0, 1)`);
+    await new UploadRecovery({ db: worker.database.db, config: config(), removeFile: async () => undefined, tempRoot: () => rootB }).recover();
+    expect(await exists(path.join(rootA, token))).toBe(true);
+    expect(await count(worker, "web_upload_cleanup")).toBe(1);
+    await new UploadRecovery({ db: worker.database.db, config: config(), removeFile: async () => undefined, tempRoot: () => rootA }).recover();
+    expect(await exists(path.join(rootA, token))).toBe(false);
+    expect(await count(worker, "web_upload_cleanup")).toBe(0);
+  });
+
   it("resolves a record whose directory was never created", async () => {
     const app = await instance();
     const storageInstance = await uploadStorageInstance(storage);
     const token = `chat-upload-${randomBytes(12).toString("hex")}`;
     await app.database.db.execute(sql`insert into web_upload_items(id, lease_id, user_id, kind, target, instance, created_at)
-      values ('item-1', 'missing-lease', ${USER}, 'directory', ${token}, ${storageInstance}, 1)`);
+      values ('item-1', 'missing-lease', ${USER}, 'directory', ${token}, ${uploadSpoolInstance(storageInstance, temporaryRoot)}, 1)`);
     await app.recovery.recover();
     expect(await count(app, "web_upload_items")).toBe(0);
     expect(await count(app, "web_upload_cleanup")).toBe(0);
@@ -352,9 +398,10 @@ describe("abandoned upload directories", () => {
     await symlink(outside, path.join(temporaryRoot, linked));
     const foreign = `chat-upload-${randomBytes(12).toString("hex")}`;
     await mkdir(path.join(temporaryRoot, foreign));
+    const spool = uploadSpoolInstance(storageInstance, temporaryRoot);
     const records: Array<[string, string, string]> = [
-      [outside, "directory", storageInstance], ["../outside", "directory", storageInstance], ["/etc", "directory", storageInstance],
-      ["chat-upload-../outside", "directory", storageInstance], [linked, "directory", storageInstance], [foreign, "directory", "another-host-volume"],
+      [outside, "directory", spool], ["../outside", "directory", spool], ["/etc", "directory", spool],
+      ["chat-upload-../outside", "directory", spool], [linked, "directory", spool], [foreign, "directory", "another-host-volume"],
       ["../outside/precious", "file", storageInstance], ["not-a-uuid", "file", storageInstance],
     ];
     for (const [index, [target, kind, owner]] of records.entries()) {
