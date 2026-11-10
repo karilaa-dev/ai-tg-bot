@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
@@ -145,6 +145,25 @@ describe("local-first durable file resolution", () => {
     expect(await store.read(String(file.id))).toEqual(original);
     expect((await resolver.resolveFile(file)).source.transport).toBe("local");
     expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("persists intact bytes repeatedly without rewriting, and repairs same-size corruption from the canonical hash", async () => {
+    const file = await insertFile();
+    const target = path.join(directory, file.id);
+    await resolver.persistFile(file, original);
+    const published = await stat(target);
+    await resolver.persistFile(file, Buffer.from(original));
+    // The identical file was verified in place, not replaced by another staged copy.
+    expect((await stat(target)).ino).toBe(published.ino);
+
+    await writeFile(target, Buffer.alloc(original.length, 7));
+    await resolver.persistFile(file, original);
+    expect(await readFile(target)).toEqual(original);
+    // Bytes that do not match the canonical hash are refused and never become the stored copy.
+    await writeFile(target, Buffer.alloc(original.length, 7));
+    await expect(resolver.persistFile(file, Buffer.alloc(original.length, 9))).rejects.toThrow("hash mismatch");
+    expect(await readFile(target)).toEqual(Buffer.alloc(original.length, 7));
+    expect(await readdir(directory)).toEqual([file.id]);
   });
 
   it("repairs a substituted local symlink without changing its target", async () => {

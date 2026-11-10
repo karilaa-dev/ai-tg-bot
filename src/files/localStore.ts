@@ -59,6 +59,14 @@ export class LocalFileStore {
     const filename = await this.filename(key);
     const integrity = { size: bytes.byteLength, contentSha256: sha256Hex(bytes) };
     throwIfAborted(signal);
+    // Repeated persistence of the same attachment is common (preparation, then delivery). Only the bytes on disk
+    // prove they exist, so verify them instead of staging and fsyncing another full copy.
+    if (await this.hasIntegrity(key, integrity, signal)) {
+      throwIfAborted(signal);
+      // The publisher that linked this file may not have synced the directory yet; only the entry needs it.
+      await this.syncDirectory();
+      return integrity;
+    }
     const temporary = `${filename}.${randomUUID()}.tmp`;
     const handle = await open(temporary, "wx", 0o600);
     try {
@@ -76,21 +84,30 @@ export class LocalFileStore {
         await link(temporary, filename);
       } catch (error) {
         if (!hasCode(error, "EEXIST")) throw error;
-        let existing: Buffer;
-        try { existing = await this.read(key, signal); }
-        catch (error) {
-          if (error instanceof FileTooLargeError || hasCode(error, "ELOOP")) throw new LocalFileConflictError();
-          throw error;
-        }
-        if (existing.length !== integrity.size || sha256Hex(existing) !== integrity.contentSha256) {
-          throw new LocalFileConflictError();
-        }
+        // Another writer published between the check above and now.
+        if (!await this.hasIntegrity(key, integrity, signal)) throw new LocalFileConflictError();
       }
       await this.syncDirectory();
       return integrity;
     } finally {
       await unlink(temporary);
     }
+  }
+
+  /**
+   * Whether a canonical file exists with exactly these bytes. False means it is absent; different bytes, links and
+   * oversized files are conflicts, and unreadable entries (such as directories) surface their own errors.
+   */
+  private async hasIntegrity(key: string, expected: LocalFileIntegrity, signal?: AbortSignal): Promise<boolean> {
+    let existing: Buffer;
+    try { existing = await this.read(key, signal, expected.size); }
+    catch (error) {
+      if (hasCode(error, "ENOENT")) return false;
+      if (error instanceof FileTooLargeError || hasCode(error, "ELOOP")) throw new LocalFileConflictError();
+      throw error;
+    }
+    if (existing.length !== expected.size || sha256Hex(existing) !== expected.contentSha256) throw new LocalFileConflictError();
+    return true;
   }
 
   /** Replace damaged bytes only after the caller verifies the canonical hash. */
