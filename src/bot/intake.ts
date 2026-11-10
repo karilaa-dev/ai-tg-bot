@@ -27,6 +27,7 @@ interface Acceptance {
 export class TelegramIntake {
   private readonly acceptances = new Set<Acceptance>();
   private readonly work = new Map<Promise<unknown>, string>();
+  private readonly stopController = new AbortController();
 
   constructor(private readonly retryDelaysMs: readonly number[] = INTAKE_RETRY_DELAYS_MS) {}
 
@@ -72,6 +73,11 @@ export class TelegramIntake {
     return this.work.size;
   }
 
+  /** Aborted when shutdown stops waiting; detached work must then stop using Telegram and the database. */
+  get stopping(): AbortSignal {
+    return this.stopController.signal;
+  }
+
   /**
    * Wait for tracked work, calling `flush` before each wait so batches that are
    * still collecting are sent now. After the deadline, input that is still not
@@ -92,6 +98,7 @@ export class TelegramIntake {
       clearTimeout(timer);
     }
     const residue = [...this.work.values()];
+    this.stopController.abort(cancelledError());
     for (const acceptance of this.acceptances) acceptance.controller.abort(cancelledError());
     return residue;
   }

@@ -94,10 +94,18 @@ export class ConversationService {
     return incoming || turn;
   }
 
-  async fork(input: { userId: number; threadId: ThreadRow["id"]; origin: ThreadRow["origin"]; messageId?: number; link?: ConversationLink }) {
+  /**
+   * `onPointFixed` runs once the fork point is fixed. Messages accepted after
+   * that wait behind the fork and are not part of it.
+   */
+  async fork(input: {
+    userId: number; threadId: ThreadRow["id"]; origin: ThreadRow["origin"]; messageId?: number; link?: ConversationLink;
+    onPointFixed?: () => void;
+  }) {
     const thread = await this.thread(input.userId, input.threadId);
     const user = await this.user(input.userId);
     return this.services.turnCoordinator.withThreadBarrier(thread.id, "fork", async (snapshotId, signal) => {
+      input.onPointFixed?.();
       const point = input.messageId ?? snapshotId;
       const chain = await this.services.repos.threads.chain(thread);
       const visible = point === null || point === 0 ? undefined

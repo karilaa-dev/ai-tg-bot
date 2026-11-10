@@ -34,6 +34,10 @@ export async function createGrammyEmulator(options: {
   imageCaptioner?: { caption(input: { bytes: Buffer; name: string; mime?: string }): Promise<string> };
   pi?: PiRuntimeService;
   downloadFile?: TelegramFileDownloader;
+  /** False lets acceptance return before the turn runs, as in production. */
+  awaitTurnProcessingOnAccept?: boolean;
+  /** Awaited by the default echo runner before it replies. */
+  turnGate?: (input: Parameters<TurnRunner>[0]) => Promise<void>;
 } = {}): Promise<GrammyEmulator> {
   const storageDirectory = await mkdtemp(path.join(tmpdir(), "ai-tg-bot-emulator-"));
   const config = loadTestConfig({ FILE_STORAGE_PATH: path.join(storageDirectory, "files"), ...options.config });
@@ -63,6 +67,7 @@ export async function createGrammyEmulator(options: {
   const turnRunner =
     options.turnRunner ??
     (async (input) => {
+      await options.turnGate?.(input);
       const accepted = input.userMessageId === undefined
         ? undefined
         : await input.repos.messages.get(input.userMessageId);
@@ -95,7 +100,7 @@ export async function createGrammyEmulator(options: {
     repos,
     turnRunner,
     pi,
-    awaitTurnProcessingOnAccept: true,
+    awaitTurnProcessingOnAccept: options.awaitTurnProcessingOnAccept ?? true,
     downloadFile: options.downloadFile ?? (async ({ fileId }) => {
       const content = bot.server.fileState.getFileContent(fileId);
       if (!content) throw new Error(`test file content not found: ${fileId}`);

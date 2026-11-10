@@ -21,6 +21,11 @@ export class ThreadTurnCoordinator {
   private readonly draining = new Map<string, Promise<void>>();
   private readonly active = new Map<string, ActiveTurn>();
   private readonly drafts = new Map<string, TurnDraft>();
+  /**
+   * Turn IDs accepted before each pending compaction. Later turns stay queued
+   * until it finishes, so new messages are stored without postponing it forever.
+   */
+  private readonly reservations = new Map<string, number[]>();
   private readonly activity: TurnFrontend["activity"];
   private readonly recovery: Promise<string[]>;
   private readonly ownerId = randomUUID();
@@ -144,7 +149,7 @@ export class ThreadTurnCoordinator {
     return this.drafts.get(threadId) ?? null;
   }
 
-  async waitForIdle(threadId?: string, includeActivity = true): Promise<void> {
+  async waitForIdle(threadId?: string, includeActivity = true, maxQueuedId?: number): Promise<void> {
     await this.recovery;
     while (true) {
       const tasks = threadId === undefined
@@ -162,7 +167,7 @@ export class ThreadTurnCoordinator {
           threadId,
         });
       }
-      if (threadId !== undefined && await this.input.repos.turnRuns.hasUnfinished(threadId)) {
+      if (threadId !== undefined && await this.input.repos.turnRuns.hasUnfinished(threadId, maxQueuedId)) {
         if (!this.draining.has(threadId) && await this.input.repos.turnRuns.nextQueued(threadId)) {
           this.schedule(threadId);
         }
@@ -180,9 +185,44 @@ export class ThreadTurnCoordinator {
     callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     await this.recovery;
+    const maxQueuedId = operation === "compact" ? await this.input.repos.turnRuns.latestId(threadId) : undefined;
+    const release = maxQueuedId === undefined ? () => undefined : this.reserve(threadId, maxQueuedId);
+    try {
+      return await this.runThreadBarrier(threadId, operation, callback, release, maxQueuedId);
+    } finally {
+      release();
+    }
+  }
+
+  private reserve(threadId: string, maxQueuedId: number): () => void {
+    const cutoffs = this.reservations.get(threadId) ?? [];
+    cutoffs.push(maxQueuedId);
+    this.reservations.set(threadId, cutoffs);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      cutoffs.splice(cutoffs.indexOf(maxQueuedId), 1);
+      if (!cutoffs.length) this.reservations.delete(threadId);
+    };
+  }
+
+  /** Whether a queued turn must wait for a compaction requested before it was accepted. */
+  private reserved(run: Pick<TurnRunRow, "id" | "thread_id">): boolean {
+    const cutoffs = this.reservations.get(run.thread_id);
+    return Boolean(cutoffs?.length && run.id > Math.min(...cutoffs));
+  }
+
+  private async runThreadBarrier<T>(
+    threadId: string,
+    operation: "fork" | "compact",
+    callback: (snapshotMessageId: number | null, signal: AbortSignal) => Promise<T>,
+    releaseReservation: () => void,
+    maxQueuedId: number | undefined,
+  ): Promise<T> {
     const barrierOwnerId = `${this.ownerId}:${randomUUID()}`;
     while (this.accepting) {
-      await this.waitForIdle(threadId, false);
+      await this.waitForIdle(threadId, false, maxQueuedId);
       if (!this.accepting) break;
       const barrierLeaseExpiresAt = Date.now() + ThreadTurnCoordinator.BARRIER_LEASE_MS;
       const barrier = await this.input.repos.turnRuns.tryAcquireThreadBarrier({
@@ -190,6 +230,7 @@ export class ThreadTurnCoordinator {
         ownerId: barrierOwnerId,
         operation,
         leaseExpiresAt: barrierLeaseExpiresAt,
+        maxQueuedId,
       });
       if (!barrier) {
         await delay(ThreadTurnCoordinator.CLAIM_RETRY_MS);
@@ -262,6 +303,7 @@ export class ThreadTurnCoordinator {
         } else if (released) {
           this.input.logger.info("thread operation barrier released", { threadId, operation });
         }
+        releaseReservation();
         try {
           if (this.accepting && await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
         } catch (error) {
@@ -392,7 +434,7 @@ export class ThreadTurnCoordinator {
     while (this.accepting) {
       try {
         const queued = await this.input.repos.turnRuns.nextQueued(threadId);
-        if (!queued) return;
+        if (!queued || this.reserved(queued)) return;
         await this.input.repos.turnRuns.indexMessageForRun(queued);
         const now = Date.now();
         const run = await this.input.repos.turnRuns.claimRunning(
@@ -429,7 +471,8 @@ export class ThreadTurnCoordinator {
     this.draining.delete(threadId);
     if (!this.accepting) return;
     try {
-      if (retry || await this.input.repos.turnRuns.nextQueued(threadId)) this.schedule(threadId);
+      const next = retry ? undefined : await this.input.repos.turnRuns.nextQueued(threadId);
+      if (retry || (next && !this.reserved(next))) this.schedule(threadId);
     } catch (error) {
       this.input.logger.error("failed to verify turn queue after drain; rescheduling", {
         threadId,

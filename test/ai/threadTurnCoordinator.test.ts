@@ -952,6 +952,59 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("runs a compaction before turns accepted after it was requested", async () => {
+    const { userId, threadId } = await ownership(repos, 830);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const order: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      order.push(input.text);
+      if (input.text === "active") {
+        started.resolve();
+        await release.promise;
+      }
+      await confirmDelivery(input);
+    });
+    await coordinator.accept(request(userId, threadId, 30_001, "active"));
+    await started.promise;
+    await coordinator.accept(request(userId, threadId, 30_002, "queued before"));
+    const operation = coordinator.withThreadBarrier(threadId, "compact", async () => { order.push("compact"); });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await coordinator.accept(request(userId, threadId, 30_003, "after request"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release.resolve();
+
+    await operation;
+    await coordinator.waitForIdle(threadId);
+    expect(order).toEqual(["active", "queued before", "compact", "after request"]);
+    await coordinator.shutdown();
+  });
+
+  it("still lets a fork wait for turns accepted while it waits", async () => {
+    const { userId, threadId } = await ownership(repos, 831);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const order: string[] = [];
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      order.push(input.text);
+      if (input.text === "active") {
+        started.resolve();
+        await release.promise;
+      }
+      await confirmDelivery(input);
+    });
+    await coordinator.accept(request(userId, threadId, 31_001, "active"));
+    await started.promise;
+    const operation = coordinator.withThreadBarrier(threadId, "fork", async () => { order.push("fork"); });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await coordinator.accept(request(userId, threadId, 31_002, "after request"));
+    release.resolve();
+
+    await operation;
+    expect(order).toEqual(["active", "after request", "fork"]);
+    await coordinator.shutdown();
+  });
+
   it("renews a thread barrier while the operation is still running", async () => {
     vi.useFakeTimers();
     const { threadId } = await ownership(repos, 825);

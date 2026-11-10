@@ -90,6 +90,7 @@ file-processed = ✅ Файл <code>{ $name }</code> обработан.
 file-source-registered = ✅ Файл <code>{ $name }</code> зарегистрирован для анализа в песочнице.
 file-reused = ♻️ Использую сохраненный файл <code>{ $name }</code>.
 fork-created = 🌱 Форк создан. Контекст перенесен в новую тему.
+fork-failed = ⚠️ Не удалось создать форк. Попробуйте ещё раз.
 fork-need-topics = 🧵 Темы не включены для этого бота. Сначала включите Topics в BotFather.
 help = 🧭 Команды: /lang, /timezone, /stream, /memory, /stop, /fork, /compact, /help. Для чистого треда начните новую тему Telegram; /fork переносит контекст Pi в новую тему. /stop отменяет активный ход агента или обработку файла. Просмотр записей: /memory view.
 private-only = 🔒 Я работаю только в личных чатах.

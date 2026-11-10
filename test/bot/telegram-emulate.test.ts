@@ -312,9 +312,9 @@ describe("Telegram bot with grammy-emulate", () => {
     const parent = await env.repos.threads.activeForUserTopic(env.user.id, null);
     await env.bot.sendMessage(env.user, env.chat, "context before fork");
 
-    const res = await env.bot.sendCommand(env.user, env.chat, "/fork");
+    await env.bot.sendCommand(env.user, env.chat, "/fork");
 
-    expect(res.text).toContain("Fork created");
+    await waitForApiText("Fork created");
     const child = (await env.db.db.query<ThreadRow>(sql`select * from threads where parent_thread_id = ${parent.id} limit 1`))[0];
     const latestParentMessage = await env.repos.messages.latest(parent.id);
     expect(child).toMatchObject({
@@ -337,7 +337,8 @@ describe("Telegram bot with grammy-emulate", () => {
     await startBot();
     const parent = await env.repos.threads.activeForUserTopic(env.user.id, null);
 
-    await env.bot.sendCommand(env.user, env.chat, "/fork").catch(() => undefined);
+    await env.bot.sendCommand(env.user, env.chat, "/fork");
+    await waitForApiText("could not create the fork");
 
     const [child] = await env.db.db.query<ThreadRow>(sql`
       select * from threads where parent_thread_id = ${parent.id} limit 1
@@ -352,12 +353,12 @@ describe("Telegram bot with grammy-emulate", () => {
     const waitForIdle = vi.spyOn(env.services.turnCoordinator, "waitForIdle").mockResolvedValue();
     const compact = vi.spyOn(env.services.pi, "compact").mockResolvedValue(2);
 
-    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
+    await env.bot.sendCommand(env.user, env.chat, "/compact");
 
-    expect(waitForIdle).toHaveBeenCalledWith(thread.id, false);
+    await waitForApiText(/Context compacted · \d+:\d{2}/);
+    expect(waitForIdle).toHaveBeenCalledWith(thread.id, false, expect.any(Number));
     expect(compact).toHaveBeenCalledOnce();
     expect(waitForIdle.mock.invocationCallOrder[0]).toBeLessThan(compact.mock.invocationCallOrder[0]!);
-    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({ text: expect.stringMatching(/Context compacted · \d+:\d{2}/) });
     const action = (await env.repos.messages.listThread(thread.id)).find(message => savedCompactionAction(message.content_json));
     expect(savedCompactionAction(action!.content_json)).toMatchObject({ status: "succeeded", messagesCompacted: 2 });
   });
@@ -365,10 +366,9 @@ describe("Telegram bot with grammy-emulate", () => {
   it("explains why a short Telegram chat cannot be compacted", async () => {
     await startBot();
     vi.spyOn(env.services.pi, "compact").mockRejectedValueOnce(new CompactionGuardError("too_small"));
-    const response = await env.bot.sendCommand(env.user, env.chat, "/compact");
-    expect(response.getLastApiCall("editMessageText")?.payload).toMatchObject({
-      text: expect.stringContaining("The available context is still too small"),
-    });
+    await env.bot.sendCommand(env.user, env.chat, "/compact");
+    const edit = await waitForApiText("The available context is still too small");
+    expect(edit.method).toBe("editMessageText");
   });
 
   it("treats a Telegram-created topic as a clean thread", async () => {
@@ -1295,6 +1295,120 @@ describe("Telegram bot with grammy-emulate", () => {
     expect(rows[1]?.text_plain).toContain("album caption");
   });
 
+  describe("commands that wait for the thread", () => {
+    async function runningTurnEnv(privateTopics = false) {
+      await env.dispose();
+      const started = deferred<void>();
+      const release = deferred<void>();
+      const order: string[] = [];
+      env = await createGrammyEmulator({
+        privateTopics,
+        awaitTurnProcessingOnAccept: false,
+        turnGate: async (input) => {
+          order.push(`turn:${input.text}`);
+          if (input.text !== "long running") return;
+          started.resolve();
+          await release.promise;
+        },
+      });
+      await startBot();
+      return { started, release, order };
+    }
+
+    let nextUpdateId = 50_000;
+    function send(text: string) {
+      const update = env.bot.server.updateFactory.createTextMessage(env.user, env.chat, text, text.startsWith("/")
+        ? { entities: [{ type: "bot_command", offset: 0, length: text.length }] }
+        : {});
+      update.update_id = nextUpdateId++;
+      return env.bot.processUpdatesConcurrently([update]);
+    }
+
+    async function turnsFor(topicId: number | null = null) {
+      const thread = await env.repos.threads.activeForUserTopic(env.user.id, topicId);
+      return env.repos.turnRuns.listForThread(thread.id);
+    }
+
+    it("accepts later text while /compact waits and compacts before running it", async () => {
+      const { started, release, order } = await runningTurnEnv();
+      const compact = vi.spyOn(env.services.pi, "compact").mockImplementation(async () => { order.push("compact"); return 2; });
+      await env.bot.sendMessage(env.user, env.chat, "long running");
+      await started.promise;
+
+      const commands = send("/compact");
+      const later = send("later text");
+      await waitUntil(async () => (await turnsFor()).length === 2, 2_000);
+      expect(compact).not.toHaveBeenCalled();
+
+      release.resolve();
+      await Promise.all([commands, later]);
+      await waitForApiText(/Context compacted · \d+:\d{2}/);
+      await waitUntil(() => order.includes("turn:later text"), 5_000);
+      expect(order).toEqual(["turn:long running", "compact", "turn:later text"]);
+    });
+
+    it("lets /stop reach the active turn while /compact waits", async () => {
+      const { started, release } = await runningTurnEnv();
+      vi.spyOn(env.services.pi, "compact").mockResolvedValue(1);
+      await env.bot.sendMessage(env.user, env.chat, "long running");
+      await started.promise;
+      await env.bot.sendCommand(env.user, env.chat, "/compact");
+      const cancel = vi.spyOn(env.services.turnCoordinator, "cancelActive");
+      const stop = await env.bot.sendCommand(env.user, env.chat, "/stop");
+      expect(cancel).toHaveBeenCalled();
+      expect(expectResponseSurface(stop)).toMatch(/Stopping the active agent turn|No active task/);
+      release.resolve();
+      await waitForApiText(/Context compacted/);
+    });
+
+    it("keeps later text out of a fork but accepts it before the fork finishes", async () => {
+      const { started, release, order } = await runningTurnEnv(true);
+      const forkStarted = deferred<void>();
+      const releaseFork = deferred<void>();
+      vi.spyOn(env.services.pi, "fork").mockImplementation(async () => {
+        forkStarted.resolve();
+        await releaseFork.promise;
+      });
+      const parent = await env.repos.threads.activeForUserTopic(env.user.id, null);
+      await env.bot.sendMessage(env.user, env.chat, "long running");
+      await started.promise;
+
+      const command = send("/fork");
+      const later = send("later text");
+      release.resolve();
+      await forkStarted.promise;
+      // The fork point is fixed; later text is now durable while the fork is still being created.
+      await waitUntil(async () => (await turnsFor()).length === 2, 2_000);
+      expect(order).toEqual(["turn:long running"]);
+
+      releaseFork.resolve();
+      await Promise.all([command, later]);
+      await waitForApiText("Fork created");
+      await waitUntil(() => order.includes("turn:later text"), 5_000);
+      const child = (await env.db.db.query<ThreadRow>(sql`select * from threads where parent_thread_id = ${parent.id} limit 1`))[0]!;
+      const messages = await env.repos.messages.listThread(parent.id);
+      const reply = messages.find(message => message.text_plain === "Echo: long running")!;
+      const laterMessage = messages.find(message => message.text_plain === "later text")!;
+      expect(child.fork_point_message_id).toBe(reply.id);
+      expect(laterMessage.id).toBeGreaterThan(child.fork_point_message_id!);
+    });
+
+    it("stops reporting compaction progress when shutdown stops waiting", async () => {
+      await startBot();
+      const compacting = deferred<number>();
+      vi.spyOn(env.services.pi, "compact").mockImplementation(() => compacting.promise);
+      await env.bot.sendCommand(env.user, env.chat, "/compact");
+      const { drainTelegramIntake } = await import("../../src/bot/batching.js");
+      await expect(drainTelegramIntake(env.services, 50)).resolves.toEqual(["compaction progress"]);
+      expect(env.services.routerState.intake.stopping.aborted).toBe(true);
+      await waitUntil(() => env.services.routerState.intake.pending === 0, 1_000);
+      const calls = env.bot.getApiCalls().length;
+      compacting.resolve(1);
+      await wait(100);
+      expect(env.bot.getApiCalls()).toHaveLength(calls);
+    });
+  });
+
   describe("durable Telegram intake", () => {
     function failAcceptOnce(error: Error = new Error("database is temporarily unavailable")) {
       const real = env.services.conversations.accept.bind(env.services.conversations);
@@ -1448,6 +1562,13 @@ describe("Telegram bot with grammy-emulate", () => {
       expect(env.services.routerState.pendingTextBursts.size).toBe(0);
     });
   });
+
+  async function waitForApiText(pattern: string | RegExp, timeoutMs = 5_000) {
+    const matches = (call: { payload: Record<string, unknown> }) => typeof call.payload.text === "string"
+      && (typeof pattern === "string" ? call.payload.text.includes(pattern) : pattern.test(call.payload.text));
+    await waitUntil(() => env.bot.getApiCalls().some(matches), timeoutMs);
+    return env.bot.getApiCalls().find(matches)!;
+  }
 
   async function startBot(user = env.user, chat = env.chat): Promise<BotResponse> {
     await env.services.access.allow(user.id);

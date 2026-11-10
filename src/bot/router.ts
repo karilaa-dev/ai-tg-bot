@@ -4,6 +4,7 @@ import { withThreadNotFoundFallback } from "../telegram/richApi.js";
 import type { AccessControl } from "../access/control.js";
 import { createApplication } from "../application/runtime.js";
 import { compactionDescription, compactionDuration, compactionTime, savedCompactionAction } from "../application/compactionAction.js";
+import type { CompactionRun } from "../application/conversations.js";
 import { telegramConversationLink } from "../telegram/conversationLink.js";
 import { LocalFileStore } from "../files/localStore.js";
 import { Bot, GrammyError, HttpError } from "grammy";
@@ -301,21 +302,9 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
     if (!thread) return;
     const run = await ctx.services.conversations.compact(ctx.from!.id, thread.id);
     const status = await replyWithThreadFallback(ctx, ctx.t("compacting"), threadExtra(thread));
-    const done = run.completion.then(() => true, () => true);
-    let finished = false;
-    while (!finished) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      finished = await Promise.race([done, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 3_000); })]);
-      clearTimeout(timer);
-      const saved = await ctx.services.repos.messages.get(run.messageId);
-      const action = saved && savedCompactionAction(saved.content_json);
-      if (!action) continue;
-      const description = compactionDescription(action, ctx.user?.lang ?? "en");
-      const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
-      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, text).catch(() => {
-        if (finished) return replyWithThreadFallback(ctx, text, threadExtra(thread));
-      });
-    }
+    // Report progress outside this topic's update queue so later messages are accepted meanwhile.
+    void ctx.services.routerState.intake.track("compaction progress", reportCompaction(ctx, thread, run, status.message_id))
+      .catch((err) => ctx.services.logger.warn("compaction progress reporting failed", ctxLogMeta(ctx, { err: String(err) })));
   });
   bot.command("fork", async (ctx) => {
     logCommand(ctx, "fork");
@@ -326,17 +315,32 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
       await replyWithThreadFallback(ctx, ctx.t("fork-need-topics"), threadExtra(thread));
       return;
     }
-    const fork = await ctx.services.conversations.fork({ userId: user.tg_id, threadId: thread.id, origin: "telegram",
-      link: telegramConversationLink(ctx.api, ctx.services.logger, true) });
-    ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
-      forkThreadId: fork.id,
-      parentThreadId: thread.id,
-      topicId: fork.topic_id,
+    // Hold this topic's later messages only until the fork point is fixed, so they
+    // stay out of the fork. They are then accepted while the fork is created.
+    const intake = ctx.services.routerState.intake;
+    let pointFixed!: () => void;
+    const fixed = new Promise<void>((resolve) => { pointFixed = resolve; });
+    const forking = ctx.services.conversations.fork({ userId: user.tg_id, threadId: thread.id, origin: "telegram",
+      link: telegramConversationLink(ctx.api, ctx.services.logger, true), onPointFixed: pointFixed });
+    const reporting = intake.track("fork", forking.then(async (fork) => {
+      ctx.services.logger.info("thread fork created", ctxLogMeta(ctx, {
+        forkThreadId: fork.id,
+        parentThreadId: thread.id,
+        topicId: fork.topic_id,
+      }));
+      if (intake.stopping.aborted) return;
+      if (fork.fork_point_message_id !== null && fork.fork_point_message_id > 0) {
+        await ctx.services.repos.threadReads.markRead(user.tg_id, fork.id, fork.fork_point_message_id);
+      }
+      await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
+    }, async (err: unknown) => {
+      ctx.services.logger.error("thread fork failed", ctxLogMeta(ctx, { err: String(err) }));
+      if (intake.stopping.aborted) return;
+      await replyWithThreadFallback(ctx, ctx.t("fork-failed"), threadExtra(thread));
+    }).catch((err: unknown) => {
+      ctx.services.logger.warn("fork result could not be reported", ctxLogMeta(ctx, { err: String(err) }));
     }));
-    if (fork.fork_point_message_id !== null && fork.fork_point_message_id > 0) {
-      await ctx.services.repos.threadReads.markRead(user.tg_id, fork.id, fork.fork_point_message_id);
-    }
-    await replyWithThreadFallback(ctx, ctx.t("fork-created"), threadExtra(fork));
+    await Promise.race([fixed, reporting]);
   });
   bot.on(["message:video", "message:animation"], async (ctx) => {
     const media = ctx.message.video ?? ctx.message.animation;
@@ -477,6 +481,50 @@ export function installBot(bot: Bot<BotContext>, options: InstallOptions): BotSe
 
   options.logger.info("bot handlers installed");
   return services;
+}
+
+const compactionProgressMs = 3_000;
+const compactionProgressEditFailures = 3;
+
+/** Edit the status message until compaction settles; stop early when shutdown stops waiting. */
+async function reportCompaction(
+  ctx: BotContext,
+  thread: NonNullable<BotContext["thread"]>,
+  run: CompactionRun,
+  statusMessageId: number,
+): Promise<void> {
+  const stopping = ctx.services.routerState.intake.stopping;
+  const done = run.completion.then(() => true, () => true);
+  const stopped = new Promise<false>((resolve) => {
+    if (stopping.aborted) resolve(false);
+    else stopping.addEventListener("abort", () => resolve(false), { once: true });
+  });
+  let finished = false;
+  let failedEdits = 0;
+  let lastText: string | undefined;
+  while (!finished) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    finished = await Promise.race([done, stopped, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), compactionProgressMs); })]);
+    clearTimeout(timer);
+    if (stopping.aborted) return;
+    // After repeated failures only the final status is attempted, so a broken message is not retried every few seconds.
+    if (!finished && failedEdits >= compactionProgressEditFailures) continue;
+    const saved = await ctx.services.repos.messages.get(run.messageId);
+    const action = saved && savedCompactionAction(saved.content_json);
+    if (!action) continue;
+    const description = compactionDescription(action, ctx.user?.lang ?? "en");
+    const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
+    if (!finished && text === lastText) continue;
+    const edited = await ctx.api.editMessageText(ctx.chat!.id, statusMessageId, text).then(() => true, () => false);
+    if (edited) {
+      lastText = text;
+      failedEdits = 0;
+    } else if (finished) {
+      await replyWithThreadFallback(ctx, text, threadExtra(thread));
+    } else {
+      failedEdits += 1;
+    }
+  }
 }
 
 function threadSequentializationKey(ctx: BotContext): string | undefined {
