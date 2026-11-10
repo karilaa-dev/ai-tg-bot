@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, statfs, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readFile, stat, statfs, unlink } from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
@@ -44,25 +44,52 @@ export function uploadStorageInstance(root: string): Promise<string> {
   return instance;
 }
 
+const hasCode = (error: unknown, code: string) => error instanceof Error && "code" in error && error.code === code;
+
+/**
+ * The identity is published only once it is complete: written and fsynced under a staging name, then linked into
+ * place (which refuses to replace anything) and the directory synced. A crash therefore leaves either no identity
+ * or a whole one, concurrent first starters agree on whichever link won, and an existing identity is never
+ * rotated, even when it is unreadable: that is reported instead of replaced, since replacing it would orphan
+ * everything recorded under it.
+ */
 async function loadStorageInstance(root: string): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const file = path.join(root, ".upload-instance");
   for (;;) {
-    try {
-      const existing = (await readFile(file, "utf8")).trim();
-      if (!isUuid(existing)) throw new Error("The upload storage identity file is invalid.");
-      return existing;
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-    }
+    const existing = await readIdentity(file);
+    if (existing) return existing;
+    const staging = `${file}.${randomUUID()}.tmp`;
     const created = randomUUID();
     try {
-      await writeFile(file, `${created}\n`, { flag: "wx", mode: 0o600 });
-      return created;
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-    }
+      const handle = await open(staging, "wx", 0o600);
+      try {
+        await handle.writeFile(`${created}\n`);
+        await handle.sync();
+      } finally { await handle.close(); }
+      try { await link(staging, file); }
+      catch (error) {
+        // Another process published first; its identity wins.
+        if (hasCode(error, "EEXIST")) continue;
+        throw error;
+      }
+    } finally { await unlink(staging).catch(() => undefined); }
+    const directory = await open(root, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+    return created;
   }
+}
+
+async function readIdentity(file: string): Promise<string | undefined> {
+  let text: string;
+  try { text = await readFile(file, "utf8"); }
+  catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  const identity = text.trim();
+  if (!isUuid(identity)) throw new Error("The upload storage identity file is invalid and will not be replaced.");
+  return identity;
 }
 
 export async function requireUploadSpace(directory: string, bytes: number, minimumFree: number): Promise<void> {
