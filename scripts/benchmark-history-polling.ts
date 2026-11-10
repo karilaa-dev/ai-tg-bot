@@ -1,10 +1,12 @@
 import path from "node:path";
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { SQL } from "drizzle-orm";
+import type { ToolActivity } from "../src/ai/toolActivity.js";
 
 // Measures what the website's history polling costs on a long, tool-heavy thread.
-// Usage: bun scripts/benchmark-history-polling.ts [checkout] [--polls N] [--route]
+// Usage: bun scripts/benchmark-history-polling.ts [checkout] [--polls N]
 // The fixture is synthetic and lives in an in-memory SQLite database (or the
 // PostgreSQL server in BENCH_POSTGRES_URL, in a temporary schema).
 const args = process.argv.slice(2);
@@ -45,6 +47,7 @@ try {
   const user = await repos.users.ensure({ tgId: 77001, firstName: "Benchmark" });
   const thread = await repos.threads.create({ userId: user.tg_id, title: "Long benchmark thread", topicId: null, origin: "web" });
   let actionId = 0;
+  let attachments = 0;
   for (let index = 0; index < MESSAGES; index++) {
     if (index === 60) {
       const now = Date.now();
@@ -60,13 +63,15 @@ try {
       if (index % 10 === 0) {
         await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: message.id,
           type: "txt", name: `notes-${index}.txt`, size: 2_000, contentMd: "n".repeat(2_000), isInline: true });
+        attachments++;
       }
       continue;
     }
     const text = `Answer ${index}. ${"Detailed findings with sources and caveats. ".repeat(Math.ceil(REPLY_BYTES / 44))}`.slice(0, REPLY_BYTES);
-    const toolActivity = { version: 1, status: "complete", reasoning: ["Checked the sources.", "Compared the results."],
-      tools: Array.from({ length: 6 }, (_, tool) => ({ id: `call-${index}-${tool}`, name: "web_search", status: "succeeded",
-        arguments: JSON.stringify({ query: `query ${index} ${tool}` }), result: "r".repeat(600) })) };
+    const toolActivity: ToolActivity = { version: 1, omittedCalls: 0, reasoning: ["Checked the sources.", "Compared the results."],
+      calls: Array.from({ length: 6 }, (_, tool) => ({ id: `call-${index}-${tool}`, name: "web_search", status: "succeeded", durationMs: 100,
+        args: { format: "json", text: JSON.stringify({ query: `query ${index} ${tool}` }), truncated: false },
+        result: { format: "text", text: "r".repeat(600), truncated: false } })) };
     await repos.messages.insert({ threadId: thread.id, role: "assistant", content: { text, toolActivity }, textPlain: text, thinking: "" });
   }
 
@@ -95,6 +100,22 @@ try {
 
   const initial = await repository.history(thread.id);
   let known = initial.messages;
+  // Model a reader who has loaded older messages containing the still-running
+  // action. Otherwise the initial 50-message page never exposes that action.
+  let older = initial.olderCursor;
+  while (!known.some(message => message.id === actionId) && older !== null) {
+    const page = await repository.history(thread.id, older);
+    known = [...page.messages, ...known];
+    older = page.olderCursor;
+  }
+  assert(known.some(message => message.id === actionId && message.action?.status === "running"), "The active action must be visible to the polling cursor.");
+  assert.equal(clientCursor(known), actionId, "Polling must include the older active action.");
+  const assertToolCalls = (messages: History["messages"]) => {
+    for (const message of messages.filter(message => message.role === "assistant")) {
+      assert.equal(message.toolActivity?.calls.length, 6, `Reply ${message.id} lost its persisted tool calls.`);
+    }
+  };
+  assertToolCalls(known);
   const samples: Array<{ requests: number; statements: number; bytes: number; transferred: number; notModified: number; messages: number; ms: number; digest: string }> = [];
   const etags = new Map<string, string>();
   for (let poll = 0; poll < polls; poll++) {
@@ -102,6 +123,7 @@ try {
     statements = 0;
     const started = performance.now();
     const pages = await fetchHistory({ after: cursor === Infinity ? undefined : cursor });
+    for (const page of pages) assertToolCalls(page.messages);
     const bodies = pages.map((page) => JSON.stringify(page));
     let transferred = 0, notModified = 0;
     for (const [index, body] of bodies.entries()) {
@@ -131,7 +153,7 @@ try {
     checkout: path.basename(root),
     dialect: database.dialect,
     runtime: `bun ${Bun.version}`,
-    fixture: { messages: MESSAGES, assistantReplyBytes: REPLY_BYTES, toolCallsPerReply: 6, attachments: MESSAGES / 10, activeActionId: actionId },
+    fixture: { messages: MESSAGES, assistantReplyBytes: REPLY_BYTES, toolCallsPerReply: 6, attachments, activeActionId: actionId, activeActionLoaded: true },
     polls,
     unchangedPoll: {
       requests: first.requests,

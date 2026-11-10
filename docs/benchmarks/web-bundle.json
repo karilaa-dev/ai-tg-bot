@@ -8,7 +8,7 @@
     "date": "2026-11-10",
     "server": "test/web/http-smoke.ts (synthetic fixture, loopback, no HTTP compression)"
   },
-  "notes": "Bytes are JavaScript bodies the browser requested from a cold cache until the route's landmark was visible; gzip (level 9) and brotli (quality 11) sizes are computed locally to show what a compressing proxy would send. usableMs is loopback wall time from navigation (including the fixture's sign-in redirects) to the landmark; it is a parse/waterfall proxy, not a field metric.",
+  "notes": "Bytes are JavaScript bodies the browser requested from a cold cache until the route's landmark was visible; gzip (level 9) and brotli (quality 11) sizes are computed locally to show what a compressing proxy would send. shellReadyMs is loopback wall time from navigation (including the fixture's sign-in redirects) to the landmark; it is a parse/waterfall proxy, not a field metric. Timing ends at the sign-in link, New chat button or admin navigation landmark; the signInOnlyChat fixture does not implement chat APIs, so this measures shell readiness, not a working conversation.",
   "before": {
     "checkout": "a469b81 (before)",
     "runtime": "bun 1.4.4",
@@ -42,13 +42,13 @@
             "brotli": 378488
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           219,
           232,
           249,
           263
         ],
-        "usableMsMedian": 249
+        "shellReadyMsMedian": 249
       },
       {
         "route": "signed-in chat",
@@ -69,13 +69,13 @@
             "brotli": 378488
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           395,
           401,
           461,
           532
         ],
-        "usableMsMedian": 461
+        "shellReadyMsMedian": 461
       },
       {
         "route": "admin dashboard",
@@ -96,13 +96,13 @@
             "brotli": 378488
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           370,
           373,
           377,
           394
         ],
-        "usableMsMedian": 377
+        "shellReadyMsMedian": 377
       },
       {
         "route": "returning signed-in chat (cold cache)",
@@ -123,13 +123,13 @@
             "brotli": 378488
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           255,
           269,
           290,
           381
         ],
-        "usableMsMedian": 290
+        "shellReadyMsMedian": 290
       }
     ]
   },
@@ -182,13 +182,13 @@
             "brotli": 145420
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           125,
           126,
           126,
           135
         ],
-        "usableMsMedian": 126
+        "shellReadyMsMedian": 126
       },
       {
         "route": "signed-in chat",
@@ -227,13 +227,13 @@
             "brotli": 145420
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           313,
           320,
           332,
           359
         ],
-        "usableMsMedian": 332
+        "shellReadyMsMedian": 332
       },
       {
         "route": "admin dashboard",
@@ -272,13 +272,13 @@
             "brotli": 145420
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           287,
           299,
           317,
           323
         ],
-        "usableMsMedian": 317
+        "shellReadyMsMedian": 317
       },
       {
         "route": "returning signed-in chat (cold cache)",
@@ -317,13 +317,13 @@
             "brotli": 145420
           }
         ],
-        "usableMsRuns": [
+        "shellReadyMsRuns": [
           218,
           230,
           235,
           285
         ],
-        "usableMsMedian": 235
+        "shellReadyMsMedian": 235
       }
     ]
   }

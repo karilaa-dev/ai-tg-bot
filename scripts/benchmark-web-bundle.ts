@@ -6,7 +6,7 @@ import { createInterface } from "node:readline";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import { chromium, type BrowserContext } from "playwright-core";
 
-// Measures the JavaScript each website route downloads before it is usable.
+// Measures the JavaScript each website route downloads before its shell is ready.
 // Usage: bun scripts/benchmark-web-bundle.ts [checkout]
 // The checkout's own production build is served by its synthetic HTTP fixture
 // (test/web/http-smoke.ts); every route starts from an empty browser cache.
@@ -40,13 +40,13 @@ try {
   if (!url) throw new Error("The HTTP fixture did not start.");
   const origin = new URL(url).origin;
 
-  // Time to usable is noisy on a local server; report the median of several cold runs.
+  // Time to shell ready is noisy on a local server; report the median of several cold runs.
   type ContextState = Awaited<ReturnType<BrowserContext["storageState"]>>;
   async function measure(name: string, visit: (context: BrowserContext) => Promise<void>, state?: () => Promise<ContextState>, runs = 4) {
     const results = [];
     for (let index = 0; index < runs; index++) results.push(await measureOnce(name, visit, await state?.()));
-    const times = results.map((result) => result.usableMs).sort((a, b) => a - b);
-    return { ...results[0]!, usableMs: undefined, usableMsRuns: times, usableMsMedian: times[Math.floor(times.length / 2)] };
+    const times = results.map((result) => result.shellReadyMs).sort((a, b) => a - b);
+    return { ...results[0]!, shellReadyMs: undefined, shellReadyMsRuns: times, shellReadyMsMedian: times[Math.floor(times.length / 2)] };
   }
 
   async function measureOnce(name: string, visit: (context: BrowserContext) => Promise<void>, storageState?: ContextState) {
@@ -63,14 +63,14 @@ try {
     });
     const started = performance.now();
     await visit(context);
-    const usableMs = performance.now() - started;
+    const shellReadyMs = performance.now() - started;
     await new Promise((resolve) => setTimeout(resolve, 300));
     await context.close();
     const files = [...scripts].map(([pathname, script]) => ({ path: pathname, status: script.status, cacheControl: script.cacheControl,
       contentType: script.contentType, ...compressed(script.body) })).sort((a, b) => a.path.localeCompare(b.path));
     const total = files.reduce((sum, file) => ({ raw: sum.raw + file.raw, gzip: sum.gzip + file.gzip, brotli: sum.brotli + file.brotli }),
       { raw: 0, gzip: 0, brotli: 0 });
-    return { route: name, requests: files.length, javascript: total, usableMs: Math.round(usableMs), files };
+    return { route: name, requests: files.length, javascript: total, shellReadyMs: Math.round(shellReadyMs), files };
   }
 
   const signIn = async (context: BrowserContext, start: string, landmark: (page: Awaited<ReturnType<BrowserContext["newPage"]>>) => Promise<void>) => {

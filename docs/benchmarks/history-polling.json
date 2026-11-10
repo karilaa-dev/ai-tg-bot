@@ -17,35 +17,36 @@
         "messages": 160,
         "assistantReplyBytes": 6000,
         "toolCallsPerReply": 6,
-        "attachments": 16,
-        "activeActionId": 61
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
       },
       "polls": 40,
       "unchangedPoll": {
-        "requests": 1,
-        "sqlStatements": 10,
-        "responseBytes": 170234,
-        "messagesReturned": 50,
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
         "identicalResponses": true,
-        "medianMs": 2.9,
-        "p95Ms": 5.05,
+        "medianMs": 9.06,
+        "p95Ms": 12.2,
         "conditionalResponses": false,
-        "firstPollTransferredBytes": 170234,
-        "steadyTransferredBytesPerPoll": 170234,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 419938,
         "steadyNotModifiedPerPoll": 0
       },
       "perMinute": {
         "busyEvery1500ms": {
-          "requests": 40,
-          "transferredBytes": 6809360
+          "requests": 80,
+          "transferredBytes": 16797520
         },
         "idleEvery8000ms": {
-          "requests": 7.5,
-          "transferredBytes": 1276755
+          "requests": 15,
+          "transferredBytes": 3149535
         },
         "compactingEvery1000ms": {
-          "requests": 60,
-          "transferredBytes": 10214040
+          "requests": 120,
+          "transferredBytes": 25196280
         }
       }
     },
@@ -57,34 +58,35 @@
         "messages": 160,
         "assistantReplyBytes": 6000,
         "toolCallsPerReply": 6,
-        "attachments": 16,
-        "activeActionId": 61
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
       },
       "polls": 40,
       "unchangedPoll": {
-        "requests": 1,
-        "sqlStatements": 10,
-        "responseBytes": 170234,
-        "messagesReturned": 50,
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
         "identicalResponses": true,
-        "medianMs": 3.13,
-        "p95Ms": 5.5,
+        "medianMs": 9.84,
+        "p95Ms": 14.95,
         "conditionalResponses": true,
-        "firstPollTransferredBytes": 170234,
+        "firstPollTransferredBytes": 419938,
         "steadyTransferredBytesPerPoll": 0,
-        "steadyNotModifiedPerPoll": 1
+        "steadyNotModifiedPerPoll": 2
       },
       "perMinute": {
         "busyEvery1500ms": {
-          "requests": 40,
+          "requests": 80,
           "transferredBytes": 0
         },
         "idleEvery8000ms": {
-          "requests": 7.5,
+          "requests": 15,
           "transferredBytes": 0
         },
         "compactingEvery1000ms": {
-          "requests": 60,
+          "requests": 120,
           "transferredBytes": 0
         }
       }
@@ -97,35 +99,36 @@
         "messages": 160,
         "assistantReplyBytes": 6000,
         "toolCallsPerReply": 6,
-        "attachments": 16,
-        "activeActionId": 61
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
       },
       "polls": 40,
       "unchangedPoll": {
-        "requests": 1,
-        "sqlStatements": 10,
-        "responseBytes": 170234,
-        "messagesReturned": 50,
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
         "identicalResponses": true,
-        "medianMs": 7.76,
-        "p95Ms": 9.87,
+        "medianMs": 21.18,
+        "p95Ms": 26.29,
         "conditionalResponses": false,
-        "firstPollTransferredBytes": 170234,
-        "steadyTransferredBytesPerPoll": 170234,
+        "firstPollTransferredBytes": 419938,
+        "steadyTransferredBytesPerPoll": 419938,
         "steadyNotModifiedPerPoll": 0
       },
       "perMinute": {
         "busyEvery1500ms": {
-          "requests": 40,
-          "transferredBytes": 6809360
+          "requests": 80,
+          "transferredBytes": 16797520
         },
         "idleEvery8000ms": {
-          "requests": 7.5,
-          "transferredBytes": 1276755
+          "requests": 15,
+          "transferredBytes": 3149535
         },
         "compactingEvery1000ms": {
-          "requests": 60,
-          "transferredBytes": 10214040
+          "requests": 120,
+          "transferredBytes": 25196280
         }
       }
     },
@@ -137,34 +140,35 @@
         "messages": 160,
         "assistantReplyBytes": 6000,
         "toolCallsPerReply": 6,
-        "attachments": 16,
-        "activeActionId": 61
+        "attachments": 15,
+        "activeActionId": 61,
+        "activeActionLoaded": true
       },
       "polls": 40,
       "unchangedPoll": {
-        "requests": 1,
-        "sqlStatements": 10,
-        "responseBytes": 170234,
-        "messagesReturned": 50,
+        "requests": 2,
+        "sqlStatements": 20,
+        "responseBytes": 419938,
+        "messagesReturned": 100,
         "identicalResponses": true,
-        "medianMs": 8.77,
-        "p95Ms": 12.15,
+        "medianMs": 23.1,
+        "p95Ms": 31.51,
         "conditionalResponses": true,
-        "firstPollTransferredBytes": 170234,
+        "firstPollTransferredBytes": 419938,
         "steadyTransferredBytesPerPoll": 0,
-        "steadyNotModifiedPerPoll": 1
+        "steadyNotModifiedPerPoll": 2
       },
       "perMinute": {
         "busyEvery1500ms": {
-          "requests": 40,
+          "requests": 80,
           "transferredBytes": 0
         },
         "idleEvery8000ms": {
-          "requests": 7.5,
+          "requests": 15,
           "transferredBytes": 0
         },
         "compactingEvery1000ms": {
-          "requests": 60,
+          "requests": 120,
           "transferredBytes": 0
         }
       }
