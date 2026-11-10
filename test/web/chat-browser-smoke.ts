@@ -29,6 +29,8 @@ try {
   const remoteRequests: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("request", request => { if (!request.url().startsWith(root)) remoteRequests.push(request.url()); });
+  const loadedScripts = new Set<string>();
+  page.on("response", response => { if (response.ok() && new URL(response.url()).pathname.endsWith(".js")) loadedScripts.add(response.url()); });
 
   let userId: number | null = null;
   let sessionReads = 0;
@@ -137,13 +139,27 @@ try {
   const login = page.getByRole("link", { name: "Sign in with Telegram", exact: true });
   await login.waitFor();
   assert.equal(new URL((await login.getAttribute("href"))!, root).searchParams.get("return"), `/?thread=${fixtureUuid(1)}`);
+  if (!development) {
+    // The production build loads the workspace as a separate chunk; a failed download offers a retry.
+    let failedChunks = 0;
+    await page.route(/\/chat-app-[a-z0-9]+\.js$/, route => { failedChunks++; return route.abort("connectionfailed"); });
+    userId = 1001;
+    await page.evaluate(() => window.dispatchEvent(new Event("chat-session-expired")));
+    const retryChunk = page.getByRole("button", { name: "Try again", exact: true });
+    await retryChunk.waitFor();
+    assert.equal(failedChunks, 1);
+    await page.getByRole("alert").filter({ hasText: "Could not reach the server" }).waitFor();
+    await page.unroute(/\/chat-app-[a-z0-9]+\.js$/);
+    await retryChunk.click();
+  }
   await recheck(1001);
   await page.getByRole("heading", { name: "Chat 1", exact: true }).waitFor();
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   assert.equal(await page.evaluate(() => typeof Reflect.get(globalThis, "process")), "undefined");
   assert.equal(await page.locator("[data-openui-devtools-auto-mount]").count(), 0);
   const scripts = await page.locator("script[src]").evaluateAll(nodes => nodes.map(node => node.getAttribute("src")!));
-  for (const script of scripts) {
+  // Route chunks loaded on demand must meet the same rules as the entry script.
+  for (const script of [...scripts, ...loadedScripts]) {
     const source = await (await page.request.get(new URL(script, root).href)).text();
     assert(!source.includes('process.env["NODE_ENV"]'), "Dev bundle must not reference a Node-only global");
     assert(!source.includes("cdn.jsdelivr.net/npm/@openuidev/devtools"), "Devtools must not enter the browser bundle");
@@ -316,7 +332,7 @@ try {
 
   assert.deepEqual(errors, []);
   assert.deepEqual(remoteRequests, []);
-  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, deep-link sign-in, failed-send navigation/retry/files, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion, 304 history revalidation`);
+  console.log(`Chat browser smoke passed (${development ? "development" : "production"}): real HTTP bundle, no process global/CDN, deep-link sign-in, failed-send navigation/retry/files, live draft, logout race, user-scoped drafts/files, late send/create/fork callbacks, changed account assertion, 304 history revalidation${development ? "" : ", workspace chunk retry"}`);
 } finally {
   server.kill("SIGTERM");
   await stopped;
