@@ -13,7 +13,7 @@
 | Browser Use Cloud | Adds optional interactive browsing, screenshots, and downloads. |
 | Web search | Codex hosted search through the existing Codex login. Optional Tavily fallback, image discovery, and stateless `web_extract`. |
 
-Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
+Main conversations default to GPT-6.2 Sol on both Codex and OpenRouter. Pi uses Codex OAuth when valid credentials are available. If Codex is not configured, or if a retryable Codex request fails before producing output, the bot uses OpenRouter. OpenRouter is still required for fallback inference, image generation, and audio transcription.
 
 Streaming drafts show Telegram's native Stop button. Pressing it cancels the task that produced that draft, stops further draft updates, and posts a localized acknowledgement in the same topic. If the reply has already finished or started sending, the bot explains that it can no longer cancel it. `/stop` also cancels the active task when streaming is disabled.
 
@@ -33,7 +33,7 @@ Accepted messages receive a 👀 reaction until their response finishes, fails, 
 
 ## Agent harness
 
-The core prompt, including optional browser guidance and runtime model identity, stays below 4,500 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Each provider request receives the selected model's display name, such as `Model: GPT-6 Astra`; this line is absent from persistent conversation history.
+The core prompt, including optional browser guidance and runtime model identity, stays below 4,500 characters. Detailed Office, PDF, and CAD workflows live in approved skills. Each provider request receives the selected model's display name, such as `Model: GPT-6.2 Sol`; this line is absent from persistent conversation history.
 
 `bash.inspect_images` combines command output with up to four workspace images. `finish_response({ text?, files? })` prepares final files and ends inference without another model request. It must be the only tool in its response. Partial failures retain successful attachments for repair. The normal OpenSCAD sequence is four model cycles: read the skill, build and inspect the preview, build and inspect final outputs, then finish with the STL and final photo.
 
@@ -126,7 +126,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.11` uses `ai-tg-bot-tools:v2.1.11`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.12` uses `ai-tg-bot-tools:v2.1.12`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -142,8 +142,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.11 is ai-tg-bot-tools:v2.1.11.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.11
+# Optional override. The default for version 2.1.12 is ai-tg-bot-tools:v2.1.12.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.12
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648

@@ -95,8 +95,8 @@ describe("Pi automatic provider", () => {
     expect(transport.requests[0]!.body).toHaveProperty("service_tier", "priority");
     expect(transport.requests[1]!.body).not.toHaveProperty("service_tier");
     expect(transport.requests[2]!.body).not.toHaveProperty("service_tier");
-    expect(transport.requests.slice(1).map(request => request.body.model)).toEqual([
-      harness.router.openRouterModel("main").id, harness.router.openRouterModel("helper").id,
+    expect(transport.requests.map(request => request.body.model)).toEqual([
+      "gpt-6.2-sol", "openai/gpt-6.2-sol", harness.router.openRouterModel("helper").id,
     ]);
     expect(harness.router.circuit.state().open).toBe(true);
   });
@@ -210,7 +210,7 @@ describe("Pi automatic provider", () => {
     await harness.run("main");
     await harness.run("helper");
     expect(harness.contexts.map((context) => getCurrentSystemPrompt(context.messages))).toEqual([
-      "Core\n\nModel: GPT-6.1 Sol", "Core\n\nModel: GPT-6.1 Sol", "Core\n\nModel: GPT-6 Luna",
+      "Core\n\nModel: GPT-6.2 Sol", "Core\n\nModel: GPT-6.2 Sol", "Core\n\nModel: GPT-6 Luna",
     ]);
     expect(harness.context).toEqual(normalizeContext({ systemPrompt: "Core", messages: [] }));
   });
@@ -245,7 +245,7 @@ describe("Pi automatic provider", () => {
 
     expect(harness.contexts).toHaveLength(2);
     for (const request of harness.contexts) {
-      expect(getCurrentSystemPrompt(request.messages)).toBe("Core\n\nModel: GPT-6.1 Sol\n\nUpdated instructions\n\nCurrent policy");
+      expect(getCurrentSystemPrompt(request.messages)).toBe("Core\n\nModel: GPT-6.2 Sol\n\nUpdated instructions\n\nCurrent policy");
       expect(getCurrentTools(request.messages)).toEqual([currentTool]);
       expect(request.messages.slice(1)).toEqual(original.messages.slice(1));
     }
