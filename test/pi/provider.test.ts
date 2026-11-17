@@ -101,6 +101,32 @@ describe("Pi automatic provider", () => {
     expect(harness.router.circuit.state().open).toBe(true);
   });
 
+  it("preserves Sol reasoning, transcript order, output capacity and rates across fallback", async () => {
+    const transport = interceptedSdkTransport({ codexFailure: true });
+    const harness = providerHarness({
+      streams: { codex: streamCodex, openRouter: streamOpenRouter },
+      apiKey: testCodexToken(),
+      options: { reasoning: "max", transport: "sse", fetch: transport.fetch },
+      context: normalizeContext({ messages: [
+        { role: "system", content: "Core", timestamp: 0 },
+        { role: "user", content: "First turn", timestamp: 1 },
+        { role: "system", content: "Updated instructions", timestamp: 2 },
+        { role: "user", content: "Next turn", timestamp: 3 },
+      ] }),
+    });
+    expect(textDeltas(await harness.run())).toBe("openrouter answer");
+    const [codex, fallback] = transport.requests.map(request => request.body);
+    for (const body of [codex!, fallback!]) {
+      expect(body.reasoning).toMatchObject({ effort: "max" });
+      const transcript = JSON.stringify(body.input ?? body.messages);
+      expect(transcript).toMatch(/First turn.*Updated instructions.*Next turn/);
+    }
+    expect(Number(fallback!.max_tokens ?? fallback!.max_completion_tokens)).toBeGreaterThan(100_000);
+    for (const model of [harness.router.codexModel("main"), harness.router.openRouterModel("main")]) {
+      expect(model.cost).toMatchObject({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 });
+    }
+  });
+
   it.each([false, true])("preserves caller payload hooks through fallback, replacement=%s", async (replace) => {
     const onPayload = vi.fn(async (payload: unknown) => {
       if (replace) return { custom: "kept" };
