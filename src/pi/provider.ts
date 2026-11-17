@@ -10,6 +10,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { streamSimple as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { streamSimple as streamOpenRouter } from "@earendil-works/pi-ai/api/openai-completions";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
+import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -413,7 +415,9 @@ function backendCodexModel(
   contextWindow: number,
 ): Model<"openai-codex-responses"> {
   const id = configuredId.replace(/^openai-codex\//, "");
-  const found = registry.find("openai-codex", id);
+  // Pi 1.4 predates Sol 6.2. Its limits, rates and reasoning levels match Sol 6.1.
+  const found = registry.find("openai-codex", id) ?? (id === "gpt-6.2-sol"
+    ? { ...OPENAI_CODEX_MODELS["gpt-6.1-sol"], id, name: "GPT-6.2 Sol" } : undefined);
   if (found?.api === "openai-codex-responses") return { ...found, contextWindow } as Model<"openai-codex-responses">;
   return {
     id,
@@ -435,7 +439,8 @@ function backendOpenRouterModel(
   contextWindow: number,
 ): Model<"openai-completions"> {
   const id = configuredId.replace(/^openrouter\//, "");
-  const found = registry.find("openrouter", id);
+  const found = registry.find("openrouter", id) ?? (id === "openai/gpt-6.2-sol"
+    ? { ...OPENROUTER_MODELS["openai/gpt-6.1-sol"], id, name: "OpenAI: GPT-6.2 Sol" } : undefined);
   if (found?.api === "openai-completions") {
     return {
       ...found,
