@@ -31,6 +31,15 @@ describe("TurnBudget", () => {
     expect(budget.snapshot()).toMatchObject({ toolCalls: 2, terminationReason: "tool_call_limit" });
   });
 
+  it("keeps the original stop reason when a tool already in flight reports a failure", () => {
+    const budget = createBudget({ maxToolCalls: 1, maxConsecutiveToolFailures: 1 });
+    budget.beforeToolCall("1", "search", {});
+    const blocked = budget.beforeToolCall("2", "search", {});
+    expect(blocked.terminate).toBe(true);
+    budget.afterToolResult("1", true);
+    expect(budget.snapshot().terminationReason).toBe("tool_call_limit");
+  });
+
   it("stops after three normalized identical failing calls", () => {
     const budget = createBudget({ maxIdenticalToolFailures: 3 });
     for (const [id, args] of [

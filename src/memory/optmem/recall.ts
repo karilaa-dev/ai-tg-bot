@@ -17,6 +17,11 @@ const Reply = z.discriminatedUnion("kind", [
  */
 export const RECALL_DEADLINE_MS = 5_000;
 
+type WorkerState =
+  | { phase: "idle" }
+  | { phase: "waiting"; expected: "ready" | "matches"; resolve: (values: boolean[]) => void; reject: (error: unknown) => void }
+  | { phase: "failed"; error: unknown };
+
 class RecallDeadlineError extends Error {}
 
 // Only regex matching runs in the worker; database ownership stays in the caller.
@@ -32,22 +37,30 @@ export async function recallInWorker(
   const searchSignal = signal ? AbortSignal.any([signal, deadlineController.signal]) : deadlineController.signal;
   const entry = import.meta.url.endsWith(".ts") ? "./recallWorker.ts" : "./recallWorker.js";
   const worker = new Worker(new URL(entry, import.meta.url), { workerData: pattern });
-  let pending: { resolve: (value: boolean[]) => void; reject: (error: unknown) => void } | undefined;
-  let failure: { error: unknown } | undefined;
-  const fail = (error: unknown) => { failure = { error }; pending?.reject(error); pending = undefined; };
-  const receive = () => new Promise<boolean[]>((resolve, reject) => {
-    if (failure) reject(failure.error);
-    else pending = { resolve, reject };
+  let state: WorkerState = { phase: "idle" };
+  const fail = (error: unknown) => {
+    if (state.phase === "failed") return;
+    if (state.phase === "waiting") state.reject(error);
+    state = { phase: "failed", error };
+  };
+  const receive = (expected: "ready" | "matches") => new Promise<boolean[]>((resolve, reject) => {
+    if (state.phase === "failed") reject(state.error);
+    else if (state.phase === "waiting") reject(new Error("Memory search already has an outstanding request."));
+    else state = { phase: "waiting", expected, resolve, reject };
   });
-  const ready = receive();
+  const ready = receive("ready");
   const abort = () => fail(searchSignal.reason);
   worker.on("message", (message: unknown) => {
     const parsed = Reply.safeParse(message);
     if (!parsed.success) { fail(new Error("Invalid memory search result", { cause: parsed.error })); return; }
     const reply = parsed.data;
     if (reply.kind === "error") { fail(new MemoError(reply.message)); return; }
-    pending?.resolve(reply.kind === "ready" ? [] : reply.values);
-    pending = undefined;
+    if (state.phase !== "waiting" || state.expected !== reply.kind) {
+      fail(new Error("Unexpected memory search worker reply."));
+      return;
+    }
+    state.resolve(reply.kind === "ready" ? [] : reply.values);
+    state = { phase: "idle" };
   });
   worker.once("error", fail);
   worker.once("exit", code => fail(new Error(`Memory search worker exited (${code}).`)));
@@ -60,8 +73,8 @@ export async function recallInWorker(
       searchSignal.throwIfAborted();
       return runMemo({ ...input, signal: searchSignal, args: ["recall", pattern], matchRecall: async lines => {
         searchSignal.throwIfAborted();
-        const result = receive();
-        worker.postMessage(lines);
+        const result = receive("matches");
+        try { worker.postMessage(lines); } catch (error) { fail(error); }
         const values = await result;
         if (values.length !== lines.length) throw new Error("Invalid memory search batch size.");
         return values;

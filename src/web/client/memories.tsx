@@ -1,3 +1,4 @@
+import type { PollState } from "./request-state.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { Button as KumoButton } from "@cloudflare/kumo/components/button";
@@ -11,7 +12,10 @@ const PAGE_SIZE = 50;
 type SavedMemory = WebMemories["items"][number];
 const plainError = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
 /** Errors stay raw so the dialog follows a language change while it is open. */
-type Removal = { open: boolean; memory: SavedMemory | null; busy: boolean; error: unknown };
+type Removal =
+  | { kind: "closed"; memory: SavedMemory | null }
+  | { kind: "confirming" | "deleting"; memory: SavedMemory }
+  | { kind: "failed"; memory: SavedMemory; error: unknown };
 
 /**
  * `load` is scoped by the caller: admins read any person's notes, chat users only their own.
@@ -31,9 +35,10 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
   const [offset, setOffset] = useState(0);
   const [revision, setRevision] = useState(0);
   const [data, setData] = useState<WebMemories | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(true);
-  const [removal, setRemoval] = useState<Removal>({ open: false, memory: null, busy: false, error: null });
+  const [poll, setPoll] = useState<PollState>({ kind: "loading" });
+  const error = "error" in poll ? poll.error : null;
+  const loading = poll.kind === "loading";
+  const [removal, setRemoval] = useState<Removal>({ kind: "closed", memory: null });
   const [deleted, setDeleted] = useState(false);
   // Callers pass inline loaders; key the component to change scope instead of refetching on every render.
   const loader = useRef(load);
@@ -46,12 +51,10 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
     const controller = new AbortController();
     const silent = quiet.current;
     quiet.current = false;
-    if (!silent) setLoading(true);
-    setError(null);
+    setPoll({ kind: silent ? "ready" : "loading" });
     void loader.current(offset, controller.signal)
-      .then(result => { if (!controller.signal.aborted) setData(result); })
-      .catch(err => { if (!controller.signal.aborted) setError(err ?? new Error()); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .then(result => { if (!controller.signal.aborted) { setData(result); setPoll({ kind: "ready" }); } })
+      .catch(err => { if (!controller.signal.aborted) setPoll({ kind: "failed", error: err ?? new Error() }); });
     return () => controller.abort();
   }, [offset, revision]);
   useEffect(() => {
@@ -62,12 +65,12 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
 
   const remove = async () => {
     const memory = removal.memory;
-    if (!onDelete || !memory || removal.busy) return;
-    setRemoval(current => ({ ...current, busy: true, error: null }));
+    if (!onDelete || (removal.kind !== "confirming" && removal.kind !== "failed") || !memory) return;
+    setRemoval({ kind: "deleting", memory });
     try {
       await onDelete(memory.id);
       if (!mounted.current) return;
-      setRemoval(current => ({ ...current, open: false, busy: false }));
+      setRemoval({ kind: "closed", memory });
       setDeleted(true);
       const lastOnPage = data?.items.length === 1 && offset > 0;
       setData(current => current && { ...current, total: Math.max(0, current.total - 1), items: current.items.filter(item => item.id !== memory.id) });
@@ -75,7 +78,7 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
       if (lastOnPage) setOffset(value => Math.max(0, value - PAGE_SIZE));
       else { quiet.current = true; setRevision(value => value + 1); }
     } catch (err) {
-      if (mounted.current) setRemoval(current => ({ ...current, busy: false, error: err ?? new Error() }));
+      if (mounted.current) setRemoval({ kind: "failed", memory, error: err ?? new Error() });
     }
   };
 
@@ -100,7 +103,7 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
           <p>{memory.text}</p>
           <div className="memory-meta"><span>{t.note(memory.id)} · {memory.date}</span>
             {onDelete && <Button className="memory-delete" variant="ghost" size="icon-sm" aria-label={t.deleteNote(memory.id)} title={t.deleteNote(memory.id)}
-              onClick={() => setRemoval({ open: true, memory, busy: false, error: null })}><IconTrash aria-hidden="true" /></Button>}</div>
+              onClick={() => setRemoval({ kind: "confirming", memory })}><IconTrash aria-hidden="true" /></Button>}</div>
         </li>)}</ol> : <div className="notice"><IconBrain aria-hidden="true" /><h3>{data.total ? t.noNotesOnPage : t.noMemories}</h3><p>{data.total ? t.earlierPage : t.noMemoriesHint}</p></div>}
         {(offset > 0 || data.nextOffset !== null) && <nav className="memory-pagination" aria-label={t.memoryPages}>
           <Button variant="outline" disabled={offset === 0} onClick={() => setOffset(value => Math.max(0, value - PAGE_SIZE))}><IconArrowLeft aria-hidden="true" /> {t.previous}</Button>
@@ -109,15 +112,15 @@ export function Memories({ load, back, subtitle, leading, page = false, onDelete
         </nav>}
       </>}
     </div>
-    {onDelete && <Dialog.Root open={removal.open} onOpenChange={open => { if (!removal.busy) setRemoval(current => ({ ...current, open })); }}>
+    {onDelete && <Dialog.Root open={removal.kind !== "closed"} onOpenChange={open => { if (!open && removal.kind !== "deleting") setRemoval({ kind: "closed", memory: removal.memory }); }}>
       <Dialog size="lg" className="chat-dialog">
         <Dialog.Title>{t.deleteMemoryTitle}</Dialog.Title>
         <Dialog.Description>{t.deleteMemoryDescription}</Dialog.Description>
         {removal.memory && <blockquote className="chat-dialog-quote memory-dialog-quote">{removal.memory.text}</blockquote>}
-        {removal.error !== null && <p className="chat-error-text" role="alert">{describeError(removal.error, t.memoryDeleteFailed)}</p>}
+        {removal.kind === "failed" && <p className="chat-error-text" role="alert">{describeError(removal.error, t.memoryDeleteFailed)}</p>}
         <div className="chat-dialog-actions">
-          <Dialog.Close render={<KumoButton variant="secondary" disabled={removal.busy}>{t.cancel}</KumoButton>} />
-          <KumoButton variant="destructive" icon={<IconTrash size={16} aria-hidden="true" />} loading={removal.busy} onClick={() => void remove()}>{t.delete}</KumoButton>
+          <Dialog.Close render={<KumoButton variant="secondary" disabled={removal.kind === "deleting"}>{t.cancel}</KumoButton>} />
+          <KumoButton variant="destructive" icon={<IconTrash size={16} aria-hidden="true" />} loading={removal.kind === "deleting"} onClick={() => void remove()}>{t.delete}</KumoButton>
         </div>
       </Dialog>
     </Dialog.Root>}

@@ -40,13 +40,11 @@ type SandboxScope = { userId: number; threadId: string };
 type RuntimeState = {
   tail: Promise<void>;
   leases: number;
-  websiteSandboxId?: string;
-  websiteIdleUntil?: number;
-  websitePublishedPending?: boolean;
+  websiteWindow?:
+    | { phase: "awaiting_release"; sandboxId: string }
+    | { phase: "countdown"; sandboxId: string; until: number };
   threadFilesSync?: ThreadFileSync;
-  connection?: E2BSandbox;
-  sandboxId?: string;
-  continuousStartedAt?: number;
+  connection?: { sandbox: E2BSandbox; continuousStartedAt: number };
   toolboxValidatedSandboxId?: string;
   sourcePruning?: { sandboxId: string; at: number };
   renewTimer?: NodeJS.Timeout;
@@ -133,20 +131,20 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         if (this.shuttingDown) return;
         return this.enqueue(scope, undefined, async () => {
           if (this.shuttingDown || state.leases !== 0 || !state.connection) return;
-          const sandboxId = state.sandboxId;
+          const sandboxId = state.connection.sandbox.id;
           const idle = this.idleTimeout(state, sandboxId, true);
-          await state.connection.setTimeout(idle.timeoutMs);
+          await state.connection.sandbox.setTimeout(idle.timeoutMs);
           this.commitIdleTimeout(state, sandboxId, idle);
           this.input.logger?.info("E2B sandbox idle timeout armed", {
             ...scope,
-            sandboxId: state.sandboxId,
+            sandboxId,
             timeoutMs: idle.timeoutMs,
             website: idle.website,
           });
         }).catch((error) => {
           this.input.logger?.warn("failed to arm E2B sandbox idle timeout", {
             ...scope,
-            sandboxId: state.sandboxId,
+            sandboxId: state.connection?.sandbox.id,
             error: String(error),
           });
         });
@@ -250,7 +248,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         throw new Error("E2B file source does not belong to this Telegram thread");
       }
       let resumedForRead = false;
-      let sandbox = state.connection?.id === request.sandboxId ? state.connection : undefined;
+      let sandbox = state.connection?.sandbox.id === request.sandboxId ? state.connection.sandbox : undefined;
       if (!sandbox || !await sandbox.isRunning(request.signal).catch(() => false)) {
         const info = await this.client.getInfo(request.sandboxId, request.signal);
         // Connecting can resume a sandbox that pauses after getInfo; require consent
@@ -263,11 +261,11 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           // Complete a consented resume so cancellation can still pause it in finally.
           resumedForRead ? undefined : request.signal,
         );
-        state.continuousStartedAt = info.state === "paused"
+        const startedAt = info.state === "paused"
           ? Date.now()
           : info.startedAt.getTime();
+        this.rememberConnection(state, sandbox, startedAt);
       }
-      this.rememberConnection(state, sandbox);
       try {
         request.signal?.throwIfAborted();
         return (await this.readCanonicalFile(
@@ -306,8 +304,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         request.signal,
       );
       const published = await publishWebsite(prepared.sandbox, target, this.input.config.E2B_REQUEST_TIMEOUT_MS, request.signal);
-      state.websiteSandboxId = prepared.sandbox.id;
-      state.websitePublishedPending = true;
+      state.websiteWindow = { phase: "awaiting_release", sandboxId: prepared.sandbox.id };
       this.input.logger?.info("E2B website published", { ...scope, ...published });
       return published;
     });
@@ -338,7 +335,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     const previousSync = state.threadFilesSync;
     const filesRevision = threadFilesRevision(files);
     const synchronizationCached = previousSync !== undefined
-      && previousSync.sandboxId === state.sandboxId
+      && previousSync.sandboxId === state.connection?.sandbox.id
       && previousSync.revision === filesRevision
       && (previousSync.retryAt === undefined || Date.now() < previousSync.retryAt);
     const projectedFileCount = synchronizationCached ? 0 : files.length;
@@ -360,7 +357,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     );
     const connectionWindowMs = Math.max(
       operationWindowMs,
-      this.idleTimeout(state, state.sandboxId, false).timeoutMs,
+      this.idleTimeout(state, state.connection?.sandbox.id, false).timeoutMs,
     );
     let sandbox = await this.acquireConnection(state, scope, connectionWindowMs, signal);
     let effectiveWindowMs = Math.max(
@@ -395,8 +392,8 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<E2BSandbox> {
-    if (state.connection && await state.connection.isRunning(signal).catch(() => false)) {
-      return state.connection;
+    if (state.connection && await state.connection.sandbox.isRunning(signal).catch(() => false)) {
+      return state.connection.sandbox;
     }
 
     const deploymentId = this.input.config.E2B_DEPLOYMENT_ID;
@@ -665,7 +662,7 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     requestedDurationMs: number,
     signal?: AbortSignal,
   ): Promise<E2BSandbox> {
-    const startedAt = state.continuousStartedAt ?? Date.now();
+    const startedAt = state.connection?.continuousStartedAt ?? Date.now();
     if (Date.now() - startedAt + requestedDurationMs + ROTATION_GUARD_MS < CONTINUOUS_ROTATE_MS) {
       return sandbox;
     }
@@ -854,18 +851,14 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
   private rememberConnection(
     state: RuntimeState,
     sandbox: E2BSandbox,
-    continuousStartedAt?: number,
+    continuousStartedAt: number,
   ): void {
-    if (state.sandboxId !== sandbox.id) {
+    if (state.connection?.sandbox.id !== sandbox.id) {
       state.toolboxValidatedSandboxId = undefined;
-      state.websiteSandboxId = undefined;
-      state.websiteIdleUntil = undefined;
-      state.websitePublishedPending = false;
+      state.websiteWindow = undefined;
       state.threadFilesSync = undefined;
     }
-    state.connection = sandbox;
-    state.sandboxId = sandbox.id;
-    if (continuousStartedAt !== undefined) state.continuousStartedAt = continuousStartedAt;
+    state.connection = { sandbox, continuousStartedAt };
   }
 
   private idleTimeout(
@@ -873,29 +866,23 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     sandboxId: string | undefined,
     startPendingWindow: boolean,
   ): { timeoutMs: number; website: boolean; startPendingWindow?: boolean } {
-    const matches = sandboxId !== undefined && state.websiteSandboxId === sandboxId;
-    if (!matches) {
-      state.websiteSandboxId = undefined;
-      state.websiteIdleUntil = undefined;
-      state.websitePublishedPending = false;
+    const window = state.websiteWindow;
+    if (!window || window.sandboxId !== sandboxId) {
+      state.websiteWindow = undefined;
       return { timeoutMs: E2B_IDLE_PAUSE_MS, website: false };
     }
-    const now = Date.now();
-    if (state.websitePublishedPending) {
+    if (window.phase === "awaiting_release") {
       return {
         timeoutMs: E2B_WEBSITE_IDLE_PAUSE_MS,
         website: true,
         ...(startPendingWindow ? { startPendingWindow: true } : {}),
       };
     }
-    const remainingMs = state.websiteIdleUntil === undefined
-      ? 0
-      : Math.max(0, state.websiteIdleUntil - now);
+    const remainingMs = window.until - Date.now();
     if (remainingMs > 0) {
       return { timeoutMs: Math.max(E2B_IDLE_PAUSE_MS, remainingMs), website: true };
     }
-    state.websiteSandboxId = undefined;
-    state.websiteIdleUntil = undefined;
+    state.websiteWindow = undefined;
     return { timeoutMs: E2B_IDLE_PAUSE_MS, website: false };
   }
 
@@ -907,11 +894,10 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
     if (
       !idle.startPendingWindow
       || sandboxId === undefined
-      || state.websiteSandboxId !== sandboxId
-      || !state.websitePublishedPending
+      || state.websiteWindow?.phase !== "awaiting_release"
+      || state.websiteWindow.sandboxId !== sandboxId
     ) return;
-    state.websiteIdleUntil = Date.now() + E2B_WEBSITE_IDLE_PAUSE_MS;
-    state.websitePublishedPending = false;
+    state.websiteWindow = { phase: "countdown", sandboxId, until: Date.now() + E2B_WEBSITE_IDLE_PAUSE_MS };
   }
 
   private scheduleRenewal(scope: SandboxScope, state: RuntimeState): void {
@@ -923,12 +909,12 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
         if (this.shuttingDown || state.leases === 0 || !state.connection) return;
         const requestedRenewalMs = Math.max(
           E2B_IDLE_PAUSE_MS,
-          this.idleTimeout(state, state.connection.id, false).timeoutMs,
+          this.idleTimeout(state, state.connection.sandbox.id, false).timeoutMs,
         );
-        let sandbox = await this.rotateIfNeeded(
+        const sandbox = await this.rotateIfNeeded(
           state,
           scope,
-          state.connection,
+          state.connection.sandbox,
           requestedRenewalMs,
         );
         const renewalWindowMs = Math.max(
@@ -936,11 +922,10 @@ export class ThreadE2BSandboxRuntimeManager implements CommandRuntime {
           this.idleTimeout(state, sandbox.id, false).timeoutMs,
         );
         await sandbox.setTimeout(renewalWindowMs);
-        this.rememberConnection(state, sandbox);
       }).catch((error) => {
         this.input.logger?.warn("E2B activity renewal failed", {
           ...scope,
-          sandboxId: state.sandboxId,
+          sandboxId: state.connection?.sandbox.id,
           error: String(error),
         });
       }).finally(() => this.scheduleRenewal(scope, state));

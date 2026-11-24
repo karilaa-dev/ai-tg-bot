@@ -15,7 +15,7 @@ import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from
 import { OutgoingBuffers, prepareWithTwoWorkers } from "./outgoingBuffers.js";
 import { FileResolver } from "./resolver.js";
 import { LocalFileStore } from "./localStore.js";
-import type { CreatedFileAttachment, CreatedFileDeliveryPreference } from "./types.js";
+import { attachmentMayHaveBeenSent, type CreatedFileAttachment, type CreatedFileDeliveryPreference } from "./types.js";
 
 type FileOptions = { name?: string; mime?: string; caption?: string; delivery?: CreatedFileDeliveryPreference };
 type DirectFile = FileOptions & { bytes: Buffer; name: string; summary?: string; origin?: "created_file" | "generated_image" };
@@ -35,16 +35,16 @@ type Input = {
 export class OutgoingFiles {
   readonly buffers = new OutgoingBuffers();
   readonly fileResolver: FileResolver;
-  private readonly slots = new Map<string, string | undefined>();
+  private readonly slots = new Map<string, { phase: "reserved" | "ready" } | { phase: "failed"; error: string }>();
   private readonly officeHashes = new Map<CreatedFileAttachment, string>();
 
   constructor(private readonly input: Input, readonly items: CreatedFileAttachment[] = []) {
     this.fileResolver = input.fileResolver ?? new FileResolver(input.repos.files, undefined, new LocalFileStore(input.config.FILE_STORAGE_PATH));
-    for (const file of items) this.slots.set(fileKey(file), undefined);
+    for (const file of items) this.slots.set(fileKey(file), { phase: "ready" });
   }
 
   get unresolved(): Array<{ path: string; error: string }> {
-    return [...this.slots].flatMap(([path, error]) => error === undefined ? [] : [{ path, error }]);
+    return [...this.slots].flatMap(([path, slot]) => slot.phase === "failed" ? [{ path, error: slot.error }] : []);
   }
 
   async workspace(files: Array<FileOptions & { path: string }>, signal?: AbortSignal) {
@@ -52,7 +52,7 @@ export class OutgoingFiles {
     const paths = files.map((file) => normalizeCreatedFilePath(file.path));
     if (new Set(paths).size !== paths.length) throw new Error("File paths must be unique.");
     this.assertCapacity(paths.filter((key) => !this.slots.has(key)).length);
-    for (const key of paths) if (!this.slots.has(key)) this.slots.set(key, undefined);
+    for (const key of paths) if (!this.slots.has(key)) this.slots.set(key, { phase: "reserved" });
     const results = await prepareWithTwoWorkers(files, (file, index) => this.prepare(async () => {
       if (!this.input.commandRuntime) throw new Error("E2B command runtime is unavailable.");
       const exported = await this.input.commandRuntime.readWorkspaceFile({
@@ -72,14 +72,14 @@ export class OutgoingFiles {
       const key = paths[index]!;
       if (result.status === "rejected") {
         const error = String(result.reason);
-        this.slots.set(key, error);
+        this.slots.set(key, { phase: "failed", error });
         errors.push({ path: key, error });
         const oldIndex = this.items.findIndex(file => file.sourceVirtualPath === key);
         const oldFile = this.items[oldIndex];
         if (oldFile && officeFormat(oldFile.name, oldFile.mimeType, oldFile.data ?? Buffer.alloc(0))) await this.remove(this.items.splice(oldIndex, 1)[0]!);
         continue;
       }
-      this.slots.set(key, undefined);
+      this.slots.set(key, { phase: "ready" });
       const attachment = result.value;
       attachment.sourceVirtualPath = paths[index];
       const oldIndex = this.items.findIndex((file) => file.sourceVirtualPath === paths[index]);
@@ -97,7 +97,7 @@ export class OutgoingFiles {
     this.assertCapacity(1);
     const attachment = await this.prepare(async () => ({ file: await load() }), signal);
     this.items.push(attachment);
-    this.slots.set(fileKey(attachment), undefined);
+    this.slots.set(fileKey(attachment), { phase: "ready" });
     this.input.selectContextFiles?.([attachment.fileId]);
     return attachment;
   }
@@ -114,7 +114,7 @@ export class OutgoingFiles {
   async dispose(): Promise<void> {
     try {
       for (const attachment of this.items.splice(0)) {
-        if (attachment.telegramDelivery || attachment.telegramDeliveryUnknown) continue;
+        if (attachmentMayHaveBeenSent(attachment)) continue;
         try {
           const stored = await this.input.repos.files.get(attachment.fileId);
           if (stored && (stored.user_id !== this.input.user.tg_id || stored.thread_id !== this.input.thread.id)) continue;
@@ -150,7 +150,7 @@ export class OutgoingFiles {
         }
       } catch (error) {
         if (signal?.aborted) throw signal.reason ?? error;
-        this.slots.set(fileKey(attachment), String(error));
+        this.slots.set(fileKey(attachment), { phase: "failed", error: String(error) });
         this.items.splice(this.items.indexOf(attachment), 1);
         await this.remove(attachment);
       }

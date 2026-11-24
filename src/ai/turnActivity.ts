@@ -1,3 +1,4 @@
+import { isUnfinishedTurn } from "../db/turnLifecycle.js";
 import { randomUUID } from "node:crypto";
 import { GrammyError, type Api } from "grammy";
 import type { Repos } from "../db/repos/index.js";
@@ -65,7 +66,7 @@ export class TurnActivityCoordinator {
         this.stopping.signal.throwIfAborted();
         const run = await this.input.repos.turnRuns.get(runId);
         if (!run) return false;
-        const working = isWorking(run.status);
+        const working = isUnfinishedTurn(run.status);
         const messageIds = await this.input.repos.turnRuns.telegramMessageIds(runId);
         const results = await Promise.allSettled([
           ...messageIds.map((messageId) => this.input.api.raw.setMessageReaction({
@@ -84,7 +85,7 @@ export class TurnActivityCoordinator {
         // An accepted turn may finish while Telegram is processing the request.
         // Apply the latest state before acknowledging the durable sync record.
         const latest = await this.input.repos.turnRuns.get(runId);
-        if (latest && isWorking(latest.status) !== working) continue;
+        if (latest && isUnfinishedTurn(latest.status) !== working) continue;
         if (results.some((result) => result.status === "rejected" || result.value === false)) {
           await repo.invalidate(runId);
           this.input.logger.warn("turn activity update will be retried", { turnRunId: runId, working });
@@ -103,8 +104,4 @@ export class TurnActivityCoordinator {
       if (!confirmed) await repo.release(runId, ownerId, retryAt);
     }
   }
-}
-
-function isWorking(status: string): boolean {
-  return ["queued", "running", "awaiting_delivery"].includes(status);
 }

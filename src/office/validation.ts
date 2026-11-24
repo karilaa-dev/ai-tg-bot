@@ -29,13 +29,14 @@ export const VisualReviewSchema = z.object({
   issues: z.array(z.string().min(1)).max(20).default([]),
 });
 export type VisualReview = z.infer<typeof VisualReviewSchema>;
+type PageReview = { phase: "previewed" } | { phase: "reviewed"; review: VisualReview };
+type OfficeReviewState = "checks_blocked" | "needs_preview" | "needs_review" | "changes_requested" | "approved";
 type RenderReport = z.infer<typeof RenderReportSchema>;
 type Entry = {
   format: OfficeFormat;
   report: RenderReport;
   directory: string;
-  seen: Set<number>;
-  reviews: Map<number, VisualReview>;
+  pages: Map<number, PageReview>;
 };
 type OfficeFormat = ".docx" | ".pptx" | ".xlsx";
 const OFFICE_MIME: Record<OfficeFormat, string> = {
@@ -211,8 +212,7 @@ export class OfficeValidation {
       format,
       report,
       directory,
-      seen: new Set<number>(),
-      reviews: new Map<number, VisualReview>(),
+      pages: new Map<number, PageReview>(),
     };
     this.entries.set(hash, entry);
     return entry;
@@ -232,20 +232,23 @@ export class OfficeValidation {
     if (new Set(reviews.map((r) => r.page)).size !== reviews.length)
       throw new Error("Review page numbers must be unique.");
     for (const review of reviews) {
-      if (!entry.seen.has(review.page))
+      if (!entry.pages.has(review.page))
         throw new Error(
           `Page ${review.page} has not been returned to the model. Render it before recording review.`,
         );
       if (review.status === "passed" && review.issues.length)
         throw new Error("A passed review cannot contain unresolved issues.");
     }
-    for (const review of reviews) entry.reviews.set(review.page, review);
+    for (const review of reviews) entry.pages.set(review.page, { phase: "reviewed", review });
     return this.report(entry, virtualPath);
   }
 
   private report(entry: Entry, virtualPath: string) {
     const { pdf_path: _pdf, ...report } = entry.report;
-    const reviews = [...entry.reviews.values()].sort((a, b) => a.page - b.page);
+    const reviews = [...entry.pages.values()]
+      .flatMap(page => page.phase === "reviewed" ? [page.review] : [])
+      .sort((a, b) => a.page - b.page);
+    const state = this.reviewState(entry);
     const passed = reviews.filter((r) => r.status === "passed").length;
     return {
       ...report,
@@ -257,28 +260,25 @@ export class OfficeValidation {
             ? "passed"
             : "not_run",
         reviewed_pages: reviews,
-        rendered_pages: [...entry.seen].sort((a, b) => a - b),
+        rendered_pages: [...entry.pages.keys()].sort((a, b) => a - b),
         passed_pages: passed,
       },
-      approved: this.approved(entry),
+      review_state: state,
+      approved: state === "approved",
     };
   }
 
-  private approved(entry: Entry): boolean {
-    return (
-      entry.report.checks.every(
-        (check) => check.status === "passed" && !check.issues.length,
-      ) &&
-      Boolean(entry.report.pdf_path && entry.report.renderer_version) &&
-      entry.report.page_count > 0 &&
-      Array.from(
-        { length: entry.report.page_count },
-        (_, index) => index + 1,
-      ).every(
-        (page) =>
-          entry.seen.has(page) && entry.reviews.get(page)?.status === "passed",
-      )
-    );
+  private reviewState(entry: Entry): OfficeReviewState {
+    const { checks, pdf_path, renderer_version, page_count } = entry.report;
+    if (!pdf_path || !renderer_version || !page_count ||
+        checks.some(check => check.status !== "passed" || check.issues.length)) return "checks_blocked";
+    let pendingReview = false;
+    for (const page of entry.pages.values()) {
+      if (page.phase === "previewed") pendingReview = true;
+      else if (page.review.status === "failed") return "changes_requested";
+    }
+    if (entry.pages.size !== page_count) return "needs_preview";
+    return pendingReview ? "needs_review" : "approved";
   }
 
   async preview(virtualPath: string, pages: number[], signal?: AbortSignal) {
@@ -337,7 +337,12 @@ export class OfficeValidation {
   markSeen(hash: string, pages: number[]): void {
     const entry = this.entries.get(hash);
     if (!entry) throw new Error("Office preview is no longer available.");
-    for (const page of pages) entry.seen.add(page);
+    for (const page of pages) {
+      if (!Number.isInteger(page) || page < 1 || page > entry.report.page_count) throw new Error("Invalid preview page.");
+    }
+    for (const page of pages) {
+      if (!entry.pages.has(page)) entry.pages.set(page, { phase: "previewed" });
+    }
   }
 
   assertApproved(
@@ -352,7 +357,7 @@ export class OfficeValidation {
     delivery?: { name: string; mime?: string | null },
   ): void {
     const entry = this.entries.get(hash);
-    if (!entry || !this.approved(entry))
+    if (!entry || this.reviewState(entry) !== "approved")
       throw new Error(
         "Office validation required: run validate_office_file, render every page with render_office_preview, then record passing visual_reviews for this source_sha256.",
       );

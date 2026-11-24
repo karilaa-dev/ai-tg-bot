@@ -51,8 +51,10 @@ export async function stopActiveFileProcessing(ctx: BotContext, quiet = false): 
     return false;
   }
   ctx.services.logger.info("file stop requested", ctxLogMeta(ctx));
-  job.cancel();
-  await job.status.updateKey("file-processing-stopping");
+  if (!job.controller.signal.aborted) {
+    job.cancel();
+    await job.status.updateKey("file-processing-stopping");
+  }
   return true;
 }
 
@@ -61,8 +63,9 @@ function activeFileJobKey(ctx: BotContext): string | undefined {
 }
 
 export class FileProcessingStatus {
-  private messageId?: number;
-  private lastText = "";
+  private message: { phase: "absent" } | { phase: "visible"; id: number; text: string } = { phase: "absent" };
+  // /stop bypasses topic sequencing and can arrive during the first send or an edit.
+  private pending = Promise.resolve();
 
   constructor(
     private readonly ctx: BotContext,
@@ -78,45 +81,52 @@ export class FileProcessingStatus {
     await this.updateText(this.ctx.t(key, { name: escapeHtml(this.name), ...params }));
   }
 
-  async clear(): Promise<void> {
-    if (!this.messageId || !this.ctx.chat) return;
-    try {
-      await this.ctx.api.deleteMessage(this.ctx.chat.id, this.messageId);
-      this.messageId = undefined;
-      this.lastText = "";
-    } catch (err) {
-      this.ctx.services.logger.warn("failed to delete file status message", { err: String(err), name: this.name });
-    }
+  clear(): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.message.phase === "absent" || !this.ctx.chat) return;
+      try {
+        await this.ctx.api.deleteMessage(this.ctx.chat.id, this.message.id);
+        this.message = { phase: "absent" };
+      } catch (err) {
+        this.ctx.services.logger.warn("failed to delete file status message", { err: String(err), name: this.name });
+      }
+    });
   }
 
-  async updateText(text: string): Promise<void> {
-    if (text === this.lastText) return;
-    if (!this.messageId) {
-      try {
-        const sent = await replyWithThreadFallback(this.ctx, text, {
-          ...threadExtra(this.ctx.thread),
-          parse_mode: "HTML",
-        });
-        this.messageId = sent.message_id;
-        this.lastText = text;
-      } catch (err) {
-        this.ctx.services.logger.warn("failed to send file status message", { err: String(err), name: this.name });
+  updateText(text: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.message.phase === "absent") {
+        if (!text) return;
+        try {
+          const sent = await replyWithThreadFallback(this.ctx, text, {
+            ...threadExtra(this.ctx.thread),
+            parse_mode: "HTML",
+          });
+          this.message = { phase: "visible", id: sent.message_id, text };
+        } catch (err) {
+          this.ctx.services.logger.warn("failed to send file status message", { err: String(err), name: this.name });
+        }
+        return;
       }
-      return;
-    }
-    if (!this.ctx.chat) return;
-    try {
-      await this.ctx.api.editMessageText(this.ctx.chat.id, this.messageId, text, { parse_mode: "HTML" });
-      this.lastText = text;
-    } catch (err) {
-      this.ctx.services.logger.warn("failed to edit file status message", { err: String(err), name: this.name });
-    }
+      if (this.message.text === text || !this.ctx.chat) return;
+      try {
+        await this.ctx.api.editMessageText(this.ctx.chat.id, this.message.id, text, { parse_mode: "HTML" });
+        this.message = { ...this.message, text };
+      } catch (err) {
+        this.ctx.services.logger.warn("failed to edit file status message", { err: String(err), name: this.name });
+      }
+    });
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    this.pending = this.pending.then(operation, operation);
+    return this.pending;
   }
 }
 
-function indexingPercent(progress: FileIngestProgress): number {
-  if (!progress.total || progress.total <= 0) return 100;
-  const completed = Math.max(0, Math.min(progress.completed ?? 0, progress.total));
+function indexingPercent(progress: Extract<FileIngestProgress, { stage: "indexing" }>): number {
+  if (progress.total <= 0) return 100;
+  const completed = Math.max(0, Math.min(progress.completed, progress.total));
   return Math.floor((completed / progress.total) * 100);
 }
 
@@ -277,19 +287,22 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     if (current?.controller === controller) activeFileJobs.delete(jobKey);
   };
   const releaseMediaGroup = holdPendingMediaGroup(ctx, input.mediaGroupId);
-  let failureKey = "error-generic";
+  const failureMessages = {
+    downloadingAudio: "audio-download-failed", transcribingAudio: "audio-transcription-failed", ingesting: "error-generic",
+  };
+  let phase: keyof typeof failureMessages = "ingesting";
   try {
     let transcript: Awaited<ReturnType<typeof transcribeAudio>> | undefined;
     let downloadedBytes: Buffer | undefined;
     // Failed or cancelled transcription must not create or claim durable file records.
     if (input.mediaKind === "voice" || input.mediaKind === "audio") {
-      failureKey = "audio-download-failed";
+      phase = "downloadingAudio";
       const downloaded = await ctx.services.fileResolver.resolveSource(telegramFileSource({
         fileId: input.fileId, fileUniqueId: input.fileUniqueId, mimeType: input.mime,
       }), controller.signal);
       downloadedBytes = downloaded.bytes;
       input = { ...input, size: downloaded.size };
-      failureKey = "audio-transcription-failed";
+      phase = "transcribingAudio";
       let format = audioFormat(input.name, input.mime);
       if (!format) {
         const detected = await detectAudioType(downloaded.bytes);
@@ -305,7 +318,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
       throwIfAborted(controller.signal);
       transcript = transcribed;
     }
-    failureKey = "error-generic";
+    phase = "ingesting";
     const result = await ingestTelegramFile(ctx, input, {
       signal: controller.signal,
       status: input.type === "image" ? undefined : status,
@@ -362,7 +375,7 @@ export async function handleTelegramFile(ctx: BotContext, input: TelegramFileInp
     await status.updateText(ctx.t(err instanceof FileTooLargeError ? "file-too-big"
       : err instanceof EmptyTranscriptError ? "audio-no-speech"
       : err instanceof TranscriptionHttpError && err.status === 429 ? "audio-transcription-rate-limited"
-      : failureKey));
+      : failureMessages[phase]));
   } finally {
     clearJob();
     releaseMediaGroup();

@@ -78,9 +78,9 @@ export function ChatSearch({ open, onOpenChange, recent, onOpen }: {
   const [results, setResults] = useState<Results | null>(null);
   const [failure, setFailure] = useState<{ query: string; error: unknown } | null>(null);
   const [highlighted, setHighlighted] = useState<ChatThread | null>(null);
-  /** On narrow screens the preview replaces the list; `previewing` makes taps preview instead of open. */
-  const [previewing, setPreviewing] = useState(false);
-  const [paneOpen, setPaneOpen] = useState(false);
+  const [mobileMode, setMobileMode] = useState<"open-chat" | "pick-preview" | "show-preview">("open-chat");
+  const previewing = mobileMode !== "open-chat";
+  const paneOpen = mobileMode === "show-preview";
   const list = useRef<HTMLDivElement>(null);
   const sentinel = useRef<HTMLDivElement>(null);
   const moreController = useRef<AbortController | null>(null);
@@ -90,7 +90,7 @@ export function ChatSearch({ open, onOpenChange, recent, onOpen }: {
   useEffect(() => {
     if (!open) return;
     setQuery(""); setSearch(""); setResults(null); setFailure(null); setOrigin("all");
-    setHighlighted(null); setPreviewing(false); setPaneOpen(false); previews.current.clear();
+    setHighlighted(null); setMobileMode("open-chat"); previews.current.clear();
   }, [open]);
   const typed = query.trim();
   useEffect(() => {
@@ -159,11 +159,11 @@ export function ChatSearch({ open, onOpenChange, recent, onOpen }: {
     onOpen(thread);
   };
   const activate = (thread: ChatThread, newTab: boolean) => {
-    if (narrow && previewing && !newTab) { setHighlighted(thread); setPaneOpen(true); return; }
+    if (narrow && previewing && !newTab) { setHighlighted(thread); setMobileMode("show-preview"); return; }
     choose(thread, newTab);
   };
   const focusInput = () => requestAnimationFrame(() => document.getElementById(inputId)?.focus());
-  const backToList = () => { setPaneOpen(false); focusInput(); };
+  const backToList = () => { setMobileMode("pick-preview"); focusInput(); };
 
   // The preview follows the highlighted row, and stays on it while newer results load.
   const previewed = highlighted ? threads.find(item => item.id === highlighted.id) ?? (pending ? highlighted : null) : null;
@@ -256,7 +256,7 @@ export function ChatSearch({ open, onOpenChange, recent, onOpen }: {
         </span>
         {narrow && <Button className="chat-search-mode" variant={previewing ? "secondary" : "ghost"} size="sm" aria-pressed={previewing}
           icon={previewing ? <IconEye size={14} aria-hidden="true" /> : <IconLayoutGrid size={14} aria-hidden="true" />}
-          onClick={() => { setPreviewing(value => !value); setPaneOpen(false); }}>{t.searchPreview}</Button>}
+          onClick={() => { setMobileMode(previewing ? "open-chat" : "pick-preview"); }}>{t.searchPreview}</Button>}
       </CommandPalette.Footer>
     </CommandPalette.Panel>
   </CommandPalette.Dialog>;
@@ -289,8 +289,12 @@ function SearchPreview({ thread, query, cache, narrow, canOpen, onOpen, onBack }
       cache.set(key, { status: "loading" }); rerender(value => value + 1);
       const match = thread.searchMatch;
       chatApi.history(thread.id, match ? { after: match.messageId } : null, controller.signal)
-        .then(history => { cache.set(key, { status: "ready", history }); })
-        .catch(error => { if (isAbort(error)) cache.delete(key); else cache.set(key, { status: "failed", error }); })
+        .then(history => { if (!controller.signal.aborted) cache.set(key, { status: "ready", history }); })
+        .catch(error => {
+          if (controller.signal.aborted) return;
+          if (isAbort(error)) cache.delete(key);
+          else cache.set(key, { status: "failed", error });
+        })
         .finally(() => { if (!controller.signal.aborted) rerender(value => value + 1); });
     }, PREVIEW_DELAY_MS);
     return () => {

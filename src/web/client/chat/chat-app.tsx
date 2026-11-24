@@ -1,3 +1,4 @@
+import type { RequestState } from "../request-state.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button } from "@cloudflare/kumo/components/button";
@@ -216,12 +217,11 @@ function Home({ name, drafts, onStarted, notice }: { name: string | null; drafts
   const [draft, setDraftState] = useState<Draft>(() => drafts.read("new"));
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [creation, setCreation] = useState<RequestState>({ kind: "idle" });
   const setDraft = (next: Draft) => { setDraftState(next); drafts.write("new", next); };
   const start = async (value: Draft) => {
-    if (!mounted.current || !drafts.active) return;
-    setBusy(true); setError(null);
+    if (creation.kind === "pending" || !mounted.current || !drafts.active) return;
+    setCreation({ kind: "pending" });
     try {
       const thread = await chatApi.createThread();
       if (!mounted.current || !drafts.active) return;
@@ -230,16 +230,15 @@ function Home({ name, drafts, onStarted, notice }: { name: string | null; drafts
       onStarted(thread);
     } catch (err) {
       if (!mounted.current || !drafts.active) return;
-      setError(err ?? new Error());
-      setBusy(false);
+      setCreation({ kind: "failed", error: err ?? new Error() });
     }
   };
   return <div className="chat-view chat-home">
     <header className="chat-view-header chat-home-header"><MobileNavButton /></header>
     <div className="chat-home-body">
       <h1 className="chat-home-title">{t.greeting(new Date().getHours())}{name ? `, ${name.split(" ")[0]}` : ""}</h1>
-      {error !== null && <Banner variant="error" size="sm" icon={<IconAlertCircle aria-hidden="true" />} description={describeError(error, t.startFailed, language)} />}
-      <Composer draft={draft} onDraftChange={setDraft} onSubmit={value => void start(value)} maxFileBytes={MAX_FILE_BYTES} disabled={busy} autoFocus placeholder={t.askAnything} />
+      {creation.kind === "failed" && <Banner variant="error" size="sm" icon={<IconAlertCircle aria-hidden="true" />} description={describeError(creation.error, t.startFailed, language)} />}
+      <Composer draft={draft} onDraftChange={setDraft} onSubmit={value => void start(value)} maxFileBytes={MAX_FILE_BYTES} disabled={creation.kind === "pending"} autoFocus placeholder={t.askAnything} />
       {notice}
     </div>
   </div>;

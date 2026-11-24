@@ -102,6 +102,9 @@ describe("Telegram intake", () => {
     await expect(intake.drain(20)).resolves.toEqual(["telegram updates 7"]);
     await expect(outcome).resolves.toEqual({ status: "cancelled" });
     expect(intake.pending).toBe(0);
+    const late = vi.fn();
+    await expect(intake.accept("thread-a", "late file", late)).resolves.toEqual({ status: "cancelled" });
+    expect(late).not.toHaveBeenCalled();
   });
 
   it("returns tracked rejections to the caller without leaving them unobserved", async () => {

@@ -31,7 +31,7 @@ export interface PendingMediaGroupItem {
 
 export interface PendingMediaGroup {
   ctx: BotContext;
-  timer: NodeJS.Timeout;
+  collection: { phase: "collecting"; timer: NodeJS.Timeout } | { phase: "held" };
   items: PendingMediaGroupItem[];
 }
 

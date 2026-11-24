@@ -6,6 +6,7 @@ import { bindChatRequests, chatFetch, invalidateChatRequests } from "../../src/w
 import { DraftStore, emptyDraft, type Draft, type PendingSend } from "../../src/web/client/chat/drafts.js";
 import { LiveDraft } from "../../src/web/client/chat/live-draft.js";
 import { acceptFiles, fileProblemText } from "../../src/web/client/chat/composer.js";
+import { CoalescedRead } from "../../src/web/client/request-state.js";
 import { deferred } from "../helpers/async.js";
 
 beforeEach(() => {
@@ -21,7 +22,8 @@ beforeEach(() => {
 afterEach(() => { invalidateChatRequests(); vi.unstubAllGlobals(); });
 
 const message: Draft = { text: "Alice's private message", files: [new File(["private"], "private.txt")], requestId: "same-request" };
-const failedMessage: PendingSend = { ...message, requestId: "same-request", status: "failed", error: new Error("Send failed") };
+const sending: Extract<PendingSend, { status: "sending" }> = { ...message, requestId: "same-request", status: "sending" };
+const failedMessage: Extract<PendingSend, { status: "failed" }> = { ...message, requestId: "same-request", status: "failed", error: new Error("Send failed") };
 
 it("scopes persisted drafts by verified user and removes legacy and other-user drafts", () => {
   sessionStorage.setItem("chat-draft:new", "unscoped legacy text");
@@ -47,10 +49,12 @@ it("revokes files, retry ids, queued starts and late writes on sign-out, even fo
   const alice = new DraftStore(1);
   alice.write("new", message);
   alice.queueStart(fixtureUuid(3), message);
-  alice.updatePending(fixtureUuid(2), () => [failedMessage]);
+  alice.beginSend(fixtureUuid(2), sending);
+  alice.failSend(fixtureUuid(2), sending.requestId, failedMessage.error);
   const completion = deferred<void>();
   const lateFailure = completion.promise.then(() => {
-    alice.updatePending(fixtureUuid(2), () => [failedMessage]);
+    alice.beginSend(fixtureUuid(2), sending);
+    alice.failSend(fixtureUuid(2), sending.requestId, failedMessage.error);
     alice.write("new", message);
     alice.queueStart(fixtureUuid(4), message);
   });
@@ -73,7 +77,8 @@ it("keeps failed sends separate from newer drafts, scoped to their thread and se
   const alice = new DraftStore(1);
   const newer = { ...emptyDraft, text: "newer draft" };
   alice.write(fixtureUuid(2), newer);
-  alice.updatePending(fixtureUuid(2), () => [failedMessage]);
+  alice.beginSend(fixtureUuid(2), sending);
+  alice.failSend(fixtureUuid(2), sending.requestId, failedMessage.error);
   expect(alice.pending(fixtureUuid(2))).toEqual([failedMessage]);
   expect(alice.pending(fixtureUuid(3))).toEqual([]);
   expect(new DraftStore(2).pending(fixtureUuid(2))).toEqual([]);
@@ -87,24 +92,27 @@ it("notifies the current subscriber when an in-flight send finishes after naviga
   const drafts = new DraftStore(1);
   const previousView = vi.fn();
   const unsubscribe = drafts.subscribe(previousView);
-  drafts.updatePending(fixtureUuid(2), () => [{ ...message, requestId: "same-request", status: "sending" }]);
+  drafts.beginSend(fixtureUuid(2), sending);
   unsubscribe();
   const currentView = vi.fn();
   drafts.subscribe(currentView);
-  drafts.updatePending(fixtureUuid(2), () => [failedMessage]);
+  drafts.beginSend(fixtureUuid(2), sending);
+  drafts.failSend(fixtureUuid(2), sending.requestId, failedMessage.error);
   expect(previousView).toHaveBeenCalledTimes(1);
   expect(currentView).toHaveBeenCalledTimes(1);
   expect(drafts.pending(fixtureUuid(2))).toEqual([failedMessage]);
   drafts.close();
-  drafts.updatePending(fixtureUuid(2), () => [failedMessage]);
+  drafts.beginSend(fixtureUuid(2), sending);
+  drafts.failSend(fixtureUuid(2), sending.requestId, failedMessage.error);
   expect(currentView).toHaveBeenCalledTimes(2);
   expect(drafts.pending(fixtureUuid(2))).toEqual([]);
 });
 
 it("releases original uploads after confirmation without reopening the chat", () => {
   const drafts = new DraftStore(1);
-  drafts.updatePending(fixtureUuid(2), () => [{ ...message, requestId: "same-request", status: "sending" }]);
-  drafts.updatePending(fixtureUuid(3), () => [failedMessage]);
+  drafts.beginSend(fixtureUuid(2), sending);
+  drafts.beginSend(fixtureUuid(3), sending);
+  drafts.failSend(fixtureUuid(3), sending.requestId, failedMessage.error);
   drafts.write(fixtureUuid(2), { ...emptyDraft, text: "A newer draft" });
   drafts.confirmSend(fixtureUuid(2), "same-request", 285);
   expect(drafts.pending(fixtureUuid(2))).toEqual([{
@@ -116,6 +124,38 @@ it("releases original uploads after confirmation without reopening the chat", ()
   drafts.close();
   drafts.confirmSend(fixtureUuid(2), "same-request", 285);
   expect(drafts.pending(fixtureUuid(2))).toEqual([]);
+});
+
+it("accepts only one active send per request id and keeps confirmation until history includes it", () => {
+  const drafts = new DraftStore(1);
+  const threadId = fixtureUuid(2);
+  expect(drafts.beginSend(threadId, sending)).toBe(true);
+  expect(drafts.beginSend(threadId, sending)).toBe(false);
+  expect(drafts.removeFailedSend(threadId, sending.requestId)).toBe(false);
+  drafts.failSend(threadId, sending.requestId, failedMessage.error);
+  expect(drafts.beginSend(threadId, sending)).toBe(true);
+  drafts.confirmSend(threadId, sending.requestId, 285);
+  expect(drafts.beginSend(threadId, sending)).toBe(false);
+  drafts.failSend(threadId, sending.requestId, failedMessage.error);
+  drafts.reconcileSends(threadId, new Set([200]));
+  expect(drafts.pending(threadId)).toMatchObject([{ status: "sent", messageId: 285 }]);
+  drafts.reconcileSends(threadId, new Set([285]));
+  expect(drafts.pending(threadId)).toEqual([]);
+});
+
+it("coalesces refreshes while ignoring duplicate older-page requests", () => {
+  const read = new CoalescedRead();
+  expect(read.start()).toBe(true);
+  expect(read.start(false)).toBe(false);
+  expect(read.takeRefresh()).toBe(false);
+  expect(read.start()).toBe(false);
+  expect(read.start()).toBe(false);
+  expect(read.takeRefresh()).toBe(true);
+  expect(read.finish()).toBe(false);
+  expect(read.start()).toBe(true);
+  expect(read.start()).toBe(false);
+  expect(read.finish()).toBe(true);
+  expect(read.start()).toBe(true);
 });
 
 it("keeps in-memory drafts revocable when browser storage is unavailable", () => {

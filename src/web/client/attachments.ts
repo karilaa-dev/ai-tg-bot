@@ -2,9 +2,17 @@ import { z } from "zod";
 import type { WebAttachment } from "../types.js";
 import { apiFetch } from "./api.js";
 
-export interface LoadedAttachment { status: "loading" | "ready" | "error"; url?: string; text?: string; mime?: string; error?: string; needsSandbox?: boolean }
+export type LoadedAttachment =
+  | { status: "loading" }
+  | { status: "ready"; url: string; mime: string; text?: string }
+  | { status: "error"; error?: string; needsSandbox?: false }
+  | { status: "error"; needsSandbox: true; error?: never };
 type AttachmentMode = "auto" | "download";
 type RequestPolicy = "auto" | "download" | "sandbox";
+type AttachmentRequest =
+  | { phase: "idle" | "queued"; policy: RequestPolicy }
+  | { phase: "fetching"; policy: RequestPolicy; upgrade: Exclude<RequestPolicy, "auto"> | null };
+
 type Listener = (state: LoadedAttachment) => void;
 
 /** A shared cache belongs to one verified session, never to a global file ID. */
@@ -20,8 +28,7 @@ interface CacheEntry {
   url: string;
   source: AttachmentSource;
   state?: LoadedAttachment;
-  policy: RequestPolicy;
-  upgrade: Exclude<RequestPolicy, "auto"> | null;
+  request: AttachmentRequest;
   bytes: number;
   retiredUrls: string[];
   listeners: Set<Listener>;
@@ -55,7 +62,7 @@ export class AttachmentCache {
     const key = JSON.stringify([threadId, fileId, url]);
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { key, url, source, policy: "auto", upgrade: null, bytes: 0, retiredUrls: [], listeners: new Set(), controller: new AbortController(), touched: ++this.clock };
+      entry = { key, url, source, request: { phase: "idle", policy: "auto" }, bytes: 0, retiredUrls: [], listeners: new Set(), controller: new AbortController(), touched: ++this.clock };
       if (!this.closed) this.entries.set(key, entry);
     }
     const item = entry;
@@ -64,17 +71,17 @@ export class AttachmentCache {
     if (item.state && !this.closed) listener(item.state);
     return {
       load: (policy, retry) => {
-        if (this.closed || item.controller.signal.aborted || policy === "auto" && item.policy !== "auto") return;
-        if (item.state?.status === "loading") {
-          if (policy !== "auto" && (item.policy === "auto" || policy === "sandbox" && item.policy === "download")) {
-            item.policy = policy;
-            item.upgrade = policy;
+        const request = item.request;
+        if (this.closed || item.controller.signal.aborted || policy === "auto" && request.policy !== "auto") return;
+        if (request.phase !== "idle") {
+          if (policy !== "auto" && (request.policy === "auto" || policy === "sandbox" && request.policy === "download")) {
+            request.policy = policy;
+            if (request.phase === "fetching") request.upgrade = policy;
           }
           return;
         }
         if (!retry && item.state) return;
-        item.policy = policy;
-        this.enqueue(item);
+        this.enqueue(item, policy);
       },
       release: () => {
         item.listeners.delete(listener);
@@ -102,7 +109,7 @@ export class AttachmentCache {
 
   private remove(entry: CacheEntry) {
     entry.controller.abort();
-    if (entry.state?.url) URL.revokeObjectURL(entry.state.url);
+    if (entry.state?.status === "ready") URL.revokeObjectURL(entry.state.url);
     for (const url of entry.retiredUrls) URL.revokeObjectURL(url);
     entry.retiredUrls = [];
     if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
@@ -120,26 +127,26 @@ export class AttachmentCache {
 
   private set(entry: CacheEntry, state: LoadedAttachment) {
     if (this.closed || entry.controller.signal.aborted) return;
-    if (entry.state?.url) entry.retiredUrls.push(entry.state.url);
+    if (entry.state?.status === "ready") entry.retiredUrls.push(entry.state.url);
     entry.state = state;
     for (const listener of entry.listeners) listener(state);
   }
 
-  private enqueue(entry: CacheEntry) {
+  private enqueue(entry: CacheEntry, policy: RequestPolicy) {
+    entry.request = { phase: "queued", policy };
     this.set(entry, { status: "loading" });
     this.queue.push(async () => {
-      const policy = entry.policy;
-      entry.upgrade = null;
-      const result = await this.fetch(entry, policy);
+      const request: Extract<AttachmentRequest, { phase: "fetching" }> = { phase: "fetching", policy: entry.request.policy, upgrade: null };
+      entry.request = request;
+      const result = await this.fetch(entry, request.policy);
       if (!result) return;
       if (this.closed || entry.controller.signal.aborted) {
-        if (result.url) URL.revokeObjectURL(result.url);
+        if (result.status === "ready") URL.revokeObjectURL(result.url);
         return;
       }
-      const upgrade = entry.upgrade;
-      entry.upgrade = null;
+      entry.request = { phase: "idle", policy: request.policy };
       // A pending explicit request may recover an automatic failure; ready bytes already satisfy every view.
-      if (result.status === "error" && upgrade) this.enqueue(entry);
+      if (result.status === "error" && request.upgrade) this.enqueue(entry, request.upgrade);
       else this.set(entry, result);
     });
     this.pump();
@@ -157,7 +164,7 @@ export class AttachmentCache {
         });
         if (signal.aborted) return;
         if (!response.ok) {
-          if (!allowSandbox && !entry.upgrade && (response.status === 429 || response.status === 503) && attempt < this.maxRetries) {
+          if (!allowSandbox && entry.request.phase === "fetching" && !entry.request.upgrade && (response.status === 429 || response.status === 503) && attempt < this.maxRetries) {
             const retryAfter = response.headers.get("Retry-After");
             const seconds = retryAfter === null ? NaN : Number(retryAfter);
             const requestedDelay = Number.isFinite(seconds) ? seconds * 1000 : retryAfter ? Date.parse(retryAfter) - Date.now() : NaN;

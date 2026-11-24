@@ -74,6 +74,7 @@ export function AuthenticatedImage({ source, alt, caption, className = "", langu
   const state = resources?.states.get(fileId);
   const url = state?.status === "ready" && imageMimeTypes.includes(state.mime ?? "") && state.url !== failedUrl ? state.url : undefined;
   const loading = Boolean(loader) && (!state || state.status === "loading");
+  const needsSandbox = state?.status === "error" && state.needsSandbox;
   const failed = state?.status === "error" || state?.status === "ready" && !url;
   // Bytes that arrived but cannot be previewed (undecodable or not an image type) stay saveable; `download` never opens them.
   const undisplayable = state?.status === "ready" && !url ? state.url : undefined;
@@ -89,8 +90,8 @@ export function AuthenticatedImage({ source, alt, caption, className = "", langu
       <div className="flex flex-wrap justify-center gap-1">
         {undisplayable && <a href={undisplayable} download={saveName} className={`${buttonVariants({ variant: "secondary", size: "sm", shape: thumbnail ? "square" : "base" })} ${thumbnail ? "size-7 p-0" : ""}`}
           aria-label={saveLabel} title={saveLabel}><IconDownload size={16} aria-hidden="true" />{!thumbnail && saveText}</a>}
-        {failed && !state?.needsSandbox && loader && <Button type="button" variant="secondary" size="sm" className={thumbnail ? "size-7 p-0" : undefined} title={language === "ru" ? "Повторить" : "Try again"} aria-label={language === "ru" ? "Повторить" : "Try again"} onClick={() => loader.load(file, "download", true)}>{thumbnail ? <IconRefresh size={16} aria-hidden="true" /> : language === "ru" ? "Повторить" : "Try again"}</Button>}
-        {state?.needsSandbox && loader && <Button type="button" variant="secondary" size="sm" className={thumbnail ? "size-7 p-0" : undefined} title={language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"} aria-label={language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"} onClick={() => loader.load(file, "download", true, true)}>{thumbnail ? <IconPlayerPlay size={16} aria-hidden="true" /> : language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"}</Button>}
+        {failed && !needsSandbox && loader && <Button type="button" variant="secondary" size="sm" className={thumbnail ? "size-7 p-0" : undefined} title={language === "ru" ? "Повторить" : "Try again"} aria-label={language === "ru" ? "Повторить" : "Try again"} onClick={() => loader.load(file, "download", true)}>{thumbnail ? <IconRefresh size={16} aria-hidden="true" /> : language === "ru" ? "Повторить" : "Try again"}</Button>}
+        {needsSandbox && loader && <Button type="button" variant="secondary" size="sm" className={thumbnail ? "size-7 p-0" : undefined} title={language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"} aria-label={language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"} onClick={() => loader.load(file, "download", true, true)}>{thumbnail ? <IconPlayerPlay size={16} aria-hidden="true" /> : language === "ru" ? "Запустить рабочую среду и загрузить" : "Start sandbox and load"}</Button>}
       </div>
     </div>}
     {caption && <figcaption className="text-sm text-kumo-subtle">{caption}</figcaption>}

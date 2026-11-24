@@ -9,8 +9,14 @@ interface LoginAttempt {
   controller: AbortController;
   task: Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
-  committing: boolean;
 }
+
+type LoginView = CodexStatus["login"];
+type ActiveView = Extract<LoginView, { status: "starting" | "pending" }>;
+type LoginState =
+  | { phase: "settled"; view: Exclude<LoginView, ActiveView> }
+  | { phase: "authorizing" | "committing"; view: ActiveView; attempt: LoginAttempt }
+  | { phase: "aborting"; view: { status: "cancelled" } | { status: "expired"; error: string }; attempt: LoginAttempt };
 
 export interface CodexLoginOptions {
   credentialStatus(): Promise<CodexStatus["credentialStatus"]>;
@@ -19,22 +25,20 @@ export interface CodexLoginOptions {
 }
 
 export class CodexLoginManager {
-  private login: CodexStatus["login"] = { status: "idle" };
-  private attempt?: LoginAttempt;
+  private state: LoginState = { phase: "settled", view: { status: "idle" } };
   private stopped = false;
 
   constructor(private readonly options: CodexLoginOptions) {}
 
   async status(): Promise<CodexStatus> {
-    return { credentialStatus: await this.options.credentialStatus(), login: { ...this.login } };
+    return { credentialStatus: await this.options.credentialStatus(), login: { ...this.state.view } };
   }
 
   async start(): Promise<CodexStatus> {
     if (this.stopped) throw new Error("Codex login is unavailable while the website is stopping.");
-    if (!this.attempt) {
-      const attempt: LoginAttempt = { controller: new AbortController(), task: Promise.resolve(), committing: false };
-      this.attempt = attempt;
-      this.login = { status: "starting" };
+    if (this.state.phase === "settled") {
+      const attempt: LoginAttempt = { controller: new AbortController(), task: Promise.resolve() };
+      this.state = { phase: "authorizing", attempt, view: { status: "starting" } };
       this.setTimeout(attempt, START_TIMEOUT_MS);
       attempt.task = Promise.resolve().then(() => this.run(attempt));
     }
@@ -42,13 +46,13 @@ export class CodexLoginManager {
   }
 
   async cancel(): Promise<CodexStatus> {
-    const attempt = this.attempt;
-    if (attempt) {
-      if (!attempt.committing) {
-        this.login = { status: "cancelled" };
-        attempt.controller.abort();
+    const state = this.state;
+    if (state.phase !== "settled") {
+      if (state.phase === "authorizing") {
+        this.state = { phase: "aborting", attempt: state.attempt, view: { status: "cancelled" } };
+        state.attempt.controller.abort();
       }
-      await attempt.task;
+      await state.attempt.task;
     }
     return this.status();
   }
@@ -59,7 +63,6 @@ export class CodexLoginManager {
   }
 
   private async run(attempt: LoginAttempt): Promise<void> {
-    let saving = false;
     try {
       attempt.controller.signal.throwIfAborted();
       const login = this.options.login ?? openaiCodexProvider().auth.oauth!.login;
@@ -75,31 +78,30 @@ export class CodexLoginManager {
       attempt.controller.signal.throwIfAborted();
       // Once tokens have arrived, cancellation waits for the atomic commit. It
       // must not report cancellation after the account has already been changed.
-      attempt.committing = true;
+      if (this.state.phase !== "authorizing" || this.state.attempt !== attempt) return;
+      this.state = { ...this.state, phase: "committing" };
       clearTimeout(attempt.timer);
-      saving = true;
       const commitController = new AbortController();
       attempt.timer = setTimeout(() => commitController.abort(), START_TIMEOUT_MS);
       attempt.timer.unref?.();
       await abortable(this.options.saveCredential(credential, commitController.signal), commitController.signal);
-      this.login = { status: "success" };
+      this.state = { phase: "settled", view: { status: "success" } };
     } catch {
-      if (!attempt.controller.signal.aborted) {
-        this.login = {
-          status: "error",
-          error: saving
-            ? "Codex sign-in completed, but saving or activating the credentials failed. Check the server's credential file permissions and try again."
-            : "Could not complete Codex sign-in. Enable device code login in ChatGPT Settings → Security, then try again.",
-        };
-      }
+      const state = this.state;
+      if (state.phase === "settled" || state.attempt !== attempt) return;
+      this.state = { phase: "settled", view: state.phase === "aborting" ? state.view : {
+        status: "error",
+        error: state.phase === "committing"
+          ? "Codex sign-in completed, but saving or activating the credentials failed. Check the server's credential file permissions and try again."
+          : "Could not complete Codex sign-in. Enable device code login in ChatGPT Settings → Security, then try again.",
+      } };
     } finally {
       clearTimeout(attempt.timer);
-      if (this.attempt === attempt) this.attempt = undefined;
     }
   }
 
   private onEvent(attempt: LoginAttempt, event: AuthEvent): void {
-    if (attempt.controller.signal.aborted || this.attempt !== attempt || event.type !== "device_code") return;
+    if (this.state.phase !== "authorizing" || this.state.attempt !== attempt || event.type !== "device_code") return;
     // Only link the documented OpenAI approval page, never an arbitrary URL from
     // a failed or unexpected provider response.
     const uri = new URL(event.verificationUri);
@@ -112,14 +114,15 @@ export class CodexLoginManager {
     const lifetime = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0
       ? Math.min(DEVICE_LOGIN_TIMEOUT_MS, seconds * 1000)
       : DEVICE_LOGIN_TIMEOUT_MS;
-    this.login = { status: "pending", userCode: event.userCode, verificationUri: uri.href, expiresAt: Date.now() + lifetime };
+    this.state = { ...this.state, view: { status: "pending", userCode: event.userCode, verificationUri: uri.href, expiresAt: Date.now() + lifetime } };
     this.setTimeout(attempt, lifetime);
   }
 
   private setTimeout(attempt: LoginAttempt, durationMs: number): void {
     clearTimeout(attempt.timer);
     attempt.timer = setTimeout(() => {
-      this.login = { status: "expired", error: "Codex sign-in expired. Start again to get a new code." };
+      if (this.state.phase !== "authorizing" || this.state.attempt !== attempt) return;
+      this.state = { phase: "aborting", attempt, view: { status: "expired", error: "Codex sign-in expired. Start again to get a new code." } };
       attempt.controller.abort();
     }, durationMs);
     attempt.timer.unref?.();

@@ -5,11 +5,14 @@ type CodexAttempt =
   | { allowed: true; probe: boolean; recordSuccess(): void; recordFailure(resetAt?: number): void; release(): void }
   | { allowed: false; retryAt: number };
 
+type Cooldown = { blockedUntil: number; nextProbeAt: number };
+type CircuitState =
+  | { phase: "closed" }
+  | { phase: "open"; cooldown: Cooldown }
+  | { phase: "half_open"; cooldown: Cooldown; probeId: number };
+
 export class CodexCircuitBreaker {
-  private open = false;
-  private blockedUntil = 0;
-  private nextProbeAt = 0;
-  private activeProbe: number | undefined;
+  private circuit: CircuitState = { phase: "closed" };
   private nextAttemptId = 0;
   private lastSettledAttemptId = 0;
   private failureGeneration = 0;
@@ -19,23 +22,25 @@ export class CodexCircuitBreaker {
   reset(): void {
     // Requests made with the previous login cannot reopen the reset circuit.
     this.failureGeneration++;
-    this.activeProbe = undefined;
     this.recordSuccess();
   }
 
   acquire(): CodexAttempt {
     const now = this.now();
-    if (this.open && (now < this.nextProbeAt || this.activeProbe !== undefined)) {
-      return { allowed: false, retryAt: this.nextProbeAt };
+    const state = this.circuit;
+    if (state.phase === "half_open" || (state.phase === "open" && now < state.cooldown.nextProbeAt)) {
+      return { allowed: false, retryAt: state.cooldown.nextProbeAt };
     }
     const id = ++this.nextAttemptId;
     const generation = this.failureGeneration;
-    const probe = this.open;
-    if (probe) this.activeProbe = id;
+    const probe = state.phase === "open";
+    if (probe) this.circuit = { phase: "half_open", cooldown: state.cooldown, probeId: id };
     let settled = false;
     const release = () => {
       settled = true;
-      if (this.activeProbe === id) this.activeProbe = undefined;
+      if (this.circuit.phase === "half_open" && this.circuit.probeId === id) {
+        this.circuit = { phase: "open", cooldown: this.circuit.cooldown };
+      }
     };
     const settle = (update: () => void) => {
       if (settled) return;
@@ -56,29 +61,26 @@ export class CodexCircuitBreaker {
   }
 
   private recordSuccess(): void {
-    this.open = false;
-    this.blockedUntil = 0;
-    this.nextProbeAt = 0;
+    this.circuit = { phase: "closed" };
   }
 
   private recordFailure(resetAt?: number): void {
     this.failureGeneration++;
     const now = this.now();
-    this.open = true;
     const knownReset = resetAt !== undefined && Number.isFinite(resetAt) && resetAt > now;
     const effectiveReset = knownReset ? resetAt : now + THIRTY_MINUTES_MS;
-    this.blockedUntil = Math.max(this.blockedUntil, effectiveReset);
-    this.nextProbeAt = knownReset && effectiveReset - now <= THIRTY_MINUTES_MS
+    const blockedUntil = Math.max(this.circuit.phase === "closed" ? 0 : this.circuit.cooldown.blockedUntil, effectiveReset);
+    const nextProbeAt = knownReset && effectiveReset - now <= THIRTY_MINUTES_MS
       ? effectiveReset + RESET_GRACE_MS
       : Math.min(effectiveReset, now + THIRTY_MINUTES_MS);
+    this.circuit = { phase: "open", cooldown: { blockedUntil, nextProbeAt } };
   }
 
   state(): { open: boolean; blockedUntil: number; nextProbeAt: number; probeActive: boolean } {
     return {
-      open: this.open,
-      blockedUntil: this.blockedUntil,
-      nextProbeAt: this.nextProbeAt,
-      probeActive: this.activeProbe !== undefined,
+      open: this.circuit.phase !== "closed",
+      ...(this.circuit.phase === "closed" ? { blockedUntil: 0, nextProbeAt: 0 } : this.circuit.cooldown),
+      probeActive: this.circuit.phase === "half_open",
     };
   }
 }

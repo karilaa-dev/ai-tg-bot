@@ -24,7 +24,7 @@ export interface SignedIn { user: ChatProfile; botUsername: string; admin: boole
 
 type Notice = "none" | "signed-out" | "session-ended";
 type GateState =
-  | { kind: "checking" }
+  | { kind: "checking" | "signing-out" }
   | { kind: "unreachable" }
   | { kind: "signed-out"; loginAvailable: boolean; notice: Notice }
   | { kind: "signed-in"; session: SignedIn };
@@ -59,8 +59,7 @@ export function WorkspaceLoadFailed({ retry }: { retry: () => void }) {
 export function ChatGate({ children }: { children: (session: SignedIn, signOut: () => Promise<void>) => ReactNode }) {
   const [state, setState] = useState<GateState>({ kind: "checking" });
   const [revision, setRevision] = useState(0);
-  const generation = useRef(0);
-  const signingOut = useRef(false);
+  const operation = useRef<{ kind: "idle" | "checking" | "signing-out" }>({ kind: "idle" });
   const drafts = useRef<DraftStore | null>(null);
   const endSession = useCallback(() => {
     invalidateChatRequests();
@@ -70,11 +69,12 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, []);
 
   const check = useCallback(async (signal: AbortSignal, notice: Notice = "none") => {
-    if (signingOut.current) return;
-    const current = ++generation.current;
+    if (operation.current.kind === "signing-out") return;
+    const attempt = { kind: "checking" } as const;
+    operation.current = attempt;
     try {
       const session = await chatApi.session(signal);
-      if (signal.aborted || current !== generation.current) return;
+      if (signal.aborted || operation.current !== attempt) return;
       if (session.authenticated) {
         if (drafts.current?.userId !== session.user.id) {
           if (drafts.current) endSession();
@@ -89,7 +89,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
         setState({ kind: "signed-out", loginAvailable: session.loginAvailable, notice });
       }
     } catch (error) {
-      if (signal.aborted || current !== generation.current) return;
+      if (signal.aborted || operation.current !== attempt) return;
       if (error instanceof ChatApiError && error.status === 401) {
         endSession();
         rememberSignedIn(false);
@@ -97,6 +97,8 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
       } else {
         setState({ kind: "unreachable" });
       }
+    } finally {
+      if (operation.current === attempt) operation.current = { kind: "idle" };
     }
   }, [endSession]);
 
@@ -109,7 +111,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   useEffect(() => {
     const controller = new AbortController();
     const expired = () => {
-      if (signingOut.current) return;
+      if (operation.current.kind === "signing-out") return;
       endSession();
       setState({ kind: "checking" });
       void check(controller.signal, "session-ended");
@@ -121,13 +123,12 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   useEffect(() => () => { endSession(); }, [endSession]);
 
   const signOut = useCallback(async () => {
-    if (signingOut.current) return;
-    signingOut.current = true;
-    generation.current++;
+    if (operation.current.kind === "signing-out") return;
+    operation.current = { kind: "signing-out" };
     const logout = chatApi.logout();
     endSession();
     rememberSignedIn(false);
-    setState({ kind: "checking" });
+    setState({ kind: "signing-out" });
     try {
       await logout;
       history.replaceState(null, "", location.pathname);
@@ -135,7 +136,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     } catch {
       setState({ kind: "unreachable" });
     } finally {
-      signingOut.current = false;
+      operation.current = { kind: "idle" };
     }
   }, [endSession]);
 
@@ -152,8 +153,9 @@ function SignedOut({ state, retry }: { state: Exclude<GateState, { kind: "signed
   const t = useChatStrings();
   const returnTo = loginReturnPath(window.location.pathname + window.location.search);
   const signInUrl = `/api/auth/telegram/start${returnTo === "/" ? "" : `?return=${encodeURIComponent(returnTo)}`}`;
-  return <AccessFrame busy={state.kind === "checking"}>
-    {state.kind === "checking" && <p className="chat-access-status" role="status"><Loader size="sm" /> {t.checkingSession}</p>}
+  const checking = state.kind === "checking" || state.kind === "signing-out";
+  return <AccessFrame busy={checking}>
+    {checking && <p className="chat-access-status" role="status"><Loader size="sm" /> {t.checkingSession}</p>}
     {state.kind === "unreachable" && <>
       <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</span></p>
       <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>{t.tryAgain}</Button>

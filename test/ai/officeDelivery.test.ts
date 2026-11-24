@@ -72,6 +72,22 @@ async function setup() {
   return { input, runtime, approve };
 }
 describe("Office delivery gate", () => {
+  it("reports the next review step for the exact bytes being delivered", async () => {
+    const { input } = await setup();
+    const validation = input.officeValidation;
+    const path = "/deck.pptx";
+    const initial = await validation.validate(path);
+    const hash = initial.source_sha256;
+    expect(initial.review_state).toBe("needs_preview");
+    validation.markSeen(hash, [1, 2]);
+    expect((await validation.validate(path)).review_state).toBe("needs_review");
+    expect((await validation.validate(path, hash, [{ page: 2, status: "failed", issues: ["Clipped title"] }])).review_state)
+      .toBe("changes_requested");
+    await validation.validate(path, hash, [1, 2].map(page => ({ page, status: "passed", issues: [] })));
+    validation.markSeen(hash, [1]);
+    expect(await validation.validate(path)).toMatchObject({ approved: true, review_state: "approved" });
+  });
+
   it("can finish with a blocker and retain failed drafts without attaching them", async () => {
     const { input, runtime } = await setup();
     const finish = createFinishResponseTool(input);

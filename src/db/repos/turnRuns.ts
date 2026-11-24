@@ -1,3 +1,4 @@
+import { unfinishedTurnStatuses, activeTurnStatuses, finishTurnFrom } from "../turnLifecycle.js";
 import { isUuid } from "../../utils/uuid.js";
 import { sql } from "drizzle-orm";
 import { messageScopePredicate, type TextSearch } from "../search.js";
@@ -11,7 +12,6 @@ import type {
   MessageRow,
   TurnDeliveryStatus,
   TurnRunRow,
-  TurnRunStatus,
 } from "../types.js";
 
 export interface TelegramTurnSource {
@@ -146,7 +146,7 @@ export class TurnRunsRepo {
           select 1 as present from turn_runs
           where thread_id = ${input.threadId}
             and id < ${turnRun.id}
-            and status in ('queued', 'running', 'awaiting_delivery')
+            and status in (${unfinishedTurnStatuses})
           limit 1
         `);
         input.signal?.throwIfAborted();
@@ -256,7 +256,7 @@ export class TurnRunsRepo {
             owner_id = null, lease_expires_at = null,
             finished_at = ${now}, updated_at = ${now}
         where thread_id = ${candidate.thread_id}
-          and status in ('running', 'awaiting_delivery')
+          and status in (${activeTurnStatuses})
           and (
             (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
             or (${legacyStaleBefore === undefined ? 0 : 1} = 1 and owner_id is null and updated_at <= ${legacyStaleBefore ?? 0})
@@ -278,7 +278,7 @@ export class TurnRunsRepo {
             where blocker.thread_id = target.thread_id
               and blocker.id <> target.id
               and (
-                blocker.status in ('running', 'awaiting_delivery')
+                blocker.status in (${activeTurnStatuses})
                 or (blocker.status = 'queued' and blocker.id < target.id)
               )
           )
@@ -299,7 +299,7 @@ export class TurnRunsRepo {
       set status = 'interrupted', failure_code = 'process_interrupted',
           owner_id = null, lease_expires_at = null,
           finished_at = ${now}, updated_at = ${now}
-      where status in ('running', 'awaiting_delivery')
+      where status in (${activeTurnStatuses})
         and (${input.threadId === undefined ? 0 : 1} = 0 or thread_id = ${input.threadId ?? null})
         and (
           (owner_id is not null and lease_expires_at is not null and lease_expires_at <= ${now})
@@ -319,7 +319,7 @@ export class TurnRunsRepo {
       where id = ${id}
         and owner_id = ${ownerId}
         and lease_expires_at > ${now}
-        and status in ('running', 'awaiting_delivery')
+        and status in (${activeTurnStatuses})
       returning id
     `);
     return Boolean(renewed);
@@ -489,7 +489,7 @@ export class TurnRunsRepo {
     usage?: unknown;
   } = {}, ownerId?: string): Promise<boolean> {
     const now = Date.now();
-    const transitioned = await queryOne<{ status: string }>(this.db, sql`
+    const transitioned = await queryOne<{ status: string; lease_expires_at: number | null }>(this.db, sql`
       update turn_runs set
         status = case when cancel_requested_at is null then 'awaiting_delivery' else status end,
         delivery_status = 'pending',
@@ -506,18 +506,27 @@ export class TurnRunsRepo {
           ${ownerId === undefined ? 0 : 1} = 0
           or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
         )
-      returning status
+      returning status, lease_expires_at
     `);
     // Preserve the saved reply and usage even when cancellation wins. The
     // caller must still reject delivery unless the state actually transitioned.
-    return transitioned?.status === "awaiting_delivery";
+    if (transitioned) return transitioned.status === "awaiting_delivery"
+      && (ownerId === undefined || (transitioned.lease_expires_at ?? 0) > Date.now());
+    // A connection can fail after committing but before acknowledging the transition.
+    // Only the same live owner registering the very same reply may resume here.
+    if (ownerId === undefined || input.resultMessageId == null) return false;
+    const existing = await queryOne<{ lease_expires_at: number }>(this.db, sql`
+      select lease_expires_at from turn_runs where id = ${id} and status = 'awaiting_delivery'
+        and result_message_id = ${input.resultMessageId} and owner_id = ${ownerId}
+        and lease_expires_at > ${Date.now()}
+    `);
+    return existing !== undefined && existing.lease_expires_at > Date.now();
   }
 
   markSucceeded(id: number, resultMessageId?: number | null, ownerId?: string): Promise<void> {
-    return this.updateLifecycle(id, "succeeded", {
+    return this.finishTurn(id, "succeeded", {
       deliveryStatus: "delivered",
       resultMessageId,
-      finished: true,
     }, ownerId);
   }
 
@@ -527,21 +536,17 @@ export class TurnRunsRepo {
     deliveryStatus: TurnDeliveryStatus = "failed",
     ownerId?: string,
   ): Promise<void> {
-    return this.updateLifecycle(id, "failed", { deliveryStatus, failureCode, finished: true }, ownerId);
+    return this.finishTurn(id, "failed", { deliveryStatus, failureCode }, ownerId);
   }
 
   markCancelled(id: number, ownerId?: string): Promise<void> {
-    return this.updateLifecycle(id, "cancelled", { failureCode: "user_cancelled", finished: true }, ownerId);
+    return this.finishTurn(id, "cancelled", { failureCode: "user_cancelled" }, ownerId);
   }
 
-  private async updateLifecycle(id: number, status: TurnRunStatus, input: {
+  private async finishTurn(id: number, status: keyof typeof finishTurnFrom, input: {
     deliveryStatus?: TurnDeliveryStatus;
     resultMessageId?: number | null;
-    provider?: string | null;
-    model?: string | null;
-    usage?: unknown;
     failureCode?: string | null;
-    finished?: boolean;
   }, ownerId?: string): Promise<void> {
     const now = Date.now();
     await this.db.execute(sql`
@@ -549,13 +554,10 @@ export class TurnRunsRepo {
         status = ${status},
         delivery_status = coalesce(${input.deliveryStatus ?? null}, delivery_status),
         result_message_id = coalesce(${input.resultMessageId ?? null}, result_message_id),
-        provider = coalesce(${input.provider ?? null}, provider),
-        model = coalesce(${input.model ?? null}, model),
-        usage_json = coalesce(${input.usage === undefined ? null : JSON.stringify(input.usage)}, usage_json),
         failure_code = ${input.failureCode ?? null},
-        finished_at = ${input.finished ? now : null},
+        finished_at = ${now},
         updated_at = ${now}
-      where id = ${id}
+      where id = ${id} and status in (${finishTurnFrom[status]})
         and (
           ${ownerId === undefined ? 0 : 1} = 0
           or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
@@ -680,6 +682,6 @@ async function attachFilesToAcceptedMessage(
 
 function unfinishedPredicate(maxQueuedId: number | undefined) {
   return maxQueuedId === undefined
-    ? sql`status in ('queued', 'running', 'awaiting_delivery')`
-    : sql`(status in ('running', 'awaiting_delivery') or (status = 'queued' and id <= ${maxQueuedId}))`;
+    ? sql`status in (${unfinishedTurnStatuses})`
+    : sql`(status in (${activeTurnStatuses}) or (status = 'queued' and id <= ${maxQueuedId}))`;
 }

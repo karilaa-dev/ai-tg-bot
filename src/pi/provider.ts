@@ -167,8 +167,8 @@ async function* routeStream(input: {
 
   let status: number | undefined;
   let resetAt: number | undefined;
-  let emitted = false;
-  let fallback = false;
+  // Once Codex output is visible, replaying the request on another provider would duplicate it.
+  let phase: "buffering" | "streaming" | "fallback" = "buffering";
   const usage = new ProviderUsageCapture(input.codex.provider, input.codex.id, {
     fastMode: input.config.CODEX_FAST_MODE,
     ...(input.config.CODEX_FAST_MODE ? { requestedServiceTier: "priority" } : {}),
@@ -220,7 +220,7 @@ async function* routeStream(input: {
         yield event;
         return;
       }
-      if (!emitted && event.type === "error") {
+      if (phase === "buffering" && event.type === "error") {
         const message = event.error.errorMessage;
         if (retryableCodexError({ status, message })) {
           attempt.recordFailure(resetAt);
@@ -229,35 +229,35 @@ async function* routeStream(input: {
             error: message,
             openRouterModel: input.openRouter.id,
           });
-          fallback = true;
+          phase = "fallback";
           break;
         }
         attempt.recordSuccess();
-        emitted = true;
+        phase = "streaming";
         for (const pending of buffered) yield pending;
         yield event;
         continue;
       }
-      if (emitted && event.type === "error") {
+      if (phase === "streaming" && event.type === "error") {
         const message = event.error.errorMessage;
         if (retryableCodexError({ status, message })) attempt.recordFailure(resetAt);
         else attempt.recordSuccess();
       }
-      if (!emitted && !isMeaningful(event)) {
+      if (phase === "buffering" && !isMeaningful(event)) {
         buffered.push(event);
         continue;
       }
-      if (!emitted) {
-        emitted = true;
+      if (phase === "buffering") {
+        phase = "streaming";
         for (const pending of buffered) yield pending;
       }
       yield event;
       if (event.type === "done") attempt.recordSuccess();
     }
-    if (!emitted && !fallback) {
+    if (phase === "buffering") {
       for (const pending of buffered) yield pending;
     }
-    if (!fallback) attempt.recordSuccess();
+    if (phase !== "fallback") attempt.recordSuccess();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const retryable = !input.options?.signal?.aborted && retryableCodexError({ status, message });
@@ -265,13 +265,13 @@ async function* routeStream(input: {
       if (retryable) attempt.recordFailure(resetAt);
       else attempt.recordSuccess();
     }
-    if (!emitted && retryable) {
+    if (phase === "buffering" && retryable) {
       input.logger?.warn("Codex provider setup failed; falling back to OpenRouter", {
         status,
         error: message,
         openRouterModel: input.openRouter.id,
       });
-      fallback = true;
+      phase = "fallback";
     } else {
       yield { type: "error", reason: "error", error: providerErrorMessage(input.codex, message) };
     }
@@ -281,7 +281,7 @@ async function* routeStream(input: {
   }
   // Fallback failures belong to OpenRouter. Catching them as Codex failures
   // would start another fallback, including after already emitting its output.
-  if (fallback) yield* openRouterEvents(input);
+  if (phase === "fallback") yield* openRouterEvents(input);
 }
 
 function providerErrorMessage(model: Model<Api>, message: string): AssistantMessage {

@@ -46,6 +46,7 @@ export class TelegramIntake {
     attempt: (signal: AbortSignal) => Promise<T>,
     parent?: AbortSignal,
   ): Promise<IntakeOutcome<T>> {
+    if (this.stopping.aborted) return Promise.resolve({ status: "cancelled" });
     const acceptance: Acceptance = { threadId, label, controller: new AbortController() };
     const forward = () => acceptance.controller.abort(parent?.reason);
     if (parent?.aborted) forward();

@@ -515,12 +515,12 @@ async function parseCodexImageSse(
   let latestPartial:
     | { data: string; mimeType: string; revisedPrompt?: string }
     | undefined;
-  let imageCompleted = false;
-  let responseCompleted = false;
+  // The image may finish before the response event carrying usage.
+  const progress: { phase: "generating" | "image_completed" | "response_completed" } = { phase: "generating" };
   let completedImage: { data: string; mimeType: string; revisedPrompt?: string } | undefined;
   let readSignal = signal;
   let usageGraceTimer: ReturnType<typeof setTimeout> | undefined;
-  const finalImage = () => completedImage ?? (imageCompleted ? latestPartial : undefined);
+  const finalImage = () => completedImage ?? (progress.phase === "generating" ? undefined : latestPartial);
   let partialImages = 0;
   const observedEvents = new Set<string>();
   const observedImageStatuses = new Set<string>();
@@ -540,7 +540,6 @@ async function parseCodexImageSse(
       return undefined;
     }
     onEvent(event);
-    if (event.type === "response.completed") responseCompleted = true;
     if (typeof event.type === "string") observedEvents.add(event.type);
     const item =
       imageItem(event.item) ??
@@ -548,12 +547,10 @@ async function parseCodexImageSse(
       responseImageItem(event.response);
     if (typeof item?.status === "string")
       observedImageStatuses.add(item.status);
-    if (
-      item?.status === "completed" ||
-      event.type === "response.image_generation_call.completed" ||
-      event.type === "response.completed"
-    ) {
-      imageCompleted = true;
+    if (event.type === "response.completed") progress.phase = "response_completed";
+    else if (progress.phase === "generating"
+      && (item?.status === "completed" || event.type === "response.image_generation_call.completed")) {
+      progress.phase = "image_completed";
     }
     const raw =
       typeof item?.result === "string"
@@ -626,7 +623,7 @@ async function parseCodexImageSse(
       for (const chunk of chunks) {
         completedImage = consume(chunk) ?? completedImage;
         // Usage arrives on the terminal response after output_item.done.
-        if (responseCompleted && (completedImage || latestPartial)) return completedImage ?? latestPartial!;
+        if (progress.phase === "response_completed" && (completedImage || latestPartial)) return completedImage ?? latestPartial!;
       }
       if (finalImage() && usageGraceTimer === undefined) {
         // Allow terminal usage to arrive, without waiting the full generation timeout.
@@ -645,7 +642,7 @@ async function parseCodexImageSse(
   // The hosted Codex endpoint can omit the base64 result from output_item.done
   // after streaming a usable final partial image. Keep only the newest partial
   // in memory and return it once the stream has completed.
-  if (imageCompleted && latestPartial) return latestPartial;
+  if (progress.phase !== "generating" && latestPartial) return latestPartial;
   const diagnostics = [
     observedEvents.size ? `events=${[...observedEvents].join(",")}` : undefined,
     observedImageStatuses.size

@@ -1,6 +1,8 @@
 import { Api, Bot, GrammyError, HttpError } from "grammy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BotContext } from "../../src/bot/context.js";
+import { FileProcessingStatus } from "../../src/bot/files.js";
+import { deferred } from "../helpers/async.js";
 import { installBot } from "../../src/bot/router.js";
 import { AccessControl } from "../../src/access/control.js";
 import { loadTestConfig } from "../../src/config.js";
@@ -12,6 +14,23 @@ import { TELEGRAM_CONNECTION_KEY } from "../../src/files/telegramSource.js";
 import { createLogger } from "../../src/logger.js";
 import type { PiRuntimeService } from "../../src/pi/runtime.js";
 import { telegramRetry } from "../../src/telegram/retry.js";
+
+it("edits one file status when stop and cancellation arrive during its first send", async () => {
+  const sent = deferred<{ message_id: number }>();
+  const reply = vi.fn(() => sent.promise);
+  const editMessageText = vi.fn().mockResolvedValue(true);
+  const status = new FileProcessingStatus({ chat: { id: 7 }, reply, api: { editMessageText } } as unknown as BotContext, "file");
+  const first = status.updateText("Downloading");
+  await Promise.resolve();
+  const stopping = status.updateText("Stopping");
+  const cancelled = status.updateText("Cancelled");
+  sent.resolve({ message_id: 47 });
+  await Promise.all([first, stopping, cancelled]);
+  expect(reply).toHaveBeenCalledOnce();
+  expect(editMessageText.mock.calls.map(([chat, message, text]) => [chat, message, text])).toEqual([
+    [7, 47, "Stopping"], [7, 47, "Cancelled"],
+  ]);
+});
 
 describe("Telegram retry safety", () => {
   it.each(["transport", "server"])("does not repeat sends or topic creation after an ambiguous %s failure", async (failure) => {

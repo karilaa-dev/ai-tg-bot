@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { IconAlertCircle, IconArrowUpRight, IconCheck, IconChecks, IconCopy, IconKey, IconLoader2, IconRefresh, IconShieldCheck, IconX } from "@tabler/icons-react";
 import type { CodexStatus } from "../admin-types.js";
+import type { RequestState } from "./request-state.js";
 import { apiJson } from "./api.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
 
@@ -16,13 +17,12 @@ export function trustedVerificationUri(value?: string): string | null {
 
 export function CodexConnection() {
   const [data, setData] = useState<CodexStatus | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [request, setRequest] = useState<RequestState<string>>({ kind: "idle" });
+  const busy = request.kind === "pending";
+  const error = request.kind === "failed" ? request.error : "";
   const [revision, setRevision] = useState(0);
   const [now, setNow] = useState(Date.now);
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState("");
-  const mutating = useRef(false);
+  const [clipboard, setClipboard] = useState<{ code: string; kind: "copied" | "failed" } | null>(null);
   const generation = useRef(0);
   const actionController = useRef<AbortController | null>(null);
   const pending = data?.login.status === "pending" || data?.login.status === "starting";
@@ -32,13 +32,13 @@ export function CodexConnection() {
     const controller = new AbortController();
     let fetching = false;
     const load = async () => {
-      if (fetching || mutating.current || document.hidden) return;
+      if (fetching || actionController.current || document.hidden) return;
       fetching = true;
       const current = generation.current;
       try {
         const status = await apiJson<CodexStatus>("/api/admin/codex", { signal: controller.signal });
-        if (!controller.signal.aborted && current === generation.current) { setData(status); setError(""); }
-      } catch (error) { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "Could not load the Codex connection."); }
+        if (!controller.signal.aborted && current === generation.current) { setData(status); setRequest({ kind: "idle" }); }
+      } catch (error) { if (!controller.signal.aborted && current === generation.current) setRequest({ kind: "failed", error: error instanceof Error ? error.message : "Could not load the Codex connection." }); }
       finally { fetching = false; }
     };
     void load();
@@ -53,29 +53,32 @@ export function CodexConnection() {
     const timer = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [pending]);
-  useEffect(() => { setCopied(false); setCopyError(""); }, [data?.login.userCode]);
 
   const changeLogin = async (method: "POST" | "DELETE") => {
-    if (mutating.current) return;
-    mutating.current = true; generation.current++; setBusy(true); setError("");
+    if (actionController.current) return;
+    generation.current++; setRequest({ kind: "pending" });
     const controller = new AbortController();
     actionController.current = controller;
     try {
       const status = await apiJson<CodexStatus>("/api/admin/codex/login", { method, signal: controller.signal });
-      if (!controller.signal.aborted) { setData(status); setRevision(value => value + 1); }
-    } catch (error) { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "Could not update the Codex connection. Try again."); }
-    finally { mutating.current = false; if (!controller.signal.aborted) setBusy(false); }
+      if (!controller.signal.aborted) { setData(status); setRequest({ kind: "idle" }); setRevision(value => value + 1); }
+    } catch (error) { if (!controller.signal.aborted) setRequest({ kind: "failed", error: error instanceof Error ? error.message : "Could not update the Codex connection. Try again." }); }
+    finally { actionController.current = null; }
   };
+  const login = data?.login;
+  const deviceLogin = login?.status === "pending" ? login : null;
+  const code = deviceLogin?.userCode;
+  const copied = clipboard?.code === code && clipboard?.kind === "copied";
+  const copyFailed = clipboard?.code === code && clipboard?.kind === "failed";
   const copy = async () => {
-    if (!data?.login.userCode) return;
-    try { await navigator.clipboard.writeText(data.login.userCode); setCopied(true); setCopyError(""); }
-    catch { setCopyError("Select the code and copy it manually."); }
+    if (!code) return;
+    try { await navigator.clipboard.writeText(code); setClipboard({ code, kind: "copied" }); }
+    catch { setClipboard({ code, kind: "failed" }); }
   };
 
-  const login = data?.login;
   const available = data?.credentialStatus === "available";
-  const verificationUri = trustedVerificationUri(login?.verificationUri);
-  const seconds = login?.expiresAt ? Math.max(0, Math.ceil((login.expiresAt - now) / 1000)) : null;
+  const verificationUri = trustedVerificationUri(deviceLogin?.verificationUri);
+  const seconds = deviceLogin?.expiresAt ? Math.max(0, Math.ceil((deviceLogin.expiresAt - now) / 1000)) : null;
   const expired = login?.status === "expired" || Boolean(pending && seconds === 0);
   const waiting = pending && !expired;
   const statusLabel = available ? "Credentials saved" : data?.credentialStatus === "invalid" ? "Sign-in needed" : "Not connected";
@@ -90,12 +93,12 @@ export function CodexConnection() {
         {waiting ? <section className="device-login" aria-labelledby="device-heading">
           <div className="device-heading"><span className="device-waiting"><IconLoader2 className="activity-spinner" size={16} aria-hidden="true" /> Waiting for approval</span><Button variant="ghost" size="sm" onClick={() => void changeLogin("DELETE")} disabled={busy}><IconX aria-hidden="true" /> Cancel</Button></div>
           <h2 id="device-heading">Approve your Codex sign-in</h2><p>Open the OpenAI sign-in page and enter this one-time code.</p>
-          {login?.userCode && verificationUri ? <>
-            <div className="device-code"><span className="utility-label">One-time code</span><div><code aria-label="One-time sign-in code" tabIndex={0}>{login.userCode}</code><Button variant="ghost" size="icon-sm" aria-label={copied ? "Code copied" : "Copy sign-in code"} onClick={() => void copy()}>{copied ? <IconCheck aria-hidden="true" /> : <IconCopy aria-hidden="true" />}</Button></div><span className="code-copy-feedback" role="status">{copyError || (copied ? "Copied to clipboard" : "Only enter this code on the OpenAI sign-in page.")}</span></div>
+          {code && verificationUri ? <>
+            <div className="device-code"><span className="utility-label">One-time code</span><div><code aria-label="One-time sign-in code" tabIndex={0}>{code}</code><Button variant="ghost" size="icon-sm" aria-label={copied ? "Code copied" : "Copy sign-in code"} onClick={() => void copy()}>{copied ? <IconCheck aria-hidden="true" /> : <IconCopy aria-hidden="true" />}</Button></div><span className="code-copy-feedback" role="status">{copyFailed ? "Select the code and copy it manually." : (copied ? "Copied to clipboard" : "Only enter this code on the OpenAI sign-in page.")}</span></div>
             <div className="device-actions"><a className={buttonVariants({ variant: "primary" })} href={verificationUri} target="_blank" rel="noopener noreferrer">Continue to OpenAI <IconArrowUpRight aria-hidden="true" /></a><span className="device-expiry">{seconds !== null ? `Expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "Keep this page open or return after approval."}</span></div>
           </> : <p className="inline-loading" role="status"><IconLoader2 aria-hidden="true" className="activity-spinner" size={16} /> Preparing your sign-in code…</p>}
         </section> : <section className="connection-action" aria-label={available ? "Sign in again" : "Connect your account"}>
-          {(expired || login?.status === "error" || login?.status === "cancelled") && <div className={login?.status === "cancelled" ? "connection-note" : "failure"} role="status"><IconAlertCircle aria-hidden="true" size={17} /><p>{expired ? "This sign-in code expired. Start again to get a new code." : login?.status === "cancelled" ? "Sign-in cancelled. You can start again whenever you are ready." : login?.error || "Codex sign-in did not finish. Try again."}</p></div>}
+          {(expired || login?.status === "error" || login?.status === "cancelled") && <div className={login?.status === "cancelled" ? "connection-note" : "failure"} role="status"><IconAlertCircle aria-hidden="true" size={17} /><p>{expired ? "This sign-in code expired. Start again to get a new code." : login?.status === "cancelled" ? "Sign-in cancelled. You can start again whenever you are ready." : (login?.status === "error" && login.error) || "Codex sign-in did not finish. Try again."}</p></div>}
           <div><p>{available ? "Refresh your access or switch to another ChatGPT account." : "Get a one-time code, then approve access with OpenAI."}</p></div><Button variant="primary" onClick={() => void changeLogin("POST")} disabled={busy}>{busy ? <><IconLoader2 aria-hidden="true" className="activity-spinner" /> Starting sign-in…</> : <>{available ? "Sign in again" : "Connect Codex"}<IconArrowUpRight aria-hidden="true" /></>}</Button>
         </section>}
         <aside className="connection-help"><IconShieldCheck size={18} aria-hidden="true" /><div><h3>Before you sign in</h3><p>Enable device code login in your ChatGPT security settings.</p><a href="https://chatgpt.com/#settings/Security" target="_blank" rel="noopener noreferrer">Open ChatGPT settings <IconArrowUpRight aria-hidden="true" size={13} /></a></div></aside>

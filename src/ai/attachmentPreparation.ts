@@ -1,5 +1,5 @@
 import { OutgoingBuffers, OUTGOING_BUFFER_BYTES, prepareWithTwoWorkers } from "../files/outgoingBuffers.js";
-import type { CreatedFileAttachment } from "../files/types.js";
+import { canSendTelegramAttachment, type CreatedFileAttachment } from "../files/types.js";
 
 /** Batches never cross a delivery-type boundary or reorder the attachment queue. */
 function orderedAttachmentBatches(attachments: CreatedFileAttachment[]): CreatedFileAttachment[][] {
@@ -37,7 +37,7 @@ export class AttachmentPreparation {
     if (this.pending.has(index) || !this.batches[index]) return;
     const batch = this.batches[index]!;
     this.pending.set(index, prepareWithTwoWorkers(batch, async (attachment) => {
-      if (attachment.telegramDelivery || attachment.telegramDeliveryUnknown) return;
+      if (!canSendTelegramAttachment(attachment)) return;
       const startedAt = Date.now();
       try {
         await this.input.buffers.load(attachment, () => this.input.load(attachment, this.signal), this.signal);

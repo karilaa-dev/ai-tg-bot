@@ -82,7 +82,7 @@ it("waits for explicit sandbox approval without retrying during refresh", async 
   const loader = new AttachmentLoader(fixtureUuid(9), next => { states = next; });
   const file = { id: fixtureUuid(3), name: "a.png", size: 5, mimeType: "image/png", caption: null };
   loader.load(file, "auto");
-  await vi.waitFor(() => expect(states.get(fixtureUuid(3))?.needsSandbox).toBe(true));
+  await vi.waitFor(() => expect(states.get(fixtureUuid(3))).toEqual({ status: "error", needsSandbox: true }));
   loader.load(file, "auto");
   expect(fetch).toHaveBeenCalledTimes(1);
   vi.mocked(fetch).mockResolvedValue(new Response("hello"));

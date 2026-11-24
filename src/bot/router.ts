@@ -494,39 +494,44 @@ async function reportCompaction(
   statusMessageId: number,
 ): Promise<void> {
   const stopping = ctx.services.routerState.intake.stopping;
-  const done = run.completion.then(() => true, () => true);
+  const done = run.completion.then(() => "finished" as const, () => "finished" as const);
   let onStopping!: () => void;
-  const stopped = new Promise<false>((resolve) => {
-    onStopping = () => resolve(false);
+  const stopped = new Promise<"stopped">((resolve) => {
+    onStopping = () => resolve("stopped");
     if (stopping.aborted) onStopping();
     else stopping.addEventListener("abort", onStopping, { once: true });
   });
-  let finished = false;
   let failedEdits = 0;
   let lastText: string | undefined;
   try {
-    while (!finished) {
+    while (true) {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      finished = await Promise.race([done, stopped, new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), compactionProgressMs); })]);
+      const event = await Promise.race([done, stopped, new Promise<"tick">(resolve => {
+        timer = setTimeout(() => resolve("tick"), compactionProgressMs);
+      })]);
       clearTimeout(timer);
-      if (stopping.aborted) return;
+      if (event === "stopped" || stopping.aborted) return;
       // After repeated failures only the final status is attempted, so a broken message is not retried every few seconds.
-      if (!finished && failedEdits >= compactionProgressEditFailures) continue;
+      if (event === "tick" && failedEdits >= compactionProgressEditFailures) continue;
       const saved = await ctx.services.repos.messages.get(run.messageId);
       const action = saved && savedCompactionAction(saved.content_json);
-      if (!action) continue;
+      if (!action) {
+        if (event === "finished") return;
+        continue;
+      }
       const description = compactionDescription(action, ctx.user?.lang ?? "en");
       const text = `${description.title} · ${compactionTime(compactionDuration(action))}${description.detail ? `\n${description.detail}` : ""}`;
-      if (!finished && text === lastText) continue;
+      if (event === "tick" && text === lastText) continue;
       const edited = await ctx.api.editMessageText(ctx.chat!.id, statusMessageId, text).then(() => true, () => false);
       if (edited) {
         lastText = text;
         failedEdits = 0;
-      } else if (finished) {
+      } else if (event === "finished") {
         await replyWithThreadFallback(ctx, text, threadExtra(thread));
       } else {
         failedEdits += 1;
       }
+      if (event === "finished") return;
     }
   } finally {
     stopping.removeEventListener("abort", onStopping);

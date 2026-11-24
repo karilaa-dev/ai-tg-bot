@@ -359,6 +359,41 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.shutdown();
   });
 
+  it("registers the same persisted reply once across repeated delivery notifications", async () => {
+    const { userId, threadId } = await ownership(repos, 804);
+    const register = vi.spyOn(repos.turnRuns, "markAwaitingDelivery");
+    const coordinator = createCoordinator(db, repos, async input => {
+      const result = { assistantMessageId: input.userMessageId! };
+      await Promise.all([input.onAwaitingDelivery?.(result), input.onAwaitingDelivery?.(result)]);
+      await input.onAwaitingDelivery?.(result);
+      await expect(input.onAwaitingDelivery?.({ assistantMessageId: result.assistantMessageId + 1 })).rejects.toThrow("different reply");
+      await input.onDeliveryConfirmed?.(result);
+    });
+    await coordinator.accept(request(userId, threadId, 8042, "repeat notification"));
+    await coordinator.waitForIdle(threadId);
+    expect(register).toHaveBeenCalledOnce();
+    expect(await repos.turnRuns.listForThread(threadId)).toMatchObject([{ status: "succeeded" }]);
+    await coordinator.shutdown();
+  });
+
+  it("retains the first delivery outcome when a late callback arrives during a failed write", async () => {
+    const { userId, threadId } = await ownership(repos, 804);
+    const retry = vi.spyOn(repos.turnRuns, "markSucceeded").mockRejectedValueOnce(new Error("database unavailable"));
+    const coordinator = createCoordinator(db, repos, async (input) => {
+      await input.onAwaitingDelivery?.({ assistantMessageId: 77 });
+      await expect(input.onDeliveryConfirmed?.({ assistantMessageId: 77 })).rejects.toThrow("database unavailable");
+      await input.onDeliveryUnknown?.({ assistantMessageId: 78, failureCode: "late_callback" });
+    });
+    await coordinator.accept(request(userId, threadId, 8041, "first outcome wins"));
+    await coordinator.waitForIdle(threadId);
+
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(await repos.turnRuns.listForThread(threadId)).toMatchObject([
+      { status: "succeeded", delivery_status: "delivered", result_message_id: 77 },
+    ]);
+    await coordinator.shutdown();
+  });
+
   it.each(["confirmed", "unknown", "rejected"] as const)("persists %s delivery after a transient bookkeeping failure without replaying the turn", async (outcome) => {
     const { userId, threadId } = await ownership(repos, 804);
     vi.spyOn(repos.turnRuns, outcome === "confirmed" ? "markSucceeded" : "markFailed")
@@ -555,6 +590,44 @@ describe("ThreadTurnCoordinator", () => {
     await coordinator.waitForIdle(target.threadId);
     expect(executed).toEqual(["queued successor"]);
     await coordinator.shutdown();
+  });
+
+  it("keeps the first delivery outcome across duplicate callbacks from a live owner", async () => {
+    const { userId, threadId } = await ownership(repos, 823);
+    const { turnRun, userMessage } = await repos.turnRuns.accept(request(userId, threadId, 23_001, "one outcome"));
+    const owner = "live-process";
+    await repos.turnRuns.claimRunning(turnRun.id, owner, Date.now() + 60_000);
+    const reply = { resultMessageId: userMessage.id };
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(true);
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(true);
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, reply, "another-process")).toBe(false);
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, { resultMessageId: userMessage.id + 1 }, owner)).toBe(false);
+    await repos.turnRuns.markCancelled(turnRun.id, owner);
+    expect((await repos.turnRuns.get(turnRun.id))?.status).toBe("awaiting_delivery");
+    await repos.turnRuns.markSucceeded(turnRun.id, userMessage.id, owner);
+    const completed = await repos.turnRuns.get(turnRun.id);
+    expect(completed).toMatchObject({ status: "succeeded", delivery_status: "delivered" });
+    await repos.turnRuns.markFailed(turnRun.id, "late_failure", "unknown", owner);
+    await repos.turnRuns.markCancelled(turnRun.id);
+    await repos.turnRuns.markSucceeded(turnRun.id, null, owner);
+    expect(await repos.turnRuns.get(turnRun.id)).toEqual(completed);
+  });
+
+  it("refuses a delivery registration lookup that arrives after its lease deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { userId, threadId } = await ownership(repos, 823);
+    const { turnRun, userMessage } = await repos.turnRuns.accept(request(userId, threadId, 23_002, "delayed lookup"));
+    const owner = "delayed-owner";
+    const deadline = Date.now() + 1_000;
+    await repos.turnRuns.claimRunning(turnRun.id, owner, deadline);
+    const reply = { resultMessageId: userMessage.id };
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(true);
+    const delayed = createRepos({ ...db.db, async query<T extends object>(statement: ReturnType<typeof sql>) {
+      const rows = await db.db.query<T>(statement);
+      if (rows.length) vi.setSystemTime(deadline);
+      return rows;
+    } }, db.search);
+    expect(await delayed.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(false);
   });
 
   it("fences terminal writes from an owner whose lease expired", async () => {

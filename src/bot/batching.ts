@@ -23,6 +23,7 @@ export function cancelMediaGroup(ctx: BotContext, groupId?: string): void {
 }
 
 function rememberCancelledMediaGroup(ctx: BotContext, key: string): void {
+  takeMediaGroup(ctx, key);
   const cancelled = ctx.services.routerState.cancelledMediaGroups;
   cancelled.add(key);
   if (cancelled.size > maxCancelledMediaGroups) cancelled.delete(cancelled.values().next().value!);
@@ -86,10 +87,8 @@ export async function flushPendingTextBurstForContext(ctx: BotContext): Promise<
 export function cancelPendingTextBurstForContext(ctx: BotContext): boolean {
   const key = textBurstKey(ctx);
   if (!key) return false;
-  const pending = ctx.services.routerState.pendingTextBursts.get(key);
+  const pending = takeTextBurst(ctx, key);
   if (!pending) return false;
-  ctx.services.routerState.pendingTextBursts.delete(key);
-  clearTimeout(pending.timer);
   ctx.services.logger.info("pending text burst cancelled", ctxLogMeta(ctx, {
     parts: pending.texts.length,
   }));
@@ -101,9 +100,7 @@ export function cancelPendingMediaGroupsForContext(ctx: BotContext): boolean {
   let cancelled = false;
   for (const [key, pending] of ctx.services.routerState.pendingMediaGroups) {
     if (pending.ctx.chat?.id !== ctx.chat.id || pending.ctx.thread?.id !== ctx.thread.id) continue;
-    clearTimeout(pending.timer);
     rememberCancelledMediaGroup(ctx, key);
-    ctx.services.routerState.pendingMediaGroups.delete(key);
     cancelled = true;
   }
   return cancelled;
@@ -120,12 +117,19 @@ export function cancelPendingForThread(state: BotServices["routerState"], thread
   return cancelled;
 }
 
+function takeTextBurst(ctx: BotContext, key: string) {
+  const bursts = ctx.services.routerState.pendingTextBursts;
+  const pending = bursts.get(key);
+  if (pending) {
+    clearTimeout(pending.timer);
+    bursts.delete(key);
+  }
+  return pending;
+}
+
 async function flushPendingTextBurst(ctx: BotContext, key: string): Promise<void> {
-  const pendingTextBursts = ctx.services.routerState.pendingTextBursts;
-  const pending = pendingTextBursts.get(key);
+  const pending = takeTextBurst(ctx, key);
   if (!pending) return;
-  pendingTextBursts.delete(key);
-  clearTimeout(pending.timer);
 
   const text = pending.texts.join("\n\n");
   if (!text) return;
@@ -153,21 +157,21 @@ export function enqueueMediaGroup(ctx: BotContext, groupId: string, item: Omit<P
   const key = `${ctx.chat.id}:${ctx.thread.id}:${groupId}`;
   const existing = pendingMediaGroups.get(key);
   if (existing) {
-    clearTimeout(existing.timer);
+    clearMediaGroupTimer(existing);
     existing.ctx = ctx;
     existing.items.push({ ...item, source: mediaTurnSource(ctx, item) });
     ctx.services.logger.debug("media group item appended", ctxLogMeta(ctx, {
       groupId,
       items: existing.items.length,
     }));
-    existing.timer = scheduleMediaGroupFlush(key, ctx, groupId);
+    existing.collection = scheduleMediaGroupFlush(key, ctx, groupId);
     return;
   }
 
   const pending: PendingMediaGroup = {
     ctx,
     items: [{ ...item, source: mediaTurnSource(ctx, item) }],
-    timer: scheduleMediaGroupFlush(key, ctx, groupId),
+    collection: scheduleMediaGroupFlush(key, ctx, groupId),
   };
   pendingMediaGroups.set(key, pending);
   ctx.services.logger.debug("media group queued", ctxLogMeta(ctx, { groupId, items: 1 }));
@@ -179,16 +183,31 @@ export function holdPendingMediaGroup(ctx: BotContext, groupId?: string): () => 
   const key = `${ctx.chat.id}:${ctx.thread.id}:${groupId}`;
   const pending = ctx.services.routerState.pendingMediaGroups.get(key);
   if (!pending) return () => {};
-  clearTimeout(pending.timer);
+  clearMediaGroupTimer(pending);
+  pending.collection = { phase: "held" };
   return () => {
     if (ctx.services.routerState.pendingMediaGroups.get(key) !== pending) return;
-    clearTimeout(pending.timer);
-    pending.timer = scheduleMediaGroupFlush(key, ctx, groupId);
+    clearMediaGroupTimer(pending);
+    pending.collection = scheduleMediaGroupFlush(key, ctx, groupId);
   };
 }
 
-function scheduleMediaGroupFlush(key: string, ctx: BotContext, groupId: string): NodeJS.Timeout {
-  return setTimeout(() => startMediaGroupFlush(ctx, key, groupId), mediaGroupFlushMs);
+function clearMediaGroupTimer(pending: PendingMediaGroup): void {
+  if (pending.collection.phase === "collecting") clearTimeout(pending.collection.timer);
+}
+
+function takeMediaGroup(ctx: BotContext, key: string): PendingMediaGroup | undefined {
+  const groups = ctx.services.routerState.pendingMediaGroups;
+  const pending = groups.get(key);
+  if (pending) {
+    clearMediaGroupTimer(pending);
+    groups.delete(key);
+  }
+  return pending;
+}
+
+function scheduleMediaGroupFlush(key: string, ctx: BotContext, groupId: string): PendingMediaGroup["collection"] {
+  return { phase: "collecting", timer: setTimeout(() => startMediaGroupFlush(ctx, key, groupId), mediaGroupFlushMs) };
 }
 
 function startMediaGroupFlush(ctx: BotContext, key: string, groupId?: string): void {
@@ -206,11 +225,9 @@ export async function drainTelegramIntake(services: BotServices, timeoutMs = 10_
   const state = services.routerState;
   const residue = await state.intake.drain(timeoutMs, () => {
     for (const [key, pending] of state.pendingTextBursts) {
-      clearTimeout(pending.timer);
       startTextBurstFlush(pending.ctx, key);
     }
     for (const [key, pending] of state.pendingMediaGroups) {
-      clearTimeout(pending.timer);
       startMediaGroupFlush(pending.ctx, key);
     }
   });
@@ -222,10 +239,8 @@ export async function drainTelegramIntake(services: BotServices, timeoutMs = 10_
 }
 
 async function flushMediaGroup(flushCtx: BotContext, key: string): Promise<void> {
-  const pendingMediaGroups = flushCtx.services.routerState.pendingMediaGroups;
-  const pending = pendingMediaGroups.get(key);
+  const pending = takeMediaGroup(flushCtx, key);
   if (!pending) return;
-  pendingMediaGroups.delete(key);
 
   const { ctx, items } = pending;
   if (!ctx.user || !ctx.thread || !ctx.chat || items.length === 0) return;

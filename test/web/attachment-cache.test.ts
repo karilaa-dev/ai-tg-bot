@@ -288,7 +288,7 @@ it.each([
       manual.resolve(response("manual bytes"));
     }
     await vi.waitFor(() => expect(view.state()?.status).toBe("ready"));
-    expect(view.state()?.text).toBe(status === 200 ? "automatic bytes" : "manual bytes");
+    expect(view.state()).toMatchObject({ status: "ready", text: status === 200 ? "automatic bytes" : "manual bytes" });
     expect(sibling.state()).toEqual(view.state());
     const url = readyUrl(view);
     for (const consumer of [view, sibling]) {
