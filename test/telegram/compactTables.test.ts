@@ -103,13 +103,14 @@ describe("compact Telegram tables", () => {
       editMessageText: vi.fn(async () => true) } };
     const rich = format === "markdown" ? { markdown: table } : { html: "<table><tr><td>x</td></tr></table>" };
     const payload = { chat_id: 1, rich_message: rich };
-    await sendRich(api, payload);
-    await sendRichDraft(api, { ...payload, draft_id: 2 });
-    await editRich(api, { ...payload, message_id: 3 });
+    const signal = new AbortController().signal;
+    await sendRich(api, payload, signal);
+    await sendRichDraft(api, { ...payload, draft_id: 2 }, signal);
+    await editRich(api, { ...payload, message_id: 3 }, signal);
     for (const method of Object.values(api.raw)) {
       expect(method).toHaveBeenCalledWith(expect.objectContaining({ rich_message: expect.objectContaining({
         [format]: expect.stringContaining("<table compact>"),
-      }) }), ...(method === api.raw.sendRichMessageDraft ? [undefined] : []));
+      }) }), signal);
     }
   });
 });
