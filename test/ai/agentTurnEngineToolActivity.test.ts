@@ -63,7 +63,7 @@ describe("website tool activity through real Pi execution and response persisten
     expect((await h.repos.messages.listThread(h.thread.id)).find(row => row.role === "assistant")?.text_plain).toBe("Possibly delivered");
   });
 
-  it("sends one reply when the database loses the delivery registration acknowledgement", async () => {
+  it.each(["live", "expired"] as const)("recovers a lost delivery acknowledgement with a %s lease", async lease => {
     const answer = "Recovered answer";
     const h = await setup([{ name: "finish_response", arguments: { text: answer } }], false);
     const runs = h.repos.turnRuns;
@@ -73,22 +73,32 @@ describe("website tool activity through real Pi execution and response persisten
       sources: [{ updateId: 1, messageId: 1 }],
     });
     const ownerId = "test-owner";
-    await runs.claimRunning(turnRun.id, ownerId);
+    const deadline = Date.now() + 60_000;
+    await runs.claimRunning(turnRun.id, ownerId, deadline);
+    const controller = new AbortController();
     const write = runs.markAwaitingDelivery.bind(runs);
     const register = vi.spyOn(runs, "markAwaitingDelivery").mockImplementationOnce(async (...args) => {
       await write(...args);
       throw new Error("connection lost after commit");
+    }).mockImplementationOnce(async (...args) => {
+      const registered = await write(...args);
+      if (lease === "expired") {
+        await runs.interruptStaleRunning({ now: deadline });
+        controller.abort(new Error("owner lease expired during registration"));
+      }
+      return registered;
     });
     const finalizer = new TurnFinalizer({ repos: h.repos, logger: h.input.logger, turnRunId: turnRun.id, threadId: h.thread.id, ownerId });
-    await runTurn({ ...h.input, turnRunId: turnRun.id, userMessageId: userMessage.id,
+    await runTurn({ ...h.input, signal: controller.signal, turnRunId: turnRun.id, userMessageId: userMessage.id,
       onDeliveryStarting: () => finalizer.beginDelivery(),
       onAwaitingDelivery: result => finalizer.awaitingDelivery(result),
       onDeliveryConfirmed: result => finalizer.confirmDelivery(result.assistantMessageId),
     });
-    expect(h.sent.filter(text => text === answer)).toEqual([answer]);
+    expect(h.sent.filter(text => text === answer)).toEqual(lease === "live" ? [answer] : []);
     expect(register).toHaveBeenCalledTimes(2);
     expect(register.mock.calls[1]).toEqual(register.mock.calls[0]);
-    expect(await runs.get(turnRun.id)).toMatchObject({ status: "succeeded", delivery_status: "delivered" });
+    expect(await runs.get(turnRun.id)).toMatchObject(lease === "live"
+      ? { status: "succeeded", delivery_status: "delivered" } : { status: "interrupted" });
   });
 
   it("shows stopped when durable cancellation wins before delivery, even without an aborted local signal", async () => {

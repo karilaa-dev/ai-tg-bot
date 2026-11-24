@@ -71,6 +71,25 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.getProfile.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("keeps CDP connected until profile persistence is checked after a failed stop", async () => {
+    const fixture = await runtimeFixture({}, true);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+    await browser.open("https://example.com/login");
+    const connection = fixture.browsers[0]!;
+    fixture.api.stopBrowser.mockRejectedValueOnce(new BrowserUseHttpError(403, "stop denied"));
+    await expect(browser.closeSession()).rejects.toThrow();
+    expect(connection.isConnected()).toBe(true);
+    const readProfile = fixture.api.getProfile.getMockImplementation()!;
+    const connectedAtCheck: boolean[] = [];
+    fixture.api.getProfile.mockImplementationOnce(async () => {
+      connectedAtCheck.push(connection.isConnected());
+      return readProfile();
+    });
+    await browser.closeSession();
+    expect(connectedAtCheck).toEqual([true]);
+    expect(connection.isConnected()).toBe(false);
+  });
+
   it("ignores a deadline from the previous session queued during rollover", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture();

@@ -84,7 +84,7 @@ interface SessionState {
 type BrowserSession =
   | { phase: "closed" }
   | { phase: "open"; value: SessionState }
-  | { phase: "stop_pending"; id: string; timeoutAt: number; profileSave?: { id: string; before?: BrowserUseProfile } };
+  | { phase: "stop_pending"; id: string; timeoutAt: number; profileSave?: { id: string; before?: BrowserUseProfile; browser?: Browser } };
 
 interface UserState {
   userId: number;
@@ -778,7 +778,12 @@ export class BrowserUseRuntimeManager {
       this.scheduleCleanup(state);
       throw error;
     } finally {
-      await session?.browser.close().catch(() => undefined);
+      // Keep CDP through a retry when the provider still owes a profile save.
+      if (state.session !== pending || !pending.profileSave || this.lifecycle.phase !== "running" || Date.now() >= pending.timeoutAt) {
+        const browser = pending.profileSave?.browser ?? session?.browser;
+        if (pending.profileSave) delete pending.profileSave.browser;
+        await browser?.close().catch(() => undefined);
+      }
     }
     this.input.logger?.info("Browser Use session stopped", { userId: state.userId, reason });
   }
@@ -803,7 +808,7 @@ export class BrowserUseRuntimeManager {
       : undefined;
     return {
       phase: "stop_pending", id: session.id, timeoutAt: session.timeoutAt,
-      ...(storageChanged ? { profileSave: { id: session.profileId, before: profileBefore } } : {}),
+      ...(storageChanged ? { profileSave: { id: session.profileId, before: profileBefore, browser: session.browser } } : {}),
     };
   }
 

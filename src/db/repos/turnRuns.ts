@@ -489,7 +489,7 @@ export class TurnRunsRepo {
     usage?: unknown;
   } = {}, ownerId?: string): Promise<boolean> {
     const now = Date.now();
-    const transitioned = await queryOne<{ status: string }>(this.db, sql`
+    const transitioned = await queryOne<{ status: string; lease_expires_at: number | null }>(this.db, sql`
       update turn_runs set
         status = case when cancel_requested_at is null then 'awaiting_delivery' else status end,
         delivery_status = 'pending',
@@ -506,19 +506,21 @@ export class TurnRunsRepo {
           ${ownerId === undefined ? 0 : 1} = 0
           or (owner_id = ${ownerId ?? ""} and lease_expires_at > ${now})
         )
-      returning status
+      returning status, lease_expires_at
     `);
     // Preserve the saved reply and usage even when cancellation wins. The
     // caller must still reject delivery unless the state actually transitioned.
-    if (transitioned) return transitioned.status === "awaiting_delivery";
+    if (transitioned) return transitioned.status === "awaiting_delivery"
+      && (ownerId === undefined || (transitioned.lease_expires_at ?? 0) > Date.now());
     // A connection can fail after committing but before acknowledging the transition.
     // Only the same live owner registering the very same reply may resume here.
     if (ownerId === undefined || input.resultMessageId == null) return false;
-    return Boolean(await queryOne(this.db, sql`
-      select id from turn_runs where id = ${id} and status = 'awaiting_delivery'
+    const existing = await queryOne<{ lease_expires_at: number }>(this.db, sql`
+      select lease_expires_at from turn_runs where id = ${id} and status = 'awaiting_delivery'
         and result_message_id = ${input.resultMessageId} and owner_id = ${ownerId}
         and lease_expires_at > ${Date.now()}
-    `));
+    `);
+    return existing !== undefined && existing.lease_expires_at > Date.now();
   }
 
   markSucceeded(id: number, resultMessageId?: number | null, ownerId?: string): Promise<void> {

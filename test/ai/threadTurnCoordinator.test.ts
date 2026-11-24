@@ -613,6 +613,23 @@ describe("ThreadTurnCoordinator", () => {
     expect(await repos.turnRuns.get(turnRun.id)).toEqual(completed);
   });
 
+  it("refuses a delivery registration lookup that arrives after its lease deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { userId, threadId } = await ownership(repos, 823);
+    const { turnRun, userMessage } = await repos.turnRuns.accept(request(userId, threadId, 23_002, "delayed lookup"));
+    const owner = "delayed-owner";
+    const deadline = Date.now() + 1_000;
+    await repos.turnRuns.claimRunning(turnRun.id, owner, deadline);
+    const reply = { resultMessageId: userMessage.id };
+    expect(await repos.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(true);
+    const delayed = createRepos({ ...db.db, async query<T extends object>(statement: ReturnType<typeof sql>) {
+      const rows = await db.db.query<T>(statement);
+      if (rows.length) vi.setSystemTime(deadline);
+      return rows;
+    } }, db.search);
+    expect(await delayed.turnRuns.markAwaitingDelivery(turnRun.id, reply, owner)).toBe(false);
+  });
+
   it("fences terminal writes from an owner whose lease expired", async () => {
     const { userId, threadId } = await ownership(repos, 822);
     const accepted = await repos.turnRuns.accept(request(userId, threadId, 22_001, "expired owner"));

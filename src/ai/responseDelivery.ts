@@ -121,6 +121,7 @@ export async function sendFinalVisible(
     model: inference?.model,
     usage: inference?.usage,
   });
+  input.signal?.throwIfAborted();
   const thinkingIds = [...(thinkingDelivery?.messageIds ?? [])];
   const answerIds: number[] = [];
   const ownsBuffers = !input.outgoingBuffers;
@@ -342,6 +343,7 @@ async function editFinalMessageVisible(
     if (seen.has(hash)) continue;
     seen.add(hash);
     try {
+      input.signal?.throwIfAborted();
       const edited = await editRich(input.api, {
         chat_id: input.chatId,
         message_id: messageId,
@@ -900,8 +902,8 @@ function withThreadFallback<T>(
           ...warn.fields,
         }),
     },
-    attempt,
-    fallback,
+    () => { input.signal?.throwIfAborted(); return attempt(); },
+    () => { input.signal?.throwIfAborted(); return fallback(); },
   );
 }
 
