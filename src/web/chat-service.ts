@@ -143,8 +143,6 @@ export class BotChatService implements ChatService {
       .reserve(userId, files.reduce((sum, file) => sum + file.size, 0)) : undefined;
     const prepared: Awaited<ReturnType<typeof ingestFileBytes>>[] = [];
     const createdIds: FileRow["id"][] = [];
-    let settled = false;
-    let unresolved = false;
     try {
       for (const file of files) {
         await budget!.beforeWrite(file.size);
@@ -181,6 +179,7 @@ export class BotChatService implements ChatService {
       });
       return sendResult(accepted);
     } finally {
+      let cleanup: "checking" | "release" | "recover" = "checking";
       try {
         // Failed preparations and losing retries never leave unreferenced upload blobs. A removal that fails
         // stays recorded in the database and is retried by recovery.
@@ -200,14 +199,14 @@ export class BotChatService implements ChatService {
             if (recorded) this.input.services.logger.warn("upload file removal will be retried", { fileId: id, error: String(error) });
             else {
               this.input.services.logger.error("upload file removal failed and could not be recorded for retry", { fileId: id, error: String(error) });
-              unresolved = true;
+              cleanup = "recover";
             }
           }
         }
-        settled = !unresolved;
+        if (cleanup === "checking") cleanup = "release";
       } finally {
         // Unresolved ownership is left to expire so recovery finishes it, instead of being forgotten.
-        if (settled) await budget?.release(); else budget?.abandon();
+        if (cleanup === "release") await budget?.release(); else budget?.abandon();
       }
     }
   }

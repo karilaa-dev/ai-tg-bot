@@ -502,12 +502,11 @@ function createTurnPresenter(input: TurnInput, startedAt: number): TurnPresenter
 class TurnDraftStreamer {
   private readonly thinking: DraftStreamer;
   private readonly answer: DraftStreamer;
-  private answerStarted = false;
-  private answerReady = false;
+  private presentation:
+    | { phase: "thinking" }
+    | { phase: "answer"; thinkingDelivery: Promise<number[]> } = { phase: "thinking" };
   private latestAnswerMd = "";
   private deliveredThinkingMd = "";
-  private thinkingDelivery?: Promise<number[]>;
-  private thinkingDeliveryError: unknown;
 
   constructor(
     private readonly input: TurnInput,
@@ -528,7 +527,7 @@ class TurnDraftStreamer {
   }
 
   update(frame: { thinkingMd: string; answerMd: string }): void {
-    if (this.answerStarted) return;
+    if (this.presentation.phase === "answer") return;
     // Text can precede more tool calls. Keep it inside the running draft until
     // the prompt completes and finish() can publish the final answer.
     this.thinking.update({
@@ -539,18 +538,20 @@ class TurnDraftStreamer {
 
   async finish(frame?: { thinkingMd: string; answerMd: string }): Promise<ThinkingDelivery | undefined> {
     if (!frame) {
-      if (!this.answerStarted) {
+      if (this.presentation.phase === "thinking") {
         await this.thinking.finish();
         return undefined;
       }
-      const messageIds = await this.waitForThinkingDelivery();
+      const messageIds = await this.presentation.thinkingDelivery;
       await this.answer.finish();
       return { handled: true, messageIds };
     }
 
     this.latestAnswerMd = frame.answerMd;
-    if (!this.answerStarted) this.startAnswer(frame.thinkingMd);
-    let messageIds = await this.waitForThinkingDelivery();
+    if (this.presentation.phase === "thinking") {
+      this.presentation = { phase: "answer", thinkingDelivery: this.startAnswer(frame.thinkingMd) };
+    }
+    let messageIds = await this.presentation.thinkingDelivery;
     if (frame.thinkingMd !== this.deliveredThinkingMd) {
       messageIds = await refreshFinalThinkingVisible(
         this.input,
@@ -573,34 +574,15 @@ class TurnDraftStreamer {
     this.answer.stop();
   }
 
-  private startAnswer(finalThinkingMd: string): void {
-    if (this.answerStarted) return;
-    this.answerStarted = true;
+  private async startAnswer(finalThinkingMd: string): Promise<number[]> {
     this.deliveredThinkingMd = finalThinkingMd;
     // Keep the old draft's Stop route during the final-thinking send. The turn
     // remains cancellable until delivery starts, and stop() cleans up the route.
     this.thinking.stopUpdates();
     const elapsedMs = Math.max(0, Date.now() - this.startedAt);
-    this.thinkingDelivery = sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs).catch((err) => {
-      this.thinkingDeliveryError = err;
-      return [];
-    });
-    void this.thinkingDelivery.then(() => {
-      if (this.thinkingDeliveryError) return;
-      this.answerReady = true;
-      this.updateAnswerDraft();
-    });
-  }
-
-  private async waitForThinkingDelivery(): Promise<number[]> {
-    const messageIds = await (this.thinkingDelivery ?? Promise.resolve([]));
-    if (this.thinkingDeliveryError) throw this.thinkingDeliveryError;
+    const messageIds = await sendFinalThinkingVisible(this.input, finalThinkingMd, elapsedMs);
+    if (this.latestAnswerMd.trim()) this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
     return messageIds;
-  }
-
-  private updateAnswerDraft(): void {
-    if (!this.answerReady || !this.latestAnswerMd.trim()) return;
-    this.answer.update({ thinkingMd: "", answerMd: this.latestAnswerMd });
   }
 }
 

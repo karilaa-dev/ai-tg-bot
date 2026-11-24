@@ -4,35 +4,37 @@ import type { WebMemories, WebMessage, WebPage } from "../../types.js";
 import { localizeServerError, type UiLanguage } from "../i18n.js";
 
 export const CHAT_SESSION_EXPIRED_EVENT = "chat-session-expired";
-let sessionGeneration = 0;
-let sessionUserId: number | null = null;
-let attachmentSource: AttachmentSource | null = null;
-// The last history response per URL for this session, revalidated with its ETag.
-const historyCopies = new Map<string, { etag: string; body: ChatHistory }>();
+type RequestSession =
+  | { kind: "unbound" }
+  | { kind: "bound"; userId: number; attachments: AttachmentSource; history: Map<string, { etag: string; body: ChatHistory }> };
+
+let requestSession: RequestSession = { kind: "unbound" };
 const maxHistoryCopies = 16;
 export function bindChatRequests(userId: number) {
   invalidateChatRequests();
-  sessionUserId = userId;
-  const generation = sessionGeneration;
-  attachmentSource = {
+  const attachments: AttachmentSource = {
     cache: new AttachmentCache(),
     url: (threadId, fileId) => `/api/chat/threads/${threadId}/files/${fileId}`,
     fetch: (url, init) => {
-      if (generation !== sessionGeneration || sessionUserId !== userId) return Promise.reject(new DOMException("Session ended", "AbortError"));
+      if (requestSession.kind !== "bound" || requestSession.attachments !== attachments) {
+        return Promise.reject(new DOMException("Session ended", "AbortError"));
+      }
       return chatFetch(url, init);
     },
   };
+  requestSession = { kind: "bound", userId, attachments, history: new Map() };
 }
 export function invalidateChatRequests() {
-  sessionGeneration++;
-  sessionUserId = null;
-  historyCopies.clear();
-  attachmentSource?.cache?.dispose();
-  attachmentSource = null;
+  const previous = requestSession;
+  requestSession = { kind: "unbound" };
+  if (previous.kind === "bound") {
+    previous.history.clear();
+    previous.attachments.cache?.dispose();
+  }
 }
 export function getChatAttachmentSource(): AttachmentSource {
-  if (!attachmentSource) throw new Error("File access requires a verified chat session.");
-  return attachmentSource;
+  if (requestSession.kind !== "bound") throw new Error("File access requires a verified chat session.");
+  return requestSession.attachments;
 }
 
 export type ChatMessage = WebMessage;
@@ -53,13 +55,13 @@ function errorText(body: unknown): string | null {
 
 /** Every chat request is same-origin; writes carry the CSRF marker the server requires. */
 export async function chatFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  const generation = sessionGeneration;
+  const session = requestSession;
   const headers = new Headers(init.headers);
-  if (sessionUserId !== null) headers.set("X-Chat-User", String(sessionUserId));
+  if (session.kind === "bound") headers.set("X-Chat-User", String(session.userId));
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) headers.set("X-Chat-Request", "1");
   const response = await fetch(url, { ...init, headers, credentials: "same-origin", cache: init.cache ?? "no-store" });
   if (response.status === 401) {
-    if (url !== "/api/chat/session" && generation === sessionGeneration && !init.signal?.aborted) window.dispatchEvent(new Event(CHAT_SESSION_EXPIRED_EVENT));
+    if (url !== "/api/chat/session" && session === requestSession && !init.signal?.aborted) window.dispatchEvent(new Event(CHAT_SESSION_EXPIRED_EVENT));
     throw new ChatApiError("Your session ended. Sign in again to continue.", 401);
   }
   return response;
@@ -76,8 +78,9 @@ async function chatJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 /** Reuse the parsed copy when the server confirms with 304 that the history is unchanged. */
 async function historyJson(url: string, signal: AbortSignal): Promise<ChatHistory> {
-  const generation = sessionGeneration;
-  const copy = historyCopies.get(url);
+  const session = requestSession;
+  const historyCopies = session.kind === "bound" ? session.history : null;
+  const copy = historyCopies?.get(url);
   const response = await chatFetch(url, { signal, headers: copy ? { "If-None-Match": copy.etag } : undefined });
   if (response.status === 304 && copy) return copy.body;
   const raw = await response.text();
@@ -85,7 +88,7 @@ async function historyJson(url: string, signal: AbortSignal): Promise<ChatHistor
   try { body = raw ? JSON.parse(raw) : null; } catch { /* Proxies can return HTML error pages. */ }
   if (!response.ok) throw new ChatApiError(errorText(body) ?? fallbackMessage(response.status), response.status);
   const etag = response.headers.get("ETag");
-  if (etag && generation === sessionGeneration) {
+  if (etag && historyCopies && session === requestSession) {
     historyCopies.delete(url);
     historyCopies.set(url, { etag, body: body as ChatHistory });
     if (historyCopies.size > maxHistoryCopies) historyCopies.delete(historyCopies.keys().next().value!);

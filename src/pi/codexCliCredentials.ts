@@ -60,8 +60,9 @@ export function isOAuthCredential(value: unknown): value is OAuthCredential {
 
 export class CodexCliCredentialStore implements CredentialStore {
   private pending: Promise<void> = Promise.resolve();
-  private volatileCredential?: OAuthCredential;
-  private suppressed = false;
+  private source:
+    | { kind: "file" | "suppressed" }
+    | { kind: "memory"; credential: OAuthCredential } = { kind: "file" };
 
   constructor(
     private authFile: string,
@@ -70,7 +71,7 @@ export class CodexCliCredentialStore implements CredentialStore {
   ) {}
 
   async status(): Promise<"available" | "missing" | "invalid"> {
-    if (this.volatileCredential) return "available";
+    if (this.source.kind === "memory") return "available";
     return (await loadSnapshot(this.authFile, this.format)).status;
   }
 
@@ -91,14 +92,13 @@ export class CodexCliCredentialStore implements CredentialStore {
       await persistCredential(piAuthFile, document, credential, "pi", signal);
       this.authFile = piAuthFile;
       this.format = "pi";
-      this.volatileCredential = undefined;
-      this.suppressed = false;
+      this.source = { kind: "file" };
     }, signal);
   }
 
   async read(providerId: string): Promise<Credential | undefined> {
-    if (providerId !== CODEX_PROVIDER_ID || this.suppressed) return undefined;
-    if (this.volatileCredential) return this.volatileCredential;
+    if (providerId !== CODEX_PROVIDER_ID || this.source.kind === "suppressed") return undefined;
+    if (this.source.kind === "memory") return this.source.credential;
     const loaded = await loadSnapshot(this.authFile, this.format);
     return loaded.status === "available" ? loaded.snapshot.credential : undefined;
   }
@@ -114,10 +114,10 @@ export class CodexCliCredentialStore implements CredentialStore {
   ): Promise<Credential | undefined> {
     if (providerId !== CODEX_PROVIDER_ID) return fn(undefined);
     return this.exclusive(async () => {
-      this.suppressed = false;
+      if (this.source.kind === "suppressed") this.source = { kind: "file" };
       const before = await loadSnapshot(this.authFile, this.format);
       const diskCredential = before.status === "available" ? before.snapshot.credential : undefined;
-      const current = this.volatileCredential ?? diskCredential;
+      const current = this.source.kind === "memory" ? this.source.credential : diskCredential;
       let next: Credential | undefined;
       try {
         next = await fn(current);
@@ -125,7 +125,7 @@ export class CodexCliCredentialStore implements CredentialStore {
         const concurrent = await loadSnapshot(this.authFile, this.format);
         if (concurrent.status === "available"
           && fingerprint(concurrent.snapshot.credential) !== fingerprint(diskCredential)) {
-          this.volatileCredential = undefined;
+          this.source = { kind: "file" };
           return concurrent.snapshot.credential;
         }
         throw error;
@@ -138,7 +138,7 @@ export class CodexCliCredentialStore implements CredentialStore {
       const latest = await loadSnapshot(this.authFile, this.format);
       if (latest.status === "available"
         && fingerprint(latest.snapshot.credential) !== fingerprint(diskCredential)) {
-        this.volatileCredential = undefined;
+        this.source = { kind: "file" };
         return latest.snapshot.credential;
       }
 
@@ -148,15 +148,15 @@ export class CodexCliCredentialStore implements CredentialStore {
           ? before.snapshot.document
           : undefined;
       if (!baseDocument) {
-        this.volatileCredential = next;
+        this.source = { kind: "memory", credential: next };
         this.onPersistenceError?.("missing_auth_file");
         return next;
       }
       try {
         await persistCredential(this.authFile, baseDocument, next, this.format);
-        this.volatileCredential = undefined;
+        this.source = { kind: "file" };
       } catch (error) {
-        this.volatileCredential = next;
+        this.source = { kind: "memory", credential: next };
         this.onPersistenceError?.(errorCode(error));
       }
       return next;
@@ -167,8 +167,7 @@ export class CodexCliCredentialStore implements CredentialStore {
     if (providerId !== CODEX_PROVIDER_ID) return;
     await this.exclusive(async () => {
       // Logging out the bot must not unexpectedly sign the developer out of Codex CLI.
-      this.suppressed = true;
-      this.volatileCredential = undefined;
+      this.source = { kind: "suppressed" };
     });
   }
 

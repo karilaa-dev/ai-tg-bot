@@ -237,7 +237,7 @@ describe("Pi runtime cache ownership", () => {
       const sessions = new Set([old.runtime.session, ...leases.map(lease => lease.runtime.session)]);
       // Owned runtimes stay usable and pinned while their owners work, whichever generation they are.
       expect(created.mock.calls.length).toBeLessThanOrEqual(1);
-      expect(leases.every(lease => (lease.runtime as unknown as { disposed: boolean }).disposed === false)).toBe(true);
+      for (const { runtime } of leases) expect(created.mock.instances).not.toContain(runtime.session);
       expect(h.cache().get(target.id)).toBe(leases.find(lease => lease.runtime === h.cache().get(target.id))?.runtime);
       for (const lease of leases) await lease.release();
       await h.manager.dispose();

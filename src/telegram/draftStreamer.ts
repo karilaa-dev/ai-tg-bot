@@ -5,6 +5,10 @@ import { renderAnswerDraft, renderDraft, type RenderT, variantsForRichRetry } fr
 
 type DraftFrame = { thinkingMd: string; answerMd: string };
 type PendingDraft = { frame: DraftFrame; force: boolean; elapsedMs: number };
+type DraftPump =
+  | { phase: "idle" }
+  | { phase: "waiting"; timer: NodeJS.Timeout; readyAt: number }
+  | { phase: "sending" };
 type DraftSendResult = "sent" | "dropped" | { retryAfterMs: number };
 
 const floodWaitSafetyMs = 100;
@@ -37,15 +41,12 @@ export class DraftStreamer {
   private lastHash = "";
   private latest?: DraftFrame;
   private pending?: PendingDraft;
-  private timer?: NodeJS.Timeout;
-  private timerAt = 0;
+  private pumpState: DraftPump = { phase: "idle" };
   private elapsedTimer?: NodeJS.Timeout;
   private lastThinkingMd: string | undefined;
   private titleElapsedMs = 0;
-  private sending = false;
   private blockedUntil = 0;
   private threadUnavailable = false;
-  private closed = false;
   private readonly idleWaiters: Array<() => void> = [];
 
   constructor(private readonly options: DraftStreamerOptions) {}
@@ -80,12 +81,9 @@ export class DraftStreamer {
   }
 
   stopUpdates(): void {
-    if (this.timer) clearTimeout(this.timer);
+    this.clearPumpTimer();
     this.stopElapsedTick();
-    this.timer = undefined;
-    this.timerAt = 0;
     this.pending = undefined;
-    this.closed = true;
     this.controller.abort();
     this.resolveIdle();
   }
@@ -102,7 +100,7 @@ export class DraftStreamer {
   }
 
   private queue(frame: DraftFrame, force: boolean, elapsedMs: number): void {
-    if (this.closed) return;
+    if (this.controller.signal.aborted) return;
     this.latest = frame;
     this.pending = { frame, force, elapsedMs };
     this.schedulePump();
@@ -118,11 +116,11 @@ export class DraftStreamer {
   }
 
   private scheduleElapsedTick(): void {
-    if (this.closed || !this.latest) return;
+    if (this.controller.signal.aborted || !this.latest) return;
     this.stopElapsedTick();
     this.elapsedTimer = setTimeout(() => {
       this.elapsedTimer = undefined;
-      if (!this.latest || this.closed) return;
+      if (!this.latest || this.controller.signal.aborted) return;
       this.titleElapsedMs = this.elapsedMs();
       this.queue(this.latest, true, this.titleElapsedMs);
       this.scheduleElapsedTick();
@@ -138,9 +136,15 @@ export class DraftStreamer {
     return Math.max(this.lastSentAt + Math.max(0, this.options.updateMs), this.blockedUntil);
   }
 
+  private clearPumpTimer(): void {
+    if (this.pumpState.phase !== "waiting") return;
+    clearTimeout(this.pumpState.timer);
+    this.pumpState = { phase: "idle" };
+  }
+
   private schedulePump(): void {
-    if (this.closed) return;
-    if (this.sending) return;
+    if (this.controller.signal.aborted) return;
+    if (this.pumpState.phase === "sending") return;
     if (!this.pending) {
       this.resolveIdle();
       return;
@@ -148,24 +152,21 @@ export class DraftStreamer {
     const readyAt = this.nextReadyAt();
     const delay = Math.max(0, readyAt - Date.now());
     if (delay === 0) {
-      if (this.timer) clearTimeout(this.timer);
-      this.timer = undefined;
-      this.timerAt = 0;
+      this.clearPumpTimer();
       void this.pump();
       return;
     }
-    if (this.timer && this.timerAt <= readyAt) return;
-    if (this.timer) clearTimeout(this.timer);
-    this.timerAt = readyAt;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      this.timerAt = 0;
+    if (this.pumpState.phase === "waiting" && this.pumpState.readyAt <= readyAt) return;
+    this.clearPumpTimer();
+    const timer = setTimeout(() => {
+      this.pumpState = { phase: "idle" };
       void this.pump();
     }, delay);
+    this.pumpState = { phase: "waiting", readyAt, timer };
   }
 
   private async pump(): Promise<void> {
-    if (this.closed || this.sending) return;
+    if (this.controller.signal.aborted || this.pumpState.phase === "sending") return;
     const queued = this.pending;
     if (!queued) {
       this.resolveIdle();
@@ -183,10 +184,10 @@ export class DraftStreamer {
       this.schedulePump();
       return;
     }
-    this.sending = true;
+    this.pumpState = { phase: "sending" };
     const result = await this.send(payload);
-    this.sending = false;
-    if (this.closed) {
+    this.pumpState = { phase: "idle" };
+    if (this.controller.signal.aborted) {
       this.resolveIdle();
       return;
     }
@@ -211,7 +212,7 @@ export class DraftStreamer {
   }
 
   private isIdle(): boolean {
-    return this.closed || (!this.pending && !this.sending && !this.timer);
+    return this.controller.signal.aborted || (!this.pending && this.pumpState.phase === "idle");
   }
 
   private async send(payload: InputRichMessage): Promise<DraftSendResult> {
@@ -249,7 +250,7 @@ export class DraftStreamer {
   }
 
   private sendDraft(payload: InputRichMessage): Promise<boolean> {
-    if (this.closed) return Promise.resolve(false);
+    if (this.controller.signal.aborted) return Promise.resolve(false);
     if (this.options.onStop) {
       let drafts = activeDrafts.get(this.options.api);
       if (!drafts) activeDrafts.set(this.options.api, drafts = new Map());

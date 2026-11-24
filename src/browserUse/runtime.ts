@@ -80,13 +80,17 @@ interface SessionState {
   downloadSelections: Map<string, string[]>;
 }
 
+type BrowserSession =
+  | { phase: "closed" }
+  | { phase: "open"; value: SessionState }
+  | { phase: "stop_pending"; id: string; timeoutAt: number; profileSave?: { id: string; before?: BrowserUseProfile } };
+
 interface UserState {
   userId: number;
   activeTurns: Map<string, number>;
   lock: AsyncLock;
   profilePromise?: Promise<string>;
-  session?: SessionState;
-  sessionPromise?: Promise<SessionState>;
+  session: BrowserSession;
   idleTimer?: NodeJS.Timeout;
   deadlineTimer?: NodeJS.Timeout;
 }
@@ -113,6 +117,10 @@ export interface BrowserUseToolRuntime {
 
 export class BrowserUseRuntimeManager {
   private readonly states = new Map<number, UserState>();
+  private lifecycle:
+    | { phase: "running" }
+    | { phase: "stopping"; done: Promise<void> }
+    | { phase: "stopped" } = { phase: "running" };
   private readonly api: BrowserUseApi;
   private readonly connect: (cdpUrl: string, timeoutMs: number) => Promise<Browser>;
 
@@ -135,7 +143,7 @@ export class BrowserUseRuntimeManager {
 
   async endTurn(userId: number, threadId: string): Promise<void> {
     const state = this.states.get(userId);
-    if (!state) return;
+    if (!state || this.lifecycle.phase !== "running") return;
     const count = state.activeTurns.get(threadId) ?? 0;
     if (count <= 1) state.activeTurns.delete(threadId);
     else state.activeTurns.set(threadId, count - 1);
@@ -168,31 +176,49 @@ export class BrowserUseRuntimeManager {
     };
   }
 
-  async dispose(): Promise<void> {
-    const states = [...this.states.values()];
-    this.states.clear();
-    await Promise.all(states.map((state) => state.lock.run(async () => {
-      await this.closeSessionLocked(state, "shutdown").catch((error) => {
+  dispose(): Promise<void> {
+    if (this.lifecycle.phase === "stopping") return this.lifecycle.done;
+    if (this.lifecycle.phase === "stopped" && this.states.size === 0) return Promise.resolve();
+    const done = Promise.all([...this.states.values()].map(state => state.lock.run(async () => {
+      try {
+        await this.closeSessionLocked(state, "shutdown");
+        this.states.delete(state.userId);
+      } catch (error) {
+        // Keep the provider ID so a subsequent disposal can retry a failed stop.
         this.input.logger?.warn("Browser Use shutdown cleanup failed", { error: String(error) });
-      });
-    })));
+      }
+    }))).then(() => { this.lifecycle = { phase: "stopped" }; });
+    this.lifecycle = { phase: "stopping", done };
+    return done;
+  }
+
+  private assertRunning(): void {
+    if (this.lifecycle.phase !== "running") throw new BrowserUseRuntimeError("browser_runtime_stopped", "The browser runtime is shutting down.");
+  }
+
+  private withUser<T>(userId: number, signal: AbortSignal | undefined, operation: (state: UserState) => Promise<T>): Promise<T> {
+    const state = this.state(userId);
+    return state.lock.run(() => {
+      this.assertRunning();
+      return operation(state);
+    }, signal);
   }
 
   private state(userId: number): UserState {
+    this.assertRunning();
     let state = this.states.get(userId);
     if (!state) {
       const lock = new AsyncLock(() => {
         const current = this.states.get(userId);
         if (
           current?.lock === lock
-          && !current.session
-          && !current.sessionPromise
+          && current.session.phase === "closed"
           && !current.activeTurns.size
         ) {
           this.states.delete(userId);
         }
       });
-      state = { userId, activeTurns: new Map(), lock };
+      state = { userId, activeTurns: new Map(), lock, session: { phase: "closed" } };
       this.states.set(userId, state);
     }
     return state;
@@ -205,9 +231,7 @@ export class BrowserUseRuntimeManager {
     timeoutMinutes?: number,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    return this.state(userId).lock.run(async () => {
-      throwIfAborted(signal);
-      const state = this.state(userId);
+    return this.withUser(userId, signal, async (state) => {
       const session = await this.ensureSessionLocked(state, timeoutMinutes, signal);
       this.assertTime(session, true);
       const page = await this.availablePage(session);
@@ -228,20 +252,19 @@ export class BrowserUseRuntimeManager {
           ? browserTimeoutRequestResult(session, timeoutMinutes)
           : {}),
       };
-    }, signal);
+    });
   }
 
   private async listTabs(userId: number, threadId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return this.state(userId).lock.run(async () => {
-      const state = this.state(userId);
-      const session = state.session;
+    return this.withUser(userId, signal, async (state) => {
+      const session = state.session.phase === "open" ? state.session.value : undefined;
       if (!session || !session.browser.isConnected()) return { tabs: [], session_remaining_seconds: 0 };
       await this.syncPages(session, threadId);
       const tabs = await Promise.all([...session.tabs.values()]
         .filter((tab) => tab.ownerThreadId === threadId && !tab.page.isClosed())
         .map(async (tab) => ({ tab_id: tab.id, url: tab.page.url(), title: await safeTitle(tab.page) })));
       return { tabs, session_remaining_seconds: remainingSeconds(session) };
-    }, signal);
+    });
   }
 
   private async navigate(
@@ -457,10 +480,9 @@ export class BrowserUseRuntimeManager {
     timeoutMinutes: number,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    const state = this.state(userId);
-    return state.lock.run(async () => {
+    return this.withUser(userId, signal, async (state) => {
       this.assertNoOtherActiveThread(state, threadId);
-      const old = state.session;
+      const old = state.session.phase === "open" ? state.session.value : undefined;
       if (!old) {
         const created = await this.ensureSessionLocked(state, timeoutMinutes, signal);
         return {
@@ -500,7 +522,7 @@ export class BrowserUseRuntimeManager {
         warning: "Cookies and persistent storage were preserved, but unsaved forms, sessionStorage, dialogs, and JavaScript state were not.",
         session_remaining_seconds: remainingSeconds(replacement),
       };
-    }, signal);
+    });
   }
 
   private async closeSession(
@@ -508,17 +530,17 @@ export class BrowserUseRuntimeManager {
     threadId: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    const state = this.state(userId);
-    return state.lock.run(async () => {
+    return this.withUser(userId, signal, async (state) => {
       this.assertNoOtherActiveThread(state, threadId);
-      if (!state.session) return { closed: false, already_closed: true, profile_preserved: true };
-      const tabsClosed = new Set([
-        ...[...state.session.tabs.values()].filter((tab) => !tab.page.isClosed()).map((tab) => tab.page),
-        ...state.session.context.pages().filter((page) => !page.isClosed()),
-      ]).size;
+      if (state.session.phase === "closed") return { closed: false, already_closed: true, profile_preserved: true };
+      const session = state.session.phase === "open" ? state.session.value : undefined;
+      const tabsClosed = session ? new Set([
+        ...[...session.tabs.values()].filter((tab) => !tab.page.isClosed()).map((tab) => tab.page),
+        ...session.context.pages().filter((page) => !page.isClosed()),
+      ]).size : 0;
       await this.closeSessionLocked(state, "agent");
       return { closed: true, tabs_closed: tabsClosed, profile_preserved: true };
-    }, signal);
+    });
   }
 
   private async withTab<T>(
@@ -528,10 +550,8 @@ export class BrowserUseRuntimeManager {
     signal: AbortSignal | undefined,
     operation: (session: SessionState, tab: TabState) => Promise<T>,
   ): Promise<T> {
-    const state = this.state(userId);
-    return state.lock.run(async () => {
-      throwIfAborted(signal);
-      const session = state.session;
+    return this.withUser(userId, signal, async (state) => {
+      const session = state.session.phase === "open" ? state.session.value : undefined;
       if (!session || !session.browser.isConnected()) {
         throw new BrowserUseRuntimeError("browser_session_closed", "The browser session is closed. Open a new browser tab.");
       }
@@ -540,7 +560,7 @@ export class BrowserUseRuntimeManager {
         throw new BrowserUseRuntimeError("tab_not_found", `Browser tab ${tabId} is not available in this thread.`);
       }
       return operation(session, tab);
-    }, signal);
+    });
   }
 
   private async ensureSessionLocked(
@@ -548,49 +568,38 @@ export class BrowserUseRuntimeManager {
     requestedTimeout: number | undefined,
     signal?: AbortSignal,
   ): Promise<SessionState> {
-    if (state.session?.browser.isConnected() && state.session.timeoutAt > Date.now() + DEADLINE_MARGIN_MS) {
-      return state.session;
+    const current = state.session;
+    if (current.phase === "open" && current.value.browser.isConnected() && current.value.timeoutAt > Date.now() + DEADLINE_MARGIN_MS) {
+      return current.value;
     }
-    if (state.session) await this.closeSessionLocked(state, "expired");
-    if (state.sessionPromise) return state.sessionPromise;
+    if (current.phase !== "closed") await this.closeSessionLocked(state, "expired");
     const timeoutMinutes = clampTimeout(
       requestedTimeout ?? this.input.config.BROWSER_USE_DEFAULT_TIMEOUT_MINUTES,
     );
-    state.sessionPromise = (async () => {
-      const profileId = await this.ensureProfile(state, signal);
-      const remote = await this.api.createBrowser({
-        profileId,
-        proxyCountryCode: null,
-        timeout: timeoutMinutes,
-        browserScreenWidth: SCREEN.width,
-        browserScreenHeight: SCREEN.height,
-        allowResizing: true,
-        enableRecording: false,
-      }, signal);
-      this.logUnexpectedProxyUsage(remote, "create");
-      if (!remote.cdpUrl) {
-        await this.stopRemote(remote.id).catch(() => undefined);
-        throw new Error("Browser Use Cloud did not return a CDP URL.");
-      }
-      let browser: Browser;
-      try {
-        browser = await this.connect(remote.cdpUrl, this.input.config.BROWSER_USE_API_TIMEOUT_MS);
-      } catch (error) {
-        await this.stopRemote(remote.id).catch(() => undefined);
-        throw error;
-      }
+    const profileId = await this.ensureProfile(state, signal);
+    const remote = await this.api.createBrowser({
+      profileId,
+      proxyCountryCode: null,
+      timeout: timeoutMinutes,
+      browserScreenWidth: SCREEN.width,
+      browserScreenHeight: SCREEN.height,
+      allowResizing: true,
+      enableRecording: false,
+    }, signal);
+    this.logUnexpectedProxyUsage(remote, "create");
+    const timeout = Date.parse(remote.timeoutAt);
+    const timeoutAt = Number.isFinite(timeout) ? timeout : Date.now() + timeoutMinutes * 60_000;
+    let browser: Browser | undefined;
+    try {
+      if (!remote.cdpUrl) throw new Error("Browser Use Cloud did not return a CDP URL.");
+      browser = await this.connect(remote.cdpUrl, this.input.config.BROWSER_USE_API_TIMEOUT_MS);
       const context = browser.contexts()[0];
-      if (!context) {
-        await browser.close().catch(() => undefined);
-        await this.stopRemote(remote.id).catch(() => undefined);
-        throw new Error("Browser Use Cloud did not provide a profile browser context.");
-      }
-      const timeoutAt = Date.parse(remote.timeoutAt);
+      if (!context) throw new Error("Browser Use Cloud did not provide a profile browser context.");
       const session: SessionState = {
         id: remote.id,
         profileId,
         storageSignature: await browserStorageSignature(context),
-        timeoutAt: Number.isFinite(timeoutAt) ? timeoutAt : Date.now() + timeoutMinutes * 60_000,
+        timeoutAt,
         timeoutMinutes,
         browser,
         context,
@@ -598,18 +607,16 @@ export class BrowserUseRuntimeManager {
         downloadHints: [],
         downloadSelections: new Map(),
       };
-      state.session = session;
+      state.session = { phase: "open", value: session };
       this.scheduleCleanup(state);
-      this.input.logger?.info("Browser Use session ready", {
-        userId: state.userId,
-        timeoutMinutes,
-      });
+      this.input.logger?.info("Browser Use session ready", { userId: state.userId, timeoutMinutes });
       return session;
-    })();
-    try {
-      return await state.sessionPromise;
-    } finally {
-      state.sessionPromise = undefined;
+    } catch (error) {
+      // Even a browser that never connected remains billable until the provider acknowledges stop.
+      state.session = { phase: "stop_pending", id: remote.id, timeoutAt };
+      await browser?.close().catch(() => undefined);
+      await this.closeSessionLocked(state, "setup_failed").catch(() => undefined);
+      throw error;
     }
   }
 
@@ -708,19 +715,21 @@ export class BrowserUseRuntimeManager {
     clearTimer(state, "idleTimer");
     clearTimer(state, "deadlineTimer");
     const session = state.session;
-    if (!session) return;
-    const deadlineDelay = Math.max(0, session.timeoutAt - Date.now() - DEADLINE_MARGIN_MS);
-    state.deadlineTimer = setTimeout(() => void this.autoClose(state, "deadline"), deadlineDelay);
+    if (this.lifecycle.phase !== "running" || session.phase === "closed") return;
+    const timeoutAt = session.phase === "open" ? session.value.timeoutAt : session.timeoutAt;
+    const deadlineDelay = Math.max(0, timeoutAt - Date.now() - DEADLINE_MARGIN_MS);
+    state.deadlineTimer = setTimeout(() => void this.autoClose(state, session, "deadline"), deadlineDelay);
     state.deadlineTimer.unref?.();
     if (!state.activeTurns.size) {
       const idleDelay = Math.max(0, Math.min(this.input.config.BROWSER_USE_IDLE_TIMEOUT_MS, deadlineDelay));
-      state.idleTimer = setTimeout(() => void this.autoClose(state, "idle"), idleDelay);
+      state.idleTimer = setTimeout(() => void this.autoClose(state, session, "idle"), idleDelay);
       state.idleTimer.unref?.();
     }
   }
 
-  private async autoClose(state: UserState, reason: string): Promise<void> {
+  private async autoClose(state: UserState, expected: BrowserSession, reason: "idle" | "deadline"): Promise<void> {
     await state.lock.run(async () => {
+      if (this.lifecycle.phase !== "running" || state.session !== expected) return;
       if (reason === "idle" && state.activeTurns.size) {
         this.scheduleCleanup(state);
         return;
@@ -738,8 +747,32 @@ export class BrowserUseRuntimeManager {
   private async closeSessionLocked(state: UserState, reason: string): Promise<void> {
     clearTimer(state, "idleTimer");
     clearTimer(state, "deadlineTimer");
-    const session = state.session;
-    if (!session) return;
+    if (state.session.phase === "closed") return;
+    const session = state.session.phase === "open" ? state.session.value : undefined;
+    if (state.session.phase === "open") {
+      state.session = await this.prepareStop(state.session.value);
+    }
+    const pending = state.session;
+    try {
+      await this.stopRemote(pending.id);
+      if (pending.profileSave?.before?.updatedAt) {
+        const saved = await this.waitForProfileSave(pending.profileSave.id, pending.profileSave.before);
+        if (!saved) this.input.logger?.warn("Browser Use profile save was not confirmed before disconnect", {
+          userId: state.userId,
+          reason,
+        });
+      } else if (pending.profileSave) {
+        // The provider saves asynchronously. Keep CDP connected when profile metadata cannot be polled.
+        await delay(PROFILE_SAVE_TIMEOUT_MS);
+      }
+      state.session = { phase: "closed" };
+    } finally {
+      await session?.browser.close().catch(() => undefined);
+    }
+    this.input.logger?.info("Browser Use session stopped", { userId: state.userId, reason });
+  }
+
+  private async prepareStop(session: SessionState): Promise<Extract<BrowserSession, { phase: "stop_pending" }>> {
     const finalStorageSignature = await browserStorageSignature(session.context);
     // An unavailable initial or final snapshot means the storage state is unknown,
     // not unchanged. Wait for the provider's profile-save signal in that case so
@@ -757,31 +790,10 @@ export class BrowserUseRuntimeManager {
     const profileBefore = storageChanged
       ? await this.api.getProfile(session.profileId).catch(() => undefined)
       : undefined;
-    let stopError: unknown;
-    try {
-      await this.stopRemote(session.id);
-      if (profileBefore?.updatedAt) {
-        const saved = await this.waitForProfileSave(session.profileId, profileBefore);
-        if (!saved) this.input.logger?.warn("Browser Use profile save was not confirmed before disconnect", {
-          userId: state.userId,
-          reason,
-        });
-      } else if (storageChanged) {
-        // Browser Use persists profile state asynchronously after stop. Keep CDP connected
-        // briefly if the profile metadata cannot be polled, or the just-stopped browser can
-        // discard the state before the provider finishes saving it.
-        await delay(PROFILE_SAVE_TIMEOUT_MS);
-      }
-    } catch (error) {
-      stopError = error;
-    } finally {
-      await session.browser.close().catch(() => undefined);
-    }
-    if (stopError) throw stopError;
-    // Keep the provider ID until stop is acknowledged. Disconnecting CDP alone
-    // does not stop billing, and a failed stop must remain retryable.
-    state.session = undefined;
-    this.input.logger?.info("Browser Use session stopped", { userId: state.userId, reason });
+    return {
+      phase: "stop_pending", id: session.id, timeoutAt: session.timeoutAt,
+      ...(storageChanged ? { profileSave: { id: session.profileId, before: profileBefore } } : {}),
+    };
   }
 
   private async waitForProfileSave(profileId: string, before: BrowserUseProfile): Promise<boolean> {

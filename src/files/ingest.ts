@@ -16,12 +16,10 @@ const FILE_SUMMARY_MAX_CHARS = 180;
 const OUTLINE_PREVIEW_HEADINGS = 5;
 
 export type AcceptedFileType = FileRow["type"];
-type FileIngestStage = "extracting" | "indexing";
-export interface FileIngestProgress {
-  stage: FileIngestStage;
-  completed?: number;
-  total?: number;
-}
+export type FileIngestProgress =
+  | { stage: "extracting" }
+  | { stage: "indexing"; completed: number; total: number };
+
 type FileIngestStageReporter = (progress: FileIngestProgress) => void | Promise<void>;
 
 export function classifyFile(name: string, mime = "", bytes?: Uint8Array): AcceptedFileType {
@@ -137,15 +135,9 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
     });
     return { fileId: file.id, card: cardForFile(file, [], input.name), inline: false, type };
   }
-  let fileId: FileRow["id"] | undefined;
-  let completed = false;
-  const cleanup = async () => {
-    if (fileId !== undefined) {
-      await input.repo.deleteFileIfUnattached(fileId);
-    }
-  };
-  const finish = async (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): Promise<FileIngestResult> => {
-    completed = true;
+  let registration: { phase: "unregistered" | "complete" } | { phase: "indexing"; fileId: string } = { phase: "unregistered" };
+  const finish = (file: FileRow, card: string, inline: boolean, logDetail: Record<string, unknown>): FileIngestResult => {
+    registration = { phase: "complete" };
     input.logger?.info("file ingest complete", {
       fileId: file.id,
       name: input.name,
@@ -185,7 +177,7 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
       summary: firstLine(content),
       isInline: inline,
     });
-    fileId = file.id;
+    registration = { phase: "indexing", fileId: file.id };
     input.logger?.debug("file row inserted", { fileId: file.id, name: input.name, inline });
     if (!inline) {
       const outline = await indexDocumentChunks(input, file, chunks);
@@ -196,22 +188,23 @@ export async function ingestFileBytes(input: FileIngestInput): Promise<FileInges
         chunks.map((chunk) => ({ idx: chunk.idx, heading_path: chunk.headingPath })),
         input.name,
       );
-      return await finish(file, card, false, { chunks: chunks.length });
+      return finish(file, card, false, { chunks: chunks.length });
     }
-    return await finish(file, cardForFile(file, [], input.name), true, { chars: content.length });
+    return finish(file, cardForFile(file, [], input.name), true, { chars: content.length });
   } catch (err) {
-    if (!completed) {
+    if (registration.phase !== "complete") {
+      const fileId = registration.phase === "indexing" ? registration.fileId : null;
       if (isAbortError(err) || input.signal?.aborted) {
-        input.logger?.info("file ingest cancelled", { name: input.name, type, fileId: fileId ?? null });
+        input.logger?.info("file ingest cancelled", { name: input.name, type, fileId });
       } else {
         input.logger?.warn("file ingest failed; cleaning up", {
           name: input.name,
           type,
-          fileId: fileId ?? null,
+          fileId,
           err: String(err),
         });
       }
-      await cleanup();
+      if (fileId !== null) await input.repo.deleteFileIfUnattached(fileId);
     }
     throw err;
   }

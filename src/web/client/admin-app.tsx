@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Button as BaseButton } from "@base-ui/react/button";
 import { Input } from "@base-ui/react/input";
 import { IconArchive, IconArrowDown, IconArrowLeft, IconBrain, IconChartBar, IconChevronRight, IconFolderOpen, IconGitFork, IconKey, IconLoader2, IconLock, IconMessage, IconMessageChatbot, IconMoon, IconSearch, IconSun, IconUsers } from "@tabler/icons-react";
+import { startPoll, type PollState } from "./request-state.js";
 import { AdminGate } from "./auth.js";
 import { BrandMark } from "./brand.js";
 import { apiJson } from "./api.js";
@@ -33,21 +34,29 @@ function Failure({ message, retry }: { message: string; retry?: () => void }) {
   return <div className="failure" role="alert">{message}{retry && <Button variant="outline" size="sm" onClick={retry}>Retry</Button>}</div>;
 }
 
+type AdminView = "users" | "threads" | "messages" | "memories" | "codex" | "allowed-users" | "usage";
 function selection() {
   const params = new URLSearchParams(location.search);
   const parse = (name: string) => { const value = Number(params.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
   const thread = params.get("thread");
   const threadId = thread !== null && isUuid(thread) ? thread : null;
-  const usage = params.get("view") === "usage";
-  return { userId: parse("user"), threadId, memories: Boolean(parse("user") && !threadId && params.get("view") === "memories"), codex: params.get("view") === "codex", allowedUsers: params.get("view") === "allowed-users", usage: !threadId && usage,
-    threadUsage: Boolean(threadId && (params.get("usage") === "thread" || usage)) };
+  const userId = parse("user");
+  const section = params.get("view");
+  let view: AdminView;
+  if (section === "codex" || section === "allowed-users") view = section;
+  else if (threadId) view = "messages";
+  else if (section === "usage") view = "usage";
+  else if (userId && section === "memories") view = "memories";
+  else view = userId ? "threads" : "users";
+  return { view, userId, threadId, threadUsage: view === "messages" && (params.get("usage") === "thread" || section === "usage") };
 }
 
 function usePages<T extends Pick<WebUser, "id"> | Pick<WebThread, "id">>(url: string | null) {
   const [items, setItems] = useState<T[]>([]);
   const [next, setNext] = useState<number | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [poll, setPoll] = useState<PollState<string>>({ kind: "ready" });
+  const error = "error" in poll ? poll.error : "";
+  const loading = poll.kind === "loading" || poll.kind === "retrying";
   const [revision, setRevision] = useState(0);
   const count = useRef(1);
   const more = useCallback(() => { count.current++; setRevision(v => v + 1); }, []);
@@ -59,7 +68,7 @@ function usePages<T extends Pick<WebUser, "id"> | Pick<WebThread, "id">>(url: st
     const load = async () => {
       if (busy || document.hidden) return;
       busy = true;
-      setLoading(true);
+      setPoll(startPoll);
       try {
         const all: T[] = [];
         let offset: number | null = 0;
@@ -68,9 +77,9 @@ function usePages<T extends Pick<WebUser, "id"> | Pick<WebThread, "id">>(url: st
           all.push(...result.items);
           offset = result.nextOffset;
         }
-        if (!controller.signal.aborted) { setItems([...new Map(all.map(item => [item.id, item])).values()]); setNext(offset); setError(""); }
-      } catch (err) { if (!controller.signal.aborted) setError(String(err instanceof Error ? err.message : err)); }
-      finally { busy = false; if (!controller.signal.aborted) setLoading(false); }
+        if (!controller.signal.aborted) { setItems([...new Map(all.map(item => [item.id, item])).values()]); setNext(offset); setPoll({ kind: "ready" }); }
+      } catch (err) { if (!controller.signal.aborted) setPoll({ kind: "failed", error: String(err instanceof Error ? err.message : err) }); }
+      finally { busy = false; }
     };
     void load();
     const interval = setInterval(() => void load(), 10_000);
@@ -95,8 +104,9 @@ function App() {
   const [selected, setSelected] = useState(selection);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
-  const users = usePages<WebUser>(selected.usage || selected.codex || selected.allowedUsers ? null : `/api/users?q=${encodeURIComponent(query)}`);
-  const threads = usePages<WebThread>(selected.userId && !selected.usage && !selected.codex && !selected.allowedUsers ? `/api/users/${selected.userId}/threads` : null);
+  const view = selected.view === "usage" || selected.view === "codex" || selected.view === "allowed-users" ? selected.view : "conversations";
+  const users = usePages<WebUser>(view !== "conversations" ? null : `/api/users?q=${encodeURIComponent(query)}`);
+  const threads = usePages<WebThread>(selected.userId && view === "conversations" ? `/api/users/${selected.userId}/threads` : null);
   const user = users.items.find(u => u.id === selected.userId);
   useEffect(() => { const timeout = setTimeout(() => setQuery(search), 250); return () => clearTimeout(timeout); }, [search]);
   useEffect(() => { const pop = () => setSelected(selection()); window.addEventListener("popstate", pop); return () => window.removeEventListener("popstate", pop); }, []);
@@ -106,13 +116,12 @@ function App() {
     if (threadId) params.set("thread", String(threadId));
     if (usage) { if (threadId) params.set("usage", "thread"); else params.set("view", "usage"); }
     history.pushState(null, "", `/admin${params.size ? `?${params}` : ""}`);
-    setSelected({ userId, threadId, memories: false, codex: false, allowedUsers: false, usage: !threadId && usage, threadUsage: Boolean(threadId && usage) });
+    setSelected(selection());
   };
   const openCodex = () => { history.pushState(null, "", "/admin?view=codex"); setSelected(selection()); };
   const openAllowedUsers = () => { history.pushState(null, "", "/admin?view=allowed-users"); setSelected(selection()); };
   const openMemories = () => { history.pushState(null, "", `/admin?user=${selected.userId}&view=memories`); setSelected(selection()); };
-  const screen = selected.memories ? "messages" : selected.codex ? "codex" : selected.allowedUsers ? "allowed-users" : selected.usage ? "usage" : selected.threadId ? "messages" : selected.userId ? "threads" : "users";
-  const view = selected.codex ? "codex" : selected.allowedUsers ? "allowed-users" : selected.usage ? "usage" : "conversations";
+  const screen = selected.view === "memories" ? "messages" : selected.view;
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <nav className="app-navigation" aria-label="Main navigation">
@@ -141,7 +150,7 @@ function App() {
     </aside>
     <aside className="threads-pane pane" aria-label="Conversations">
       <header className="pane-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to people" onClick={() => navigate(null, null)}><IconArrowLeft aria-hidden="true" /></Button><div><h2>{user ? userLabel(user) : "Threads"}</h2>{selected.userId && <details className="person-details"><summary>Details</summary><p>Telegram ID {selected.userId}</p></details>}</div></header>
-      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.memories}><IconBrain aria-hidden="true" /> Memories</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><IconChartBar aria-hidden="true" /> Usage</Button></div>}
+      {selected.userId && <div className="person-usage"><Button variant="ghost" onClick={openMemories} aria-pressed={selected.view === "memories"}><IconBrain aria-hidden="true" /> Memories</Button><Button variant="ghost" onClick={() => navigate(selected.userId, null, true)}><IconChartBar aria-hidden="true" /> Usage</Button></div>}
       <div className="pane-scroll thread-list">
         {threads.error && <Failure message={threads.error} retry={threads.retry} />}
         {!selected.userId ? null : !threads.items.length && threads.loading ? <Loading /> : !threads.items.length ? <Notice title="No conversations yet" /> : <div className="conversation-list">{threads.items.map(t => <BaseButton key={t.id} className={cn("thread-row", selected.threadId === t.id && "selected")} aria-current={selected.threadId === t.id ? "true" : undefined} onClick={() => navigate(selected.userId, t.id)}>
@@ -155,8 +164,8 @@ function App() {
       </div>
     </aside>
     </>}
-    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.memories ? "Saved memories" : selected.codex ? "Codex connection" : selected.allowedUsers ? "Allowed users" : selected.usage ? "Usage statistics" : "Message history"}>
-      {selected.memories && selected.userId ? <Memories key={selected.userId} load={(offset, signal) => apiJson(`/api/users/${selected.userId}/memories?offset=${offset}`, { signal })} back={() => navigate(selected.userId, null)} /> : selected.codex ? <CodexConnection /> : selected.allowedUsers ? <AllowedUsers /> : selected.usage ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Messages</h2></div><span className="read-only-label"><IconLock aria-hidden="true" size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><IconFolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "Select a person"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Then choose a conversation to view its messages."} /></div></>}
+    <main id="main-content" tabIndex={-1} className="messages-pane pane" aria-label={selected.view === "memories" ? "Saved memories" : selected.view === "codex" ? "Codex connection" : selected.view === "allowed-users" ? "Allowed users" : selected.view === "usage" ? "Usage statistics" : "Message history"}>
+      {selected.view === "memories" && selected.userId ? <Memories key={selected.userId} load={(offset, signal) => apiJson(`/api/users/${selected.userId}/memories?offset=${offset}`, { signal })} back={() => navigate(selected.userId, null)} /> : selected.view === "codex" ? <CodexConnection /> : selected.view === "allowed-users" ? <AllowedUsers /> : selected.view === "usage" ? <UsageDashboard key={selected.userId} userId={selected.userId} title={selected.userId ? user ? userLabel(user) : `Telegram ID ${selected.userId}` : "All conversations"} back={() => navigate(selected.userId, null)} all={() => navigate(null, null, true)} openThread={navigate} /> : selected.threadId ? <Transcript key={selected.threadId} threadId={selected.threadId} back={() => navigate(selected.userId, null)} showUsage={selected.threadUsage} /> : <><header className="pane-header"><div><h2>Messages</h2></div><span className="read-only-label"><IconLock aria-hidden="true" size={13} /> Read-only</span></header><div className="welcome"><div className="welcome-mark"><IconFolderOpen size={28} aria-hidden="true" /></div><Notice title={selected.userId ? "Select a conversation" : "Select a person"} description={selected.userId ? "Choose a thread to view its messages and shared files." : "Then choose a conversation to view its messages."} /></div></>}
     </main>
     </div>
   </div>;
@@ -165,14 +174,15 @@ function App() {
 function Transcript({ threadId, back, showUsage }: { threadId: string; back: () => void; showUsage: boolean }) {
   const [data, setData] = useState<WebHistory | null>(null);
   const dataRef = useRef<WebHistory | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [poll, setPoll] = useState<PollState<string>>({ kind: "ready" });
+  const error = "error" in poll ? poll.error : "";
+  const busy = poll.kind === "loading" || poll.kind === "retrying";
   const [revision, setRevision] = useState(0);
   const [files, setFiles] = useState(new Map<string, LoadedAttachment>());
   const [loader] = useState(() => new AttachmentLoader(threadId, setFiles));
   const autoLoad = useCallback((file: WebAttachment) => loader.load(file, "auto"), [loader]);
   const controller = useRef<AbortController | null>(null);
-  const fetching = useRef(false);
+  const fetching = useRef<AbortSignal | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const scrollPosition = useRef<{ top: number; height: number } | null>(null);
   const positioned = useRef(false);
@@ -201,9 +211,9 @@ function Transcript({ threadId, back, showUsage }: { threadId: string; back: () 
     return () => observer.disconnect();
   }, [Boolean(data)]);
   const load = useCallback(async (older = false) => {
-    if (fetching.current || !controller.current || controller.current.signal.aborted) return;
-    fetching.current = true; setBusy(true);
-    const signal = controller.current.signal;
+    const signal = controller.current?.signal;
+    if (!signal || signal.aborted || fetching.current === signal) return;
+    fetching.current = signal; setPoll(startPoll);
     try {
       const previous = dataRef.current;
       let cursor: number | null = older ? previous?.olderCursor ?? null : previous?.messages.slice(-50)[0]?.id ?? null;
@@ -218,9 +228,9 @@ function Transcript({ threadId, back, showUsage }: { threadId: string; back: () 
       const messages = [...new Map([...(previous?.messages ?? []), ...received].map(m => [m.id, m])).values()].sort((a, b) => a.id - b.id);
       const merged = { ...latest, messages, olderCursor: older || !previous ? latest.olderCursor : previous.olderCursor };
       if (older && viewport.current) scrollPosition.current = { top: viewport.current.scrollTop, height: viewport.current.scrollHeight };
-      dataRef.current = merged; setData(merged); setError("");
-    } catch (err) { if (!signal.aborted) setError(err instanceof Error ? err.message : "Could not load this conversation."); }
-    finally { fetching.current = false; if (!signal.aborted) setBusy(false); }
+      dataRef.current = merged; setData(merged); setPoll({ kind: "ready" });
+    } catch (err) { if (!signal.aborted) setPoll({ kind: "failed", error: err instanceof Error ? err.message : "Could not load this conversation." }); }
+    finally { if (fetching.current === signal) fetching.current = null; }
   }, [threadId]);
   useEffect(() => {
     controller.current = new AbortController();

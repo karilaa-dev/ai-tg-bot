@@ -16,8 +16,7 @@ type Phase = { kind: "ask" } | { kind: "saving" } | { kind: "failed" } | { kind:
 export function TimeZonePrompt({ userId, onChoose }: { userId: number; onChoose: () => void }) {
   const { state, update } = usePreferences();
   const [device] = useState(deviceZone);
-  const [dismissed, setDismissed] = useState(() => wasDismissed(userId));
-  const [phase, setPhase] = useState<Phase>({ kind: "ask" });
+  const [phase, setPhase] = useState<Phase>(() => ({ kind: wasDismissed(userId) ? "closed" : "ask" }));
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -28,7 +27,7 @@ export function TimeZonePrompt({ userId, onChoose }: { userId: number; onChoose:
 
   // An offset saved in Telegram counts as set; Settings offers to name it.
   const unset = state.kind === "ready" && state.settings.timeZone === null && state.settings.timezoneOffsetMinutes === null;
-  const asking = (phase.kind === "ask" || phase.kind === "failed") && unset && !dismissed;
+  const asking = (phase.kind === "ask" || phase.kind === "failed") && unset;
   if (!device || (!asking && phase.kind !== "saving" && phase.kind !== "saved")) return null;
 
   const accept = async () => {
@@ -43,7 +42,7 @@ export function TimeZonePrompt({ userId, onChoose }: { userId: number; onChoose:
   const close = () => {
     if (phase.kind === "saved") { setPhase({ kind: "closed" }); return; }
     rememberDismissed(userId);
-    setDismissed(true);
+    setPhase({ kind: "closed" });
   };
   return <ZoneCard zone={device} phase={phase} onAccept={() => void accept()} onChoose={onChoose} onClose={close} />;
 }

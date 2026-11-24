@@ -1,3 +1,4 @@
+import { unfinishedTurnStatuses } from "../turnLifecycle.js";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { ScheduleError, ScheduleInputSchema, SchedulePatchSchema, MIN_SCHEDULE_INTERVAL_MS,
@@ -76,7 +77,7 @@ export class SchedulesRepo {
     return this.db.query(sql`select s.id, s.user_id from chat_schedules s join threads t on t.id = s.thread_id
       where s.enabled = 1 and s.next_run_at <= ${now} and t.archived = 0
       and not exists (select 1 from turn_runs r where r.thread_id = s.thread_id
-        and (r.status in ('queued', 'running', 'awaiting_delivery')
+        and (r.status in (${unfinishedTurnStatuses})
           or (r.schedule_id is not null and coalesce(r.started_at, r.accepted_at) > ${now - MIN_SCHEDULE_INTERVAL_MS})))
       order by s.next_run_at, s.id limit 100`);
   }
@@ -90,7 +91,7 @@ export class SchedulesRepo {
         const user = await new UsersRepo(tx).get(userId);
         if (!thread || thread.user_id !== userId || thread.archived || !user) return null;
         const busy = await queryOne(tx, sql`select id from turn_runs where thread_id = ${thread.id}
-          and (status in ('queued', 'running', 'awaiting_delivery')
+          and (status in (${unfinishedTurnStatuses})
             or (schedule_id is not null and coalesce(started_at, accepted_at) > ${now - MIN_SCHEDULE_INTERVAL_MS})) limit 1`);
         if (busy) return null;
         const text = `[Scheduled check: ${row.title}]\nRun the following saved task now. This is an existing schedule occurrence; do not create or change schedules unless the saved task explicitly requests it.\n\n${row.prompt}`;

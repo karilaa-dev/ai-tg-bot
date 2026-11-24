@@ -71,6 +71,25 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.getProfile.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("ignores a deadline from the previous session queued during rollover", async () => {
+    vi.useFakeTimers();
+    const fixture = await runtimeFixture();
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+    const { tab_id } = await browser.open("https://example.com", 5);
+    const gate = { started: deferred<void>(), release: deferred<void>() };
+    fixture.browsers[0]!.context.pageList[0]!.nextGotoGate = gate;
+    const navigating = browser.navigate(String(tab_id), "https://example.org");
+    await gate.started.promise;
+    const extending = browser.extendSession(20);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    gate.release.resolve();
+    await Promise.all([navigating, extending]);
+
+    expect(await browser.listTabs()).toMatchObject({ tabs: [{ tab_id, url: "https://example.org" }] });
+    expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(1);
+  });
+
   it("reports when an existing session cannot apply a longer open timeout", async () => {
     const fixture = await runtimeFixture();
     await fixture.manager.beginTurn(7, THREAD_ID);
@@ -158,6 +177,22 @@ describe("BrowserUseRuntimeManager", () => {
     await expect(browser.closeSession()).resolves.toMatchObject({ closed: true });
   });
 
+  it("requires provider stop acknowledgement before replacing a browser that failed during setup", async () => {
+    const fixture = await runtimeFixture();
+    fixture.api.createBrowser.mockResolvedValueOnce(activeBrowser("unconnected", 5, ""));
+    fixture.api.stopBrowser.mockRejectedValue(new BrowserUseHttpError(403, "stop denied"));
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+
+    await expect(browser.open("https://example.com")).rejects.toThrow("CDP URL");
+    await expect(browser.open("https://example.org")).rejects.toThrow();
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(1);
+
+    fixture.api.stopBrowser.mockImplementation(async (id) => stoppedBrowser(id));
+    await expect(browser.open("https://example.org")).resolves.toMatchObject({ url: "https://example.org" });
+    expect(fixture.api.stopBrowser).toHaveBeenLastCalledWith("unconnected", expect.any(AbortSignal));
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(2);
+  });
+
   it("does not poison later no-proxy sessions when the provider reports proxy usage", async () => {
     const fixture = await runtimeFixture();
     fixture.api.stopBrowser.mockResolvedValueOnce({
@@ -227,6 +262,39 @@ describe("BrowserUseRuntimeManager", () => {
     await expect(active).resolves.toMatchObject({ url: "https://example.com/blocked" });
     await expect(cancelled).rejects.toThrow("stopped");
     await expect(later).resolves.toMatchObject({ tabs: [expect.any(Object)] });
+  });
+
+  it("drains active work and rejects queued and new browser operations during shutdown", async () => {
+    const fixture = await runtimeFixture();
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+    const opened = await browser.open("https://example.com");
+    const gate = { started: deferred<void>(), release: deferred<void>() };
+    fixture.browsers[0]!.context.pageList[0]!.nextGotoGate = gate;
+    const active = browser.navigate(String(opened.tab_id), "https://example.org");
+    await gate.started.promise;
+    const queued = expect(browser.open("https://example.net")).rejects.toMatchObject({ code: "browser_runtime_stopped" });
+    const stopping = fixture.manager.dispose();
+    expect(fixture.manager.dispose()).toBe(stopping);
+    await expect(browser.listTabs()).rejects.toMatchObject({ code: "browser_runtime_stopped" });
+    await expect(fixture.manager.beginTurn(8, THREAD_ID)).rejects.toMatchObject({ code: "browser_runtime_stopped" });
+    expect(fixture.api.stopBrowser).not.toHaveBeenCalled();
+    gate.release.resolve();
+    await Promise.all([active, queued, stopping]);
+    await expect(browser.open("https://example.net")).rejects.toMatchObject({ code: "browser_runtime_stopped" });
+    expect(fixture.api.createBrowser).toHaveBeenCalledTimes(1);
+    expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries an unacknowledged provider stop on a later disposal", async () => {
+    const fixture = await runtimeFixture();
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+    await browser.open("https://example.com");
+    fixture.api.stopBrowser.mockRejectedValueOnce(new BrowserUseHttpError(403, "stop denied"));
+    await fixture.manager.dispose();
+    await fixture.manager.dispose();
+    await fixture.manager.dispose();
+    expect(fixture.api.stopBrowser).toHaveBeenCalledTimes(2);
+    expect(fixture.api.stopBrowser.mock.calls[0]![0]).toBe(fixture.api.stopBrowser.mock.calls[1]![0]);
   });
 
   it("retains user state while a browser operation is queued behind endTurn", async () => {

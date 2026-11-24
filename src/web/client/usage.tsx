@@ -1,3 +1,4 @@
+import { startPoll, type PollState } from "./request-state.js";
 import { useEffect, useId, useRef, useState } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { Select } from "@base-ui/react/select";
@@ -143,24 +144,25 @@ export function ThreadUsage({ threadId, initiallyOpen = false }: { threadId: str
 
 function useUsageReport(userId: number | null, threadId: string | null, days: number) {
   const [report, setReport] = useState<WebUsageReport | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [poll, setPoll] = useState<PollState<string>>({ kind: "ready" });
+  const error = "error" in poll ? poll.error : "";
+  const busy = poll.kind === "loading" || poll.kind === "retrying";
   const [revision, setRevision] = useState(0);
-  useEffect(() => { setReport(null); setError(""); }, [userId, threadId, days]);
+  useEffect(() => { setReport(null); setPoll({ kind: "ready" }); }, [userId, threadId, days]);
   useEffect(() => {
     const controller = new AbortController();
     let fetching = false;
     const load = async () => {
       if (fetching || document.hidden) return;
-      fetching = true; setBusy(true);
+      fetching = true; setPoll(startPoll);
       try {
         const query = new URLSearchParams({ days: String(days) });
         if (userId) query.set("user", String(userId));
         if (threadId) query.set("thread", String(threadId));
         const value = await apiJson<WebUsageReport>(`/api/usage?${query}`, { signal: controller.signal });
-        if (!controller.signal.aborted) { setReport(value); setError(""); }
-      } catch (err) { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load usage."); }
-      finally { fetching = false; if (!controller.signal.aborted) setBusy(false); }
+        if (!controller.signal.aborted) { setReport(value); setPoll({ kind: "ready" }); }
+      } catch (err) { if (!controller.signal.aborted) setPoll({ kind: "failed", error: err instanceof Error ? err.message : "Could not load usage." }); }
+      finally { fetching = false; }
     };
     void load();
     const timer = setInterval(() => void load(), 30_000);

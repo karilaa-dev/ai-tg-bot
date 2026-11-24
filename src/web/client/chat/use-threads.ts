@@ -1,3 +1,4 @@
+import type { PollState } from "../request-state.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatThread } from "../../chat-types.js";
 import { chatApi, type ChatReadResult } from "./api.js";
@@ -6,9 +7,9 @@ import { chatApi, type ChatReadResult } from "./api.js";
 export function useThreads() {
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [next, setNext] = useState<number | null>(null);
-  /** Rendered in the current language by the sidebar; null when the last poll succeeded. */
-  const [error, setError] = useState<unknown>(null);
-  const [status, setStatus] = useState<"loading" | "ready">("loading");
+  const [poll, setPoll] = useState<PollState>({ kind: "loading" });
+  const status = poll.kind;
+  const error = "error" in poll ? poll.error : null;
   const [revision, setRevision] = useState(0);
   const pages = useRef(1);
   const active = useRef(false);
@@ -33,9 +34,9 @@ export function useThreads() {
         if (controller.signal.aborted || generation !== readGeneration.current) return;
         const unique = [...new Map(all.map(thread => [thread.id, thread])).values()];
         active.current = unique.some(thread => thread.activity !== null);
-        setThreads(unique); setNext(offset); setError(null); setStatus("ready");
+        setThreads(unique); setNext(offset); setPoll({ kind: "ready" });
       } catch (err) {
-        if (!controller.signal.aborted) { setError(err ?? new Error()); setStatus("ready"); }
+        if (!controller.signal.aborted && generation === readGeneration.current) setPoll({ kind: "failed", error: err ?? new Error() });
       } finally { busy = false; }
     };
     const loop = async () => {

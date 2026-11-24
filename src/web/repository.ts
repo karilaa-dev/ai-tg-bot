@@ -1,3 +1,4 @@
+import { unfinishedTurnStatuses, activeTurnStatuses } from "../db/turnLifecycle.js";
 import { sql } from "drizzle-orm";
 import type { SqlExecutor } from "../db/sql.js";
 import { valueList } from "../db/sql.js";
@@ -175,7 +176,7 @@ export class ConversationRepository {
     const pendingTurnIds = selected.flatMap(m => attachmentDeliveryTurnId(m) ?? []);
     const delivering = pendingTurnIds.length ? await this.db.query<{ id: number; thread_id: string }>(sql`
       select id, thread_id from turn_runs where id in (${valueList(pendingTurnIds)})
-        and status in ('running', 'awaiting_delivery') and lease_expires_at > ${Date.now()}
+        and status in (${activeTurnStatuses}) and lease_expires_at > ${Date.now()}
     `) : [];
     const messages = selected.map(m => messageView(m, attachments.get(m.id) ?? [], transcripts,
       delivering.some(run => run.id === attachmentDeliveryTurnId(m) && run.thread_id === m.thread_id)));
@@ -222,7 +223,7 @@ export class ConversationRepository {
         max(case when r.status <> 'queued' then r.lease_expires_at end) as lease,
         max(case when r.status <> 'queued' then r.started_at end) as started
       from turn_runs r join threads t on t.id = r.thread_id and t.user_id = r.user_id
-      where r.thread_id in (${valueList(threadIds)}) and r.status in ('queued', 'running', 'awaiting_delivery')
+      where r.thread_id in (${valueList(threadIds)}) and r.status in (${unfinishedTurnStatuses})
       group by r.thread_id
     `);
     const now = Date.now();

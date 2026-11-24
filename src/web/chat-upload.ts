@@ -69,9 +69,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
 }> {
   if (!request.body) throw invalid();
   const reader = request.body.getReader();
-  let directory: string | undefined;
-  let directoryToken: string | undefined;
-  let directoryInstance = storageInstance;
+  let spool: Awaited<ReturnType<typeof createUploadDirectory>> | undefined;
   let disk: Awaited<ReturnType<typeof createTemporaryUploadLease>> | undefined;
   let allowance = 0;
   let writtenBytes = 0;
@@ -79,13 +77,13 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
   let disposal: Promise<void> | undefined;
   const dispose = (): Promise<void> => disposal ??= (async () => {
     let removal: Error | undefined;
-    if (directory) {
-      try { await rm(directory, { recursive: true, force: true }); }
+    if (spool) {
+      try { await rm(spool.directory, { recursive: true, force: true }); }
       catch (error) { removal = error instanceof Error ? error : new Error(String(error)); }
     }
     // A failed removal stays owed: the lease ends but a retryable record keeps the directory tracked.
     // If ending the lease fails, it expires and recovery resolves everything it still owns.
-    await disk?.release(removal && directoryToken ? [{ kind: "directory", target: directoryToken, instance: directoryInstance }] : [])
+    await disk?.release(removal && spool ? [{ kind: "directory", target: spool.token, instance: spool.instance }] : [])
       .catch(() => undefined);
     if (removal) throw removal;
   })();
@@ -158,7 +156,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
     if (!buffer.subarray(0, first.length).equals(first)) throw invalid();
     buffer = buffer.subarray(first.length);
 
-    async function payload(write: (bytes: Buffer) => Promise<void>): Promise<boolean> {
+    async function payload(write: (bytes: Buffer) => Promise<void>): Promise<"next_part" | "epilogue"> {
       let search = 0;
       while (true) {
         checkInterrupted();
@@ -176,12 +174,12 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
           if (suffix.equals(CRLF)) {
             if (candidate) await write(buffer.subarray(0, candidate));
             buffer = buffer.subarray(suffixOffset + 2);
-            return false;
+            return "next_part";
           }
           if (suffix.equals(Buffer.from("--")) && (buffer.subarray(suffixOffset + 2, suffixOffset + 4).equals(CRLF) || (ended && buffer.length === suffixOffset + 2))) {
             if (candidate) await write(buffer.subarray(0, candidate));
             buffer = buffer.subarray(suffixOffset + (buffer.length === suffixOffset + 2 ? 2 : 4));
-            return true;
+            return "epilogue";
           }
           search = candidate + 1;
           continue;
@@ -201,19 +199,20 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
     let text = "";
     let requestId: string | undefined;
     let uploaded = 0;
-    let final = false;
-    while (!final) {
+    let boundaryState: "next_part" | "epilogue" = "next_part";
+    while (boundaryState === "next_part") {
       const part = await headers();
       if (part.name === "files") {
         if (part.filename === undefined || !part.filename || part.filename.length > 255 || /\p{Cc}/u.test(part.filename)) throw invalid("Invalid file name.");
         if (files.length >= MAX_CHAT_UPLOAD_FILES) throw new WebHttpError(413, `Upload up to ${MAX_CHAT_UPLOAD_FILES} files.`);
         disk ??= await createTemporaryUploadLease(db, userId);
-        if (!directory) ({ directory, token: directoryToken, instance: directoryInstance } = await createUploadDirectory(disk, storageInstance));
+        spool ??= await createUploadDirectory(disk, storageInstance);
+        const { directory } = spool;
         const filePath = join(directory, String(files.length));
         const file = await open(filePath, "wx", 0o600);
         let size = 0;
         try {
-          final = await payload(async bytes => {
+          boundaryState = await payload(async bytes => {
             size += bytes.length;
             uploaded += bytes.length;
             if (size > MAX_FILE_BYTES || uploaded > MAX_CHAT_UPLOAD_BYTES) throw new WebHttpError(413, "Upload exceeds the file size limit.");
@@ -222,7 +221,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
               if (writtenBytes) await disk!.written(writtenBytes);
               writtenBytes = 0;
               const additional = allowance < bytes.length ? Math.max(1024 ** 2, bytes.length - allowance) : 0;
-              await disk!.beforeWrite(directory!, additional, minimumFreeBytes);
+              await disk!.beforeWrite(directory, additional, minimumFreeBytes);
               allowance += additional;
               renewAt = Date.now() + IDLE_TIMEOUT_MS;
             }
@@ -257,7 +256,7 @@ export async function readChatUpload(request: Request, db: SqlExecutor, userId: 
           catch { throw invalid("Invalid upload text."); }
           if (value.length > limit) throw invalid("Upload text is too long.");
         };
-        final = await payload(async bytes => { decode(bytes); });
+        boundaryState = await payload(async bytes => { decode(bytes); });
         decode();
         if (part.name === "text") text = value;
         else {

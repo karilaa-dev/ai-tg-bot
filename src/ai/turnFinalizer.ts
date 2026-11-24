@@ -8,13 +8,21 @@ export class TurnCancelledError extends Error {
   }
 }
 
+type DeliveryOutcome = "confirmed" | "unknown" | "rejected";
+
 export class TurnFinalizer {
-  private phase: "running" | "cancelled" | "delivering" | "confirmed" | "unknown" | "rejected" = "running";
-  private pendingDeliveryWrite?: () => Promise<void>;
+  private phase: "running" | "cancelled" | "delivering" | DeliveryOutcome = "running";
+  private persistence:
+    | { phase: "clear" }
+    | { phase: "pending"; write: () => Promise<void> }
+    | { phase: "writing"; done: Promise<void> } = { phase: "clear" };
+  private get hasDeliveryOutcome(): boolean {
+    return this.phase === "confirmed" || this.phase === "unknown" || this.phase === "rejected";
+  }
   get deliveryUnknown(): boolean { return this.phase === "unknown"; }
   get cancelRequested(): boolean { return this.phase === "cancelled"; }
   executionFailed = false;
-  resultMessageId: number | null = null;
+  private deliveryRegistration?: { messageId: number; ready: Promise<void> };
 
   constructor(private readonly input: {
     repos: Repos;
@@ -46,61 +54,74 @@ export class TurnFinalizer {
     model?: string;
     usage?: unknown;
   }): Promise<void> {
-    this.phase = "delivering";
-    this.resultMessageId = result.assistantMessageId;
-    const transitioned = await this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
+    if (this.cancelRequested) throw new TurnCancelledError();
+    if (!this.beginDelivery()) throw new Error("Delivery already finalized.");
+    // Notification of the same persisted reply can be repeated while the lease check is in flight.
+    if (this.deliveryRegistration) {
+      if (this.deliveryRegistration.messageId !== result.assistantMessageId) throw new Error("A different reply already started delivery.");
+      return this.deliveryRegistration.ready;
+    }
+    const ready = this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
       resultMessageId: result.assistantMessageId,
       provider: result.provider,
       model: result.model,
       usage: result.usage,
-    }, this.input.ownerId);
-    if (!transitioned) {
-      // A remote /stop and this delivery transition compete on the same row.
-      // If cancellation won, no Telegram delivery may start.
-      this.phase = "cancelled";
+    }, this.input.ownerId).then(transitioned => {
+      if (transitioned) return;
+      if (!this.hasDeliveryOutcome) this.phase = "cancelled";
       throw new TurnCancelledError();
+    });
+    this.deliveryRegistration = { messageId: result.assistantMessageId, ready };
+    try { await ready; }
+    catch (error) {
+      this.deliveryRegistration = undefined;
+      throw error;
     }
   }
 
-  async confirmDelivery(assistantMessageId: number): Promise<void> {
-    this.resultMessageId = assistantMessageId;
-    // Set the in-memory terminal outcome before the database round trip so a
-    // concurrent /stop cannot overwrite an already confirmed Telegram send.
-    this.phase = "confirmed";
-    this.pendingDeliveryWrite = () => this.persistConfirmed();
-    await this.persistDeliveryOutcome();
-  }
-
-  private persistConfirmed(): Promise<void> {
-    return this.executionFailed
+  confirmDelivery(assistantMessageId: number): Promise<void> {
+    return this.settle("confirmed", () => this.executionFailed
       ? this.input.repos.turnRuns.markFailed(this.input.turnRunId, "agent_execution_failed", "delivered", this.input.ownerId)
-      : this.input.repos.turnRuns.markSucceeded(this.input.turnRunId, this.resultMessageId, this.input.ownerId);
+      : this.input.repos.turnRuns.markSucceeded(this.input.turnRunId, assistantMessageId, this.input.ownerId));
   }
 
-  async unknownDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
-    this.resultMessageId = assistantMessageId;
-    this.phase = "unknown";
-    this.pendingDeliveryWrite = () => this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown", this.input.ownerId);
-    await this.persistDeliveryOutcome();
+  unknownDelivery(_assistantMessageId: number, failureCode: string): Promise<void> {
+    return this.settle("unknown", () =>
+      this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "unknown", this.input.ownerId));
   }
 
-  async rejectDelivery(assistantMessageId: number, failureCode: string): Promise<void> {
-    this.resultMessageId = assistantMessageId;
-    this.phase = "rejected";
-    this.pendingDeliveryWrite = () => this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed", this.input.ownerId);
+  rejectDelivery(_assistantMessageId: number, failureCode: string): Promise<void> {
+    return this.settle("rejected", () =>
+      this.input.repos.turnRuns.markFailed(this.input.turnRunId, failureCode, "failed", this.input.ownerId));
+  }
+
+  private async settle(outcome: DeliveryOutcome, persist: () => Promise<void>): Promise<void> {
+    if (this.cancelRequested) throw new TurnCancelledError();
+    // The first reported send outcome is authoritative, including while its write is being retried.
+    if (!this.hasDeliveryOutcome) {
+      this.phase = outcome;
+      this.persistence = { phase: "pending", write: persist };
+    }
     await this.persistDeliveryOutcome();
   }
 
   recordExecutionFailure(): void {
-    if (this.phase === "confirmed" || this.phase === "unknown" || this.phase === "rejected") return;
+    if (this.hasDeliveryOutcome) return;
     this.executionFailed = true;
   }
 
   private async persistDeliveryOutcome(): Promise<void> {
     // Keep the actual send outcome across a failed bookkeeping write. The engine
     // suppresses errors after delivery starts, so finalization must retry it.
-    await this.pendingDeliveryWrite?.();
-    this.pendingDeliveryWrite = undefined;
+    const pending = this.persistence;
+    if (pending.phase === "clear") return;
+    if (pending.phase === "writing") return pending.done;
+    const done = pending.write().then(
+      () => { this.persistence = { phase: "clear" }; },
+      (error) => { this.persistence = pending; throw error; },
+    );
+    this.persistence = { phase: "writing", done };
+    await done;
   }
 
   async finishEngine(): Promise<{ deliveredSuccessfully: boolean }> {
@@ -121,7 +142,7 @@ export class TurnFinalizer {
   }
 
   async finishException(): Promise<void> {
-    if (this.phase === "confirmed" || this.phase === "unknown" || this.phase === "rejected") {
+    if (this.hasDeliveryOutcome) {
       await this.persistDeliveryOutcome().catch((error) => {
         this.input.logger.error("turn delivery outcome could not be persisted", {
           turnRunId: this.input.turnRunId,

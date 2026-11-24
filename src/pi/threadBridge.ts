@@ -50,21 +50,24 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   readonly modelRegistry: ModelRegistry;
   readonly providerRouter: PiProviderRouter;
   publishedWebsites: PublishedWebsite[] = [];
-  activeMessageId?: number;
+  get activeMessageId(): number | undefined { return this.turn?.transport.userMessageId; }
   outgoingFiles: OutgoingFiles;
   readonly officeValidation: OfficeValidation;
   get attachments(): CreatedFileAttachment[] { return this.outgoingFiles.items; }
   get outgoingBuffers() { return this.outgoingFiles.buffers; }
-  private visibilityScope?: ThreadScope;
-  private transport?: PiTurnTransport;
+  private turn?: {
+    transport: PiTurnTransport;
+    visibility: ThreadScope;
+    systemPrompt: string;
+    sessionContext: string;
+  };
   private readonly turnFileCache = new Map<string, ResolvedChatFile>();
   private readonly contextFileIds = new Set<string>();
   private readonly durableContextFileIds = new Set<string>();
-  private commandActivityLease?: SandboxActivityLease;
-  private commandActivityRelease?: Promise<void>;
-  private turnActive = false;
-  private turnSystemPrompt?: string;
-  private turnSessionContext?: string;
+  private commandActivity:
+    | { phase: "idle" }
+    | { phase: "held"; lease: SandboxActivityLease }
+    | { phase: "releasing"; done: Promise<void> } = { phase: "idle" };
   private readonly browserRuntime?: BrowserUseRuntimeManager;
   private turnBudget?: TurnBudget;
   private responseDraft = { text: "" };
@@ -100,20 +103,20 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       config: this.config, repos: this.repos, user: this.user, thread: this.thread,
       commandRuntime: this.commandRuntime, logger: this.logger,
       officeValidation: this.officeValidation,
-      fileResolver: this.transport?.fileResolver,
+      fileResolver: this.turn?.transport.fileResolver,
       selectContextFiles: (ids) => this.selectContextFiles(ids),
     });
   }
 
   async beginTurn(input: PiTurnTransport): Promise<void> {
-    if (this.turnActive) await this.endTurn();
+    if (this.turn) await this.endTurn();
     const currentUser = await this.repos.users.get(this.user.tg_id);
     if (currentUser) this.user = { ...this.user, memory_enabled: currentUser.memory_enabled };
-    this.commandActivityRelease = undefined;
+    this.commandActivity = { phase: "idle" };
     this.officeValidation.clear();
-    this.visibilityScope = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);
-    this.visibilityScope.fileIds = [...new Set([...this.visibilityScope.fileIds, ...(input.currentFileIds ?? [])])];
-    const fileIds = await this.repos.files.listRecoverableIds(this.visibilityScope.fileIds);
+    const visibility = await threadVisibilityScope(this.repos, this.thread, input.userMessageId);
+    visibility.fileIds = [...new Set([...visibility.fileIds, ...(input.currentFileIds ?? [])])];
+    const fileIds = await this.repos.files.listRecoverableIds(visibility.fileIds);
     const [turnSystemPrompt, turnSessionContext] = await Promise.all([
       renderSystemPrompt({ user: this.user, thread: this.thread, config: this.config }),
       renderThreadSessionContext({
@@ -122,15 +125,11 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
         thread: this.thread,
         maxMessageId: input.userMessageId,
         fileIds,
-        messageScopes: this.visibilityScope.messageScopes,
+        messageScopes: visibility.messageScopes,
       }),
     ]);
     await this.browserRuntime?.beginTurn(this.user.tg_id, this.thread.id);
-    this.turnActive = true;
-    this.turnSystemPrompt = turnSystemPrompt;
-    this.turnSessionContext = turnSessionContext;
-    this.transport = input;
-    this.activeMessageId = input.userMessageId;
+    this.turn = { transport: input, visibility, systemPrompt: turnSystemPrompt, sessionContext: turnSessionContext };
     this.outgoingFiles = this.createOutgoingFiles();
     this.publishedWebsites = [];
     this.responseDraft = { text: "" };
@@ -147,31 +146,25 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   }
 
   holdCommandActivity(): void {
-    if (this.commandActivityLease || !this.commandRuntime?.acquireActivityLease) return;
-    this.commandActivityLease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
+    if (this.commandActivity.phase !== "idle" || !this.commandRuntime?.acquireActivityLease) return;
+    const lease = this.commandRuntime.acquireActivityLease(this.user.tg_id, this.thread.id);
+    this.commandActivity = { phase: "held", lease };
   }
 
   async releaseCommandActivity(): Promise<void> {
-    this.commandActivityRelease ??= (async () => {
-      await this.officeValidation.dispose().catch(error => {
-        this.logger?.warn("Office preview cleanup failed", {threadId: this.thread.id, error: String(error)});
-      });
-      const lease = this.commandActivityLease;
-      this.commandActivityLease = undefined;
-      await lease?.release();
-    })();
-    await this.commandActivityRelease;
+    const activity = this.commandActivity;
+    if (activity.phase === "releasing") return activity.done;
+    const done = this.officeValidation.dispose().catch(error => {
+      this.logger?.warn("Office preview cleanup failed", {threadId: this.thread.id, error: String(error)});
+    }).then(() => activity.phase === "held" ? activity.lease.release() : undefined);
+    this.commandActivity = { phase: "releasing", done };
+    await done;
   }
 
   async endTurn(): Promise<void> {
     await this.releaseCommandActivity();
-    const wasActive = this.turnActive;
-    this.turnActive = false;
-    this.turnSystemPrompt = undefined;
-    this.turnSessionContext = undefined;
-    this.transport = undefined;
-    this.activeMessageId = undefined;
-    this.visibilityScope = undefined;
+    const wasActive = this.turn !== undefined;
+    this.turn = undefined;
     this.turnFileCache.clear();
     this.responseDraft.text = "";
     await this.outgoingFiles?.dispose();
@@ -179,11 +172,11 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   }
 
   currentTurnSystemPrompt(): string | undefined {
-    return this.turnSystemPrompt;
+    return this.turn?.systemPrompt;
   }
 
   currentTurnSessionContext(): string | undefined {
-    return this.turnSessionContext;
+    return this.turn?.sessionContext;
   }
 
   currentTurnBudget(): TurnBudget | undefined {
@@ -220,7 +213,7 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
   }
 
   async currentScope(): Promise<ThreadScope> {
-    const scope = this.visibilityScope ?? await threadVisibilityScope(this.repos, this.thread, this.activeMessageId);
+    const scope = this.turn?.visibility ?? await threadVisibilityScope(this.repos, this.thread, this.activeMessageId);
     // Visibility is fixed at acceptance; source recoverability is checked live.
     const fileIds = await this.repos.files.listRecoverableIds(scope.fileIds);
     return { ...scope, fileIds: [...new Set([...fileIds, ...this.attachments.map((file) => file.fileId)])] };
@@ -248,8 +241,8 @@ export class ThreadBridge implements PiToolBridge, ChatImageBridge, TurnPromptCo
       };
       return resolved;
     }
-    if (!this.transport) throw new Error(`File #${file.id} has no active chat transport resolver.`);
-    const loaded = await this.transport.resolveFile(file, signal);
+    if (!this.turn) throw new Error(`File #${file.id} has no active chat transport resolver.`);
+    const loaded = await this.turn.transport.resolveFile(file, signal);
     const resolved: ResolvedChatFile = {
       ...loaded,
       mimeType: file.type === "image"

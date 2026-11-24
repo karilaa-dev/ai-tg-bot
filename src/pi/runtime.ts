@@ -55,9 +55,7 @@ interface PiThreadRuntime {
 /** Cache bookkeeping. Owners pin a runtime for the whole operation, including work after model streaming ends. */
 interface CachedRuntime extends PiThreadRuntime {
   owners: number;
-  /** No longer in the cache; disposed once the last owner releases it. */
-  retired: boolean;
-  disposed: boolean;
+  phase: "cached" | "retired" | "disposed";
 }
 
 /**
@@ -338,7 +336,7 @@ export class PiRuntimeManager implements PiRuntimeService {
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("Pi persistent session did not return a session file.");
     await this.input.repos.threads.setPiSession(thread.id, sessionFile, session.sessionId);
-    const runtime: CachedRuntime = { session, bridge, lastUsedAt: Date.now(), owners: 0, retired: false, disposed: false };
+    const runtime: CachedRuntime = { session, bridge, lastUsedAt: Date.now(), owners: 0, phase: "cached" };
     // The creator owns the runtime from the moment it becomes visible to eviction.
     const lease = this.pin(runtime);
     this.runtimes.set(thread.id, runtime);
@@ -557,10 +555,10 @@ export class PiRuntimeManager implements PiRuntimeService {
         released = true;
         runtime.owners--;
         runtime.lastUsedAt = Date.now();
-        if (runtime.owners === 0 && runtime.retired) {
+        if (runtime.owners === 0 && runtime.phase === "retired") {
           this.retiredOwned.delete(runtime);
           await this.disposeEntry(runtime);
-        } else if (runtime.owners === 0) {
+        } else if (runtime.owners === 0 && runtime.phase === "cached") {
           // The cache may have grown past its bound while every runtime was owned.
           await this.prune();
         }
@@ -571,7 +569,7 @@ export class PiRuntimeManager implements PiRuntimeService {
   /** Removes the entry from the cache without disposing it; its last owner disposes it. */
   private retire(threadId: string, runtime: CachedRuntime): void {
     if (this.runtimes.get(threadId) === runtime) this.runtimes.delete(threadId);
-    runtime.retired = true;
+    runtime.phase = "retired";
     if (runtime.owners > 0) this.retiredOwned.add(runtime);
   }
 
@@ -584,8 +582,8 @@ export class PiRuntimeManager implements PiRuntimeService {
   }
 
   private async disposeEntry(runtime: CachedRuntime): Promise<void> {
-    if (runtime.disposed) return;
-    runtime.disposed = true;
+    if (runtime.phase === "disposed") return;
+    runtime.phase = "disposed";
     try {
       await runtime.bridge.endTurn();
     } catch (error) {

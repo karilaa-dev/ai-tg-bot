@@ -1,3 +1,4 @@
+import { activeTurnStatuses } from "../turnLifecycle.js";
 import { sql, type SQL } from "drizzle-orm";
 import { asRecord } from "../../util/records.js";
 import { messageScopePredicate } from "../search.js";
@@ -32,7 +33,7 @@ export function threadReadStatesQuery(dialect: SqlExecutor["dialect"], userId: n
     ? sql`trim(${sql.raw(column)}, ${whitespace})` : sql`btrim(${sql.raw(column)}, ${whitespace})`;
   const lesser = (left: SQL, right: SQL) => dialect === "sqlite" ? sql`min(${left}, ${right})` : sql`least(${left}, ${right})`;
   const marker = '%"attachmentDeliveryTurnId"%';
-  const activeRun = sql`r.user_id = ${userId} and r.status in ('running', 'awaiting_delivery')`;
+  const activeRun = sql`r.user_id = ${userId} and r.status in (${activeTurnStatuses})`;
   return sql`
     with recursive visible_threads(root_id, source_id, max_message_id, depth) as (
       select id, id, cast(null as bigint), 0 from threads

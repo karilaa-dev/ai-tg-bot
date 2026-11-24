@@ -2,28 +2,40 @@ import type { AccessControl } from "../access/control.js";
 import type { SchedulesRepo } from "../db/repos/schedules.js";
 import type { Logger } from "../logger.js";
 
+type SchedulerState =
+  | { phase: "idle" }
+  | { phase: "scanning" | "stopping"; done: Promise<void> }
+  | { phase: "waiting"; timer: ReturnType<typeof setTimeout> }
+  | { phase: "stopped" };
+
 export class ChatScheduler {
-  private timer: ReturnType<typeof setTimeout> | undefined;
-  private running: Promise<void> | undefined;
-  private stopped = false;
+  private state: SchedulerState = { phase: "idle" };
   constructor(private readonly input: { schedules: SchedulesRepo; access: Pick<AccessControl, "isAllowed">;
     wake(threadId: string): void; logger: Logger }) {}
 
   start(): void {
-    if (this.stopped || this.timer || this.running) return;
-    this.running = this.tick().catch(error => this.input.logger.error("schedule scan failed", { error: String(error) }))
+    if (this.state.phase !== "idle") return;
+    const done = Promise.resolve().then(() => this.tick())
+      .catch(error => this.input.logger.error("schedule scan failed", { error: String(error) }))
       .finally(() => {
-        this.running = undefined;
-        if (!this.stopped) {
-          this.timer = setTimeout(() => { this.timer = undefined; this.start(); }, 30_000);
-          this.timer.unref();
+        if (this.state.phase === "stopping") {
+          this.state = { phase: "stopped" };
+          return;
         }
+        const timer = setTimeout(() => {
+          this.state = { phase: "idle" };
+          this.start();
+        }, 30_000);
+        timer.unref();
+        this.state = { phase: "waiting", timer };
       });
+    this.state = { phase: "scanning", done };
   }
 
   async tick(now = Date.now()): Promise<void> {
+    if (this.isStopping()) return;
     for (const due of await this.input.schedules.due(now)) {
-      if (this.stopped) return;
+      if (this.isStopping()) return;
       try {
         if (!await this.input.access.isAllowed(due.user_id)) {
           await this.input.schedules.update(due.user_id, due.id, { enabled: false });
@@ -40,9 +52,18 @@ export class ChatScheduler {
     }
   }
 
+  private isStopping(): boolean {
+    return this.state.phase === "stopping" || this.state.phase === "stopped";
+  }
+
   async stop(): Promise<void> {
-    this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    await this.running;
+    if (this.state.phase === "scanning" || this.state.phase === "stopping") {
+      const { done } = this.state;
+      this.state = { phase: "stopping", done };
+      await done;
+      return;
+    }
+    if (this.state.phase === "waiting") clearTimeout(this.state.timer);
+    this.state = { phase: "stopped" };
   }
 }

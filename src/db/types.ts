@@ -1,3 +1,6 @@
+import type { TurnRunStatus } from "./turnLifecycle.js";
+export type { TurnRunStatus } from "./turnLifecycle.js";
+
 export type StoredFileType = "txt" | "csv" | "pdf" | "docx" | "image" | "audio" | "other";
 
 export type DialectName = "sqlite" | "postgres";
@@ -7,15 +10,6 @@ export type Locale = "en" | "ru";
 export type MessageRole = "user" | "assistant" | "system";
 
 export type MessageKind = "text" | "image" | "file" | "system";
-
-export type TurnRunStatus =
-  | "queued"
-  | "running"
-  | "awaiting_delivery"
-  | "succeeded"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
 
 export type TurnDeliveryStatus = "pending" | "delivered" | "unknown" | "failed";
 

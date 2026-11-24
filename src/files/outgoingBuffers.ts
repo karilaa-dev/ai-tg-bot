@@ -41,21 +41,21 @@ export class OutgoingBuffers {
     }
     this.used += size;
     this.peak = Math.max(this.peak, this.used);
-    let active = true;
+    let phase: "reserved" | "released" | "committed" = "reserved";
     const release = () => {
-      if (!active) return;
-      active = false;
+      if (phase !== "reserved") return;
+      phase = "released";
       this.used -= size;
       this.wake();
     };
     return {
       release,
       commit: (attachment, bytes, pinned = false) => {
-        if (!active || this.closed) throw new Error("Outgoing reservation is no longer active.");
+        if (phase !== "reserved" || this.closed) throw new Error("Outgoing reservation is no longer active.");
         if (bytes.length > size) throw new Error("File exceeded its reserved outgoing size.");
         this.release(attachment);
         this.used -= size - bytes.length;
-        active = false;
+        phase = "committed";
         attachment.data = bytes;
         this.entries.set(attachment, { size: bytes.length, pinned });
         this.wake();

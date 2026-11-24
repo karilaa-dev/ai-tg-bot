@@ -1,3 +1,4 @@
+import { activeTurnStatuses } from "../db/turnLifecycle.js";
 import { GrammyError, InputFile, type Api } from "grammy";
 import { sql } from "drizzle-orm";
 import type { MessageRow } from "../db/types.js";
@@ -5,7 +6,7 @@ import { renderFinalAnswer, renderFinalThinking, variantsForRichRetry } from "..
 import { closeOpenStructures } from "../telegram/mdRepair.js";
 import { isRichParseError, editRich, prefixPlainForThreadFallback, prefixRichForThreadFallback, sendRich, withThreadNotFoundFallback, type InputRichMessage } from "../telegram/richApi.js";
 import { MAX_CREATED_FILES_PER_ANSWER, MAX_FILE_BYTES, TG_PHOTO_MAX_BYTES } from "../files/limits.js";
-import type { CreatedFileAttachment } from "../files/types.js";
+import { attachmentMayHaveBeenSent, canSendTelegramAttachment, recordTelegramAttachmentSend, telegramAttachmentDelivery, type CreatedFileAttachment } from "../files/types.js";
 import { escapeHtml } from "../util/text.js";
 import { telegramFileSource } from "../files/telegramSource.js";
 import { OutgoingBuffers } from "../files/outgoingBuffers.js";
@@ -126,8 +127,7 @@ export async function sendFinalVisible(
   input = { ...input, outgoingBuffers: input.outgoingBuffers ?? new OutgoingBuffers() };
   const preparation = createAttachmentPreparation(input, outboundAttachments);
   preparation.start();
-  let deliveryFailed = false;
-  let deliveryError: unknown;
+  let delivery: { phase: "sending" } | { phase: "failed"; error: unknown } = { phase: "sending" };
   try {
     for (const rich of thinkingMessages) {
       const sent = await sendRichWithFallback(input, rich);
@@ -140,8 +140,7 @@ export async function sendFinalVisible(
     }
     await sendCreatedFileAttachments(input, assistantMessage, outboundAttachments, preparation);
   } catch (error) {
-    deliveryFailed = true;
-    deliveryError = error;
+    delivery = { phase: "failed", error };
   } finally {
     // Drain source reads before the terminal callback releases durable thread
     // ownership; the next worker may immediately start using this sandbox.
@@ -152,22 +151,21 @@ export async function sendFinalVisible(
     attachment.origin === "generated_image");
   const retainedAttachments = outboundAttachments.filter((attachment) => attachment.telegramDelivery);
   const unknownAttachments = outboundAttachments.filter((attachment) =>
-    !attachment.telegramDelivery && attachment.telegramDeliveryUnknown);
+    telegramAttachmentDelivery(attachment).phase === "unknown");
   const attachmentFailures = outboundAttachments.filter((attachment) => attachment.telegramDeliveryFailure);
   const generatedDeliveryFailed = generatedAttachments.length > 0
     && generatedAttachments.every((attachment) =>
-      !attachment.telegramDelivery && !attachment.telegramDeliveryUnknown);
+      !attachmentMayHaveBeenSent(attachment));
   const strictPhotoDeliveryFailed = outboundAttachments.some((attachment) =>
     attachment.delivery === "photo"
     && attachment.photoFallback === "none"
-    && !attachment.telegramDelivery
-    && Boolean(attachment.telegramDeliveryFailure || attachment.telegramDeliveryUnknown));
+    && ["unknown", "source_unavailable", "rejected"].includes(telegramAttachmentDelivery(attachment).phase));
   const everyRegularAttachmentFailed = !deliveredAnswer.trim()
     && outboundAttachments.length > 0
     && retainedAttachments.length === 0
     && unknownAttachments.length === 0
     && attachmentFailures.length === outboundAttachments.length;
-  if (!deliveryFailed && (generatedDeliveryFailed || strictPhotoDeliveryFailed || everyRegularAttachmentFailed)) {
+  if (delivery.phase === "sending" && (generatedDeliveryFailed || strictPhotoDeliveryFailed || everyRegularAttachmentFailed)) {
     deliveredAnswer = input.t(generatedDeliveryFailed || strictPhotoDeliveryFailed ? "image-delivery-failed" : "file-delivery-failed");
     try {
       for (const rich of renderFinalAnswer({ answerMd: deliveredAnswer })) {
@@ -175,17 +173,15 @@ export async function sendFinalVisible(
         answerIds.push(...sent.map((message) => message.message_id));
       }
     } catch (error) {
-      deliveryFailed = true;
-      deliveryError = error;
+      delivery = { phase: "failed", error };
     }
   }
-  if (!deliveryFailed && input.telegramPlaceholder?.state === "pending") {
+  if (delivery.phase === "sending" && input.telegramPlaceholder?.state === "pending") {
     try {
       const sent = await sendAnswerReplacingPlaceholder(input, { markdown: input.t("thinking-done") });
       answerIds.push(...sent.map(message => message.message_id));
     } catch (error) {
-      deliveryFailed = true;
-      deliveryError = error;
+      delivery = { phase: "failed", error };
     }
   }
   const persistedText = deliveredAnswer.trim() ? deliveredAnswer : attachmentPersistedText(retainedAttachments);
@@ -228,8 +224,8 @@ export async function sendFinalVisible(
           ?? null,
       })));
   } finally {
-    if (deliveryFailed) {
-      if (isDefinitiveTelegramRejection(deliveryError)) {
+    if (delivery.phase === "failed") {
+      if (isDefinitiveTelegramRejection(delivery.error)) {
         await input.onDeliveryFailed?.({
           assistantMessageId: assistantMessage.id,
           failureCode: "telegram_delivery_rejected",
@@ -242,7 +238,7 @@ export async function sendFinalVisible(
       }
     }
   }
-  if (deliveryFailed) throw deliveryError;
+  if (delivery.phase === "failed") throw delivery.error;
   input.logger.info("assistant message persisted", {
     threadId: input.thread.id,
     messageId: assistantMessage.id,
@@ -475,7 +471,7 @@ async function sendAttachmentBatch(
   if (!attachments.length) return;
   const delivered = attachments.filter((attachment) => attachment.telegramDelivery);
   for (const attachment of delivered) {
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined).catch((error) => {
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment).catch((error) => {
       input.logger.warn("failed to persist previously delivered attachment", {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
@@ -485,7 +481,7 @@ async function sendAttachmentBatch(
       });
     });
   }
-  const ready = attachments.filter((file) => !file.telegramDelivery && !file.telegramDeliveryUnknown);
+  const ready = attachments.filter(canSendTelegramAttachment);
   if (!ready.length) return;
   if (ready.length === 1) {
     await sendOneBufferedAttachment(input, assistantMessage, ready[0]!, strategy);
@@ -500,7 +496,7 @@ async function sendAttachmentBatch(
   } catch (err) {
     if (!isDefinitiveTelegramRejection(err)) {
       for (const attachment of ready) {
-        attachment.telegramDeliveryUnknown = true;
+        recordTelegramAttachmentSend(attachment, { phase: "unknown" });
         releaseAttachmentData(input, attachment);
       }
       input.logger.warn(`${strategy.label} media group delivery outcome is unknown; not retrying`, {
@@ -525,11 +521,11 @@ async function sendAttachmentBatch(
     return;
   }
   for (let index = 0; index < ready.length; index += 1) {
-    ready[index]!.telegramDelivery = telegramDeliveryFromSent(sent[index]!);
+    recordTelegramAttachmentSend(ready[index]!, { phase: "confirmed", receipt: telegramDeliveryFromSent(sent[index]!) });
     releaseAttachmentData(input, ready[index]!);
   }
   for (const attachment of ready) {
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined).catch((error) => {
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment).catch((error) => {
       input.logger.warn(`failed to persist delivered ${strategy.label}`, {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
@@ -556,9 +552,9 @@ async function sendOneBufferedAttachment(
   let failure: unknown;
   try {
     const sent = await strategy.sendOne(input, attachment);
-    attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+    recordTelegramAttachmentSend(attachment, { phase: "confirmed", receipt: telegramDeliveryFromSent(sent) });
     releaseAttachmentData(input, attachment);
-    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
+    await rememberSentCreatedFileAttachment(input, assistantMessage, attachment);
     input.logger.info(`${strategy.label} sent`, {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
@@ -581,7 +577,7 @@ async function sendOneBufferedAttachment(
     return;
   }
   if (!isDefinitiveTelegramRejection(failure)) {
-    attachment.telegramDeliveryUnknown = true;
+    recordTelegramAttachmentSend(attachment, { phase: "unknown" });
     releaseAttachmentData(input, attachment);
     input.logger.warn(`${strategy.label} delivery outcome is unknown; not retrying`, {
       threadId: input.thread.id,
@@ -596,9 +592,9 @@ async function sendOneBufferedAttachment(
     try {
       const sent = await documentSendStrategy.sendOne(input, attachment);
       attachment.delivery = "document";
-      attachment.telegramDelivery = telegramDeliveryFromSent(sent);
+      recordTelegramAttachmentSend(attachment, { phase: "confirmed", receipt: telegramDeliveryFromSent(sent) });
       releaseAttachmentData(input, attachment);
-      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment, undefined);
+      await rememberSentCreatedFileAttachment(input, assistantMessage, attachment);
       input.logger.info("generated image sent as a document after photo rejection", {
         threadId: input.thread.id,
         messageId: assistantMessage.id,
@@ -611,18 +607,19 @@ async function sendOneBufferedAttachment(
       failure = error;
     }
   }
-  if (attachment.telegramDelivery) {
+  const fallbackDelivery = telegramAttachmentDelivery(attachment);
+  if (fallbackDelivery.phase === "confirmed") {
     input.logger.warn("failed to persist delivered created file attachment", {
       threadId: input.thread.id,
       messageId: assistantMessage.id,
       fileId: attachment.fileId,
-      telegramMessageId: attachment.telegramDelivery.messageId,
+      telegramMessageId: fallbackDelivery.receipt.messageId,
       err: String(failure),
     });
     return;
   }
   if (!isDefinitiveTelegramRejection(failure)) {
-    attachment.telegramDeliveryUnknown = true;
+    recordTelegramAttachmentSend(attachment, { phase: "unknown" });
     releaseAttachmentData(input, attachment);
     input.logger.warn("created file attachment delivery outcome is unknown; not retrying", {
       threadId: input.thread.id,
@@ -640,7 +637,7 @@ async function sendOneBufferedAttachment(
     name: attachment.name,
     err: String(failure),
   });
-  attachment.telegramDeliveryFailure = "telegram_rejected";
+  recordTelegramAttachmentSend(attachment, { phase: "rejected" });
   releaseAttachmentData(input, attachment);
   await removeUnresolvableUndeliveredAttachment(input, attachment);
 }
@@ -695,10 +692,7 @@ async function rememberSentCreatedFileAttachment(
   input: TurnInput,
   assistantMessage: MessageRow,
   attachment: CreatedFileAttachment,
-  sent: SentTelegramFileMessage | undefined,
 ): Promise<void> {
-  const delivery = attachment.telegramDelivery ?? (sent ? telegramDeliveryFromSent(sent) : undefined);
-  if (delivery) attachment.telegramDelivery = delivery;
   await rememberTelegramDeliverySource(input, attachment);
   await retryAttachmentMetadataWrite(input, attachment, "message association", () =>
     writeVisibleDelivery(input, repos => repos.files.setMessageId(attachment.fileId, assistantMessage.id, {
@@ -768,7 +762,7 @@ async function writeVisibleDelivery(
     const active = await queryOne(tx, sql`
       select id from turn_runs where id = ${input.turnRunId}
         and user_id = ${input.user.tg_id} and thread_id = ${input.thread.id}
-        and status in ('running', 'awaiting_delivery')
+        and status in (${activeTurnStatuses})
       ${tx.dialect === "postgres" ? sql`for update` : sql``}
     `);
     if (!active) return;

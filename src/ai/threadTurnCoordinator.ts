@@ -34,7 +34,7 @@ export class ThreadTurnCoordinator {
   private readonly lifecycle = new AbortController();
   private recoveryPollTimer: NodeJS.Timeout | undefined;
   private recoveryScan: Promise<void> | undefined;
-  private accepting = true;
+  private get accepting(): boolean { return !this.lifecycle.signal.aborted; }
 
   private static readonly CLAIM_RETRY_MS = 1_000;
   private static readonly FAILURE_RETRY_MAX_MS = 30_000;
@@ -341,7 +341,6 @@ export class ThreadTurnCoordinator {
   }
 
   async shutdown(timeoutMs = 5_000): Promise<void> {
-    this.accepting = false;
     this.lifecycle.abort();
     if (this.recoveryPollTimer) clearTimeout(this.recoveryPollTimer);
     this.recoveryPollTimer = undefined;

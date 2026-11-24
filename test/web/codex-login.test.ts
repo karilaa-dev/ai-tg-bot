@@ -124,6 +124,25 @@ describe("Codex device login", () => {
     await expect(manager.start()).rejects.toThrow("stopping");
   });
 
+  it("ignores late device codes while credentials are being committed", async () => {
+    const commit = deferred<void>();
+    let provider!: ProviderAuthInteraction;
+    const save = vi.fn(() => commit.promise);
+    const manager = new CodexLoginManager({
+      credentialStatus: async () => "available", saveCredential: save,
+      login: async interaction => { provider = interaction; return credential(); },
+    });
+    await manager.start();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    provider.notify({ type: "device_code", userCode: "LATE-CODE", verificationUri: "https://auth.openai.com/codex/device" });
+    const duringCommit = await manager.status();
+    const stopping = manager.stop();
+    commit.resolve();
+    await stopping;
+    expect(duringCommit.login).toEqual({ status: "starting" });
+    expect((await manager.status()).login.status).toBe("success");
+  });
+
   it("bounds shutdown while a credential commit is waiting for an old refresh", async () => {
     vi.useFakeTimers();
     let commitSignal: AbortSignal | undefined;

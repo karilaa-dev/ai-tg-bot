@@ -115,6 +115,7 @@ describe("buffered Telegram attachment delivery", () => {
     api.sendMediaGroup.mockResolvedValueOnce([photoMessage(500, "one-result")]);
     const files = [imageAttachment(fixtureUuid(1), "a.jpg", 100), imageAttachment(fixtureUuid(2), "b.jpg", 100)];
     await sendCreatedFileAttachments(input, { id: 99 } as never, files);
+    await sendCreatedFileAttachments(input, { id: 99 } as never, files);
     expect(api.sendMediaGroup).toHaveBeenCalledOnce();
     expect(api.sendPhoto).not.toHaveBeenCalled();
     expect(files.every((file) => file.telegramDeliveryUnknown && !file.data)).toBe(true);

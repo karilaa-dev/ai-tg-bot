@@ -66,13 +66,37 @@ export class DraftStore {
     return this.closed ? noPendingSends : this.sends.get(key) ?? noPendingSends;
   }
 
-  updatePending(key: DraftKey, update: (current: readonly PendingSend[]) => readonly PendingSend[]) {
+  private updatePending(key: DraftKey, update: (current: readonly PendingSend[]) => readonly PendingSend[]) {
     if (this.closed) return;
     const current = this.pending(key);
     const next = update(current);
     if (next === current) return;
     if (next.length) this.sends.set(key, next); else this.sends.delete(key);
     for (const listener of this.listeners) listener();
+  }
+
+  beginSend(key: DraftKey, item: Extract<PendingSend, { status: "sending" }>): boolean {
+    if (this.closed) return false;
+    const existing = this.pending(key).find(entry => entry.requestId === item.requestId);
+    if (existing && existing.status !== "failed") return false;
+    this.updatePending(key, list => [...list.filter(entry => entry.requestId !== item.requestId), item]);
+    return true;
+  }
+
+  failSend(key: DraftKey, requestId: string, error: unknown) {
+    this.updatePending(key, list => list.map(entry => entry.requestId === requestId && entry.status === "sending"
+      ? { ...entry, status: "failed", error } : entry));
+  }
+
+  removeFailedSend(key: DraftKey, requestId: string): boolean {
+    if (!this.pending(key).some(entry => entry.requestId === requestId && entry.status === "failed")) return false;
+    this.updatePending(key, list => list.filter(entry => entry.requestId !== requestId));
+    return true;
+  }
+
+  reconcileSends(key: DraftKey, messageIds: ReadonlySet<number>) {
+    const received = (entry: PendingSend) => entry.status === "sent" && messageIds.has(entry.messageId);
+    this.updatePending(key, list => list.some(received) ? list.filter(entry => !received(entry)) : list);
   }
 
   confirmSend(key: DraftKey, requestId: string, messageId: number) {

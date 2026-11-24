@@ -28,8 +28,13 @@ import { chatFormat, useChatStrings } from "./strings.js";
 import type { ChatHistory, ChatThread } from "../../chat-types.js";
 import { CompactionStatus } from "./compaction-status.js";
 import { ScheduleDialog, scheduleState, type Schedules } from "./schedules.js";
+import { CoalescedRead } from "../request-state.js";
 
 type ActionKind = "stop" | "fork" | "compact";
+type ConversationDialog =
+  | { kind: "closed"; forkMessage: ChatMessage | null }
+  | { kind: "fork"; message: ChatMessage | null }
+  | { kind: "compact" | "schedule" };
 
 const excerpt = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 140) + (text.length > 140 ? "…" : "");
 
@@ -71,14 +76,15 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const [olderBusy, setOlderBusy] = useState(false);
   const pendingSnapshot = useCallback(() => drafts.pending(threadId), [drafts, threadId]);
   const pending = useSyncExternalStore(drafts.subscribe, pendingSnapshot, pendingSnapshot);
-  const setPending = useCallback((update: (current: readonly PendingSend[]) => readonly PendingSend[]) => drafts.updatePending(threadId, update), [drafts, threadId]);
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
   const [draft, setDraftState] = useState<Draft>(() => drafts.read(threadId));
-  const [action, setAction] = useState<{ kind: ActionKind; busy: boolean; error: unknown } | null>(null);
-  const [forkTarget, setForkTarget] = useState<{ open: boolean; message: ChatMessage | null }>({ open: false, message: null });
-  const [compactOpen, setCompactOpen] = useState(false);
-  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [action, setAction] = useState<{ kind: ActionKind; phase: "pending" } | { kind: ActionKind; phase: "failed"; error: unknown } | null>(null);
+  const [dialog, setDialog] = useState<ConversationDialog>({ kind: "closed", forkMessage: null });
+  // Keep the fork excerpt available through the closing animation.
+  const forkMessage = dialog.kind === "fork" ? dialog.message : dialog.kind === "closed" ? dialog.forkMessage : null;
+  const closeDialog = (kind: "fork" | "compact" | "schedule") => setDialog(current => current.kind === kind
+    ? { kind: "closed", forkMessage: current.kind === "fork" ? current.message : null } : current);
   const schedule = schedules.byThread.get(threadId) ?? null;
   const [dragging, setDragging] = useState(false);
   const [dropProblem, setDropProblem] = useState<FileProblem | null>(null);
@@ -88,8 +94,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const imageSource = useMemo(() => ({ threadId, source: chatFiles }), [threadId, chatFiles]);
   const mounted = useRef(true);
   const controller = useRef(new AbortController());
-  const fetching = useRef(false);
-  const again = useRef(false);
+  const historyRead = useRef(new CoalescedRead());
   const viewport = useRef<HTMLDivElement>(null);
   const restoreScroll = useRef<{ top: number; height: number } | null>(null);
   const stickToBottom = useRef(true);
@@ -100,12 +105,10 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const load = useCallback(async (older = false) => {
     const signal = controller.current.signal;
     if (signal.aborted || !drafts.active) return;
-    if (fetching.current) { if (!older) again.current = true; return; }
-    fetching.current = true;
+    if (!historyRead.current.start(!older)) return;
     if (older) setOlderBusy(true);
     try {
       do {
-        again.current = false;
         const previous = historyRef.current;
         const activeAction = previous?.messages.find(message => message.action?.status === "queued" || message.action?.status === "running");
         let cursor = older ? previous?.olderCursor ?? null : Math.min(previous?.messages.slice(-50)[0]?.id ?? Infinity, activeAction?.id ?? Infinity);
@@ -125,16 +128,16 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
         setHistory(merged);
         setLoadError(null);
         const ids = new Set(messages.map(message => message.id));
-        setPending(list => list.some(item => item.status === "sent" && ids.has(item.messageId)) ? list.filter(item => item.status !== "sent" || !ids.has(item.messageId)) : list);
+        drafts.reconcileSends(threadId, ids);
         older = false;
-      } while (again.current && !signal.aborted);
+      } while (!signal.aborted && historyRead.current.takeRefresh());
     } catch (error) {
       if (!signal.aborted) setLoadError(error ?? new Error());
     } finally {
-      fetching.current = false;
+      historyRead.current.finish();
       if (!signal.aborted) setOlderBusy(false);
     }
-  }, [threadId, drafts, setPending]);
+  }, [threadId, drafts]);
 
   useEffect(() => {
     mounted.current = true;
@@ -173,8 +176,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   }, [history, loader]);
 
   const acked = useRef(0);
-  const acking = useRef(false);
-  const ackAgain = useRef(false);
+  const readReceipt = useRef(new CoalescedRead());
   /** Marks read only what the reader can see: the newest stored message inside the viewport, with the latest history
    * loaded, the transcript at the bottom, and this tab visible and focused. Pending sends and drafts carry no id. */
   const acknowledge = useCallback(async () => {
@@ -188,8 +190,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     if (cap === null || current.newerCursor !== null || node.scrollHeight - node.scrollTop - node.clientHeight > 80) return;
     const target = newestVisibleMessage(node, cap);
     if (target === null || target <= acked.current || (!current.thread.unread && target === cap)) return;
-    if (acking.current) { ackAgain.current = true; return; }
-    acking.current = true;
+    if (!readReceipt.current.start()) return;
     try {
       const result = await chatApi.markRead(threadId, target, signal);
       if (signal.aborted || !drafts.active) return;
@@ -197,8 +198,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       onRead(threadId, result);
     } catch { /* The next scroll, poll or focus retries. */ }
     finally {
-      acking.current = false;
-      if (ackAgain.current && !signal.aborted) { ackAgain.current = false; void acknowledge(); }
+      if (readReceipt.current.finish() && !signal.aborted) void acknowledge();
     }
   }, [threadId, drafts, onRead]);
   const ackFrame = useRef(0);
@@ -243,7 +243,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     if (!drafts.active) return;
     const requestId = input.requestId ?? newRequestId();
     const item: PendingSend = { requestId, text: input.text.trim(), files: input.files, status: "sending" };
-    setPending(list => [...list.filter(entry => entry.requestId !== requestId), item]);
+    if (!drafts.beginSend(threadId, item)) return;
     stickToBottom.current = true;
     try {
       const result = await chatApi.send(threadId, { text: item.text, requestId, files: item.files });
@@ -254,9 +254,9 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       onThreadChange();
     } catch (error) {
       if (!drafts.active) return;
-      setPending(list => list.map(entry => entry.requestId === requestId && entry.status !== "sent" ? { ...entry, status: "failed", error: error ?? new Error() } : entry));
+      drafts.failSend(threadId, requestId, error ?? new Error());
     }
-  }, [threadId, drafts, load, onThreadChange, setPending]);
+  }, [threadId, drafts, load, onThreadChange]);
 
   useEffect(() => {
     const start = drafts.takeStart(threadId);
@@ -265,18 +265,18 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
 
   const submit = (value: Draft) => { setDraft(emptyDraft); void send(value); };
   const editFailed = (item: Extract<PendingSend, { status: "failed" }>) => {
-    setPending(list => list.filter(entry => entry.requestId !== item.requestId));
+    if (!drafts.removeFailedSend(threadId, item.requestId)) return;
     setDraft({ text: item.text, files: item.files, requestId: item.requestId });
   };
 
   const run = async (kind: ActionKind, task: () => Promise<void>) => {
     if (!mounted.current || !drafts.active) return;
-    setAction({ kind, busy: true, error: null });
+    setAction({ kind, phase: "pending" });
     try {
       await task();
       if (mounted.current && drafts.active) setAction(null);
     } catch (error) {
-      if (mounted.current && drafts.active) setAction({ kind, busy: false, error: error ?? new Error() });
+      if (mounted.current && drafts.active) setAction({ kind, phase: "failed", error: error ?? new Error() });
     }
   };
   const stop = () => void run("stop", async () => {
@@ -287,16 +287,16 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
   const fork = (message: ChatMessage | null) => void run("fork", async () => {
     const thread = await chatApi.fork(threadId, message?.id);
     if (!mounted.current || !drafts.active) return;
-    setForkTarget(target => ({ ...target, open: false }));
+    closeDialog("fork");
     onOpenThread(thread);
   });
   const compact = () => void run("compact", async () => {
-    setCompactOpen(false);
+    closeDialog("compact");
     await chatApi.compact(threadId);
     if (!mounted.current || !drafts.active) return;
     void load(); onThreadChange();
   });
-  const forkFrom = useCallback((message: ChatMessage) => setForkTarget({ open: true, message }), []);
+  const forkFrom = useCallback((message: ChatMessage) => setDialog({ kind: "fork", message }), []);
   const followUp = useCallback((text: string) => void send({ text, files: [], requestId: null }), [send]);
   const autoLoadFile = useCallback((file: WebAttachment) => loader.load(file, "auto"), [loader]);
   const loadFile = useCallback((file: WebAttachment, sandbox: boolean) => loader.load(file, "download", true, sandbox), [loader]);
@@ -314,7 +314,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     : sentAt !== null ? { state: "generating", queuedTurns: 0, startedAt: sentAt } : null;
   const web = thread?.origin === "web";
   const maxBytes = history?.maxFileBytes ?? MAX_FILE_BYTES;
-  const actionError = action?.error ? describeError(action.error, t.actionFailed, language) : "";
+  const actionError = action?.phase === "failed" ? describeError(action.error, t.actionFailed, language) : "";
 
   const drop = (event: DragEvent) => {
     event.preventDefault();
@@ -336,7 +336,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
           {thread.parentThreadId !== null && <Tooltip content={t.fork} render={<span className="chat-view-mark" tabIndex={0} aria-label={t.fork}><IconGitFork size={16} aria-hidden="true" /></span>} />}
           {thread.archived && <Badge variant="secondary">{t.archived}</Badge>}
           {schedule && <Tooltip content={schedule.enabled ? scheduleState(schedule, t, format, Date.now()) : t.scheduledPausedMark} render={<button type="button" className="chat-view-mark chat-view-schedule" data-enabled={schedule.enabled}
-            aria-label={schedule.enabled ? t.scheduledMark(format.when(schedule.nextRunAt)) : t.scheduledPausedMark} onClick={() => setScheduleOpen(true)}><IconClock size={16} aria-hidden="true" /></button>} />}
+            aria-label={schedule.enabled ? t.scheduledMark(format.when(schedule.nextRunAt)) : t.scheduledPausedMark} onClick={() => setDialog({ kind: "schedule" })}><IconClock size={16} aria-hidden="true" /></button>} />}
         </span>}
         <span className="sr-only" role="status" aria-live="polite">{activity ? activityLabel(activity, language) : ""}</span>
       </div>
@@ -344,9 +344,9 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
         <DropdownMenu>
           <DropdownMenu.Trigger render={<Button variant="ghost" shape="square" aria-label={t.chatActions} disabled={!thread}><IconDots size={20} aria-hidden="true" /></Button>} />
           <DropdownMenu.Content align="end" sideOffset={6}>
-            <DropdownMenu.Item icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setForkTarget({ open: true, message: null })}>{t.forkChat}</DropdownMenu.Item>
-            <DropdownMenu.Item disabled={compacting || (action?.kind === "compact" && action.busy)} icon={<IconFold size={16} aria-hidden="true" />} onClick={() => setCompactOpen(true)}>{t.compactContext}</DropdownMenu.Item>
-            <DropdownMenu.Item disabled={!schedule && thread?.archived} icon={<IconCalendarClock size={16} aria-hidden="true" />} onClick={() => setScheduleOpen(true)}>{schedule ? t.editSchedule : t.scheduleChat}</DropdownMenu.Item>
+            <DropdownMenu.Item icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setDialog({ kind: "fork", message: null })}>{t.forkChat}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={compacting || (action?.kind === "compact" && action.phase === "pending")} icon={<IconFold size={16} aria-hidden="true" />} onClick={() => setDialog({ kind: "compact" })}>{t.compactContext}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={!schedule && thread?.archived} icon={<IconCalendarClock size={16} aria-hidden="true" />} onClick={() => setDialog({ kind: "schedule" })}>{schedule ? t.editSchedule : t.scheduleChat}</DropdownMenu.Item>
           </DropdownMenu.Content>
         </DropdownMenu>
       </div>
@@ -390,7 +390,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
                 <IconAlertCircle size={16} aria-hidden="true" /><span>{describeError(item.error, t.sendFailed, language)}</span>
                 <Button size="sm" variant="secondary" onClick={() => void send({ text: item.text, files: item.files, requestId: item.requestId })}>{t.retry}</Button>
                 <Button size="sm" variant="ghost" icon={<IconPencil size={14} aria-hidden="true" />} onClick={() => editFailed(item)}>{t.edit}</Button>
-                <Button size="sm" variant="ghost" shape="square" aria-label={t.discardMessage} onClick={() => setPending(list => list.filter(entry => entry.requestId !== item.requestId))}><IconTrash size={14} aria-hidden="true" /></Button>
+                <Button size="sm" variant="ghost" shape="square" aria-label={t.discardMessage} onClick={() => drafts.removeFailedSend(threadId, item.requestId)}><IconTrash size={14} aria-hidden="true" /></Button>
               </div> : <p className="chat-message-meta" role="status">{item.status === "sending" ? <><Loader size={12} /> {t.sending}</> : t.sent}</p>}
             </article>;
           })}
@@ -404,36 +404,36 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       {notice}
       {thread?.archived ? <div className="chat-archived" role="note">
         <IconArchive size={18} aria-hidden="true" /><p>{t.archivedNotice}</p>
-        <Button size="sm" variant="secondary" icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setForkTarget({ open: true, message: null })}>{t.forkChat}</Button>
+        <Button size="sm" variant="secondary" icon={<IconGitFork size={16} aria-hidden="true" />} onClick={() => setDialog({ kind: "fork", message: null })}>{t.forkChat}</Button>
       </div> : <>
         {dropProblem && <p className="chat-composer-problem" role="alert">{fileProblemText(dropProblem, language)}</p>}
         <Composer draft={draft} onDraftChange={next => { setDropProblem(null); setDraft(next); }} onSubmit={submit} maxFileBytes={maxBytes} autoFocus
-          disabled={!history} stop={{ visible: canStop, busy: action?.kind === "stop" && action.busy, onStop: stop }} />
+          disabled={!history} stop={{ visible: canStop, busy: action?.kind === "stop" && action.phase === "pending", onStop: stop }} />
       </>}
     </div>
     {dragging && <div className="chat-drop" aria-hidden="true"><IconFile size={28} /><span>{t.dropFiles}</span></div>}
 
-    <Dialog.Root open={forkTarget.open} onOpenChange={open => setForkTarget(target => ({ ...target, open }))}>
+    <Dialog.Root open={dialog.kind === "fork"} onOpenChange={open => { if (!open) closeDialog("fork"); }}>
       <Dialog size="lg" className="chat-dialog">
         <Dialog.Title>{t.forkTitle}</Dialog.Title>
-        <Dialog.Description>{t.forkDescription(Boolean(forkTarget.message))}</Dialog.Description>
-        {forkTarget.message && <blockquote className="chat-dialog-quote">{excerpt(forkTarget.message.text) || t.attachment}</blockquote>}
+        <Dialog.Description>{t.forkDescription(Boolean(forkMessage))}</Dialog.Description>
+        {forkMessage && <blockquote className="chat-dialog-quote">{excerpt(forkMessage.text) || t.attachment}</blockquote>}
         {action?.kind === "fork" && actionError && <p className="chat-error-text" role="alert">{actionError}</p>}
         <div className="chat-dialog-actions">
           <Dialog.Close render={<Button variant="secondary">{t.cancel}</Button>} />
-          <Button variant="primary" icon={<IconGitFork size={16} aria-hidden="true" />} loading={action?.kind === "fork" && action.busy} onClick={() => fork(forkTarget.message)}>{t.forkChat}</Button>
+          <Button variant="primary" icon={<IconGitFork size={16} aria-hidden="true" />} loading={action?.kind === "fork" && action.phase === "pending"} onClick={() => fork(forkMessage)}>{t.forkChat}</Button>
         </div>
       </Dialog>
     </Dialog.Root>
-    <ScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} thread={thread ?? null} schedule={schedule} schedules={schedules} />
-    <Dialog.Root open={compactOpen} onOpenChange={setCompactOpen}>
+    <ScheduleDialog open={dialog.kind === "schedule"} onOpenChange={open => { if (!open) closeDialog("schedule"); }} thread={thread ?? null} schedule={schedule} schedules={schedules} />
+    <Dialog.Root open={dialog.kind === "compact"} onOpenChange={open => { if (!open) closeDialog("compact"); }}>
       <Dialog size="lg" className="chat-dialog">
         <Dialog.Title>{t.compactTitle}</Dialog.Title>
         <Dialog.Description>{t.compactDescription}</Dialog.Description>
         {action?.kind === "compact" && actionError && <p className="chat-error-text" role="alert">{actionError}</p>}
         <div className="chat-dialog-actions">
           <Dialog.Close render={<Button variant="secondary">{t.cancel}</Button>} />
-          <Button variant="primary" icon={<IconFold size={16} aria-hidden="true" />} loading={action?.kind === "compact" && action.busy} onClick={compact}>{t.compact}</Button>
+          <Button variant="primary" icon={<IconFold size={16} aria-hidden="true" />} loading={action?.kind === "compact" && action.phase === "pending"} onClick={compact}>{t.compact}</Button>
         </div>
       </Dialog>
     </Dialog.Root>

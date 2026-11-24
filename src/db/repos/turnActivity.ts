@@ -1,7 +1,8 @@
+import { unfinishedTurnStatuses } from "../turnLifecycle.js";
 import { sql } from "drizzle-orm";
 import { queryOne, type SqlExecutor } from "../sql.js";
 
-const workingState = sql`case when status in ('queued', 'running', 'awaiting_delivery') then 1 else 0 end`;
+const workingState = sql`case when status in (${unfinishedTurnStatuses}) then 1 else 0 end`;
 
 export class TurnActivityRepo {
   constructor(private readonly db: SqlExecutor) {}

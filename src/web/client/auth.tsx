@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IconArrowLeft, IconBrandTelegram, IconLoader2, IconRefresh } from "@tabler/icons-react";
 import type { AdminSession } from "../admin-types.js";
 import { logo } from "./brand.js";
@@ -17,7 +17,6 @@ type AdminState =
 export function AdminGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AdminState>({ kind: "checking" });
   const [revision, setRevision] = useState(0);
-  const admitted = useRef(false);
 
   useEffect(() => {
     const expired = () => setRevision(v => v + 1);
@@ -34,13 +33,12 @@ export function AdminGate({ children }: { children: ReactNode }) {
       try {
         const session = await apiJson<AdminSession>("/api/admin/session", { signal: controller.signal });
         if (controller.signal.aborted) return;
-        if (!session.authenticated) setState({ kind: "signed-out", loginAvailable: session.loginAvailable, ended: admitted.current });
+        if (!session.authenticated) setState(previous => ({ kind: "signed-out", loginAvailable: session.loginAvailable, ended: previous.kind === "admin" }));
         else if (session.admin) setState({ kind: "admin" });
         else setState({ kind: "not-admin", id: session.userId });
-        admitted.current = session.authenticated && session.admin;
       } catch {
         // A brief outage keeps an open dashboard; requests inside it report their own failures.
-        if (!controller.signal.aborted && !admitted.current) setState({ kind: "unreachable" });
+        if (!controller.signal.aborted) setState(previous => previous.kind === "admin" ? previous : { kind: "unreachable" });
       } finally { busy = false; }
     };
     void check();

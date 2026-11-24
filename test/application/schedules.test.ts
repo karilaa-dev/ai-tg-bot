@@ -3,6 +3,7 @@ import { createGrammyEmulator, type GrammyEmulator } from "../helpers/grammy-emu
 import { BotChatService } from "../../src/web/chat-service.js";
 import { ConversationRepository } from "../../src/web/repository.js";
 import { createPiToolAdapters } from "../../src/pi/toolAdapter.js";
+import { deferred } from "../helpers/async.js";
 import { ChatScheduler } from "../../src/scheduling/runner.js";
 
 let env: GrammyEmulator;
@@ -48,4 +49,23 @@ it("pauses scheduled checks for revoked accounts before enqueueing any work", as
   expect(await env.repos.turnRuns.listForThread(thread.id)).toEqual([]);
   expect((await env.repos.schedules.list(env.user.id))[0]?.enabled).toBe(false);
   await scheduler.stop();
+});
+
+it("drains the active scan once and never schedules a scan after stop", async () => {
+  const scan = deferred<Awaited<ReturnType<typeof env.repos.schedules.due>>>();
+  const due = vi.spyOn(env.repos.schedules, "due").mockReturnValue(scan.promise);
+  const wake = vi.fn();
+  const scheduler = new ChatScheduler({ schedules: env.repos.schedules, access: env.services.access, logger: env.services.logger, wake });
+  scheduler.start();
+  scheduler.start();
+  await Promise.resolve();
+  expect(due).toHaveBeenCalledOnce();
+  const stop = scheduler.stop();
+  const again = scheduler.stop();
+  scheduler.start();
+  scan.resolve([]);
+  await Promise.all([stop, again]);
+  scheduler.start();
+  await scheduler.tick();
+  expect(due).toHaveBeenCalledOnce();
 });

@@ -67,12 +67,12 @@ export class TurnBudget {
       const failures = (this.failedSignatures.get(signature) ?? 0) + 1;
       this.failedSignatures.set(signature, failures);
       if (failures >= this.limits.maxIdenticalToolFailures) {
-        this.terminationReason = "identical_tool_failures";
+        this.terminationReason ??= "identical_tool_failures";
         return true;
       }
     }
     if (this.limits.maxConsecutiveToolFailures > 0 && this.consecutiveToolFailures >= this.limits.maxConsecutiveToolFailures) {
-      this.terminationReason = "consecutive_tool_failures";
+      this.terminationReason ??= "consecutive_tool_failures";
       return true;
     }
     return false;

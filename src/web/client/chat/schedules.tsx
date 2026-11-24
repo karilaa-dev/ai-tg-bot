@@ -1,3 +1,4 @@
+import type { PollState, RequestState } from "../request-state.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button } from "@cloudflare/kumo/components/button";
@@ -24,8 +25,9 @@ const MAX_PROMPT = 4_000;
 /** Shared by the sidebar, chat header and schedule page; polls slowly because the assistant can add schedules too. */
 export function useSchedules() {
   const [items, setItems] = useState<ChatSchedule[]>([]);
-  const [status, setStatus] = useState<"loading" | "ready">("loading");
-  const [error, setError] = useState<unknown>(null);
+  const [poll, setPoll] = useState<PollState>({ kind: "loading" });
+  const status = poll.kind;
+  const error = "error" in poll ? poll.error : null;
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -37,9 +39,9 @@ export function useSchedules() {
       try {
         const result = await chatApi.schedules(controller.signal);
         if (controller.signal.aborted) return;
-        setItems(result.items); setError(null); setStatus("ready");
+        setItems(result.items); setPoll({ kind: "ready" });
       } catch (err) {
-        if (!controller.signal.aborted) { setError(err ?? new Error()); setStatus("ready"); }
+        if (!controller.signal.aborted) setPoll({ kind: "failed", error: err ?? new Error() });
       } finally { busy = false; }
     };
     const loop = async () => {
@@ -60,6 +62,10 @@ export function useSchedules() {
   return { items, byThread, status, error, refresh, put, drop };
 }
 export type Schedules = ReturnType<typeof useSchedules>;
+
+type ScheduleEditor =
+  | { kind: "editing" | "saving" | "confirming-delete" | "deleting" }
+  | { kind: "save-failed" | "delete-failed"; error: unknown };
 
 type Repeat = "once" | "hourly" | "daily" | "weekly" | "custom";
 const presets: Record<Exclude<Repeat, "custom">, number | null> = { once: null, hourly: 60, daily: 1_440, weekly: 10_080 };
@@ -113,9 +119,9 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
   const [form, setForm] = useState<Form>(() => initialForm(schedule, thread?.title ?? ""));
   const openingSchedule = useRef(schedule);
   const [problems, setProblems] = useState<Problems>({});
-  const [busy, setBusy] = useState<"save" | "delete" | null>(null);
-  const [failure, setFailure] = useState<{ kind: "save" | "delete"; error: unknown } | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editor, setEditor] = useState<ScheduleEditor>({ kind: "editing" });
+  const busy = editor.kind === "saving" || editor.kind === "deleting";
+  const confirmDelete = editor.kind === "confirming-delete" || editor.kind === "deleting" || editor.kind === "delete-failed";
   const zone = useMemo(deviceZone, []);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -125,7 +131,7 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
     openingSchedule.current = schedule;
     const next = initialForm(schedule, thread?.title ?? "");
     setForm(resume ? { ...next, enabled: true } : next);
-    setProblems({}); setFailure(null); setBusy(null); setConfirmDelete(false);
+    setProblems({}); setEditor({ kind: "editing" });
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- reset only when the dialog opens
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => {
@@ -159,7 +165,7 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
     else if ((timeChanged || resuming) && when <= Date.now()) found.when = t.scheduleNeedsFuture;
     setProblems(found);
     if (Object.keys(found).length || when === null || minutes === undefined) return;
-    setBusy("save"); setFailure(null);
+    setEditor({ kind: "saving" });
     try {
       let saved: ChatSchedule | null = null;
       if (!original) saved = await chatApi.createSchedule({ threadId: thread.id, title, prompt, intervalMinutes: minutes, nextRunAt: when });
@@ -177,27 +183,28 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
       schedules.refresh();
       onOpenChange(false);
     } catch (error) {
-      if (mounted.current) setFailure({ kind: "save", error: error ?? new Error() });
-    } finally { if (mounted.current) setBusy(null); }
+      if (mounted.current) setEditor({ kind: "save-failed", error: error ?? new Error() });
+    }
   };
   const remove = async () => {
     if (!schedule || busy) return;
-    setBusy("delete"); setFailure(null);
+    setEditor({ kind: "deleting" });
     try {
       await deleteSchedule(schedule.id);
       if (!mounted.current) return;
       schedules.drop(schedule.id); schedules.refresh();
       onOpenChange(false);
     } catch (error) {
-      if (mounted.current) setFailure({ kind: "delete", error: error ?? new Error() });
-    } finally { if (mounted.current) setBusy(null); }
+      if (mounted.current) setEditor({ kind: "delete-failed", error: error ?? new Error() });
+    }
   };
 
   const repeatItems = [
     { value: "once", label: t.repeatOnce }, { value: "hourly", label: t.repeatHourly }, { value: "daily", label: t.repeatDaily },
     { value: "weekly", label: t.repeatWeekly }, { value: "custom", label: t.repeatCustom },
   ] satisfies { value: Repeat; label: string }[];
-  const failureText = failure ? describeError(failure.error, failure.kind === "save" ? t.scheduleSaveFailed : t.scheduleDeleteFailed, language) : "";
+  const failureText = editor.kind === "save-failed" || editor.kind === "delete-failed"
+    ? describeError(editor.error, editor.kind === "save-failed" ? t.scheduleSaveFailed : t.scheduleDeleteFailed, language) : "";
 
   return <Dialog.Root open={open} onOpenChange={next => { if (!busy) onOpenChange(next); }}>
     <Dialog size="lg" className="chat-dialog chat-schedule-dialog">
@@ -206,8 +213,8 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
         <Dialog.Description>{t.scheduleDeleteDescription(schedule.title)}</Dialog.Description>
         {failureText && <p className="chat-error-text" role="alert">{failureText}</p>}
         <div className="chat-dialog-actions">
-          <Button variant="secondary" disabled={busy !== null} onClick={() => setConfirmDelete(false)}>{t.cancel}</Button>
-          <Button variant="destructive" icon={<IconTrash size={16} aria-hidden="true" />} loading={busy === "delete"} onClick={() => void remove()}>{t.scheduleDelete}</Button>
+          <Button variant="secondary" disabled={busy} onClick={() => setEditor({ kind: "editing" })}>{t.cancel}</Button>
+          <Button variant="destructive" icon={<IconTrash size={16} aria-hidden="true" />} loading={editor.kind === "deleting"} onClick={() => void remove()}>{t.scheduleDelete}</Button>
         </div>
       </> : <>
         <Dialog.Title>{schedule ? t.editScheduleTitle : t.newScheduleTitle}</Dialog.Title>
@@ -230,10 +237,10 @@ export function ScheduleDialog({ open, onOpenChange, thread, schedule, schedules
           </div>}
           {failureText && <p className="chat-error-text" role="alert">{failureText}</p>}
           <div className="chat-dialog-actions chat-schedule-actions">
-            {schedule && <Button type="button" variant="ghost" className="chat-schedule-delete" icon={<IconTrash size={16} aria-hidden="true" />} disabled={busy !== null}
-              onClick={() => { setFailure(null); setConfirmDelete(true); }}>{t.scheduleDelete}</Button>}
-            <Dialog.Close render={<Button type="button" variant="secondary" disabled={busy !== null}>{t.cancel}</Button>} />
-            <Button type="submit" variant="primary" icon={<IconCalendarClock size={16} aria-hidden="true" />} loading={busy === "save"}>{schedule ? t.scheduleSave : t.scheduleCreate}</Button>
+            {schedule && <Button type="button" variant="ghost" className="chat-schedule-delete" icon={<IconTrash size={16} aria-hidden="true" />} disabled={busy}
+              onClick={() => setEditor({ kind: "confirming-delete" })}>{t.scheduleDelete}</Button>}
+            <Dialog.Close render={<Button type="button" variant="secondary" disabled={busy}>{t.cancel}</Button>} />
+            <Button type="submit" variant="primary" icon={<IconCalendarClock size={16} aria-hidden="true" />} loading={editor.kind === "saving"}>{schedule ? t.scheduleSave : t.scheduleCreate}</Button>
           </div>
         </form>
       </>}
@@ -341,24 +348,23 @@ function DeleteScheduleDialog({ open, onOpenChange, schedule, schedules }: {
 }) {
   const t = useChatStrings();
   const language = useUiLanguage();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  useEffect(() => { if (open) { setBusy(false); setError(null); } }, [open]);
+  const [request, setRequest] = useState<RequestState>({ kind: "idle" });
+  const busy = request.kind === "pending";
+  useEffect(() => { if (open) setRequest({ kind: "idle" }); }, [open]);
   const remove = async () => {
     if (!schedule || busy) return;
-    setBusy(true); setError(null);
+    setRequest({ kind: "pending" });
     try {
       await deleteSchedule(schedule.id);
       schedules.drop(schedule.id); schedules.refresh();
       onOpenChange(false);
-    } catch (err) { setError(err ?? new Error()); }
-    finally { setBusy(false); }
+    } catch (err) { setRequest({ kind: "failed", error: err ?? new Error() }); }
   };
   return <Dialog.Root open={open} onOpenChange={next => { if (!busy) onOpenChange(next); }}>
     <Dialog size="lg" className="chat-dialog">
       <Dialog.Title>{t.scheduleDeleteTitle}</Dialog.Title>
       <Dialog.Description>{t.scheduleDeleteDescription(schedule?.title ?? "")}</Dialog.Description>
-      {error !== null && <p className="chat-error-text" role="alert">{describeError(error, t.scheduleDeleteFailed, language)}</p>}
+      {request.kind === "failed" && <p className="chat-error-text" role="alert">{describeError(request.error, t.scheduleDeleteFailed, language)}</p>}
       <div className="chat-dialog-actions">
         <Dialog.Close render={<Button variant="secondary" disabled={busy}>{t.cancel}</Button>} />
         <Button variant="destructive" icon={<IconTrash size={16} aria-hidden="true" />} loading={busy} onClick={() => void remove()}>{t.scheduleDelete}</Button>

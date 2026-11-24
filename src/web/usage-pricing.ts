@@ -64,24 +64,32 @@ function finiteRate(value: unknown): number | null { return typeof value === "nu
 function charge(tokens: number, rate: number | null): number | null { return tokens === 0 ? 0 : rate === null ? null : tokens * rate; }
 function multiply(rate: number | null, factor: number): number | null { return rate === null ? null : rate * factor; }
 
+const PRICING_TTL_MS = 86_400_000;
+type PricingRefresh =
+  | { phase: "empty" }
+  | { phase: "fresh" | "backoff"; nextAttemptAt: number }
+  | { phase: "refreshing"; done: Promise<void> };
+
 /** One shared daily fetch, retaining the last good catalog during outages. */
 export class UsagePricing {
   private catalog: PricingCatalog = {};
   private fetchedAt: number | null = null;
-  private retryAt = 0;
-  private pending?: Promise<void>;
+  private state: PricingRefresh = { phase: "empty" };
   constructor(private readonly fetcher: (url: string, init: RequestInit) => Promise<Response> = fetch, private readonly now: () => number = Date.now) {}
 
   async load() {
-    if (this.now() >= this.retryAt) {
-      this.pending ??= this.refresh().finally(() => { this.pending = undefined; });
-      await this.pending;
+    const state = this.state;
+    if (state.phase === "refreshing") await state.done;
+    else if (state.phase === "empty" || this.now() >= state.nextAttemptAt) {
+      const done = this.refresh().then(next => { this.state = next; });
+      this.state = { phase: "refreshing", done };
+      await done;
     }
     return { catalog: this.catalog, source: "LiteLLM" as const, fetchedAt: this.fetchedAt,
-      stale: this.fetchedAt === null || this.now() - this.fetchedAt >= 86_400_000 };
+      stale: this.fetchedAt === null || this.now() - this.fetchedAt >= PRICING_TTL_MS };
   }
 
-  private async refresh() {
+  private async refresh(): Promise<Extract<PricingRefresh, { nextAttemptAt: number }>> {
     try {
       const response = await this.fetcher(PRICING_URL, { signal: AbortSignal.timeout(5_000) });
       if (!response.ok) throw new Error("Pricing download failed");
@@ -95,9 +103,9 @@ export class UsagePricing {
       if (!Object.keys(catalog).length) throw new Error("Empty pricing catalog");
       this.catalog = catalog;
       this.fetchedAt = this.now();
-      this.retryAt = this.fetchedAt + 86_400_000;
+      return { phase: "fresh", nextAttemptAt: this.fetchedAt + PRICING_TTL_MS };
     } catch {
-      this.retryAt = this.now() + 300_000;
+      return { phase: "backoff", nextAttemptAt: this.now() + 300_000 };
     }
   }
 }
