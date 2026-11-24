@@ -36,7 +36,11 @@ function readRoute(): Route {
   const view = params.get("view");
   return view === "settings" || view === "memories" || view === "schedules" ? { view } : { view: "home" };
 }
-const routeUrl = (route: Route) => route.view === "thread" ? `/?thread=${route.threadId}` : route.view === "home" ? "/" : `/?view=${route.view}`;
+function routeUrl(route: Route) {
+  if (route.view === "home") return location.pathname;
+  const query = route.view === "thread" ? `thread=${route.threadId}` : `view=${route.view}`;
+  return `${location.pathname}?${query}`;
+}
 const sameRoute = (a: Route, b: Route) => routeUrl(a) === routeUrl(b);
 const displayName = (session: SignedIn, t: ChatStrings) => session.user.name || (session.user.username ? `@${session.user.username}` : t.user(session.user.id));
 const shortcutLabel = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "⌘K" : "Ctrl K";
@@ -88,7 +92,7 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
 
   useEffect(() => {
     // Retired views such as the old usage page resolve to the home screen.
-    if (location.pathname === "/" && location.search && routeUrl(readRoute()) === "/") history.replaceState(null, "", "/");
+    if (location.search && readRoute().view === "home") history.replaceState(null, "", location.pathname);
     const pop = () => setRoute(readRoute());
     window.addEventListener("popstate", pop);
     return () => window.removeEventListener("popstate", pop);
@@ -148,7 +152,7 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
   return <>
     <Sidebar className="chat-sidebar">
       <Sidebar.Header className="chat-sidebar-head">
-        <a className="chat-brand" href="/" onClick={event => { event.preventDefault(); navigate({ view: "home" }); }}><BrandMark /><span>{t.appName}</span></a>
+        <a className="chat-brand" href={location.pathname} onClick={event => { event.preventDefault(); navigate({ view: "home" }); }}><BrandMark /><span>{t.appName}</span></a>
       </Sidebar.Header>
       <div className="chat-sidebar-actions">
         <button type="button" className="chat-side-action" aria-current={route.view === "home" ? "page" : undefined} onClick={() => navigate({ view: "home" })}>
@@ -186,7 +190,7 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
           </button>} />
           <DropdownMenu.Content side="top" align="start" sideOffset={6}>
             {session.botUsername && <DropdownMenu.LinkItem icon={<IconBrandTelegram size={16} aria-hidden="true" />} href={`https://t.me/${encodeURIComponent(session.botUsername)}`} target="_blank" rel="noopener noreferrer">{t.openBot(session.botUsername)}</DropdownMenu.LinkItem>}
-            {session.admin && <DropdownMenu.LinkItem icon={<IconLayoutDashboard size={16} aria-hidden="true" />} href="/admin">{t.adminPanel}</DropdownMenu.LinkItem>}
+            {session.admin && !window.matchMedia("(display-mode: standalone)").matches && <DropdownMenu.LinkItem icon={<IconLayoutDashboard size={16} aria-hidden="true" />} href="/admin">{t.adminPanel}</DropdownMenu.LinkItem>}
             <DropdownMenu.Item icon={theme.dark ? <IconSun size={16} aria-hidden="true" /> : <IconMoon size={16} aria-hidden="true" />} closeOnClick={false} onClick={theme.toggle}>{t.switchTheme(theme.dark)}</DropdownMenu.Item>
             <DropdownMenu.Separator />
             <DropdownMenu.Item icon={<IconLogout size={16} aria-hidden="true" />} onClick={() => void leave()}>{t.signOut}</DropdownMenu.Item>

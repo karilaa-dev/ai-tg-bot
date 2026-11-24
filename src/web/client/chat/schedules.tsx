@@ -306,7 +306,7 @@ export function SchedulesView({ schedules, threads, onOpenThread }: {
                 <span className={schedule.enabled ? undefined : "chat-schedule-paused"}>{scheduleState(schedule, t, format, now)}</span>
                 <span>{schedule.lastRunAt === null ? t.scheduleNeverRan : t.scheduleLast(format.when(schedule.lastRunAt, now))}</span>
               </p>
-              <a className="chat-schedule-chat" href={`/?thread=${schedule.threadId}`} aria-label={t.scheduleOpenChatNamed(chatTitle)}
+              <a className="chat-schedule-chat" href={`?thread=${schedule.threadId}`} aria-label={t.scheduleOpenChatNamed(chatTitle)}
                 onClick={event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return; event.preventDefault(); onOpenThread(schedule.threadId); }}>
                 {thread?.origin === "telegram" ? <IconBrandTelegram size={14} aria-hidden="true" /> : <IconMessage size={14} aria-hidden="true" />}<span>{chatTitle}</span>
               </a>

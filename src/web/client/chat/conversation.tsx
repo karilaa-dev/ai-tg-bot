@@ -471,7 +471,7 @@ const MessageView = memo(function MessageView({ message, web, files, maxBytes, a
     {openui && <div className="chat-openui"><GenerativeResponse source={openui} onAction={onAction} language={answerLanguage} imageSource={messageImageSource} onImagesRendered={imagesRendered} /></div>}
     {attachments.length > 0 && <div className="chat-attachments">{attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments}
       state={files.get(file.id)} maxBytes={maxBytes}
-      autoLoad={attachmentKind(file) === "image" && file.size !== null && file.size <= autoLoadMaxBytes ? () => autoLoad(file) : undefined} load={(allowSandbox = false) => load(file, allowSandbox)} />)}</div>}
+      autoLoad={attachmentKind(file) === "image" && file.size !== null && file.size <= autoLoadMaxBytes ? autoLoad : undefined} load={(allowSandbox = false) => load(file, allowSandbox)} />)}</div>}
     {message.telegramSyncFailed && <p className="chat-message-meta" role="note">{t.syncFailed}</p>}
     {hasContent && <footer className="chat-message-actions" role="group" aria-label={assistant ? t.responseActions : t.messageActions}>
       <time className="chat-message-time" dateTime={new Date(message.createdAt).toISOString()} title={format.full(message.createdAt)}>{format.time(message.createdAt)}</time>

@@ -152,7 +152,7 @@ export class AttachmentCache {
     try {
       for (let attempt = 0; ; attempt++) {
         const response = await entry.source.fetch(`${entry.url}?mode=${policy === "auto" ? "auto" : "download"}${allowSandbox ? "&sandbox=start" : ""}`, {
-          signal,
+          signal, cache: allowSandbox ? "no-store" : "default",
           ...(allowSandbox ? { method: "POST", headers: { "X-Conversation-Sandbox-Consent": "start" } } : {}),
         });
         if (signal.aborted) return;

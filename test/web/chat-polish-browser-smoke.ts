@@ -49,7 +49,7 @@ try {
     };
     await route.fulfill({ response, json: history });
   });
-  await page.goto(root);
+  await page.goto(new URL("/chat/", root).href);
   await page.getByRole("button", { name: "Account: Alice Morgan", exact: true }).waitFor();
   const sidebar = page.locator(".chat-sidebar");
   for (const label of ["Today", "Yesterday", "Previous 7 days", "Last 30 days"]) {
@@ -80,6 +80,7 @@ try {
   assert(rows.some(row => !row.telegram) && rows.some(row => row.telegram));
 
   await sidebar.getByRole("button", { name: /Planning the autumn trip/ }).click();
+  assert.equal(new URL(page.url()).pathname, "/chat/", "Opening a conversation stays inside the installed app");
   const reply = page.locator('article[data-role="assistant"]').filter({ hasText: "Here's a starting point" });
   await reply.getByRole("group", { name: "Response actions", exact: true }).waitFor();
   assert.equal(await page.getByText("Assistant", { exact: true }).count(), 0);

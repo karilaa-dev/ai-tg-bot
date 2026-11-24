@@ -8,7 +8,7 @@ import { apiJson } from "./api.js";
 import { Memories } from "./memories.js";
 import { CodexConnection } from "./codex-connection.js";
 import { AllowedUsers } from "./allowed-users.js";
-import { userLabel, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
+import { userLabel, type WebAttachment, type WebHistory, type WebMessage, type WebPage, type WebThread, type WebUser } from "../types.js";
 import { AttachmentLoader, type LoadedAttachment } from "./attachments.js";
 import { RichText } from "./rich-text.js";
 import { Button } from "./components/ui/button.js";
@@ -170,6 +170,7 @@ function Transcript({ threadId, back, showUsage }: { threadId: string; back: () 
   const [revision, setRevision] = useState(0);
   const [files, setFiles] = useState(new Map<string, LoadedAttachment>());
   const [loader] = useState(() => new AttachmentLoader(threadId, setFiles));
+  const autoLoad = useCallback((file: WebAttachment) => loader.load(file, "auto"), [loader]);
   const controller = useRef<AbortController | null>(null);
   const fetching = useRef(false);
   const viewport = useRef<HTMLDivElement>(null);
@@ -235,12 +236,6 @@ function Transcript({ threadId, back, showUsage }: { threadId: string; back: () 
     return () => { stopped = true; controller.current?.abort(); clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
   }, [load, revision]);
   useEffect(() => () => loader.dispose(), [loader]);
-  useEffect(() => {
-    if (!data || data.autoLoadMaxBytes === 0) return;
-    for (const message of data.messages) for (const file of message.attachments) {
-      if (file.size !== null && file.size <= data.autoLoadMaxBytes) loader.load(file, "auto");
-    }
-  }, [data, loader]);
   return <>
     <header className="pane-header conversation-header"><Button className="mobile-back" variant="ghost" size="icon-sm" aria-label="Back to conversations" onClick={back}><IconArrowLeft aria-hidden="true" /></Button><div><h2>{data?.thread.title ?? "Conversation"}</h2><p>{data ? userLabel(data.user) : "Loading messages"}</p><ThreadActivity activity={data?.thread.activity} unavailable={Boolean(error && data)} /></div>{data?.thread.archived && <span className="archive-label">Archived</span>}</header>
     {error && <div className="px-5"><Failure message={error} retry={() => setRevision(v => v + 1)} /></div>}
@@ -257,7 +252,9 @@ function Transcript({ threadId, back, showUsage }: { threadId: string; back: () 
               <header className={message.role === "system" ? undefined : "sr-only"}>{message.role === "user" ? userLabel(data.user) : message.role === "assistant" ? "Bot" : "System"}</header>
               {message.thinking && <ThinkingDetails text={message.thinking} />}
               {message.text && <div className="message-bubble"><RichText text={message.text} /></div>}
-              {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments} state={files.get(file.id)} maxBytes={data.maxFileBytes} load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
+              {message.attachments.map(file => <FileAttachment key={file.id} file={file} messageText={message.text} messageAttachments={message.attachments} state={files.get(file.id)} maxBytes={data.maxFileBytes}
+                autoLoad={file.size !== null && file.size > 0 && file.size <= data.autoLoadMaxBytes ? autoLoad : undefined}
+                load={(allowSandbox = false) => loader.load(file, "download", true, allowSandbox)} />)}
               <footer><time dateTime={new Date(message.createdAt).toISOString()}>{timestamp(message.createdAt)}</time></footer>
               {message.role === "assistant" && <MessageUsage usage={message.usage} />}
             </article>

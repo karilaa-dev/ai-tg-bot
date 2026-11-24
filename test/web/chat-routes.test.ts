@@ -149,7 +149,10 @@ it("serves the signed-in account's Telegram photo and nothing when it has none",
   const photo = await request("/api/chat/avatar", { headers });
   expect(photo.status).toBe(200);
   expect(photo.headers.get("Content-Type")).toBe("image/jpeg");
-  expect(photo.headers.get("Cache-Control")).toBe("no-store");
+  expect(photo.headers.get("Cache-Control")).toBe("private, no-cache, must-revalidate");
+  const conditional = { ...headers, "If-None-Match": photo.headers.get("etag")! };
+  expect((await request("/api/chat/avatar", { headers: conditional })).status).toBe(304);
+  expect((await request("/api/chat/avatar", { headers: { ...conditional, "X-Chat-User": "84" } })).status).toBe(401);
   expect(new Uint8Array(await photo.arrayBuffer())).toEqual(jpeg);
   expect(chat.avatar).toHaveBeenLastCalledWith(42);
 });
@@ -288,12 +291,20 @@ it("reuses safe file retrieval only for the owner and keeps sandbox consent chec
   expect(await download.text()).toBe("hello");
   expect(download.headers.get("Content-Disposition")).toContain("attachment");
   expect(fileLookup).toHaveBeenCalledWith(fixtureUuid(1), fixtureUuid(10));
+  const denied = await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}`, {
+    headers: { Cookie: await login(84), "X-Chat-User": "84", "If-None-Match": download.headers.get("etag")! },
+  });
+  expect(denied.status).toBe(404);
+  expect(denied.headers.get("cache-control")).toBe("no-store");
+  expect(fileLookup).toHaveBeenCalledTimes(1);
   resolver.mockClear();
   expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { headers })).status).toBe(400);
   expect((await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { method: "POST", headers })).status).toBe(403);
   expect(resolver).not.toHaveBeenCalled();
   const allowed = await request(`/api/chat/threads/${fixtureUuid(1)}/files/${fixtureUuid(10)}?mode=download&sandbox=start`, { method: "POST", headers: { ...headers, "X-Conversation-Sandbox-Consent": "start" } });
   expect(allowed.status).toBe(200);
+  expect(allowed.headers.get("Cache-Control")).toBe("no-store");
+  expect(allowed.headers.has("etag")).toBe(false);
   expect(resolver.mock.calls[0]?.[3]).toEqual({ allowSandboxResume: true, pauseAfterRead: true });
 });
 
@@ -308,7 +319,9 @@ it("requires custom same-origin CSRF headers and rejects CORS preflight", async 
   expect((await request("/api/chat/threads", { method: "OPTIONS", headers: { Origin: "https://evil.example", "Access-Control-Request-Headers": "X-Chat-Request" } })).status).toBe(405);
   expect(chat.createThread).not.toHaveBeenCalled();
   expect(chat.updateSettings).not.toHaveBeenCalled();
-  expect((await request("/api/chat/session", { method: "DELETE", headers: { ...mutation, Cookie: cookie } })).status).toBe(200);
+  const logout = await request("/api/chat/session", { method: "DELETE", headers: { ...mutation, Cookie: cookie } });
+  expect(logout.status).toBe(200);
+  expect(logout.headers.get("Clear-Site-Data")).toBe('"cache"');
   expect((await request("/api/chat/threads", { headers: { Cookie: cookie } })).status).toBe(401);
 });
 

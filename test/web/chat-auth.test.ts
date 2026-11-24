@@ -108,6 +108,11 @@ it("preserves only validated conversation selections through the OAuth callback"
   for (const [requested, expected] of [
     [`/?thread=${threadId}`, `/?thread=${threadId}`],
     [`/?thread=${threadId}&tracking=ignored`, `/?thread=${threadId}`],
+    ["/chat", "/chat/"],
+    [`/chat?thread=${threadId}`, `/chat/?thread=${threadId}`],
+    ["/chat/", "/chat/"],
+    [`/chat/?thread=${threadId}`, `/chat/?thread=${threadId}`],
+    ["/chat/?thread=123", "/chat/"],
     ["/?thread=123", "/"],
     ["/?thread=https://evil.example", "/"],
     [`/?thread=${threadId}&thread=${threadId}`, "/"],

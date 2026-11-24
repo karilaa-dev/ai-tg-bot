@@ -3,36 +3,16 @@ import { createRoot, type Root } from "react-dom/client";
 import { Button } from "@cloudflare/kumo/components/button";
 import { IconRefresh } from "@tabler/icons-react";
 import type { ChatApp } from "./chat/chat-app.js";
-import { logo } from "./brand.js";
 import { ChatGate, probablySignedIn, WorkspaceLoadFailed, WorkspaceLoading } from "./chat/gate.js";
 
 const admin = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
 document.title = admin ? "AI KaRiLaA · Admin" : "AI KaRiLaA";
-const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-if (favicon) {
-  favicon.href = logo;
-  void roundedIcon(logo).then(icon => { favicon.type = "image/png"; favicon.href = icon; }).catch(() => { /* The square logo stays. */ });
+if (location.pathname === "/chat/" && document.querySelector('link[rel="manifest"]') && "serviceWorker" in navigator && window.isSecureContext) {
+  const register = () => { void navigator.serviceWorker.register("/chat/service-worker.js").catch(error => console.warn("Offline setup failed", error)); };
+  if (document.readyState === "complete") register();
+  else window.addEventListener("load", register, { once: true });
 }
 
-/** The logo with rounded corners, drawn once at icon size so every browser shows the same shape. */
-async function roundedIcon(source: string, size = 64): Promise<string> {
-  const image = new Image();
-  image.src = source;
-  await image.decode();
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Canvas unavailable");
-  context.beginPath();
-  context.roundRect(0, 0, size, size, size * 0.22);
-  context.clip();
-  // Cover the square, cropping the longer side evenly.
-  const scale = size / Math.min(image.naturalWidth, image.naturalHeight);
-  const width = image.naturalWidth * scale;
-  const height = image.naturalHeight * scale;
-  context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
-  return canvas.toDataURL("image/png");
-}
 /**
  * A route loaded on demand. Loading is tracked in state rather than with
  * Suspense, so the route appears as soon as its code arrives. A failed

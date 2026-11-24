@@ -20,6 +20,9 @@ import { createChatRoutes, MAX_CHAT_BODY_BYTES } from "./chat-routes.js";
 import { uuid } from "./ids.js";
 import type { SqlExecutor } from "../db/sql.js";
 import { WebSessionStore } from "./session-store.js";
+import { matchesIfNoneMatch, privateMediaHeaders } from "./http-cache.js";
+import { sha256Hex } from "../files/hash.js";
+import { webAssetTypes } from "./asset-types.js";
 import { DownloadPool } from "./download-pool.js";
 
 export interface WebServerOptions {
@@ -47,7 +50,7 @@ const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
-  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
 };
 const AllowedUserInput = z.object({ telegramId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict();
 
@@ -114,8 +117,14 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
     if (mode === "auto" && (maxBytes === 0 || file.size <= 0 || file.size > maxBytes)) {
       throw new HttpError(413, "Load this attachment manually.");
     }
-    // HEAD never fetches a remote attachment.
-    if (request.method === "HEAD") return new Response(null, { headers });
+    const mediaHeaders = (hash: string) => privateMediaHeaders(sha256Hex(JSON.stringify([
+      hash, file.name, file.type, file.mime_type, mode,
+    ])));
+    const requested = request.headers.get("If-None-Match");
+    const known = request.method !== "POST" && file.content_sha256 ? mediaHeaders(file.content_sha256) : undefined;
+    if (known && matchesIfNoneMatch(requested, known.ETag)) return new Response(null, { status: 304, headers: { ...headers, ...known } });
+    // HEAD may revalidate a known file, but never fetches a remote attachment.
+    if (request.method === "HEAD") return new Response(null, { headers: { ...headers, ...known } });
     const signal = AbortSignal.any([request.signal, shutdownSignal, AbortSignal.timeout(120_000)]);
     const release = await downloads.acquire(await auth.requireSession(request), signal);
     try {
@@ -131,8 +140,10 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
         && !resolved.bytes.subarray(0, 8192).includes(0);
       const contentType = safeImage || safeAudio ? mime : safeText ? "text/plain; charset=utf-8" : "application/octet-stream";
       const encodedName = encodeURIComponent(file.name.replace(/[\r\n\x00-\x1f]/g, "_")).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16)}`);
+      const validators = request.method === "GET" ? known ?? mediaHeaders(resolved.contentSha256) : undefined;
+      if (!known && validators && matchesIfNoneMatch(requested, validators.ETag)) return new Response(null, { status: 304, headers: { ...headers, ...validators } });
       return new Response(new Uint8Array(resolved.bytes), { headers: {
-        ...headers, "Content-Type": contentType, "Content-Length": String(resolved.size),
+        ...headers, ...validators, "Content-Type": contentType, "Content-Length": String(resolved.size),
         "Content-Disposition": `${mode === "auto" && (safeImage || safeAudio) ? "inline" : "attachment"}; filename*=UTF-8''${encodedName}`,
       } });
     } catch (error) {
@@ -219,28 +230,35 @@ export function createWebRoutes(options: WebServerOptions, shutdownSignal: Abort
   };
 }
 
+type AssetHandler = (request: Request) => Promise<Response>;
+type AssetRoute = { GET: AssetHandler; HEAD: AssetHandler };
+
 async function assetRoutes(directory: string) {
   const entries = await readdir(directory, { withFileTypes: true });
   if (!entries.some(entry => entry.isFile() && entry.name === "index.html")) throw new Error("Website assets are missing. Run bun run build:web.");
-  const routes: Record<string, { GET: () => Response; HEAD: () => Response }> = {};
-  const assetTypes: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".jpg": "image/jpeg" };
+  const routes: Record<string, AssetRoute> = {};
+  const entryRoutes = new Map([["index.html", "/"], ["admin.html", "/admin"], ["service-worker.js", "/chat/service-worker.js"]]);
   for (const entry of entries) {
-    if (!entry.isFile() || !/\.(html|js|css|jpg)$/.test(entry.name)) continue;
+    if (!entry.isFile() || !webAssetTypes[path.extname(entry.name)]) continue;
     const filename = path.join(directory, entry.name);
-    // Only content-addressed bundles are safe to cache across releases.
-    const cache = /-[a-z0-9]{8}\.(js|css|jpg)$/.test(entry.name) ? "public, max-age=31536000, immutable" : "no-store";
-    const respond = (head: boolean) => {
+    // Only content-addressed bundles are safe to reuse across releases without revalidation.
+    const fingerprint = /-([a-z0-9]{8})\.[^.]+$/.exec(entry.name)?.[1];
+    const cache = fingerprint ? "public, max-age=31536000, immutable" : "no-cache";
+    const respond = async (request: Request) => {
       const file = bunFile(filename);
-      return new Response(head ? null : file, { headers: {
-        ...headers, "Cache-Control": cache,
-        "Content-Type": assetTypes[path.extname(entry.name)]!, "Content-Length": String(file.size),
-      } });
+      // Hash the current bytes of stable URLs so even a same-size rebuild gets a new validator.
+      const bytes = fingerprint ? undefined : await file.bytes();
+      const etag = `"${bytes ? sha256Hex(bytes) : fingerprint}"`;
+      const responseHeaders = { ...headers, "Cache-Control": cache, ETag: etag, "Content-Type": webAssetTypes[path.extname(entry.name)]! };
+      if (matchesIfNoneMatch(request.headers.get("If-None-Match"), etag)) return new Response(null, { status: 304, headers: responseHeaders });
+      const body = request.method === "HEAD" ? null : bytes ?? file;
+      return new Response(body, { headers: { ...responseHeaders, "Content-Length": String(bytes?.byteLength ?? file.size) } });
     };
-    routes[entry.name === "index.html" ? "/" : `/${entry.name}`] = { GET: () => respond(false), HEAD: () => respond(true) };
-    if (entry.name === "index.html") {
-      routes["/admin"] = { GET: () => respond(false), HEAD: () => respond(true) };
-    }
+    const url = entryRoutes.get(entry.name) ?? `/${entry.name}`;
+    routes[url] = { GET: respond, HEAD: respond };
   }
+  if (routes["/chat.webmanifest"] && !routes["/admin"]) throw new Error("Admin assets are missing. Run bun run build:web.");
+  routes["/admin"] ??= routes["/"]!;
   return routes;
 }
 
@@ -248,13 +266,17 @@ export async function startWebServer(options: WebServerOptions) {
   if (!options.config.WEB_ENABLED) return undefined;
   const controller = new AbortController();
   const api = createWebRoutes(options, controller.signal);
-  const assets: Record<string, HTMLBundle | { GET: () => Response; HEAD: () => Response }> = options.development
+  const assets: Record<string, HTMLBundle | AssetRoute> = options.development
     ? { "/": (await import("./client/index.html")).default }
     : await assetRoutes(path.resolve(options.assetsDirectory ?? "dist/web"));
+  if (assets["/"]) assets["/chat/"] = assets["/"];
   if (options.development && assets["/"]) assets["/admin"] = assets["/"];
-  const adminRedirect = (request: Request) => new Response(null, {
-    status: 308, headers: { ...headers, Location: `/admin${new URL(request.url).search}` },
-  });
+  const redirect = (target: string) => {
+    const respond = (request: Request) => new Response(null, {
+      status: 308, headers: { ...headers, Location: target + new URL(request.url).search },
+    });
+    return { GET: respond, HEAD: respond };
+  };
   let server: Server<undefined>;
   try {
     server = serve({
@@ -264,7 +286,7 @@ export async function startWebServer(options: WebServerOptions) {
       idleTimeout: 130,
       maxRequestBodySize: MAX_CHAT_BODY_BYTES,
       development: options.development ? { hmr: true, console: false } : false,
-      routes: { ...assets, ...api.routes, "/admin/": { GET: adminRedirect, HEAD: adminRedirect } },
+      routes: { ...assets, ...api.routes, "/admin/": redirect("/admin"), "/chat": redirect("/chat/") },
       fetch: api.fetch,
       error(error) {
         options.logger.error("website response failed", { error: error.name });
