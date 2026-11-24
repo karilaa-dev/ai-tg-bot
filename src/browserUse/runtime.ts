@@ -779,7 +779,7 @@ export class BrowserUseRuntimeManager {
       throw error;
     } finally {
       // Keep CDP through a retry when the provider still owes a profile save.
-      if (state.session !== pending || !pending.profileSave || this.lifecycle.phase !== "running" || Date.now() >= pending.timeoutAt) {
+      if (state.session !== pending || !pending.profileSave || reason === "shutdown" || Date.now() >= pending.timeoutAt) {
         const browser = pending.profileSave?.browser ?? session?.browser;
         if (pending.profileSave) delete pending.profileSave.browser;
         await browser?.close().catch(() => undefined);

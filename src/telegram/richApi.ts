@@ -42,8 +42,9 @@ interface EditRichMessageParams {
 export async function sendRich(
   api: RawRichApi,
   params: SendRichMessageParams,
+  signal?: AbortSignal,
 ): Promise<Message> {
-  const result = await api.raw.sendRichMessage({ ...params, rich_message: compactRichTables(params.rich_message) });
+  const result = await api.raw.sendRichMessage({ ...params, rich_message: compactRichTables(params.rich_message) }, signal);
   if (result === true) return placeholderMessageForBooleanResult(params.chat_id);
   // grammY 1.43 / @grammyjs/types lack Bot API 10.1 rich-message types (see PLAN.md),
   // so this is the single intentional trust boundary where the raw response is narrowed.
@@ -71,8 +72,9 @@ export async function sendRichDraft(
 export async function editRich(
   api: RawRichApi,
   params: EditRichMessageParams,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  return Boolean(await api.raw.editMessageText({ ...params, rich_message: compactRichTables(params.rich_message) }));
+  return Boolean(await api.raw.editMessageText({ ...params, rich_message: compactRichTables(params.rich_message) }, signal));
 }
 
 function compactRichTables(rich: InputRichMessage): InputRichMessage {

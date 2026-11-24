@@ -90,6 +90,32 @@ describe("BrowserUseRuntimeManager", () => {
     expect(connection.isConnected()).toBe(false);
   });
 
+  it("keeps CDP connected for the shutdown retry queued behind a failed stop", async () => {
+    const fixture = await runtimeFixture({}, true);
+    const browser = fixture.manager.forThread(7, THREAD_ID);
+    await browser.open("https://example.com/login");
+    const connection = fixture.browsers[0]!;
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const stop = fixture.api.stopBrowser.getMockImplementation()!;
+    const connectedAtRetry: boolean[] = [];
+    fixture.api.stopBrowser.mockImplementationOnce(async () => {
+      started.resolve();
+      await release.promise;
+      throw new BrowserUseHttpError(403, "stop denied");
+    }).mockImplementationOnce(async id => {
+      connectedAtRetry.push(connection.isConnected());
+      return stop(id);
+    });
+    const closing = expect(browser.closeSession()).rejects.toThrow();
+    await started.promise;
+    const shutdown = fixture.manager.dispose();
+    release.resolve();
+    await Promise.all([closing, shutdown]);
+    expect(connectedAtRetry).toEqual([true]);
+    expect(connection.isConnected()).toBe(false);
+  });
+
   it("ignores a deadline from the previous session queued during rollover", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture();

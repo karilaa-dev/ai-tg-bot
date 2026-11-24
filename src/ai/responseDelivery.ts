@@ -313,7 +313,7 @@ export async function refreshFinalThinkingVisible(
       const retainedStaleIds: number[] = [];
       for (const messageId of staleIds) {
         try {
-          await input.api.deleteMessage(input.chatId, messageId);
+          await input.api.deleteMessage(input.chatId, messageId, telegramSignal(input));
         } catch (error) {
           retainedStaleIds.push(messageId);
           input.logger.warn("failed to delete stale multipart final-thinking message", {
@@ -348,7 +348,7 @@ async function editFinalMessageVisible(
         chat_id: input.chatId,
         message_id: messageId,
         rich_message: variant,
-      });
+      }, input.signal);
       if (edited) return true;
     } catch (err) {
       if (err instanceof GrammyError && /message is not modified/i.test(err.description)) return true;
@@ -378,7 +378,7 @@ async function sendAnswerReplacingPlaceholder(input: TurnInput, rich: InputRichM
       if (!isDefinitiveTelegramRejection(error)) throw error;
     }
     const sent = await sendRichWithFallback(input, rich);
-    await input.api.deleteMessage(input.chatId, placeholder.messageId).catch(() => undefined);
+    await input.api.deleteMessage(input.chatId, placeholder.messageId, telegramSignal(input)).catch(() => undefined);
     return sent;
   }
   return sendRichWithFallback(input, rich);
@@ -886,6 +886,11 @@ function telegramDeliveryFromSent(sent: SentTelegramFileMessage): NonNullable<Cr
   };
 }
 
+// grammY's Node types name its AbortSignal polyfill. The API accepts a native signal at runtime.
+function telegramSignal(input: TurnInput): Parameters<Api["sendMessage"]>[3] {
+  return input.signal as Parameters<Api["sendMessage"]>[3];
+}
+
 function withThreadFallback<T>(
   input: TurnInput,
   warn: { message: string; fields?: Record<string, unknown> },
@@ -917,11 +922,11 @@ function sendDocumentWithThreadFallback(
       message: "telegram topic send failed; retrying created file without message_thread_id",
       fields: { fileId: attachment.fileId },
     },
-    () => input.api.sendDocument(input.chatId, attachmentInput(attachment), documentSendOptions(input.messageThreadId, attachment)),
+    () => input.api.sendDocument(input.chatId, attachmentInput(attachment), documentSendOptions(input.messageThreadId, attachment), telegramSignal(input)),
     () => input.api.sendDocument(input.chatId, attachmentInput(attachment), {
       ...documentSendOptions(undefined, attachment),
       caption: documentFallbackCaption(input.thread.title, attachment),
-    }),
+    }, telegramSignal(input)),
   );
 }
 
@@ -938,13 +943,13 @@ function sendPhotoWithThreadFallback(
     () => input.api.sendPhoto(input.chatId, attachmentInput(attachment), {
       ...threadOnlySendOptions(input.messageThreadId),
       caption: attachment.caption ?? undefined,
-    }),
+    }, telegramSignal(input)),
     () => input.api.sendPhoto(input.chatId, attachmentInput(attachment), {
       ...threadOnlySendOptions(undefined),
       caption: attachment.caption
         ? documentFallbackCaption(input.thread.title, attachment)
         : undefined,
-    }),
+    }, telegramSignal(input)),
   );
 }
 
@@ -958,8 +963,8 @@ function sendDocumentMediaGroupWithThreadFallback(
       message: "telegram topic send failed; retrying created file media group without message_thread_id",
       fields: { files: attachments.length, fileIds: attachments.map((attachment) => attachment.fileId) },
     },
-    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId)),
-    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments, input.thread.title), threadOnlySendOptions(undefined)),
+    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId), telegramSignal(input)),
+    () => input.api.sendMediaGroup(input.chatId, documentMediaGroup(attachments, input.thread.title), threadOnlySendOptions(undefined), telegramSignal(input)),
   );
 }
 
@@ -973,8 +978,8 @@ function sendPhotoMediaGroupWithThreadFallback(
       message: "telegram topic send failed; retrying generated image photo media group without message_thread_id",
       fields: { files: attachments.length, fileIds: attachments.map((attachment) => attachment.fileId) },
     },
-    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId)),
-    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(undefined)),
+    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(input.messageThreadId), telegramSignal(input)),
+    () => input.api.sendMediaGroup(input.chatId, photoMediaGroup(attachments), threadOnlySendOptions(undefined), telegramSignal(input)),
   );
 }
 
@@ -1129,11 +1134,11 @@ function sendRichMessageWithThreadFallback(
       chat_id: input.chatId,
       message_thread_id: input.messageThreadId,
       rich_message: rich,
-    }),
+    }, input.signal),
     () => sendRich(input.api, {
       chat_id: input.chatId,
       rich_message: prefixRichForThreadFallback(input.thread.title, rich),
-    }),
+    }, input.signal),
   );
 }
 
@@ -1148,8 +1153,8 @@ export function sendPlainWithThreadFallback(
     () => input.api.sendMessage(input.chatId, text, {
       ...other,
       message_thread_id: input.messageThreadId,
-    }),
-    () => input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text, other.parse_mode === "HTML"), other),
+    }, telegramSignal(input)),
+    () => input.api.sendMessage(input.chatId, prefixPlainForThreadFallback(input.thread.title, text, other.parse_mode === "HTML"), other, telegramSignal(input)),
   );
 }
 

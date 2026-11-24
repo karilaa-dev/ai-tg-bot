@@ -1,5 +1,5 @@
 import { fixtureUuid } from "./uuid.js";
-import { GrammyError, InputFile } from "grammy";
+import { Api, GrammyError, InputFile } from "grammy";
 import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { describe, expect, it, vi } from "vitest";
 import { buildFinalThinkingSummary } from "../../src/ai/agentTurnEngine.js";
@@ -10,6 +10,8 @@ import { OutgoingBuffers } from "../../src/files/outgoingBuffers.js";
 import { FileResolver } from "../../src/files/resolver.js";
 import { deferred } from "../helpers/async.js";
 import { StreamShaper } from "../../src/ai/shaper.js";
+import { loadTestConfig } from "../../src/config.js";
+import { telegramRetry } from "../../src/telegram/retry.js";
 import { renderFinalThinking } from "../../src/telegram/render.js";
 
 describe("buffered Telegram attachment delivery", () => {
@@ -29,7 +31,7 @@ describe("buffered Telegram attachment delivery", () => {
     } finally { textGate.resolve(); }
     await sending;
     expect(input.resolveFile).toHaveBeenCalledOnce();
-    expect(api.sendPhoto).toHaveBeenCalledWith(123, new InputFile(Buffer.from("prefetched"), "a.jpg"), expect.any(Object));
+    expect(api.sendPhoto).toHaveBeenCalledWith(123, new InputFile(Buffer.from("prefetched"), "a.jpg"), expect.any(Object), undefined);
     expect(file.telegramDelivery).toMatchObject({ fileId: "photo-file" });
     expect(file.data).toBeUndefined();
     expect(api.raw.sendRichMessage.mock.invocationCallOrder[0]).toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
@@ -160,8 +162,8 @@ describe("buffered Telegram attachment delivery", () => {
       .resolves.toEqual([701]);
 
     expect(api.raw.editMessageText).toHaveBeenCalledTimes(1);
-    expect(api.raw.editMessageText).toHaveBeenCalledWith(expect.objectContaining({ message_id: 701 }));
-    expect(api.deleteMessage).toHaveBeenCalledWith(123, 702);
+    expect(api.raw.editMessageText).toHaveBeenCalledWith(expect.objectContaining({ message_id: 701 }), undefined);
+    expect(api.deleteMessage).toHaveBeenCalledWith(123, 702, undefined);
   });
 
   it("downgrades oversized generated images before attachment delivery", () => {
@@ -188,7 +190,7 @@ describe("buffered Telegram attachment delivery", () => {
       .toBeLessThan(api.sendPhoto.mock.invocationCallOrder[0]!);
     expect(api.sendPhoto).toHaveBeenCalledWith(123, expect.anything(), expect.objectContaining({
       caption: "A pear with the cat's face",
-    }));
+    }), undefined);
   });
 
   it("does not deliver a generated image when assistant persistence fails", async () => {
@@ -267,6 +269,28 @@ describe("buffered Telegram attachment delivery", () => {
 
     expect(input.repos.messages.setDeliveryContent).toHaveBeenCalledTimes(3);
     expect(input.onDeliveryConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("cancels the pending Telegram flood-wait retry when the turn loses its lease", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = vi.fn(async () => Response.json(transport.mock.calls.length === 1
+        ? { ok: false, error_code: 429, description: "Flood limit", parameters: { retry_after: 1 } }
+        : { ok: true, result: { message_id: 200 } }));
+      const api = new Api(loadTestConfig().BOT_TOKEN, { fetch: transport as unknown as typeof fetch });
+      api.config.use(telegramRetry());
+      const controller = new AbortController();
+      const done = sendFinal({ ...turnInput(fakeApi()), api, signal: controller.signal }, "", "Reply")
+        .then(() => "sent", () => "aborted");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport).toHaveBeenCalledOnce();
+      controller.abort(new Error("Turn owner lease was lost."));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(await done).toBe("aborted");
+      expect(transport).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not persist or send a final answer after cancellation wins the delivery barrier", async () => {
