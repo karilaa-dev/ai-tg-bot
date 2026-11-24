@@ -63,6 +63,34 @@ describe("website tool activity through real Pi execution and response persisten
     expect((await h.repos.messages.listThread(h.thread.id)).find(row => row.role === "assistant")?.text_plain).toBe("Possibly delivered");
   });
 
+  it("sends one reply when the database loses the delivery registration acknowledgement", async () => {
+    const answer = "Recovered answer";
+    const h = await setup([{ name: "finish_response", arguments: { text: answer } }], false);
+    const runs = h.repos.turnRuns;
+    const { turnRun, userMessage } = await runs.accept({
+      userId: h.user.tg_id, threadId: h.thread.id, chatId: h.user.tg_id, messageThreadId: null,
+      locale: "en", kind: "text", content: { text: h.input.text }, textPlain: h.input.text,
+      sources: [{ updateId: 1, messageId: 1 }],
+    });
+    const ownerId = "test-owner";
+    await runs.claimRunning(turnRun.id, ownerId);
+    const write = runs.markAwaitingDelivery.bind(runs);
+    const register = vi.spyOn(runs, "markAwaitingDelivery").mockImplementationOnce(async (...args) => {
+      await write(...args);
+      throw new Error("connection lost after commit");
+    });
+    const finalizer = new TurnFinalizer({ repos: h.repos, logger: h.input.logger, turnRunId: turnRun.id, threadId: h.thread.id, ownerId });
+    await runTurn({ ...h.input, turnRunId: turnRun.id, userMessageId: userMessage.id,
+      onDeliveryStarting: () => finalizer.beginDelivery(),
+      onAwaitingDelivery: result => finalizer.awaitingDelivery(result),
+      onDeliveryConfirmed: result => finalizer.confirmDelivery(result.assistantMessageId),
+    });
+    expect(h.sent.filter(text => text === answer)).toEqual([answer]);
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(register.mock.calls[1]).toEqual(register.mock.calls[0]);
+    expect(await runs.get(turnRun.id)).toMatchObject({ status: "succeeded", delivery_status: "delivered" });
+  });
+
   it("shows stopped when durable cancellation wins before delivery, even without an aborted local signal", async () => {
     const h = await setup([{ name: "finish_response", arguments: { text: "Must not deliver" } }], true);
     vi.spyOn(h.repos.turnRuns, "markAwaitingDelivery").mockResolvedValue(false);

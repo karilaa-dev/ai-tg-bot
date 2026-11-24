@@ -18,6 +18,7 @@ import {
 
 const DEADLINE_MARGIN_MS = 15_000;
 const EXTENSION_REQUIRED_MS = 60_000;
+const STOP_RETRY_DELAY_MS = 30_000;
 const STOP_RETRIES = 3;
 const PROFILE_SAVE_TIMEOUT_MS = 5_000;
 const PROFILE_SAVE_POLL_MS = 250;
@@ -712,12 +713,19 @@ export class BrowserUseRuntimeManager {
   }
 
   private scheduleCleanup(state: UserState): void {
-    clearTimer(state, "idleTimer");
-    clearTimer(state, "deadlineTimer");
     const session = state.session;
     if (this.lifecycle.phase !== "running" || session.phase === "closed") return;
-    const timeoutAt = session.phase === "open" ? session.value.timeoutAt : session.timeoutAt;
-    const deadlineDelay = Math.max(0, timeoutAt - Date.now() - DEADLINE_MARGIN_MS);
+    if (session.phase === "stop_pending") {
+      const remaining = session.timeoutAt - Date.now();
+      if (remaining > 0 && !state.deadlineTimer) {
+        state.deadlineTimer = setTimeout(() => void this.autoClose(state, session, "retry"), Math.min(STOP_RETRY_DELAY_MS, remaining));
+        state.deadlineTimer.unref?.();
+      }
+      return;
+    }
+    clearTimer(state, "idleTimer");
+    clearTimer(state, "deadlineTimer");
+    const deadlineDelay = Math.max(0, session.value.timeoutAt - Date.now() - DEADLINE_MARGIN_MS);
     state.deadlineTimer = setTimeout(() => void this.autoClose(state, session, "deadline"), deadlineDelay);
     state.deadlineTimer.unref?.();
     if (!state.activeTurns.size) {
@@ -727,7 +735,7 @@ export class BrowserUseRuntimeManager {
     }
   }
 
-  private async autoClose(state: UserState, expected: BrowserSession, reason: "idle" | "deadline"): Promise<void> {
+  private async autoClose(state: UserState, expected: BrowserSession, reason: "idle" | "deadline" | "retry"): Promise<void> {
     await state.lock.run(async () => {
       if (this.lifecycle.phase !== "running" || state.session !== expected) return;
       if (reason === "idle" && state.activeTurns.size) {
@@ -766,6 +774,9 @@ export class BrowserUseRuntimeManager {
         await delay(PROFILE_SAVE_TIMEOUT_MS);
       }
       state.session = { phase: "closed" };
+    } catch (error) {
+      this.scheduleCleanup(state);
+      throw error;
     } finally {
       await session?.browser.close().catch(() => undefined);
     }

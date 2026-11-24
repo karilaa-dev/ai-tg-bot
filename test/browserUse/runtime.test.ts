@@ -213,6 +213,23 @@ describe("BrowserUseRuntimeManager", () => {
     expect(fixture.api.createBrowser).toHaveBeenCalledTimes(2);
   });
 
+  it("retries an unacknowledged idle stop without a new browser request", async () => {
+    vi.useFakeTimers();
+    const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 300_000 });
+    const stop = fixture.api.stopBrowser;
+    for (let i = 0; i < 3; i++) stop.mockRejectedValueOnce(new BrowserUseHttpError(503, "try again"));
+    await fixture.manager.beginTurn(7, THREAD_ID);
+    await fixture.manager.forThread(7, THREAD_ID).open("https://example.com", 10);
+    await fixture.manager.endTurn(7, THREAD_ID);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(stop).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(stop).toHaveBeenCalledTimes(4);
+    expect(stop.mock.calls[3]![0]).toBe(stop.mock.calls[0]![0]);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(stop).toHaveBeenCalledTimes(4);
+  });
+
   it("automatically stops an idle session after the configured five-minute fallback", async () => {
     vi.useFakeTimers();
     const fixture = await runtimeFixture({ BROWSER_USE_IDLE_TIMEOUT_MS: 300_000 });

@@ -61,12 +61,15 @@ export class TurnFinalizer {
       if (this.deliveryRegistration.messageId !== result.assistantMessageId) throw new Error("A different reply already started delivery.");
       return this.deliveryRegistration.ready;
     }
-    const ready = this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
+    const register = () => this.input.repos.turnRuns.markAwaitingDelivery(this.input.turnRunId, {
       resultMessageId: result.assistantMessageId,
       provider: result.provider,
       model: result.model,
       usage: result.usage,
-    }, this.input.ownerId).then(transitioned => {
+    }, this.input.ownerId);
+    // A failed acknowledgement can follow a successful commit. Recheck the same reply and lease
+    // before proceeding to the first send. A definitive refusal still wins immediately.
+    const ready = register().catch(register).then(transitioned => {
       if (transitioned) return;
       if (!this.hasDeliveryOutcome) this.phase = "cancelled";
       throw new TurnCancelledError();
