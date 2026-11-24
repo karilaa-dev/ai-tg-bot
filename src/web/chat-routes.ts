@@ -1,3 +1,4 @@
+import { matchesIfNoneMatch, privateMediaHeaders } from "./http-cache.js";
 import { createHash } from "node:crypto";
 import type { BunRequest, Server } from "bun";
 import { ScheduleError, ScheduleInputSchema, SchedulePatchSchema } from "../scheduling/types.js";
@@ -106,7 +107,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         DELETE: guard(async request => {
           await requireBoundSession(request);
           return Response.json({ authenticated: false, loginAvailable: auth.available && Boolean(options.chat) } satisfies ChatSession,
-            { headers: { "Set-Cookie": await auth.logout(request) } });
+            { headers: { "Set-Cookie": await auth.logout(request), "Clear-Site-Data": '"cache"' } });
         }),
       },
       "/api/auth/telegram/start": { GET: guard((request, server) => auth.start(request, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS))) },
@@ -183,11 +184,13 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         ...read<"/api/chat/threads/:threadId/files/:fileId">(async (request, userId, chat) => { await owned(request, userId, chat); return attachment(request); }),
         POST: user<"/api/chat/threads/:threadId/files/:fileId">(async (request, userId, chat) => { await owned(request, userId, chat); return attachment(request); }),
       },
-      "/api/chat/avatar": read(async (_request, userId, chat) => {
+      "/api/chat/avatar": read(async (request, userId, chat) => {
         const avatar = await chat.avatar(userId);
         // No photo, or Telegram hides it: the client keeps showing the initial.
         if (!avatar) return new Response(null, { status: 204 });
-        return new Response(new Uint8Array(avatar.bytes), { headers: { "Content-Type": avatar.mime, "Content-Length": String(avatar.bytes.byteLength) } });
+        const validators = privateMediaHeaders(createHash("sha256").update(avatar.mime).update(avatar.bytes).digest("hex"));
+        if (matchesIfNoneMatch(request.headers.get("If-None-Match"), validators.ETag)) return new Response(null, { status: 304, headers: validators });
+        return new Response(new Uint8Array(avatar.bytes), { headers: { ...validators, "Content-Type": avatar.mime, "Content-Length": String(avatar.bytes.byteLength) } });
       }),
       "/api/chat/settings": {
         ...read(async (_request, userId, chat) => Response.json(await chat.settings(userId))),
@@ -216,7 +219,7 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
  */
 export function conditionalJson(request: Request, body: string): Response {
   const etag = `"${createHash("sha256").update(body).digest("base64url")}"`;
-  if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
+  if (matchesIfNoneMatch(request.headers.get("If-None-Match"), etag)) return new Response(null, { status: 304, headers: { ETag: etag } });
   return new Response(body, { headers: { "Content-Type": "application/json;charset=utf-8", ETag: etag } });
 }
 

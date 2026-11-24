@@ -12,7 +12,8 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
 import { FileResolver } from "../../src/files/resolver.js";
-import { ConversationRepository } from "../../src/web/repository.js";
+import { sha256Hex } from "../../src/files/hash.js";
+import { ConversationRepository, WebNotFound } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
 import { audioFixture } from "../helpers/audio.js";
 import type { WebHistory } from "../../src/web/types.js";
@@ -90,7 +91,7 @@ await repos.users.ensure({ tgId: 999, firstName: "Archive Test Bot", username: "
 if (preview) {
   const picture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5xkAAAAASUVORK5CYII=", "base64");
   const imageMessage = await repos.messages.insert({ threadId: thread.id, role: "user", kind: "image", textPlain: "Here is the route preview.", content: { caption: "Here is the route preview." } });
-  const pictureFile = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: imageMessage.id, type: "image", name: "route-preview.png", mimeType: "image/png", size: picture.length, summary: "A saved preview of the walking route.", isInline: true });
+  const pictureFile = await repos.files.insertFile({ userId: user.tg_id, threadId: thread.id, messageId: imageMessage.id, type: "image", name: "route-preview.png", mimeType: "image/png", size: picture.length, contentSha256: sha256Hex(picture), summary: "A saved preview of the walking route.", isInline: true });
   payloads.set(String(pictureFile.id), picture);
   await repos.files.rememberSource(pictureFile.id, { transport: "fixture", connectionKey: "default", remoteKey: String(pictureFile.id), locator: {}, mimeType: "image/png" });
   await db.db.execute(sql`update messages set text_plain = ${`Here is the route preview.\n\n[[chat-file:${pictureFile.id}]] [image #${pictureFile.id}: A saved preview of the walking route.]`} where id = ${imageMessage.id}`);
@@ -110,8 +111,16 @@ const telegram = await fakeTelegramLogin();
 const consent = preview ? telegram.serveAuthorizePage(ADMIN_ID, (): URL => new URL(`http://127.0.0.1:${web.url.port}`)) : undefined;
 const access = new AccessControl(db.db);
 await access.initialize();
+const chat = signInOnlyChat("archive_test_bot");
+chat.service.avatar = async () => null;
+chat.service.settings = async () => ({ language: "en", timeZone: "UTC", timezoneOffsetMinutes: 0, streaming: true, memoryEnabled: true });
+chat.service.threads = async () => ({ items: [], nextOffset: null });
+chat.service.schedules = async () => ({ items: [] });
+chat.service.requireThread = async (userId, threadId) => {
+  if ((await repos.threads.get(threadId))?.user_id !== userId) throw new WebNotFound();
+};
 const options = { db: db.db, access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
-  chat: signInOnlyChat("archive_test_bot"), telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
+  chat, telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
 const web = (await startWebServer(options))!;
 if (preview) {
   console.log(`Preview: http://127.0.0.1:${web.url.port}/admin?user=${user.tg_id}&thread=${thread.id}`);

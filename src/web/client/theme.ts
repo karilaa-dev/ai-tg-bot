@@ -5,6 +5,8 @@ try { saved = localStorage.getItem(themeKey); } catch { /* Storage can be disabl
 let explicit: "light" | "dark" | null = saved === "light" || saved === "dark" ? saved : null;
 function apply(theme: "light" | "dark") {
   document.documentElement.dataset.mode = theme;
+  const browserBar = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (browserBar) browserBar.content = theme === "dark" ? "#171717" : "#ffffff";
 }
 apply(explicit ?? (preferred.matches ? "dark" : "light"));
 function onPreferenceChange() { if (!explicit) apply(preferred.matches ? "dark" : "light"); }

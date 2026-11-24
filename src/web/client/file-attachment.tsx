@@ -9,7 +9,7 @@ import { RichText } from "./rich-text.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
 
 export function FileAttachment({ file, state, maxBytes, load, autoLoad, preview = true, messageText = "", messageAttachments = [file] }: {
-  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string; messageAttachments?: WebAttachment[]; autoLoad?: () => void; preview?: boolean;
+  file: WebAttachment; state?: LoadedAttachment; maxBytes: number; load: (allowSandbox?: boolean) => void; messageText?: string; messageAttachments?: WebAttachment[]; autoLoad?: (file: WebAttachment) => void; preview?: boolean;
 }) {
   const language = useUiLanguage();
   const t = useSharedStrings();
@@ -19,7 +19,7 @@ export function FileAttachment({ file, state, maxBytes, load, autoLoad, preview 
   const kind = attachmentKind(file);
   const image = kind === "image" && preview;
   const { ref, visible } = useFirstVisible<HTMLDivElement>();
-  useEffect(() => { if (visible && preview) autoLoad?.(); }, [visible, preview, autoLoad]);
+  useEffect(() => { if (visible && preview) autoLoad?.(file); }, [visible, preview, autoLoad, file]);
   const audio = kind === "audio";
   const caption = file.caption?.trim();
   const fallbackNames = messageAttachments.map(f => f.caption?.trim() || f.name).filter(Boolean).join(", ");

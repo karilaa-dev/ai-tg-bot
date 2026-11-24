@@ -127,7 +127,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     setState({ kind: "checking" });
     try {
       await logout;
-      history.replaceState(null, "", "/");
+      history.replaceState(null, "", location.pathname);
       setState({ kind: "signed-out", loginAvailable: true, notice: "signed-out" });
     } catch {
       setState({ kind: "unreachable" });

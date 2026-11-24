@@ -126,7 +126,7 @@ The implementation follows E2B's current documentation for [sandboxes](https://e
 
 ### Toolbox template
 
-The bot derives its default private template from the application version. Version `2.1.12` uses `ai-tg-bot-tools:v2.1.12`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
+The bot derives its default private template from the application version. Version `2.1.13` uses `ai-tg-bot-tools:v2.1.13`. The template in [`e2b-template`](e2b-template/README.md) uses E2B Base with 2 vCPU and 2 GiB RAM. It includes docx-cli 0.26.0, PptxGenJS 4.0.1, python-pptx 1.0.2, openpyxl 3.1.5, headless LibreOffice Writer/Impress/Calc with compatible fonts, the OpenSCAD `2026.09.29` Node/WebAssembly engine with POV-Ray `3.7.0.10`, `openscad-build`, ImageMagick, archive tools, Python, Node.js, Git and SSH clients, SQLite, compilers, and standard shell diagnostics. OpenSCAD builds produce a compact binary STL and one exact rendered PNG by default. The image does not install an X server, OpenGL renderer, Chromium, or browser automation packages.
 
 Default `python` and `python3` scripts can use Pillow, Requests, NumPy, pandas, Matplotlib, Beautiful Soup, and PyYAML without setup. Their versions and dependencies are pinned in the image and exercised by the live toolbox contract.
 
@@ -142,8 +142,8 @@ The command reads `package.json`, builds or reuses the corresponding `v<version>
 
 ```dotenv
 E2B_API_KEY=<secret>
-# Optional override. The default for version 2.1.12 is ai-tg-bot-tools:v2.1.12.
-# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.12
+# Optional override. The default for version 2.1.13 is ai-tg-bot-tools:v2.1.13.
+# E2B_TEMPLATE=ai-tg-bot-tools:v2.1.13
 E2B_DEPLOYMENT_ID=ai-tg-bot
 E2B_REQUEST_TIMEOUT_MS=30000
 E2B_FILE_SOURCE_MAX_BYTES=2147483648
@@ -358,7 +358,11 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 
 `bun run dev` watches the backend and enables Bun's HTML development server when `WEB_ENABLED=true`. React and Tailwind edits update the browser through HMR, preserving React state without a separate frontend build. Use this mode for local development: Bun serves source maps and development diagnostics. API responses and attachments retain the production privacy and consent checks.
 
-`bun run build:web` bundles `src/web/client/index.html` with Bun and the Tailwind plugin. Production serves the generated JavaScript and CSS through `Bun.file`, with content hashes in filenames and immutable caching. HTML, conversation data, attachments, and errors use `Cache-Control: no-store`. The frontend targets current browsers with native JavaScript modules; Bun transpiles TypeScript and JSX but does not downlevel JavaScript syntax for older browsers.
+`bun run build:web` bundles `src/web/client/index.html` with Bun and the Tailwind plugin. Production serves the generated JavaScript and CSS through `Bun.file`, with content hashes in filenames and immutable caching. The frontend targets current browsers with native JavaScript modules.
+
+Open the chat over HTTPS and use the browser’s install or Add to Home Screen action. The installed app launches at `/chat/`. After the first cache fill, its interface opens offline. Sign-in and conversations require a connection. A new version takes over once all chat windows using the previous version close.
+
+Ordinary browser tabs at `/` and `/admin` reuse fingerprinted scripts, styles and images through the HTTP cache. On return visits, unchanged pages can revalidate with a small `304` response. Profile photos and attachment downloads use the browser’s private HTTP cache and revalidate access before reuse. The admin viewer stays outside the installed app.
 
 `bun-plugin-tailwind` 0.1.2 embeds a Tailwind 4.1.14 compiler, separately from the installed `tailwindcss` styles. The existing UI and HMR have been checked with this combination; newer Tailwind compiler features require an updated plugin.
 

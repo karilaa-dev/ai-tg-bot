@@ -2,7 +2,57 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { chromium } from "playwright-core";
+import { checkPwaUpdate } from "./pwa-update-browser.js";
+import type { WebHistory } from "../../src/web/types.js";
+import { chromium, type BrowserContext } from "playwright-core";
+
+/** Exercise both website routes with service workers disabled and a real HTTP cache. */
+async function checkBrowserCache(signedIn: BrowserContext, origin: string, history: WebHistory) {
+  const context = await browser.newContext({ serviceWorkers: "block", storageState: await signedIn.storageState() });
+  const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.enable");
+  const revalidated = new Set<string>();
+  cdp.on("Network.responseReceivedExtraInfo", event => {
+    if (event.statusCode === 304) revalidated.add(new Headers(event.headers).get("etag") ?? "");
+  });
+  const picture = history.messages.flatMap(message => message.attachments).find(file => file.name === "route-preview.png");
+  assert(picture);
+  try {
+    for (const route of ["/", "/admin"]) {
+      const target = new URL(route, origin).href;
+      const cold = await page.goto(target);
+      const tag = await cold!.headerValue("etag");
+      assert(tag);
+      await page.goto("about:blank");
+      revalidated.clear();
+      await page.goto(target);
+      assert(revalidated.has(tag), `The browser revalidated ${route} without downloading the page again`);
+      const styles = await page.evaluate(() => {
+        const href = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"]')!.href;
+        return performance.getEntriesByName(href).some(entry => (entry as PerformanceResourceTiming).transferSize === 0);
+      });
+      assert(styles, `The browser reused the stylesheet on ${route}`);
+
+      const chat = route === "/";
+      const mediaUrl: string = `/api${chat ? "/chat" : ""}/threads/${history.thread.id}/files/${picture.id}?mode=download`;
+      const read = () => page.evaluate(async ({ mediaUrl, user }) => {
+        const response = await fetch(mediaUrl, { headers: user ? { "X-Chat-User": user } : {} });
+        return { status: response.status, bytes: (await response.arrayBuffer()).byteLength, etag: response.headers.get("etag") };
+      }, { mediaUrl, user: chat ? String(history.user.id) : "" });
+      const first = await read();
+      assert.equal(first.status, 200);
+      assert.equal(first.bytes, picture.size);
+      assert(first.etag);
+      revalidated.clear();
+      assert.deepEqual(await read(), first);
+      assert(revalidated.has(first.etag), `The browser revalidated the private file on ${route}`);
+      await context.setOffline(true);
+      await assert.rejects(read());
+      await context.setOffline(false);
+    }
+  } finally { await context.close(); }
+}
 
 const browser = await chromium.launch({ headless: true });
 const server = spawn(process.execPath, ["test/web/http-smoke.ts", "--browser", ...process.argv.filter(arg => arg === "--web-dev")], {
@@ -64,6 +114,9 @@ try {
   await thinking.click();
   await toolDetails.waitFor({ state: "hidden" });
 
+  // Let the visible preview finish its single download slot before testing HTTP revalidation.
+  await page.locator(".image-attachment").first().scrollIntoViewIfNeeded();
+  await page.locator(".image-attachment img").first().waitFor();
   await page.getByRole("button", { name: "Usage", exact: true }).first().click();
   await page.getByRole("img", { name: "Daily stacked token counts", exact: false }).waitFor();
   for (const width of [320, 390, 768, 1440]) {
@@ -89,6 +142,53 @@ try {
   const selectedDay = await slider.getAttribute("aria-valuetext");
   await slider.press("ArrowLeft");
   assert.notEqual(await slider.getAttribute("aria-valuetext"), selectedDay);
+  if (!process.argv.includes("--web-dev")) {
+    assert.equal(await page.locator('link[rel="manifest"]').count(), 0);
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+    const context = page.context();
+    const cdp = await context.newCDPSession(page);
+    const threadId = new URL(url).searchParams.get("thread");
+    const historyResponse = await context.request.get(new URL(`/api/threads/${threadId}/messages`, url).href);
+    await checkBrowserCache(context, url, await historyResponse.json() as WebHistory);
+    await page.goto(new URL("/", url).href);
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.getRegistration("/chat/").then(Boolean)), false);
+    const rootInstall = await cdp.send("Page.getInstallabilityErrors");
+    assert.deepEqual(rootInstall.installabilityErrors, []);
+    await context.clearCookies();
+    await page.goto(new URL("/chat/", url).href);
+    await page.getByRole("link", { name: "Sign in with Telegram", exact: true }).click();
+    await page.waitForURL(new URL("/chat/", url).href);
+    const account = page.getByRole("button", { name: /^Account:/ });
+    await account.click();
+    await page.getByRole("menuitem", { name: "Admin", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+    await context.setOffline(true);
+    assert.equal(await page.evaluate(() => fetch("/api/chat/session").then(() => true, () => false)), false);
+    const response = await page.goto(new URL(`/chat/?thread=${threadId}`, url).href);
+    assert(response?.fromServiceWorker(), "Offline navigation loads the public chat shell");
+    await page.getByRole("button", { name: "Try again", exact: true }).waitFor();
+    const manifest = await cdp.send("Page.getAppManifest");
+    assert.deepEqual(manifest.errors, []);
+    const app = JSON.parse(manifest.data!);
+    assert.equal(app.start_url, "/chat/");
+    assert.equal(app.scope, "/chat/");
+    const installability = await cdp.send("Page.getInstallabilityErrors");
+    assert.deepEqual(installability.installabilityErrors, []);
+    await context.setOffline(false);
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.getRegistration("/admin").then(Boolean)), false);
+    await page.goto(new URL("/admin", url).href);
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+    const cachePaths = await page.evaluate(async () => {
+      const [name] = (await caches.keys()).filter(name => name.startsWith("ai-tg-bot-web-"));
+      return (await (await caches.open(name!)).keys()).map(request => new URL(request.url).pathname);
+    });
+    assert(cachePaths.every(path => !path.startsWith("/admin")));
+    assert(cachePaths.some(path => path.startsWith("/chat-app-")));
+    assert(cachePaths.every(path => !path.startsWith("/api/")));
+    await checkPwaUpdate(browser);
+  }
   assert.deepEqual(errors, []);
   console.log("Browser smoke passed: Telegram admin sign-in, compact tool and usage details, keyboard disclosures, responsive charts, and keyboard day selection");
 } finally {

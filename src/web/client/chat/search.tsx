@@ -154,7 +154,7 @@ export function ChatSearch({ open, onOpenChange, recent, onOpen }: {
   const choose = (thread: ChatThread, newTab = false) => {
     // A stale list (still typing, or results on their way) must not open an unrelated chat.
     if (pending || !threads.some(item => item.id === thread.id)) return;
-    if (newTab) { window.open(`/?thread=${thread.id}`, "_blank", "noopener"); return; }
+    if (newTab) { window.open(`?thread=${thread.id}`, "_blank", "noopener"); return; }
     onOpenChange(false);
     onOpen(thread);
   };

@@ -57,7 +57,7 @@ export async function chatFetch(url: string, init: RequestInit = {}): Promise<Re
   const headers = new Headers(init.headers);
   if (sessionUserId !== null) headers.set("X-Chat-User", String(sessionUserId));
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) headers.set("X-Chat-Request", "1");
-  const response = await fetch(url, { ...init, headers, credentials: "same-origin", cache: "no-store" });
+  const response = await fetch(url, { ...init, headers, credentials: "same-origin", cache: init.cache ?? "no-store" });
   if (response.status === 401) {
     if (url !== "/api/chat/session" && generation === sessionGeneration && !init.signal?.aborted) window.dispatchEvent(new Event(CHAT_SESSION_EXPIRED_EVENT));
     throw new ChatApiError("Your session ended. Sign in again to continue.", 401);
@@ -105,7 +105,7 @@ export const chatApi = {
   session: (signal?: AbortSignal) => chatJson<ChatSession>("/api/chat/session", { signal }),
   logout: () => chatJson<unknown>("/api/chat/session", json("DELETE")),
   /** 200 with the Telegram profile photo, or 204 when the account has none. */
-  avatar: (signal: AbortSignal) => chatFetch("/api/chat/avatar", { signal }),
+  avatar: (signal: AbortSignal) => chatFetch("/api/chat/avatar", { signal, cache: "default" }),
   /** `query` searches titles and visible messages across every thread, keeping the same pagination. */
   threads: (offset: number, signal?: AbortSignal, query = "") => {
     const params = new URLSearchParams({ offset: String(offset) });

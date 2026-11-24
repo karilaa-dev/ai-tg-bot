@@ -88,7 +88,15 @@ try {
     // Read state belongs to web chats only; the unread Telegram chat shows no dot.
     assert.equal(await page.locator(".chat-sidebar .chat-thread").filter({ hasText: "Weekly grocery list" }).locator(".chat-unread-dot").count(), 0);
     assert.equal(await page.locator(".chat-sidebar .chat-thread").filter({ hasText: "Compare two laptop options" }).locator(".chat-unread-dot").count(), 1);
-    await page.waitForFunction(() => document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.href.startsWith("data:image/png"));
+    assert(await page.evaluate(async () => {
+      const image = new Image();
+      image.src = document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d")!;
+      context.drawImage(image, 0, 0);
+      return image.width === 64 && context.getImageData(0, 0, 1, 1).data[3] === 0;
+    }), "The bundled favicon has rounded corners");
 
     await page.getByRole("button", { name: "Search chats", exact: true }).click();
     const palette = page.getByRole("dialog", { name: "Search chats", exact: true });

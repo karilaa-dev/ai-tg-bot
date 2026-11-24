@@ -158,9 +158,9 @@ function reply(target: ChatThread, text: string) {
 }
 
 const assets = path.resolve(process.env.CHAT_PREVIEW_ASSETS ?? "dist/web");
-const page = () => new Response(file(path.join(assets, "index.html")), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+const page = (name: string) => () => new Response(file(path.join(assets, name)), { headers: { "Content-Type": "text/html; charset=utf-8" } });
 const bundle: HTMLBundle | null = development ? (await import("../../src/web/client/index.html")).default : null;
-const pages = bundle ? { "/": bundle, "/admin": bundle } : { "/": page, "/admin": page };
+const pages = bundle ? { "/": bundle, "/chat/": bundle, "/admin": bundle } : { "/": page("index.html"), "/chat/": page("index.html"), "/admin": page("admin.html") };
 // Rebuilt bundles get new hashed names, so assets are resolved per request.
 const asset = async (request: Request) => {
   const name = path.basename(new URL(request.url).pathname);

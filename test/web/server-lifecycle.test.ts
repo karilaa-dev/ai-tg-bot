@@ -1,6 +1,7 @@
 import { AccessControl } from "../../src/access/control.js";
 import { fixtureUuid } from "./uuid-fixtures.js";
 import { copyFile, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { sha256Hex } from "../../src/files/hash.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -43,12 +44,15 @@ beforeEach(async () => {
   await repos.users.ensure({ tgId: 1, firstName: "Alice" });
   const thread = await repos.threads.create({ userId: 1, topicId: null, title: "Test" });
   const message = await repos.messages.insert({ threadId: thread.id, role: "user", textPlain: "Hello", content: {} });
-  const file = await repos.files.insertFile({ userId: 1, threadId: thread.id, messageId: message.id, type: "txt", name: "test.txt", size: 5, mimeType: "text/plain", isInline: true });
+  const file = await repos.files.insertFile({ userId: 1, threadId: thread.id, messageId: message.id, type: "txt", name: "test.txt", size: 5, contentSha256: sha256Hex("hello"), mimeType: "text/plain", isInline: true });
   await repos.files.rememberSource(file.id, { transport: "fixture", connectionKey: "default", remoteKey: "file", locator: {} });
   resolver = new FileResolver(repos.files);
   assetsDirectory = await mkdtemp(path.join(tmpdir(), "bun-web-test-"));
   await Promise.all([
     writeFile(path.join(assetsDirectory, "index.html"), "<!doctype html><title>Archive</title>"),
+    writeFile(path.join(assetsDirectory, "admin.html"), "<title>Admin viewer</title>"),
+    writeFile(path.join(assetsDirectory, "chat.webmanifest"), '{"start_url":"/chat/"}'),
+    writeFile(path.join(assetsDirectory, "service-worker.js"), "// Chat worker"),
     writeFile(path.join(assetsDirectory, "app.js"), "window.loaded = true;"),
     writeFile(path.join(assetsDirectory, "style.css"), "body { color: blue; }"),
     writeFile(path.join(assetsDirectory, "index-123abc45.js"), "window.hashed = true;"),
@@ -65,7 +69,13 @@ beforeEach(async () => {
   await symlink(path.join(assetsDirectory, "private.txt"), path.join(assetsDirectory, "symlink.js"));
   repository = new ConversationRepository(database.db, repos);
   const login = await telegram;
-  web = await startWebServer({ db: database.db, config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory, chat: signInOnlyChat(), telegramAuth: login.dependencies });
+  const chat = signInOnlyChat();
+  chat.service.requireThread = async (userId, threadId) => {
+    expect(userId).toBe(1);
+    expect(threadId).toBe(thread.id);
+  };
+  await access.allow(1);
+  web = await startWebServer({ db: database.db, config, access, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory, chat, telegramAuth: login.dependencies });
   cookie = await login.signIn(web!.url, 1);
   fileUrl = new URL(`/api/threads/${thread.id}/files/${file.id}?mode=auto`, web!.url);
 });
@@ -85,7 +95,7 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
     const response = await request(url);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain(mime);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("no-cache");
     const bytes = await response.arrayBuffer();
     expect(bytes.byteLength).toBe(Number(response.headers.get("content-length")));
     const head = await request(url, { method: "HEAD" });
@@ -96,11 +106,18 @@ it("serves packaged assets with browser-compatible types and handles HEAD withou
   expect((await request(new URL("/symlink.js", web!.url))).status).toBe(404);
   expect((await request(fileUrl, { method: "HEAD" })).status).toBe(200);
   expect((await request(new URL("/api/users", web!.url), { method: "POST", body: "ignored" })).status).toBe(405);
-  await writeFile(path.join(assetsDirectory, "app.js"), "window.rebuilt = true;");
-  expect(await (await request(new URL("/app.js", web!.url))).text()).toBe("window.rebuilt = true;");
+  const script = new URL("/app.js", web!.url);
+  const etag = (await request(script)).headers.get("etag")!;
+  const conditional = { headers: { "If-None-Match": etag } };
+  expect((await request(script, conditional)).status).toBe(304);
+  await writeFile(path.join(assetsDirectory, "app.js"), "window.edited = true;");
+  const rebuilt = await request(script, conditional);
+  expect(rebuilt.status).toBe(200);
+  expect(rebuilt.headers.get("etag")).not.toBe(etag);
+  expect(await rebuilt.text()).toBe("window.edited = true;");
 });
 
-it("serves split route chunks as immutable JavaScript and keeps the page itself uncached", async () => {
+it("serves split route chunks as immutable JavaScript and revalidates the page itself", async () => {
   for (const chunk of ["/chat-app-9a0ntrzm.js", "/admin-app-7eafyjbe.js", "/index-123abc45.js"]) {
     const response = await request(new URL(chunk, web!.url));
     expect(response.status).toBe(200);
@@ -109,7 +126,15 @@ it("serves split route chunks as immutable JavaScript and keeps the page itself 
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("set-cookie")).toBeNull();
   }
-  for (const page of ["/", "/admin"]) expect((await request(new URL(page, web!.url))).headers.get("cache-control")).toBe("no-store");
+  for (const [route, type] of [["/", "text/html"], ["/chat/", "text/html"], ["/admin", "text/html"],
+    ["/chat.webmanifest", "application/manifest+json"], ["/chat/service-worker.js", "text/javascript"]] as const) {
+    const url = new URL(route, web!.url);
+    const current = await request(url);
+    expect(current.headers.get("content-type")).toContain(type);
+    expect(current.headers.get("cache-control")).toBe("no-cache");
+    expect((await request(url, { headers: { "If-None-Match": current.headers.get("etag")! } })).status).toBe(304);
+    if (route === "/admin") expect(await current.text()).toContain("Admin viewer");
+  }
   expect((await request(new URL("/chat-app-unknown1.js", web!.url))).status).toBe(404);
 });
 
@@ -120,6 +145,9 @@ it("canonicalizes the admin URL so relative assets resolve at the website root",
     expect(response.headers.get("location")).toBe(`/admin?user=1&thread=${fixtureUuid(2)}`);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("");
+    const chat = await fetch(new URL("/chat?view=settings", web!.url), { method, redirect: "manual" });
+    expect(chat.status).toBe(308);
+    expect(chat.headers.get("Location")).toBe("/chat/?view=settings");
   }
   expect((await fetch(new URL("/admin", web!.url))).status).toBe(200);
 });
@@ -134,8 +162,7 @@ it("stops the Codex login worker exactly once when the website stops", async () 
   expect(stop).toHaveBeenCalledOnce();
 });
 
-it("caches only hashed bundles and keeps HTML, API responses, downloads, and errors private", async () => {
-  resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: async () => Buffer.from("hello") });
+it("caches hashed bundles indefinitely and keeps API responses and errors private", async () => {
   for (const asset of ["/index-123abc45.js", "/index-123abc45.css", "/logo-123abc45.jpg"]) {
     for (const method of ["GET", "HEAD"]) {
       const response = await request(new URL(asset, web!.url), { method });
@@ -146,12 +173,33 @@ it("caches only hashed bundles and keeps HTML, API responses, downloads, and err
       expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     }
   }
-  for (const url of [new URL("/", web!.url), new URL("/index-123abc45.html", web!.url), new URL("/api/users", web!.url), fileUrl, new URL("/missing", web!.url)]) {
+  for (const url of [new URL("/api/users", web!.url), new URL("/missing", web!.url)]) {
     expect((await request(url)).headers.get("cache-control")).toBe("no-store");
   }
   expect((await request(new URL("/index-123abc45.js.map", web!.url))).status).toBe(404);
   expect((await request(new URL("/src/web/client/app.tsx", web!.url))).status).toBe(404);
   expect((await request(new URL("/index-123abc45.js", web!.url), { method: "POST" })).status).toBe(405);
+});
+
+it("revalidates cached attachment bytes after authorization in chat and admin", async () => {
+  const load = vi.fn(async () => Buffer.from("hello"));
+  resolver.registry.register({ transport: "fixture", connectionKey: "default", fetch: load });
+  for (const url of [fileUrl, new URL(fileUrl.href.replace("/api/threads/", "/api/chat/threads/"))]) {
+    const headers = { "X-Chat-User": "1" };
+    const first = await request(url, { headers });
+    expect(await first.text()).toBe("hello");
+    expect(first.headers.get("cache-control")).toBe("private, no-cache, must-revalidate");
+    expect(first.headers.get("vary")).toContain("Cookie");
+    const conditional = { ...headers, "If-None-Match": first.headers.get("etag")! };
+    const repeat = await request(url, { headers: { ...conditional, "If-None-Match": `"other", W/${conditional["If-None-Match"]}` } });
+    expect(repeat.status).toBe(304);
+    expect(await repeat.text()).toBe("");
+    expect((await request(url, { method: "HEAD", headers: { ...headers, "If-None-Match": "*" } })).status).toBe(304);
+    const expired = await fetch(url, { headers: conditional });
+    expect(expired.status).toBe(401);
+    expect(expired.headers.get("cache-control")).toBe("no-store");
+  }
+  expect(load).toHaveBeenCalledTimes(2);
 });
 
 function waitForCancellation() {
