@@ -164,6 +164,17 @@ try {
     await page.getByRole("menuitem", { name: "Admin", exact: true }).waitFor();
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    const draft = "Keep this unsent draft across an offline reload.";
+    await composer.fill(draft);
+    await context.setOffline(true);
+    assert((await page.reload())?.fromServiceWorker());
+    const retry = page.getByRole("button", { name: "Try again", exact: true });
+    await retry.waitFor();
+    assert.equal(await composer.count(), 0, "The workspace stays gated until the session is verified");
+    await context.setOffline(false);
+    await retry.click();
+    assert.equal(await composer.inputValue(), draft, "Reconnecting restores the signed-in user's draft");
     await context.setOffline(true);
     assert.equal(await page.evaluate(() => fetch("/api/chat/session").then(() => true, () => false)), false);
     const response = await page.goto(new URL(`/chat/?thread=${threadId}`, url).href);

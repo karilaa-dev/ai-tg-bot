@@ -90,10 +90,13 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
       }
     } catch (error) {
       if (signal.aborted || current !== generation.current) return;
-      endSession();
-      setState(error instanceof ChatApiError && error.status === 401
-        ? { kind: "signed-out", loginAvailable: true, notice }
-        : { kind: "unreachable" });
+      if (error instanceof ChatApiError && error.status === 401) {
+        endSession();
+        rememberSignedIn(false);
+        setState({ kind: "signed-out", loginAvailable: true, notice });
+      } else {
+        setState({ kind: "unreachable" });
+      }
     }
   }, [endSession]);
 
