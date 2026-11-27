@@ -314,6 +314,11 @@ try {
   mobile.on("pageerror", error => mobileErrors.push(error.message));
   mobile.on("request", request => { if (request.url().endsWith("/read")) mobileReads.push(new URL(request.url()).pathname); });
   await mobile.goto(root);
+  const mobileSearch = mobile.getByRole("button", { name: "Поиск по чатам", exact: true });
+  await mobileSearch.click();
+  await mobile.getByRole("dialog", { name: "Поиск по чатам" }).waitFor();
+  await mobile.keyboard.press("Escape");
+  await mobile.getByRole("dialog", { name: "Поиск по чатам" }).waitFor({ state: "hidden" });
   await mobile.getByRole("button", { name: "Открыть чаты", exact: true }).first().click();
   const laptop = mobile.locator(".chat-thread").filter({ hasText: "Compare two laptop options" });
   await laptop.locator(".chat-unread-dot").waitFor();
@@ -369,6 +374,8 @@ try {
   assert(!requests.some(request => request.path.includes("/usage")));
   assert.deepEqual(remote, []);
   assert.deepEqual(errors, []);
+  await page.unrouteAll({ behavior: "wait" });
+  await page.close();
   console.log(`Chat polish browser smoke passed (${development ? "development" : "production"})`);
 } finally {
   server.kill("SIGTERM");

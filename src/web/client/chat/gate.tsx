@@ -3,9 +3,10 @@ import { Button, LinkButton } from "@cloudflare/kumo/components/button";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { IconAlertCircle, IconBrandTelegram, IconLock, IconRefresh } from "@tabler/icons-react";
 import type { ChatProfile } from "../../chat-types.js";
-import { loginReturnPath } from "../../login-return.js";
+import { loginReturnPath, type LoginFailure } from "../../login-return.js";
 import { logo } from "../brand.js";
 import { UiLanguageContext } from "../i18n.js";
+import { useLoginFailure } from "../login-failure.js";
 import { CHAT_SESSION_EXPIRED_EVENT, ChatApiError, bindChatRequests, chatApi, invalidateChatRequests } from "./api.js";
 import { clearStoredDrafts, DraftStore } from "./drafts.js";
 import { deviceLanguage, DocumentLanguage } from "./preferences.js";
@@ -13,6 +14,9 @@ import { useChatStrings } from "./strings.js";
 
 // Lets the page start downloading the workspace while the session is checked. It holds no account data.
 const SIGNED_IN_HINT = "chat-signed-in";
+const SIGN_OUT_INTENT = "chat-sign-out";
+const FIRST_RECONNECT_DELAY_MS = 1_500;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 export function probablySignedIn(): boolean {
   try { return localStorage.getItem(SIGNED_IN_HINT) === "1"; } catch { return false; }
 }
@@ -20,12 +24,27 @@ function rememberSignedIn(signedIn: boolean) {
   try { if (signedIn) localStorage.setItem(SIGNED_IN_HINT, "1"); else localStorage.removeItem(SIGNED_IN_HINT); } catch { /* Storage can be disabled. */ }
 }
 
+function pendingSignOut(): number | undefined {
+  try {
+    const userId = Number(sessionStorage.getItem(SIGN_OUT_INTENT));
+    if (Number.isSafeInteger(userId) && userId > 0) return userId;
+  } catch { /* Storage can be disabled. */ }
+}
+
+function rememberSignOut(userId: number | null) {
+  try {
+    if (userId === null) sessionStorage.removeItem(SIGN_OUT_INTENT);
+    else sessionStorage.setItem(SIGN_OUT_INTENT, String(userId));
+  } catch { /* Keep the intent in memory while this page is open. */ }
+}
+
 export interface SignedIn { user: ChatProfile; botUsername: string; admin: boolean; drafts: DraftStore }
 
 type Notice = "none" | "signed-out" | "session-ended";
 type GateState =
   | { kind: "checking" | "signing-out" }
-  | { kind: "unreachable" }
+  | { kind: "unreachable"; notice: Notice }
+  | { kind: "sign-out-failed"; userId: number }
   | { kind: "signed-out"; loginAvailable: boolean; notice: Notice }
   | { kind: "signed-in"; session: SignedIn };
 
@@ -48,18 +67,29 @@ export function WorkspaceLoading() {
 }
 
 /** Shown when the workspace code could not be downloaded; retrying requests it again. */
-export function WorkspaceLoadFailed({ retry }: { retry: () => void }) {
+export function WorkspaceLoadFailed({ retry, updateReady }: { retry: () => void; updateReady: boolean }) {
   const t = useChatStrings();
+  const controlled = typeof location !== "undefined" && location.pathname === "/chat/" && navigator.serviceWorker?.controller;
   return <AccessFrame busy={false}>
     <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</span></p>
+    {updateReady && <p className="chat-access-note" role="status">{t.appUpdateReady}</p>}
     <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>{t.tryAgain}</Button>
+    {controlled
+      ? <LinkButton size="lg" variant="ghost" className="chat-access-button" href={`/${location.search}`}>{t.openChatInBrowser}</LinkButton>
+      : <Button size="lg" variant="ghost" className="chat-access-button" onClick={() => location.reload()}>{t.reloadPage}</Button>}
   </AccessFrame>;
 }
 
 export function ChatGate({ children }: { children: (session: SignedIn, signOut: () => Promise<void>) => ReactNode }) {
-  const [state, setState] = useState<GateState>({ kind: "checking" });
-  const [revision, setRevision] = useState(0);
-  const operation = useRef<{ kind: "idle" | "checking" | "signing-out" }>({ kind: "idle" });
+  const loginFailure = useLoginFailure();
+  const [unfinishedSignOut] = useState(pendingSignOut);
+  const [state, setState] = useState<GateState>(() => unfinishedSignOut === undefined
+    ? { kind: "checking" } : { kind: "sign-out-failed", userId: unfinishedSignOut });
+  const [sessionRequest, setSessionRequest] = useState<{ notice: Notice } | null>(() => unfinishedSignOut === undefined ? { notice: "none" } : null);
+  const operation = useRef<{ kind: "idle" | "checking" | "signing-out" | "sign-out-failed" }>({
+    kind: unfinishedSignOut === undefined ? "idle" : "sign-out-failed",
+  });
+  const reconnectDelay = useRef(FIRST_RECONNECT_DELAY_MS);
   const drafts = useRef<DraftStore | null>(null);
   const endSession = useCallback(() => {
     invalidateChatRequests();
@@ -69,12 +99,13 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, []);
 
   const check = useCallback(async (signal: AbortSignal, notice: Notice = "none") => {
-    if (operation.current.kind === "signing-out") return;
+    if (operation.current.kind === "signing-out" || operation.current.kind === "sign-out-failed") return;
     const attempt = { kind: "checking" } as const;
     operation.current = attempt;
     try {
       const session = await chatApi.session(signal);
       if (signal.aborted || operation.current !== attempt) return;
+      reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
       if (session.authenticated) {
         if (drafts.current?.userId !== session.user.id) {
           if (drafts.current) endSession();
@@ -91,11 +122,12 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     } catch (error) {
       if (signal.aborted || operation.current !== attempt) return;
       if (error instanceof ChatApiError && error.status === 401) {
+        reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
         endSession();
         rememberSignedIn(false);
         setState({ kind: "signed-out", loginAvailable: true, notice });
       } else {
-        setState({ kind: "unreachable" });
+        setState({ kind: "unreachable", notice });
       }
     } finally {
       if (operation.current === attempt) operation.current = { kind: "idle" };
@@ -103,15 +135,44 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, [endSession]);
 
   useEffect(() => {
+    if (!sessionRequest) return;
     const controller = new AbortController();
-    void check(controller.signal);
+    void check(controller.signal, sessionRequest.notice);
     return () => controller.abort();
-  }, [check, revision]);
+  }, [check, sessionRequest]);
+
+  const retry = useCallback((notice: Notice, automatic = false) => {
+    reconnectDelay.current = automatic
+      ? Math.min(reconnectDelay.current * 2, MAX_RECONNECT_DELAY_MS)
+      : FIRST_RECONNECT_DELAY_MS;
+    setState({ kind: "checking" });
+    setSessionRequest({ notice });
+  }, []);
+
+  useEffect(() => {
+    if (state.kind !== "unreachable") return;
+    let checking = false;
+    const reconnect = () => {
+      if (checking || document.hidden || !navigator.onLine) return;
+      checking = true;
+      retry(state.notice, true);
+    };
+    window.addEventListener("online", reconnect);
+    document.addEventListener("visibilitychange", reconnect);
+    // The service can recover without a browser connectivity event.
+    const timer = !document.hidden ? setTimeout(reconnect, reconnectDelay.current) : undefined;
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", reconnect);
+      document.removeEventListener("visibilitychange", reconnect);
+    };
+  }, [state, retry]);
 
   useEffect(() => {
     const controller = new AbortController();
     const expired = () => {
-      if (operation.current.kind === "signing-out") return;
+      if (operation.current.kind === "signing-out" || operation.current.kind === "sign-out-failed") return;
+      reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
       endSession();
       setState({ kind: "checking" });
       void check(controller.signal, "session-ended");
@@ -122,22 +183,27 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
 
   useEffect(() => () => { endSession(); }, [endSession]);
 
-  const signOut = useCallback(async () => {
-    if (operation.current.kind === "signing-out") return;
+  const signOut = useCallback(async (userId = drafts.current?.userId) => {
+    if (userId === undefined || operation.current.kind === "signing-out") return;
     operation.current = { kind: "signing-out" };
-    const logout = chatApi.logout();
+    rememberSignOut(userId);
+    const logout = chatApi.logout(userId);
     endSession();
     rememberSignedIn(false);
     setState({ kind: "signing-out" });
     try {
       await logout;
-      history.replaceState(null, "", location.pathname);
-      setState({ kind: "signed-out", loginAvailable: true, notice: "signed-out" });
-    } catch {
-      setState({ kind: "unreachable" });
-    } finally {
-      operation.current = { kind: "idle" };
+    } catch (error) {
+      if (!(error instanceof ChatApiError) || error.status !== 401) {
+        operation.current = { kind: "sign-out-failed" };
+        setState({ kind: "sign-out-failed", userId });
+        return;
+      }
     }
+    operation.current = { kind: "idle" };
+    rememberSignOut(null);
+    history.replaceState(null, "", location.pathname);
+    setState({ kind: "signed-out", loginAvailable: true, notice: "signed-out" });
   }, [endSession]);
 
   if (state.kind === "signed-in") return children(state.session, signOut);
@@ -145,22 +211,26 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   const language = deviceLanguage();
   return <UiLanguageContext.Provider value={language}>
     <DocumentLanguage language={language} />
-    <SignedOut state={state} retry={() => { setState({ kind: "checking" }); setRevision(v => v + 1); }} />
+    <SignedOut state={state} retry={() => {
+      if (state.kind === "sign-out-failed") void signOut(state.userId);
+      else if (state.kind === "unreachable") retry(state.notice);
+    }} loginFailure={loginFailure} />
   </UiLanguageContext.Provider>;
 }
 
-function SignedOut({ state, retry }: { state: Exclude<GateState, { kind: "signed-in" }>; retry: () => void }) {
+function SignedOut({ state, retry, loginFailure }: { state: Exclude<GateState, { kind: "signed-in" }>; retry: () => void; loginFailure?: LoginFailure }) {
   const t = useChatStrings();
   const returnTo = loginReturnPath(window.location.pathname + window.location.search);
   const signInUrl = `/api/auth/telegram/start${returnTo === "/" ? "" : `?return=${encodeURIComponent(returnTo)}`}`;
   const checking = state.kind === "checking" || state.kind === "signing-out";
   return <AccessFrame busy={checking}>
     {checking && <p className="chat-access-status" role="status"><Loader size="sm" /> {t.checkingSession}</p>}
-    {state.kind === "unreachable" && <>
-      <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</span></p>
+    {(state.kind === "unreachable" || state.kind === "sign-out-failed") && <>
+      <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span>{state.kind === "sign-out-failed" ? t.signOutFailed : <><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</>}</span></p>
       <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>{t.tryAgain}</Button>
     </>}
     {state.kind === "signed-out" && <>
+      {loginFailure && <p className="chat-access-note is-error" role="alert">{t.loginFailure[loginFailure]}</p>}
       {state.notice !== "none" && <p className="chat-access-note" role="status">{state.notice === "signed-out" ? t.signedOutNotice : t.sessionEnded}</p>}
       {state.loginAvailable
         ? <LinkButton variant="primary" size="lg" className="chat-access-button" href={signInUrl}><IconBrandTelegram size={18} aria-hidden="true" />{t.signInWithTelegram}</LinkButton>

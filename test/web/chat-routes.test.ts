@@ -15,6 +15,9 @@ import { WebNotFound, type ConversationRepository } from "../../src/web/reposito
 import type { ChatService, ChatThread } from "../../src/web/chat-types.js";
 import { createWebRoutes, startWebServer, type WebServerOptions } from "../../src/web/server.js";
 import { MAX_CHAT_BODY_BYTES } from "../../src/web/chat-routes.js";
+import { ChatRateLimit } from "../../src/web/chat-auth.js";
+import { WebHttpError } from "../../src/web/auth.js";
+import { WebSessionStore } from "../../src/web/session-store.js";
 
 const originalFetch = globalThis.fetch;
 const publicOrigin = "https://chat.example";
@@ -166,10 +169,39 @@ it("does not issue a session to an unknown or disallowed Telegram identity", asy
     if (userId === 42) await access.revoke(42);
     else await access.allow(userId);
     const result = await request(`/api/auth/telegram/callback?state=${location.searchParams.get("state")}&code=sample`, { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
-    expect(result.status).toBe(403);
-    expect(result.headers.get("Set-Cookie")).toBeNull();
-    expect(await result.json()).toEqual({ error: userId === 999 ? "Send /start to the bot in Telegram before signing in here." : "This Telegram account is not allowed to use this bot." });
+    expect(result.status).toBe(303);
+    expect(result.headers.getSetCookie()).toEqual([expect.stringMatching(/^__Host-ai_tg_bot_chat_login=;.*Max-Age=0/)]);
+    expect(result.headers.get("Location")).toBe(userId === 999 ? "/?signin=start-bot" : "/?signin=denied");
   }
+});
+
+it("keeps only the verified return link on cancelled and expired sign-in", async () => {
+  const target = `/chat/?thread=${fixtureUuid(1)}`;
+  const start = await request(`/api/auth/telegram/start?return=${encodeURIComponent(target)}`);
+  const state = new URL(start.headers.get("Location")!).searchParams.get("state");
+  const callback = `/api/auth/telegram/callback?state=${state}&error=access_denied`;
+  const cancelled = await request(callback, { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
+  expect(cancelled.status).toBe(303);
+  expect(cancelled.headers.get("Location")).toBe(target + "&signin=cancelled");
+  expect(cancelled.headers.get("Cache-Control")).toBe("no-store");
+  const expired = await request(callback);
+  expect(expired.status).toBe(303);
+  expect(expired.headers.get("Location")).toBe("/chat/?signin=expired");
+});
+
+it.each(["profile lookup", "session store", "callback rate limit"])("returns to the verified chat after a %s failure", async failure => {
+  const start = await request("/api/auth/telegram/start?return=/chat/");
+  const location = new URL(start.headers.get("Location")!);
+  nonce = location.searchParams.get("nonce")!;
+  const temporary = new Error("Temporary service failure");
+  if (failure === "profile lookup") vi.mocked(chat.profile).mockRejectedValueOnce(temporary);
+  else if (failure === "session store") vi.spyOn(WebSessionStore.prototype, "create").mockRejectedValueOnce(temporary);
+  else vi.spyOn(ChatRateLimit.prototype, "take").mockImplementationOnce(() => { throw new WebHttpError(429, "Too many requests."); });
+  const result = await request(`/api/auth/telegram/callback?state=${location.searchParams.get("state")}&code=sample`,
+    { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
+  expect(result.status).toBe(303);
+  expect(result.headers.get("Location")).toBe("/chat/?signin=try-again");
+  expect(result.headers.getSetCookie()).toEqual([expect.stringMatching(/^__Host-ai_tg_bot_chat_login=;.*Max-Age=0/)]);
 });
 
 it("rechecks database revocation before any private handler or attachment work", async () => {

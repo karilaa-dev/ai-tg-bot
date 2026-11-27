@@ -5,6 +5,7 @@ import { logo } from "./brand.js";
 import { apiJson, SESSION_EXPIRED_EVENT } from "./api.js";
 import { Button, buttonVariants } from "./components/ui/button.js";
 import { cn } from "./lib/utils.js";
+import { useLoginFailure } from "./login-failure.js";
 
 type AdminState =
   | { kind: "checking" }
@@ -15,6 +16,7 @@ type AdminState =
 
 /** The admin dashboard uses the website's Telegram session; WEB_ADMIN_USER_IDS decides who gets in. */
 export function AdminGate({ children }: { children: ReactNode }) {
+  const loginFailure = useLoginFailure();
   const [state, setState] = useState<AdminState>({ kind: "checking" });
   const [revision, setRevision] = useState(0);
 
@@ -63,6 +65,7 @@ export function AdminGate({ children }: { children: ReactNode }) {
           <Button className="access-submit" onClick={() => { setState({ kind: "checking" }); setRevision(v => v + 1); }}><IconRefresh aria-hidden="true" /> Try again</Button>
         </>}
         {state.kind === "signed-out" && <>
+          {loginFailure && <p className="access-note is-error" role="alert">Telegram sign-in did not complete. Try signing in again.</p>}
           {state.ended && <p className="access-note" role="status">Your session ended. Sign in again to continue.</p>}
           {state.loginAvailable
             ? <a className={cn(buttonVariants({ variant: "primary" }), "access-submit")} href="/api/auth/telegram/start?return=/admin"><IconBrandTelegram aria-hidden="true" /> Sign in with Telegram</a>

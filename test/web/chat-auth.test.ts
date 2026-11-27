@@ -72,7 +72,7 @@ it("completes S256 exchange using dedicated raw Basic credentials and revocable 
   expect(start.response.headers.get("Set-Cookie")).toContain("HttpOnly; SameSite=Lax; Max-Age=600; Secure");
   const existing = vi.fn(async () => undefined);
   const complete = await auth.callback(callback(start), existing);
-  expect(existing).toHaveBeenCalledWith(42);
+  expect(existing).toHaveBeenCalledWith(42, "/");
   expect(complete.status).toBe(303);
   expect(complete.headers.get("Location")).toBe("/");
   expect(createHash("sha256").update(verifier).digest("base64url")).toBe(start.location.searchParams.get("code_challenge"));

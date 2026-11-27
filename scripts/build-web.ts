@@ -53,25 +53,37 @@ for (const file of result.outputs) {
   const url = `/${path.basename(file.path)}`;
   if (file.kind === "asset" && sources.some(source => source.includes(url))) assets.set(url, file.path);
 }
-const icons = [];
-for (const size of [192, 512]) {
-  const bytes = await readFile(`src/web/pwa/icon-${size}.png`);
+async function copyIcon(source: string) {
+  const bytes = await readFile(`src/web/pwa/${source}.png`);
   const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 8);
-  const name = `icon-${size}-${hash}.png`;
+  const name = `${source}-${hash}.png`;
   const target = path.join(output, name);
   await writeFile(target, bytes);
-  assets.set(`/${name}`, target);
-  icons.push({ src: `/${name}`, sizes: `${size}x${size}`, type: "image/png" });
+  return `/${name}`;
 }
+const icons = await Promise.all([
+  { source: "icon-192", sizes: "192x192", purpose: "any" },
+  { source: "icon-512", sizes: "512x512", purpose: "any" },
+  { source: "icon-maskable-512", sizes: "512x512", purpose: "maskable" },
+].map(async ({ source, sizes, purpose }) => ({ src: await copyIcon(source), sizes, type: "image/png", purpose })));
+const appleIcon = await copyIcon("apple-touch-icon");
+const launchColor = "#040a25";
 const manifestPath = path.join(output, "chat.webmanifest");
 await writeFile(manifestPath, JSON.stringify({
   id: "/chat/", start_url: "/chat/", scope: "/chat/", name: "AI KaRiLaA", short_name: "AI KaRiLaA",
-  display: "standalone", theme_color: "#ffffff", background_color: "#ffffff", icons,
+  display: "standalone", theme_color: launchColor, background_color: launchColor, icons,
 }));
 assets.set("/chat.webmanifest", manifestPath);
 const page = path.join(output, "index.html");
-const head = `<meta name="theme-color" content="#ffffff"><link rel="manifest" href="/chat.webmanifest"><link rel="apple-touch-icon" href="${icons[0]!.src}">`;
-await writeFile(page, template.replace("</head>", `${head}</head>`));
+const head = [
+  '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010">',
+  '<meta name="theme-color" content="#ffffff">',
+  '<link rel="manifest" href="/chat.webmanifest">',
+  `<link rel="apple-touch-icon" sizes="180x180" href="${appleIcon}">`,
+].join("");
+await writeFile(page, template
+  .replace("width=device-width, initial-scale=1", "width=device-width, initial-scale=1, viewport-fit=cover")
+  .replace("</head>", `${head}</head>`));
 await writeFile(path.join(output, "admin.html"), template);
 assets.set("/chat/", page);
 

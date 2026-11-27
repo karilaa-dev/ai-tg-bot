@@ -12,6 +12,7 @@ import { createRepos } from "../../src/db/repos/index.js";
 import { loadTestConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logger.js";
 import { FileResolver } from "../../src/files/resolver.js";
+import { MAX_FILE_BYTES } from "../../src/files/limits.js";
 import { sha256Hex } from "../../src/files/hash.js";
 import { ConversationRepository, WebNotFound } from "../../src/web/repository.js";
 import { startWebServer } from "../../src/web/server.js";
@@ -112,6 +113,7 @@ const consent = preview ? telegram.serveAuthorizePage(ADMIN_ID, (): URL => new U
 const access = new AccessControl(db.db);
 await access.initialize();
 const chat = signInOnlyChat("archive_test_bot");
+const repository = new ConversationRepository(db.db, repos, 999, pricing);
 chat.service.avatar = async () => null;
 chat.service.settings = async () => ({ language: "en", timeZone: "UTC", timezoneOffsetMinutes: 0, streaming: true, memoryEnabled: true });
 chat.service.threads = async () => ({ items: [], nextOffset: null });
@@ -119,11 +121,15 @@ chat.service.schedules = async () => ({ items: [] });
 chat.service.requireThread = async (userId, threadId) => {
   if ((await repos.threads.get(threadId))?.user_id !== userId) throw new WebNotFound();
 };
-const options = { db: db.db, access, development: preview && process.argv.includes("--web-dev"), config, repository: new ConversationRepository(db.db, repos, 999, pricing), fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
+chat.service.history = async (_userId, threadId, before, after) => ({
+  ...await repository.history(threadId, before, after), autoLoadMaxBytes: config.WEB_AUTOLOAD_MAX_BYTES, maxFileBytes: MAX_FILE_BYTES,
+});
+const options = { db: db.db, access, development: preview && process.argv.includes("--web-dev"), config, repository, fileResolver: resolver, logger: createLogger(config), assetsDirectory: preview ? process.env.WEB_SMOKE_ASSETS ?? "dist/web" : temp, codexLogin: preview ? createCodexLoginPreview() : undefined,
   chat, telegramAuth: { ...telegram.dependencies, authorizeUrl: consent?.authorizeUrl } };
 const web = (await startWebServer(options))!;
 if (preview) {
-  console.log(`Preview: http://127.0.0.1:${web.url.port}/admin?user=${user.tg_id}&thread=${thread.id}`);
+  config.WEB_PUBLIC_URL = `http://127.0.0.1:${web.url.port}`;
+  console.log(`Preview: ${config.WEB_PUBLIC_URL}/admin?user=${user.tg_id}&thread=${thread.id}`);
   const stop = async () => { await web.stop(); await consent?.stop(); await db.destroy(); await rm(temp, { recursive: true, force: true }); process.exit(0); };
   process.once("SIGINT", () => void stop());
   process.once("SIGTERM", () => void stop());

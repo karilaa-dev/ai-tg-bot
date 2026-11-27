@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { checkPwaUpdate } from "./pwa-update-browser.js";
 import type { WebHistory } from "../../src/web/types.js";
@@ -55,7 +58,11 @@ async function checkBrowserCache(signedIn: BrowserContext, origin: string, histo
 }
 
 const browser = await chromium.launch({ headless: true });
+const fixtureAssets = await mkdtemp(path.join(tmpdir(), "chat-worker-browser-"));
+const development = process.argv.includes("--web-dev");
+if (!development) await cp("dist/web", fixtureAssets, { recursive: true });
 const server = spawn(process.execPath, ["test/web/http-smoke.ts", "--browser", ...process.argv.filter(arg => arg === "--web-dev")], {
+  env: { ...process.env, WEB_SMOKE_ASSETS: fixtureAssets },
   stdio: ["ignore", "pipe", "inherit"], timeout: 120_000,
 });
 const stopped = once(server, "exit");
@@ -142,7 +149,7 @@ try {
   const selectedDay = await slider.getAttribute("aria-valuetext");
   await slider.press("ArrowLeft");
   assert.notEqual(await slider.getAttribute("aria-valuetext"), selectedDay);
-  if (!process.argv.includes("--web-dev")) {
+  if (!development) {
     assert.equal(await page.locator('link[rel="manifest"]').count(), 0);
     assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
     const context = page.context();
@@ -156,6 +163,10 @@ try {
     const rootInstall = await cdp.send("Page.getInstallabilityErrors");
     assert.deepEqual(rootInstall.installabilityErrors, []);
     await context.clearCookies();
+    await page.bringToFront();
+    await page.goto(new URL("/chat/?signin=cancelled", url).href);
+    await page.getByRole("alert").filter({ hasText: "Telegram sign-in was cancelled" }).waitFor();
+    assert.equal(new URL(page.url()).search, "");
     await page.goto(new URL("/chat/", url).href);
     await page.getByRole("link", { name: "Sign in with Telegram", exact: true }).click();
     await page.waitForURL(new URL("/chat/", url).href);
@@ -172,22 +183,111 @@ try {
     const retry = page.getByRole("button", { name: "Try again", exact: true });
     await retry.waitFor();
     assert.equal(await composer.count(), 0, "The workspace stays gated until the session is verified");
+    const sessionUrl = new URL("/api/chat/session", url).href;
+    await page.route(sessionUrl, route => route.fulfill({ status: 503 }));
+    const failedReconnect = page.waitForResponse(response => response.url() === sessionUrl && response.status() === 503);
     await context.setOffline(false);
-    await retry.click();
+    assert(await page.evaluate(() => navigator.onLine && !document.hidden), "Reconnect is tested on a foreground page");
+    await failedReconnect;
+    await retry.waitFor();
+    await page.unroute(sessionUrl);
+    // The origin recovers while the browser stays online and foregrounded.
+    await composer.waitFor();
     assert.equal(await composer.inputValue(), draft, "Reconnecting restores the signed-in user's draft");
     await context.setOffline(true);
     assert.equal(await page.evaluate(() => fetch("/api/chat/session").then(() => true, () => false)), false);
     const response = await page.goto(new URL(`/chat/?thread=${threadId}`, url).href);
     assert(response?.fromServiceWorker(), "Offline navigation loads the public chat shell");
     await page.getByRole("button", { name: "Try again", exact: true }).waitFor();
+    await context.setOffline(false);
     const manifest = await cdp.send("Page.getAppManifest");
     assert.deepEqual(manifest.errors, []);
     const app = JSON.parse(manifest.data!);
     assert.equal(app.start_url, "/chat/");
     assert.equal(app.scope, "/chat/");
+    assert.equal(app.background_color, "#040a25");
+    assert.equal(app.theme_color, app.background_color);
+    const adaptive = app.icons.find((icon: { purpose: string }) => icon.purpose === "maskable");
+    assert.equal(adaptive?.sizes, "512x512");
+    const touchIcon = page.locator('link[rel="apple-touch-icon"]');
+    assert.equal(await touchIcon.getAttribute("sizes"), "180x180");
+    assert.deepEqual(await page.evaluate(async urls => Promise.all(urls.map(async url => {
+      const response = await fetch(url);
+      const image = await createImageBitmap(await response.blob());
+      return [image.width, image.height];
+    })), [adaptive.src, (await touchIcon.getAttribute("href"))!]), [[512, 512], [180, 180]]);
     const installability = await cdp.send("Page.getInstallabilityErrors");
     assert.deepEqual(installability.installabilityErrors, []);
+
+    await composer.waitFor();
+    const messageUrl = new URL(`/api/chat/threads/${threadId}/messages`, url).href;
+    const failedRequests: string[] = [];
+    await page.route(messageUrl, route => {
+      if (route.request().method() !== "POST") return route.continue();
+      failedRequests.push(route.request().postDataJSON().requestId);
+      return route.abort("internetdisconnected");
+    });
+    await composer.fill("Recover this interrupted send.");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    const failedSend = page.locator(".chat-send-failed");
+    await failedSend.getByText("Your message was not sent.").waitFor();
+    await page.reload();
+    await failedSend.getByText("Send interrupted. You can retry this message.").waitFor();
+    assert.equal(failedRequests.length, 1, "Reload does not resend automatically");
+    await failedSend.getByRole("button", { name: "Retry", exact: true }).click();
+    await failedSend.getByText("Your message was not sent.").waitFor();
+    assert.equal(failedRequests.length, 2);
+    assert.equal(failedRequests[0], failedRequests[1]);
+    await page.unroute(messageUrl);
+
+    const updateNotice = page.getByRole("status").filter({ hasText: "Update ready." });
+    assert.equal(await updateNotice.count(), 0, "First install does not announce an update");
+    const workerFile = path.join(fixtureAssets, "service-worker.js");
+    const worker = await readFile(workerFile, "utf8");
+    await writeFile(workerFile, worker.replace(/^const revision = "[^"]+";/, 'const revision = "browser-smoke-update";'));
+    await page.evaluate(async () => { await (await navigator.serviceWorker.ready).update(); });
+    await updateNotice.waitFor();
+    assert.equal(await failedSend.count(), 1, "The waiting update leaves the active conversation intact");
+
+    const chatChunk = await page.evaluate(async () => {
+      const name = (await caches.keys()).find(key => key.startsWith("ai-tg-bot-web-") && key !== "ai-tg-bot-web-browser-smoke-update")!;
+      const cache = await caches.open(name);
+      const chunk = (await cache.keys()).find(request => /^\/chat-app-[a-z0-9]+\.js$/.test(new URL(request.url).pathname))!;
+      await cache.delete(chunk);
+      return new URL(chunk.url).pathname.slice(1);
+    });
+    const chunkFile = path.join(fixtureAssets, chatChunk);
+    const workspace = await readFile(chunkFile);
+    await cdp.send("Network.clearBrowserCache");
+    await rm(chunkFile);
+    await page.reload();
+    await updateNotice.waitFor();
+    const openInBrowser = page.getByRole("link", { name: "Open chat in browser", exact: true });
+    await openInBrowser.waitFor();
+    assert.equal(await openInBrowser.getAttribute("href"), `/?thread=${threadId}`);
+    await writeFile(chunkFile, workspace);
+    await openInBrowser.click();
+    await composer.waitFor();
+    assert.equal(new URL(page.url()).pathname, "/");
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+
+    // The browser fallback leaves the update cache intact, then returns to the installed scope.
+    await page.goto(new URL("/chat/", url).href);
+    await composer.waitFor();
+    await context.setOffline(true);
+    await account.click();
+    await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "Could not sign out." }).waitFor();
     await context.setOffline(false);
+    await page.reload();
+    await page.getByRole("alert").filter({ hasText: "Could not sign out." }).waitFor();
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    assert.equal(await composer.count(), 0, "Reconnect cannot undo an attempted sign-out");
+    const retrySignOut = page.waitForRequest(request => request.method() === "DELETE" && request.url().endsWith("/api/chat/session"));
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    assert.equal((await retrySignOut).headers()["x-chat-user"], "1001");
+    await page.getByRole("link", { name: "Sign in with Telegram", exact: true }).waitFor();
+
     assert.equal(await page.evaluate(() => navigator.serviceWorker.getRegistration("/admin").then(Boolean)), false);
     await page.goto(new URL("/admin", url).href);
     assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
@@ -198,6 +298,7 @@ try {
     assert(cachePaths.every(path => !path.startsWith("/admin")));
     assert(cachePaths.some(path => path.startsWith("/chat-app-")));
     assert(cachePaths.every(path => !path.startsWith("/api/")));
+    assert(cachePaths.every(path => !/^\/(icon-|apple-touch-icon-)/.test(path)));
     await checkPwaUpdate(browser);
   }
   assert.deepEqual(errors, []);
@@ -206,4 +307,5 @@ try {
   server.kill("SIGTERM");
   await stopped;
   await browser.close();
+  await rm(fixtureAssets, { recursive: true, force: true });
 }

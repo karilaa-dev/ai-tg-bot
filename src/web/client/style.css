@@ -23,6 +23,8 @@
   color: var(--foreground);
   background: var(--background);
 }
+:root:not([data-mode]) { color-scheme: light dark; }
+:root:has(link[rel="manifest"]) { --background: var(--color-kumo-base); }
 * { box-sizing: border-box; border-color: var(--border); }
 body { margin: 0; }
 #root { isolation: isolate; }

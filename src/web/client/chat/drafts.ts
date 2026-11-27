@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /** `requestId` is kept while the content is unchanged so a retried send cannot post twice. */
 export interface Draft { text: string; files: File[]; requestId: string | null }
 export type DraftKey = string;
@@ -10,6 +12,11 @@ export type PendingSend = { requestId: string; text: string } & (
 export const emptyDraft: Draft = { text: "", files: [], requestId: null };
 const noPendingSends: readonly PendingSend[] = [];
 const storagePrefix = "chat-draft:";
+const TextSend = z.object({
+  text: z.string().min(1).max(32_000),
+  requestId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+});
+const PendingText = z.array(z.unknown());
 
 export function clearStoredDrafts(keepPrefix?: string) {
   try {
@@ -50,7 +57,11 @@ export class DraftStore {
     const saved = this.drafts.get(key);
     if (saved) return saved;
     let text = "";
-    try { text = sessionStorage.getItem(this.prefix + key) ?? ""; } catch { /* Storage can be disabled. */ }
+    try {
+      text = sessionStorage.getItem(this.prefix + key) ?? "";
+      const retry = TextSend.safeParse(JSON.parse(sessionStorage.getItem(this.prefix + "retry:" + key) ?? "null"));
+      if (retry.success && retry.data.text === text) return { ...emptyDraft, text, requestId: retry.data.requestId };
+    } catch { /* Storage can be disabled or contain invalid data. */ }
     return { ...emptyDraft, text };
   }
 
@@ -59,11 +70,29 @@ export class DraftStore {
     if (isEmptyDraft(draft)) this.drafts.delete(key); else this.drafts.set(key, draft);
     try {
       if (draft.text) sessionStorage.setItem(this.prefix + key, draft.text); else sessionStorage.removeItem(this.prefix + key);
+      const retryKey = this.prefix + "retry:" + key;
+      if (draft.text && draft.requestId && !draft.files.length) {
+        sessionStorage.setItem(retryKey, JSON.stringify({ text: draft.text, requestId: draft.requestId }));
+      } else sessionStorage.removeItem(retryKey);
     } catch { /* Keep the draft in memory only. */ }
   }
 
   pending(key: DraftKey): readonly PendingSend[] {
-    return this.closed ? noPendingSends : this.sends.get(key) ?? noPendingSends;
+    if (this.closed) return noPendingSends;
+    const loaded = this.sends.get(key);
+    if (loaded) return loaded;
+    let restored = noPendingSends;
+    try {
+      const entries = PendingText.safeParse(JSON.parse(sessionStorage.getItem(this.prefix + "pending:" + key) ?? "[]"));
+      if (entries.success && entries.data.length) {
+        restored = entries.data.flatMap(item => {
+          const parsed = TextSend.safeParse(item);
+          return parsed.success ? [{ ...parsed.data, status: "failed", files: [], error: null }] : [];
+        });
+      }
+    } catch { /* Storage can be disabled or contain invalid data. */ }
+    this.sends.set(key, restored);
+    return restored;
   }
 
   private updatePending(key: DraftKey, update: (current: readonly PendingSend[]) => readonly PendingSend[]) {
@@ -71,7 +100,17 @@ export class DraftStore {
     const current = this.pending(key);
     const next = update(current);
     if (next === current) return;
-    if (next.length) this.sends.set(key, next); else this.sends.delete(key);
+    this.sends.set(key, next.length ? next : noPendingSends);
+    try {
+      const storageKey = this.prefix + "pending:" + key;
+      const textSends = next.flatMap(item => {
+        if (item.status === "sent" || item.files.length) return [];
+        const parsed = TextSend.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      });
+      if (textSends.length) sessionStorage.setItem(storageKey, JSON.stringify(textSends));
+      else sessionStorage.removeItem(storageKey);
+    } catch { /* Keep unresolved sends in memory while this page is open. */ }
     for (const listener of this.listeners) listener();
   }
 
@@ -110,7 +149,15 @@ export class DraftStore {
     return () => { this.listeners.delete(listener); };
   };
 
-  queueStart(threadId: string, draft: Draft) { if (!this.closed) this.starts.set(threadId, draft); }
+  queueStart(threadId: string, draft: Draft) {
+    if (this.closed) return;
+    if (!draft.files.length && draft.text.trim()) {
+      const requestId = draft.requestId ?? newRequestId();
+      this.updatePending(threadId, list => [...list, { requestId, text: draft.text.trim(), files: [], status: "failed", error: null }]);
+      draft = { ...draft, requestId };
+    }
+    this.starts.set(threadId, draft);
+  }
   takeStart(threadId: string): Draft | undefined {
     const draft = this.starts.get(threadId);
     this.starts.delete(threadId);

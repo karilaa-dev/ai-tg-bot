@@ -6,7 +6,7 @@ import { z } from "zod";
 import { ConversationError } from "../application/errors.js";
 import { MAX_FILE_BYTES } from "../files/limits.js";
 import { WebHttpError } from "./auth.js";
-import { chatClientAddress, ChatRateLimit, readBoundedBody, requireChatMutation, WebChatAuth } from "./chat-auth.js";
+import { chatClientAddress, ChatRateLimit, readBoundedBody, requireChatMutation, TelegramLoginError, WebChatAuth } from "./chat-auth.js";
 import type { ChatService, ChatSession } from "./chat-types.js";
 import { WebNotFound } from "./repository.js";
 import { uuid } from "./ids.js";
@@ -111,11 +111,24 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
         }),
       },
       "/api/auth/telegram/start": { GET: guard((request, server) => auth.start(request, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS))) },
-      "/api/auth/telegram/callback": { GET: guard((request, server) => {
-        return auth.callback(request, async userId => {
-          try { await service().profile(userId); }
-          catch (error) { if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) throw new WebHttpError(403, "Send /start to the bot in Telegram before signing in here."); throw error; }
-        }, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS));
+      "/api/auth/telegram/callback": { GET: guard(async (request, server) => {
+        try {
+          return await auth.callback(request, async (userId, returnTo) => {
+            try { await service().profile(userId); }
+            catch (error) {
+              if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) {
+                throw new TelegramLoginError(403, "Send /start to the bot in Telegram before signing in here.", "start-bot", returnTo);
+              }
+              throw error;
+            }
+          }, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS));
+        } catch (error) {
+          if (!(error instanceof TelegramLoginError) || request.signal.aborted) throw error;
+          if (error.internalError !== undefined) {
+            options.logger.error("Telegram sign-in could not be completed", { error: error.internalError instanceof Error ? error.internalError.name : "unknown" });
+          }
+          return auth.loginFailure(error);
+        }
       }) },
       "/api/chat/schedules": {
         ...read(async (_request, userId, chat) => Response.json(await chat.schedules(userId))),

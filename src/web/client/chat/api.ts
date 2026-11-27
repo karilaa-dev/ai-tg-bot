@@ -106,7 +106,7 @@ export type HistoryCursor = { before: number } | { after: number } | null;
 
 export const chatApi = {
   session: (signal?: AbortSignal) => chatJson<ChatSession>("/api/chat/session", { signal }),
-  logout: () => chatJson<unknown>("/api/chat/session", json("DELETE")),
+  logout: (userId: number) => chatJson<unknown>("/api/chat/session", { method: "DELETE", headers: { "X-Chat-User": String(userId) } }),
   /** 200 with the Telegram profile photo, or 204 when the account has none. */
   avatar: (signal: AbortSignal) => chatFetch("/api/chat/avatar", { signal, cache: "default" }),
   /** `query` searches titles and visible messages across every thread, keeping the same pagination. */

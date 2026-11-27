@@ -6,20 +6,25 @@ export async function checkPwaUpdate(browser: Browser) {
   const worker = await Bun.file("src/web/pwa/service-worker.js").text();
   let release = "first";
   let unavailable = false;
+  let mismatchedShell = false;
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch(request) {
       const path = new URL(request.url).pathname;
       const headers = { "Cache-Control": "no-cache" };
       const shell = `<!doctype html><title>${release}</title>`;
+      const manifest = JSON.stringify({ name: release });
       if (path === "/chat/service-worker.js") {
-        const precache = [{ url: "/chat/", integrity: "sha256-" + createHash("sha256").update(shell).digest("base64") }];
+        const precache = [["/chat/", shell], ["/chat.webmanifest", manifest]].map(([url, body]) => ({
+          url, integrity: "sha256-" + createHash("sha256").update(body!).digest("base64"),
+        }));
         return new Response(`const revision = ${JSON.stringify(release)}; const precache = ${JSON.stringify(precache)};\n${worker}`, {
           headers: { ...headers, "Content-Type": "text/javascript" },
         });
       }
+      if (path === "/chat.webmanifest") return new Response(manifest, { headers: { ...headers, "Content-Type": "application/manifest+json" } });
       if (path === "/chat/" && unavailable) return new Response("Temporarily unavailable", { status: 503, headers });
-      return new Response(shell, { headers: { ...headers, "Content-Type": "text/html" } });
+      return new Response(mismatchedShell ? "The previous server is still serving chat." : shell, { headers: { ...headers, "Content-Type": "text/html" } });
     },
   });
   const context = await browser.newContext();
@@ -30,11 +35,43 @@ export async function checkPwaUpdate(browser: Browser) {
     await page.evaluate(() => navigator.serviceWorker.register("/chat/service-worker.js"));
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
 
+    const installNext = () => page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      const installed = new Promise<ServiceWorkerState>(resolve => registration.addEventListener("updatefound", () => {
+        const installing = registration.installing!;
+        installing.addEventListener("statechange", () => {
+          if (installing.state === "redundant" || installing.state === "installed") resolve(installing.state);
+        });
+      }, { once: true }));
+      await registration.update();
+      return installed;
+    });
+    release = "rejected";
+    mismatchedShell = true;
+    assert.equal(await installNext(), "redundant");
+    assert(!await page.evaluate(async () => (await caches.keys()).includes("ai-tg-bot-web-rejected")));
+    await page.reload();
+    assert.equal(await page.title(), "first");
+    assert.equal(await page.evaluate(async () => {
+      const cache = await caches.open("ai-tg-bot-web-first");
+      await cache.delete("/chat.webmanifest");
+      return fetch("/chat.webmanifest").then(response => response.ok, () => false);
+    }), false, "A cache miss rejects the wrong revision's manifest");
+
     release = "second";
+    mismatchedShell = false;
     await page.evaluate(async () => { await (await navigator.serviceWorker.ready).update(); });
     await page.waitForFunction(async () => (await navigator.serviceWorker.ready).waiting?.state === "installed");
     await page.reload();
     assert.equal(await page.title(), "first", "Open chat clients stay on their verified build during rollout");
+
+    release = "first";
+    mismatchedShell = true;
+    assert.equal(await installNext(), "redundant");
+    await page.reload();
+    assert.equal(await page.title(), "first", "A failed rollback preserves the active revision's cache");
+    release = "second";
+    mismatchedShell = false;
 
     await page.goto(new URL("/outside", server.url).href);
     await page.waitForFunction(async () => {
@@ -45,6 +82,17 @@ export async function checkPwaUpdate(browser: Browser) {
     const response = await page.goto(url + "?view=settings");
     assert(response?.fromServiceWorker());
     assert.equal(await page.title(), "second", "The new build opens while the origin returns 503");
+
+    await page.evaluate(async () => (await caches.open("ai-tg-bot-web-second")).delete("/chat/"));
+    release = "third";
+    unavailable = false;
+    const recovery = await page.reload();
+    assert(recovery?.fromServiceWorker());
+    assert.equal(recovery?.status(), 503);
+    const browserLink = page.getByRole("link", { name: "Open chat in browser" });
+    assert.equal(await browserLink.getAttribute("href"), "/?view=settings");
+    await browserLink.click();
+    assert.equal(await page.title(), "third");
   } finally {
     await context.close();
     await server.stop(true);

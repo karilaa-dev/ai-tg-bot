@@ -4,14 +4,11 @@ import { Button } from "@cloudflare/kumo/components/button";
 import { IconRefresh } from "@tabler/icons-react";
 import type { ChatApp } from "./chat/chat-app.js";
 import { ChatGate, probablySignedIn, WorkspaceLoadFailed, WorkspaceLoading } from "./chat/gate.js";
+import { registerChatWorker, useWaitingChatWorker } from "./pwa.js";
 
 const admin = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
 document.title = admin ? "AI KaRiLaA · Admin" : "AI KaRiLaA";
-if (location.pathname === "/chat/" && document.querySelector('link[rel="manifest"]') && "serviceWorker" in navigator && window.isSecureContext) {
-  const register = () => { void navigator.serviceWorker.register("/chat/service-worker.js").catch(error => console.warn("Offline setup failed", error)); };
-  if (document.readyState === "complete") register();
-  else window.addEventListener("load", register, { once: true });
-}
+const chatWorker = registerChatWorker();
 
 /**
  * A route loaded on demand. Loading is tracked in state rather than with
@@ -53,12 +50,13 @@ function useRoute<P extends object>(route: ReturnType<typeof routeChunk<P>>): [R
 const chatRoute = routeChunk(() => import("./chat/chat-app.js").then(module => module.ChatApp));
 const adminRoute = routeChunk(() => import("./admin-app.js").then(module => module.AdminApp));
 
-function ChatRoute(props: ComponentProps<typeof ChatApp>) {
+function ChatRoute(props: Omit<ComponentProps<typeof ChatApp>, "updateReady">) {
+  const updateReady = useWaitingChatWorker(chatWorker);
   const [state, retry] = useRoute(chatRoute);
-  if (state.kind === "failed") return <WorkspaceLoadFailed retry={retry} />;
+  if (state.kind === "failed") return <WorkspaceLoadFailed retry={retry} updateReady={updateReady} />;
   if (state.kind === "loading") return <WorkspaceLoading />;
   const Chat = state.component;
-  return <Chat {...props} />;
+  return <Chat {...props} updateReady={updateReady} />;
 }
 
 function AdminRoute() {
@@ -69,6 +67,7 @@ function AdminRoute() {
       <h1 id="admin-load-title">Admin dashboard</h1>
       <p className="chat-access-note is-error" role="alert">Could not load the admin dashboard. Check your connection and try again.</p>
       <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>Try again</Button>
+      <Button size="lg" variant="ghost" className="chat-access-button" onClick={() => location.reload()}>Reload page</Button>
     </section>
   </main>;
   const Admin = state.component;

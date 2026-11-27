@@ -1,5 +1,8 @@
 import { isUuid } from "../utils/uuid.js";
 
+export const loginFailures = ["expired", "cancelled", "denied", "start-bot", "try-again"] as const;
+export type LoginFailure = typeof loginFailures[number];
+
 /** OAuth may return to the chat, an identified conversation, or the admin dashboard. */
 export function loginReturnPath(requested: string): string {
   if (requested === "/chat" || requested.startsWith("/chat?")) requested = "/chat/" + requested.slice(5);

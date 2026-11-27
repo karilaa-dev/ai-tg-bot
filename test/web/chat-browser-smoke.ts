@@ -142,15 +142,27 @@ try {
   if (!development) {
     // The production build loads the workspace as a separate chunk; a failed download offers a retry.
     let failedChunks = 0;
-    await page.route(/\/chat-app-[a-z0-9]+\.js$/, route => { failedChunks++; return route.abort("connectionfailed"); });
+    const chatChunk = /\/chat-app-[a-z0-9]+\.js$/;
+    await page.route(chatChunk, route => { failedChunks++; return route.abort("connectionfailed"); });
     userId = 1001;
     await page.evaluate(() => window.dispatchEvent(new Event("chat-session-expired")));
     const retryChunk = page.getByRole("button", { name: "Try again", exact: true });
     await retryChunk.waitFor();
     assert.equal(failedChunks, 1);
     await page.getByRole("alert").filter({ hasText: "Could not reach the server" }).waitFor();
-    await page.unroute(/\/chat-app-[a-z0-9]+\.js$/);
+    await page.unroute(chatChunk);
     await retryChunk.click();
+    await composer.waitFor();
+
+    await page.route(chatChunk, route => route.fulfill({ status: 404, body: "Previous release retired" }));
+    await page.reload();
+    const reloadPage = page.getByRole("button", { name: "Reload page", exact: true });
+    await reloadPage.waitFor();
+    await page.unroute(chatChunk);
+    const navigation = page.waitForEvent("domcontentloaded");
+    await reloadPage.click();
+    await navigation;
+    await composer.waitFor();
   }
   await recheck(1001);
   await page.getByRole("heading", { name: "Chat 1", exact: true }).waitFor();
