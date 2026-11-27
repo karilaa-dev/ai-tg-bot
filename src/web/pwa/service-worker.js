@@ -1,15 +1,24 @@
 // revision and precache are generated from the production build.
 const prefix = "ai-tg-bot-web-";
 const cacheName = prefix + revision;
-const paths = new Set(precache.map(entry => entry.url));
+const resources = new Map(precache.map(entry => [entry.url, entry]));
+
+function verifiedRequest({ url, integrity }) {
+  return new Request(url, {
+    integrity, credentials: "omit", redirect: "error",
+    cache: url === "/chat/" || url === "/chat.webmanifest" ? "no-cache" : "default",
+  });
+}
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
     const cache = await caches.open(cacheName);
-    await cache.addAll(precache.map(({ url, integrity }) => new Request(url, {
-      integrity, credentials: "omit", redirect: "error",
-      cache: url === "/chat/" || url === "/chat.webmanifest" ? "no-cache" : "default",
-    })));
+    try {
+      await cache.addAll(precache.map(verifiedRequest));
+    } catch (error) {
+      await caches.delete(cacheName).catch(() => {});
+      throw error;
+    }
   })());
 });
 
@@ -25,10 +34,16 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin || !paths.has(url.pathname)) return;
+  if (request.method !== "GET" || url.origin !== self.location.origin) return;
+  const entry = resources.get(url.pathname);
+  if (!entry) return;
   // Query parameters select a chat view; every navigation uses this worker's verified shell.
   const shell = url.pathname === "/chat/";
   if (shell ? request.mode !== "navigate" : url.search) return;
-  event.respondWith(caches.match(shell ? url.pathname : request, { cacheName })
-    .then(cached => cached || fetch(request)));
+  event.respondWith(caches.match(entry.url, { cacheName, ignoreVary: true })
+    .then(async cached => {
+      if (cached) return cached;
+      const response = await fetch(verifiedRequest(entry));
+      return response.ok ? response : Response.error();
+    }));
 });

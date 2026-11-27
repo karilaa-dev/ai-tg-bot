@@ -362,7 +362,7 @@ Run `bun install --frozen-lockfile`, `bun run build`, then `bun run start`. Both
 
 `bun run build:web` bundles `src/web/client/index.html` with Bun and the Tailwind plugin. Production serves the generated JavaScript and CSS through `Bun.file`, with content hashes in filenames and immutable caching. The frontend targets current browsers with native JavaScript modules.
 
-Open the chat over HTTPS and use the browser’s install or Add to Home Screen action. The installed app launches at `/chat/`. After the first cache fill, its interface opens offline. Sign-in and conversations require a connection. A new version takes over once all chat windows using the previous version close.
+Open the chat over HTTPS and use the browser’s install or Add to Home Screen action. The installed app launches at `/chat/`. After the first cache fill, its interface opens offline and checks the session again when the connection returns. Sign-in and conversations require a connection. Interrupted text sends can be retried after a reload in the same window once the account is verified. A notice appears when an update is ready. The update takes over once all chat windows using the previous version close.
 
 Ordinary browser tabs at `/` and `/admin` reuse fingerprinted scripts, styles and images through the HTTP cache. On return visits, unchanged pages can revalidate with a small `304` response. Profile photos and attachment downloads use the browser’s private HTTP cache and revalidate access before reuse. The admin viewer stays outside the installed app.
 

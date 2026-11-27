@@ -7,9 +7,9 @@ import { useChatStrings } from "./strings.js";
 /** The sidebar is a sheet on narrow screens, so each view header carries its opener. */
 export function MobileNavButton() {
   const t = useChatStrings();
-  const { isMobile, setOpenMobile } = useSidebar();
+  const { isMobile, openMobile, setOpenMobile } = useSidebar();
   if (!isMobile) return null;
-  return <Button variant="ghost" shape="square" aria-label={t.openChats} className="chat-nav-button" onClick={() => setOpenMobile(true)}><IconMenu2 size={20} aria-hidden="true" /></Button>;
+  return <Button variant="ghost" shape="square" aria-label={t.openChats} aria-expanded={openMobile} className="chat-nav-button" onClick={() => setOpenMobile(true)}><IconMenu2 size={20} aria-hidden="true" /></Button>;
 }
 
 /** The page theme, kept in sync with toggles in other tabs and the system preference. */

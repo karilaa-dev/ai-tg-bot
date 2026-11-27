@@ -70,17 +70,20 @@ declare module "react" {
 // Room for a title and a time; Kumo's 16.25rem default is narrower on this app's 14px root.
 const sidebarStyle = { "--sidebar-width": "272px" } satisfies CSSProperties;
 
-export function ChatApp({ session, signOut }: { session: SignedIn; signOut: () => Promise<void> }) {
+interface ChatAppProps { session: SignedIn; signOut: () => Promise<void>; updateReady: boolean }
+
+export function ChatApp(props: ChatAppProps) {
+  const { session } = props;
   return <ChatPreferences userId={session.user.id} fallback={<WorkspaceLoading />}>
     <TooltipProvider>
       <Sidebar.Provider collapsible="offcanvas" className="chat-shell" style={sidebarStyle}>
-        <Workspace session={session} signOut={signOut} />
+        <Workspace {...props} />
       </Sidebar.Provider>
     </TooltipProvider>
   </ChatPreferences>;
 }
 
-function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Promise<void> }) {
+function Workspace({ session, signOut, updateReady }: ChatAppProps) {
   const t = useChatStrings();
   const language = useUiLanguage();
   const [route, setRoute] = useState(readRoute);
@@ -200,8 +203,9 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
       </Sidebar.Footer>
     </Sidebar>
     <main id="chat-main" className="chat-main" tabIndex={-1}>
+      <p className="chat-update-status" role="status">{updateReady ? t.appUpdateReady : null}</p>
       {route.view === "thread" && <Conversation key={route.threadId} threadId={route.threadId} drafts={session.drafts} onThreadChange={threads.refresh} onOpenThread={openThread} onRead={threads.markRead} notice={zonePrompt} schedules={schedules} />}
-      {route.view === "home" && <Home name={session.user.name} drafts={session.drafts} onStarted={openThread} notice={zonePrompt} />}
+      {route.view === "home" && <Home name={session.user.name} drafts={session.drafts} onStarted={openThread} onSearch={openSearch} notice={zonePrompt} />}
       {route.view === "schedules" && <SchedulesView schedules={schedules} threads={threads.threads} onOpenThread={threadId => navigate({ view: "thread", threadId })} />}
       {route.view === "settings" && <ChatSettingsView onOpenMemories={() => navigate({ view: "memories" })} />}
       {route.view === "memories" && <div className="chat-view chat-legacy-view"><Memories page load={chatApi.memories} onDelete={deleteMemory} subtitle={t.memoriesSubtitle}
@@ -211,7 +215,7 @@ function Workspace({ session, signOut }: { session: SignedIn; signOut: () => Pro
   </>;
 }
 
-function Home({ name, drafts, onStarted, notice }: { name: string | null; drafts: DraftStore; onStarted: (thread: ChatThread) => void; notice?: ReactNode }) {
+function Home({ name, drafts, onStarted, onSearch, notice }: { name: string | null; drafts: DraftStore; onStarted: (thread: ChatThread) => void; onSearch: () => void; notice?: ReactNode }) {
   const t = useChatStrings();
   const language = useUiLanguage();
   const [draft, setDraftState] = useState<Draft>(() => drafts.read("new"));
@@ -234,7 +238,13 @@ function Home({ name, drafts, onStarted, notice }: { name: string | null; drafts
     }
   };
   return <div className="chat-view chat-home">
-    <header className="chat-view-header chat-home-header"><MobileNavButton /></header>
+    <header className="chat-view-header chat-home-header">
+      <MobileNavButton />
+      <div className="chat-home-brand"><BrandMark /><span>{t.appName}</span></div>
+      <Button variant="ghost" shape="square" className="chat-home-search" aria-label={t.searchChats} aria-haspopup="dialog" onClick={onSearch}>
+        <IconSearch size={20} aria-hidden="true" />
+      </Button>
+    </header>
     <div className="chat-home-body">
       <h1 className="chat-home-title">{t.greeting(new Date().getHours())}{name ? `, ${name.split(" ")[0]}` : ""}</h1>
       {creation.kind === "failed" && <Banner variant="error" size="sm" icon={<IconAlertCircle aria-hidden="true" />} description={describeError(creation.error, t.startFailed, language)} />}

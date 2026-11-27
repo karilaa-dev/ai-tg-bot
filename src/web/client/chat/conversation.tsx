@@ -249,6 +249,12 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
       const result = await chatApi.send(threadId, { text: item.text, requestId, files: item.files });
       if (!drafts.active) return;
       drafts.confirmSend(threadId, requestId, result.messageId);
+      const messages = historyRef.current?.messages;
+      if (messages?.some(message => message.id === result.messageId) ||
+          (messages?.[0] && messages[0].id > result.messageId)) {
+        // An interrupted send may already be in the loaded transcript or an older page.
+        drafts.reconcileSends(threadId, new Set([result.messageId]));
+      }
       if (!mounted.current) return;
       void load();
       onThreadChange();
@@ -263,7 +269,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
     if (start) void send(start);
   }, [threadId, drafts, send]);
 
-  const submit = (value: Draft) => { setDraft(emptyDraft); void send(value); };
+  const submit = (value: Draft) => { void send(value); setDraft(emptyDraft); };
   const editFailed = (item: Extract<PendingSend, { status: "failed" }>) => {
     if (!drafts.removeFailedSend(threadId, item.requestId)) return;
     setDraft({ text: item.text, files: item.files, requestId: item.requestId });
@@ -387,7 +393,7 @@ export function Conversation({ threadId, drafts, onThreadChange, onOpenThread, o
                 {fileNames.length > 0 && <ul className="chat-pending-files">{fileNames.map((name, index) => <li key={index}><IconFile size={14} aria-hidden="true" />{name}</li>)}</ul>}
               </div>
               {item.status === "failed" ? <div className="chat-send-failed" role="alert">
-                <IconAlertCircle size={16} aria-hidden="true" /><span>{describeError(item.error, t.sendFailed, language)}</span>
+                <IconAlertCircle size={16} aria-hidden="true" /><span>{item.error === null ? t.interruptedSend : describeError(item.error, t.sendFailed, language)}</span>
                 <Button size="sm" variant="secondary" onClick={() => void send({ text: item.text, files: item.files, requestId: item.requestId })}>{t.retry}</Button>
                 <Button size="sm" variant="ghost" icon={<IconPencil size={14} aria-hidden="true" />} onClick={() => editFailed(item)}>{t.edit}</Button>
                 <Button size="sm" variant="ghost" shape="square" aria-label={t.discardMessage} onClick={() => drafts.removeFailedSend(threadId, item.requestId)}><IconTrash size={14} aria-hidden="true" /></Button>

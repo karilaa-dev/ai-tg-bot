@@ -45,6 +45,31 @@ it("retains text across reloads only for the same account", () => {
   expect(new DraftStore(1).read(fixtureUuid(2))).toEqual({ ...emptyDraft, text: message.text });
 });
 
+it("recovers an interrupted text send for manual retry and forgets it on acknowledgement", () => {
+  const threadId = fixtureUuid(2);
+  const draft = { text: "Unsure whether this was received", files: [], requestId: "retry_this_message" };
+  const alice = new DraftStore(1);
+  alice.beginSend(threadId, { ...draft, status: "sending" });
+  alice.beginSend(threadId, sending);
+
+  const reloaded = new DraftStore(1);
+  expect(reloaded.pending(threadId)).toEqual([{ ...draft, status: "failed", error: null }]);
+  expect(reloaded.pending(threadId)).toBe(reloaded.pending(threadId));
+  expect(reloaded.removeFailedSend(threadId, draft.requestId)).toBe(true);
+  reloaded.write(threadId, draft);
+  const editing = new DraftStore(1);
+  expect(editing.read(threadId)).toEqual(draft);
+  expect(editing.beginSend(threadId, { ...draft, status: "sending" })).toBe(true);
+  editing.write(threadId, emptyDraft);
+  editing.confirmSend(threadId, draft.requestId, 285);
+  expect(new DraftStore(1).pending(threadId)).toEqual([]);
+  expect(new DraftStore(1).read(threadId)).toEqual(emptyDraft);
+
+  editing.queueStart(fixtureUuid(3), draft);
+  expect(new DraftStore(2).pending(fixtureUuid(3))).toEqual([]);
+  expect(new DraftStore(1).pending(fixtureUuid(3))).toEqual([]);
+});
+
 it("revokes files, retry ids, queued starts and late writes on sign-out, even for the same account", async () => {
   const alice = new DraftStore(1);
   alice.write("new", message);
