@@ -15,6 +15,8 @@ import { useChatStrings } from "./strings.js";
 // Lets the page start downloading the workspace while the session is checked. It holds no account data.
 const SIGNED_IN_HINT = "chat-signed-in";
 const SIGN_OUT_INTENT = "chat-sign-out";
+const FIRST_RECONNECT_DELAY_MS = 1_500;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 export function probablySignedIn(): boolean {
   try { return localStorage.getItem(SIGNED_IN_HINT) === "1"; } catch { return false; }
 }
@@ -87,7 +89,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   const operation = useRef<{ kind: "idle" | "checking" | "signing-out" | "sign-out-failed" }>({
     kind: unfinishedSignOut === undefined ? "idle" : "sign-out-failed",
   });
-  const automaticRetryUsed = useRef(false);
+  const reconnectDelay = useRef(FIRST_RECONNECT_DELAY_MS);
   const drafts = useRef<DraftStore | null>(null);
   const endSession = useCallback(() => {
     invalidateChatRequests();
@@ -103,7 +105,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     try {
       const session = await chatApi.session(signal);
       if (signal.aborted || operation.current !== attempt) return;
-      automaticRetryUsed.current = false;
+      reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
       if (session.authenticated) {
         if (drafts.current?.userId !== session.user.id) {
           if (drafts.current) endSession();
@@ -120,7 +122,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     } catch (error) {
       if (signal.aborted || operation.current !== attempt) return;
       if (error instanceof ChatApiError && error.status === 401) {
-        automaticRetryUsed.current = false;
+        reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
         endSession();
         rememberSignedIn(false);
         setState({ kind: "signed-out", loginAvailable: true, notice });
@@ -140,7 +142,9 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, [check, sessionRequest]);
 
   const retry = useCallback((notice: Notice, automatic = false) => {
-    automaticRetryUsed.current = automatic;
+    reconnectDelay.current = automatic
+      ? Math.min(reconnectDelay.current * 2, MAX_RECONNECT_DELAY_MS)
+      : FIRST_RECONNECT_DELAY_MS;
     setState({ kind: "checking" });
     setSessionRequest({ notice });
   }, []);
@@ -155,8 +159,8 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     };
     window.addEventListener("online", reconnect);
     document.addEventListener("visibilitychange", reconnect);
-    // A navigation can initialize with an online signal even if its first request lost connectivity.
-    const timer = automaticRetryUsed.current ? undefined : setTimeout(reconnect, 1_500);
+    // The service can recover without a browser connectivity event.
+    const timer = !document.hidden ? setTimeout(reconnect, reconnectDelay.current) : undefined;
     return () => {
       clearTimeout(timer);
       window.removeEventListener("online", reconnect);
@@ -168,7 +172,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
     const controller = new AbortController();
     const expired = () => {
       if (operation.current.kind === "signing-out" || operation.current.kind === "sign-out-failed") return;
-      automaticRetryUsed.current = false;
+      reconnectDelay.current = FIRST_RECONNECT_DELAY_MS;
       endSession();
       setState({ kind: "checking" });
       void check(controller.signal, "session-ended");

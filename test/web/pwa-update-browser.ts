@@ -82,6 +82,17 @@ export async function checkPwaUpdate(browser: Browser) {
     const response = await page.goto(url + "?view=settings");
     assert(response?.fromServiceWorker());
     assert.equal(await page.title(), "second", "The new build opens while the origin returns 503");
+
+    await page.evaluate(async () => (await caches.open("ai-tg-bot-web-second")).delete("/chat/"));
+    release = "third";
+    unavailable = false;
+    const recovery = await page.reload();
+    assert(recovery?.fromServiceWorker());
+    assert.equal(recovery?.status(), 503);
+    const browserLink = page.getByRole("link", { name: "Open chat in browser" });
+    assert.equal(await browserLink.getAttribute("href"), "/?view=settings");
+    await browserLink.click();
+    assert.equal(await page.title(), "third");
   } finally {
     await context.close();
     await server.stop(true);

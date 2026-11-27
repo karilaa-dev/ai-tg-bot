@@ -24,7 +24,7 @@ type AuthConfig = Pick<AppConfig, "WEB_TELEGRAM_CLIENT_ID" | "WEB_TELEGRAM_CLIEN
 interface Transaction { browser: string; verifier: string; nonce: string; returnTo: string; expires: number }
 
 export class TelegramLoginError extends WebHttpError {
-  constructor(status: number, message: string, readonly reason: LoginFailure, readonly returnTo?: string) {
+  constructor(status: number, message: string, readonly reason: LoginFailure, readonly returnTo?: string, readonly internalError?: unknown) {
     super(status, message);
   }
 }
@@ -190,42 +190,49 @@ export class WebChatAuth {
       throw new TelegramLoginError(400, "Sign-in expired or did not start in this browser. Try again.", "expired");
     }
     const { returnTo } = transaction;
-    this.callbacks.take(address);
     this.transactions.delete(transactionKey);
-    if (query.getAll("state").length !== 1 || query.getAll("code").length !== 1 || query.has("error") || !code || code.length > 4_096) {
-      throw new TelegramLoginError(400, "Telegram sign-in was cancelled or is invalid. Try again.", "cancelled", returnTo);
-    }
-    if (this.exchanging >= 16) throw new TelegramLoginError(503, "Sign-in is busy. Try again shortly.", "try-again", returnTo);
-    this.exchanging++;
-    let userId: number;
     try {
-      const response = await this.fetcher(`${ISSUER}/token`, {
-        method: "POST", redirect: "error", signal: AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]),
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", Authorization: `Basic ${Buffer.from(`${clientId}:${secret}`, "utf8").toString("base64")}` },
-        body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId, code, redirect_uri: redirectUri, code_verifier: transaction.verifier }),
-      });
-      if (!response.ok) throw new Error("Token exchange failed");
-      const result = TokenResponseSchema.parse(JSON.parse(await readBoundedBody(response, 65_536)));
-      userId = await verifyTelegramIdentity(result.id_token, transaction.nonce, clientId, this.jwks);
-    } catch {
-      throw new TelegramLoginError(401, "Telegram sign-in could not be verified. Try again.", "try-again", returnTo);
-    } finally { this.exchanging--; }
-    if (!this.isAdmin(userId)) {
-      const denied = () => new TelegramLoginError(403, "This Telegram account is not allowed to use this bot.", "denied", returnTo);
-      if (!await this.access.isAllowed(userId)) throw denied();
-      await requireExistingUser(userId, returnTo);
-      if (!await this.access.isAllowed(userId)) throw denied();
+      this.callbacks.take(address);
+      if (query.getAll("state").length !== 1 || query.getAll("code").length !== 1 || query.has("error") || !code || code.length > 4_096) {
+        throw new TelegramLoginError(400, "Telegram sign-in was cancelled or is invalid. Try again.", "cancelled", returnTo);
+      }
+      if (this.exchanging >= 16) throw new TelegramLoginError(503, "Sign-in is busy. Try again shortly.", "try-again", returnTo);
+      this.exchanging++;
+      let userId: number;
+      try {
+        const response = await this.fetcher(`${ISSUER}/token`, {
+          method: "POST", redirect: "error", signal: AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]),
+          headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", Authorization: `Basic ${Buffer.from(`${clientId}:${secret}`, "utf8").toString("base64")}` },
+          body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId, code, redirect_uri: redirectUri, code_verifier: transaction.verifier }),
+        });
+        if (!response.ok) throw new Error("Token exchange failed");
+        const result = TokenResponseSchema.parse(JSON.parse(await readBoundedBody(response, 65_536)));
+        userId = await verifyTelegramIdentity(result.id_token, transaction.nonce, clientId, this.jwks);
+      } catch {
+        throw new TelegramLoginError(401, "Telegram sign-in could not be verified. Try again.", "try-again", returnTo);
+      } finally { this.exchanging--; }
+      if (!this.isAdmin(userId)) {
+        const denied = () => new TelegramLoginError(403, "This Telegram account is not allowed to use this bot.", "denied", returnTo);
+        if (!await this.access.isAllowed(userId)) throw denied();
+        await requireExistingUser(userId, returnTo);
+        if (!await this.access.isAllowed(userId)) throw denied();
+      }
+      this.credentials();
+      request.signal.throwIfAborted();
+      this.prune();
+      const previous = this.cookieValue(request, "session");
+      const session = token();
+      await this.sessions.create(key(session), userId, previous ? key(previous) : undefined);
+      const headers = new Headers({ Location: returnTo });
+      headers.append("Set-Cookie", this.cookie("session", session, SESSION_COOKIE_SECONDS));
+      headers.append("Set-Cookie", this.cookie("login", "", 0));
+      return new Response(null, { status: 303, headers });
+    } catch (error) {
+      if (error instanceof TelegramLoginError || request.signal.aborted) throw error;
+      const status = error instanceof WebHttpError ? error.status : 503;
+      throw new TelegramLoginError(status, "Telegram sign-in could not be completed.", "try-again", returnTo,
+        status >= 500 ? error : undefined);
     }
-    this.credentials();
-    request.signal.throwIfAborted();
-    this.prune();
-    const previous = this.cookieValue(request, "session");
-    const session = token();
-    await this.sessions.create(key(session), userId, previous ? key(previous) : undefined);
-    const headers = new Headers({ Location: returnTo });
-    headers.append("Set-Cookie", this.cookie("session", session, SESSION_COOKIE_SECONDS));
-    headers.append("Set-Cookie", this.cookie("login", "", 0));
-    return new Response(null, { status: 303, headers });
   }
   loginFailure(error: TelegramLoginError) {
     const target = new URL(error.returnTo ?? "/chat/", "https://chat.invalid");

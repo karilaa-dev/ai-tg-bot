@@ -119,13 +119,14 @@ export function createChatRoutes(options: WebServerOptions, shutdownSignal: Abor
               if (error instanceof WebNotFound || (error instanceof ConversationError && error.status === 404)) {
                 throw new TelegramLoginError(403, "Send /start to the bot in Telegram before signing in here.", "start-bot", returnTo);
               }
-              if (request.signal.aborted) throw error;
-              options.logger.error("Telegram sign-in profile lookup failed", { error: error instanceof Error ? error.name : "unknown" });
-              throw new TelegramLoginError(503, "Telegram sign-in could not be completed.", "try-again", returnTo);
+              throw error;
             }
           }, chatClientAddress(request, server?.requestIP(request)?.address, options.config.WEB_TRUSTED_PROXY_IPS));
         } catch (error) {
           if (!(error instanceof TelegramLoginError) || request.signal.aborted) throw error;
+          if (error.internalError !== undefined) {
+            options.logger.error("Telegram sign-in could not be completed", { error: error.internalError instanceof Error ? error.internalError.name : "unknown" });
+          }
           return auth.loginFailure(error);
         }
       }) },

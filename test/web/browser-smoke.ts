@@ -191,7 +191,7 @@ try {
     await failedReconnect;
     await retry.waitFor();
     await page.unroute(sessionUrl);
-    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    // The origin recovers while the browser stays online and foregrounded.
     await composer.waitFor();
     assert.equal(await composer.inputValue(), draft, "Reconnecting restores the signed-in user's draft");
     await context.setOffline(true);

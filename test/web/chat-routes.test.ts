@@ -15,6 +15,9 @@ import { WebNotFound, type ConversationRepository } from "../../src/web/reposito
 import type { ChatService, ChatThread } from "../../src/web/chat-types.js";
 import { createWebRoutes, startWebServer, type WebServerOptions } from "../../src/web/server.js";
 import { MAX_CHAT_BODY_BYTES } from "../../src/web/chat-routes.js";
+import { ChatRateLimit } from "../../src/web/chat-auth.js";
+import { WebHttpError } from "../../src/web/auth.js";
+import { WebSessionStore } from "../../src/web/session-store.js";
 
 const originalFetch = globalThis.fetch;
 const publicOrigin = "https://chat.example";
@@ -186,11 +189,14 @@ it("keeps only the verified return link on cancelled and expired sign-in", async
   expect(expired.headers.get("Location")).toBe("/chat/?signin=expired");
 });
 
-it("returns to the verified chat when a Telegram profile lookup fails temporarily", async () => {
+it.each(["profile lookup", "session store", "callback rate limit"])("returns to the verified chat after a %s failure", async failure => {
   const start = await request("/api/auth/telegram/start?return=/chat/");
   const location = new URL(start.headers.get("Location")!);
   nonce = location.searchParams.get("nonce")!;
-  vi.mocked(chat.profile).mockRejectedValueOnce(new Error("Temporary profile lookup failure"));
+  const temporary = new Error("Temporary service failure");
+  if (failure === "profile lookup") vi.mocked(chat.profile).mockRejectedValueOnce(temporary);
+  else if (failure === "session store") vi.spyOn(WebSessionStore.prototype, "create").mockRejectedValueOnce(temporary);
+  else vi.spyOn(ChatRateLimit.prototype, "take").mockImplementationOnce(() => { throw new WebHttpError(429, "Too many requests."); });
   const result = await request(`/api/auth/telegram/callback?state=${location.searchParams.get("state")}&code=sample`,
     { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
   expect(result.status).toBe(303);
