@@ -19,7 +19,7 @@ The toolbox contract runs `assets/python/contract.py` with both default interpre
 
 ## Versioned release
 
-The default tag comes from the application version in `package.json`. Version `2.1.14` uses `ai-tg-bot-tools:v2.1.14`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
+The default tag comes from the application version in `package.json`. Version `2.1.15` uses `ai-tg-bot-tools:v2.1.15`. Put the normal application secrets, including `E2B_API_KEY`, in the ignored root `.env`.
 
 Build the versioned image and run the full live runtime smoke before deployment:
 
