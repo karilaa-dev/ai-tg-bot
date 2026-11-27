@@ -183,8 +183,15 @@ try {
     const retry = page.getByRole("button", { name: "Try again", exact: true });
     await retry.waitFor();
     assert.equal(await composer.count(), 0, "The workspace stays gated until the session is verified");
+    const sessionUrl = new URL("/api/chat/session", url).href;
+    await page.route(sessionUrl, route => route.fulfill({ status: 503 }));
+    const failedReconnect = page.waitForResponse(response => response.url() === sessionUrl && response.status() === 503);
     await context.setOffline(false);
     assert(await page.evaluate(() => navigator.onLine && !document.hidden), "Reconnect is tested on a foreground page");
+    await failedReconnect;
+    await retry.waitFor();
+    await page.unroute(sessionUrl);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await composer.waitFor();
     assert.equal(await composer.inputValue(), draft, "Reconnecting restores the signed-in user's draft");
     await context.setOffline(true);
@@ -242,11 +249,38 @@ try {
     await updateNotice.waitFor();
     assert.equal(await failedSend.count(), 1, "The waiting update leaves the active conversation intact");
 
+    const chatChunk = await page.evaluate(async () => {
+      const name = (await caches.keys()).find(key => key.startsWith("ai-tg-bot-web-") && key !== "ai-tg-bot-web-browser-smoke-update")!;
+      const cache = await caches.open(name);
+      const chunk = (await cache.keys()).find(request => /^\/chat-app-[a-z0-9]+\.js$/.test(new URL(request.url).pathname))!;
+      await cache.delete(chunk);
+      return new URL(chunk.url).pathname.slice(1);
+    });
+    const chunkFile = path.join(fixtureAssets, chatChunk);
+    const workspace = await readFile(chunkFile);
+    await cdp.send("Network.clearBrowserCache");
+    await rm(chunkFile);
+    await page.reload();
+    await updateNotice.waitFor();
+    const openInBrowser = page.getByRole("link", { name: "Open chat in browser", exact: true });
+    await openInBrowser.waitFor();
+    assert.equal(await openInBrowser.getAttribute("href"), `/?thread=${threadId}`);
+    await writeFile(chunkFile, workspace);
+    await openInBrowser.click();
+    await composer.waitFor();
+    assert.equal(new URL(page.url()).pathname, "/");
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+
+    // The browser fallback leaves the update cache intact, then returns to the installed scope.
+    await page.goto(new URL("/chat/", url).href);
+    await composer.waitFor();
     await context.setOffline(true);
     await account.click();
     await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
     await page.getByRole("alert").filter({ hasText: "Could not sign out." }).waitFor();
     await context.setOffline(false);
+    await page.reload();
+    await page.getByRole("alert").filter({ hasText: "Could not sign out." }).waitFor();
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     assert.equal(await composer.count(), 0, "Reconnect cannot undo an attempted sign-out");
     const retrySignOut = page.waitForRequest(request => request.method() === "DELETE" && request.url().endsWith("/api/chat/session"));

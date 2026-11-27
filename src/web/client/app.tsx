@@ -53,7 +53,7 @@ const adminRoute = routeChunk(() => import("./admin-app.js").then(module => modu
 function ChatRoute(props: Omit<ComponentProps<typeof ChatApp>, "updateReady">) {
   const updateReady = useWaitingChatWorker(chatWorker);
   const [state, retry] = useRoute(chatRoute);
-  if (state.kind === "failed") return <WorkspaceLoadFailed retry={retry} />;
+  if (state.kind === "failed") return <WorkspaceLoadFailed retry={retry} updateReady={updateReady} />;
   if (state.kind === "loading") return <WorkspaceLoading />;
   const Chat = state.component;
   return <Chat {...props} updateReady={updateReady} />;

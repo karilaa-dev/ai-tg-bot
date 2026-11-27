@@ -16,7 +16,7 @@ const TextSend = z.object({
   text: z.string().min(1).max(32_000),
   requestId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
 });
-const PendingText = z.array(TextSend);
+const PendingText = z.array(z.unknown());
 
 export function clearStoredDrafts(keepPrefix?: string) {
   try {
@@ -85,7 +85,10 @@ export class DraftStore {
     try {
       const entries = PendingText.safeParse(JSON.parse(sessionStorage.getItem(this.prefix + "pending:" + key) ?? "[]"));
       if (entries.success && entries.data.length) {
-        restored = entries.data.map(item => ({ ...item, status: "failed", files: [], error: null }));
+        restored = entries.data.flatMap(item => {
+          const parsed = TextSend.safeParse(item);
+          return parsed.success ? [{ ...parsed.data, status: "failed", files: [], error: null }] : [];
+        });
       }
     } catch { /* Storage can be disabled or contain invalid data. */ }
     this.sends.set(key, restored);
@@ -100,8 +103,11 @@ export class DraftStore {
     this.sends.set(key, next.length ? next : noPendingSends);
     try {
       const storageKey = this.prefix + "pending:" + key;
-      const textSends = next.flatMap(item => item.status !== "sent" && !item.files.length && item.text
-        ? [{ requestId: item.requestId, text: item.text }] : []);
+      const textSends = next.flatMap(item => {
+        if (item.status === "sent" || item.files.length) return [];
+        const parsed = TextSend.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      });
       if (textSends.length) sessionStorage.setItem(storageKey, JSON.stringify(textSends));
       else sessionStorage.removeItem(storageKey);
     } catch { /* Keep unresolved sends in memory while this page is open. */ }

@@ -12,11 +12,13 @@ function verifiedRequest({ url, integrity }) {
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
+    const existed = await caches.has(cacheName);
     const cache = await caches.open(cacheName);
     try {
       await cache.addAll(precache.map(verifiedRequest));
     } catch (error) {
-      await caches.delete(cacheName).catch(() => {});
+      // A rollback can reinstall the revision currently serving open windows.
+      if (!existed) await caches.delete(cacheName).catch(() => {});
       throw error;
     }
   })());

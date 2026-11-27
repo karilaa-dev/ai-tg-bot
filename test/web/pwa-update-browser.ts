@@ -35,9 +35,7 @@ export async function checkPwaUpdate(browser: Browser) {
     await page.evaluate(() => navigator.serviceWorker.register("/chat/service-worker.js"));
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
 
-    release = "rejected";
-    mismatchedShell = true;
-    const failedState = await page.evaluate(async () => {
+    const installNext = () => page.evaluate(async () => {
       const registration = await navigator.serviceWorker.ready;
       const installed = new Promise<ServiceWorkerState>(resolve => registration.addEventListener("updatefound", () => {
         const installing = registration.installing!;
@@ -48,7 +46,9 @@ export async function checkPwaUpdate(browser: Browser) {
       await registration.update();
       return installed;
     });
-    assert.equal(failedState, "redundant");
+    release = "rejected";
+    mismatchedShell = true;
+    assert.equal(await installNext(), "redundant");
     assert(!await page.evaluate(async () => (await caches.keys()).includes("ai-tg-bot-web-rejected")));
     await page.reload();
     assert.equal(await page.title(), "first");
@@ -64,6 +64,14 @@ export async function checkPwaUpdate(browser: Browser) {
     await page.waitForFunction(async () => (await navigator.serviceWorker.ready).waiting?.state === "installed");
     await page.reload();
     assert.equal(await page.title(), "first", "Open chat clients stay on their verified build during rollout");
+
+    release = "first";
+    mismatchedShell = true;
+    assert.equal(await installNext(), "redundant");
+    await page.reload();
+    assert.equal(await page.title(), "first", "A failed rollback preserves the active revision's cache");
+    release = "second";
+    mismatchedShell = false;
 
     await page.goto(new URL("/outside", server.url).href);
     await page.waitForFunction(async () => {

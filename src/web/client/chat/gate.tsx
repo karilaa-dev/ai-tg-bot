@@ -14,11 +14,26 @@ import { useChatStrings } from "./strings.js";
 
 // Lets the page start downloading the workspace while the session is checked. It holds no account data.
 const SIGNED_IN_HINT = "chat-signed-in";
+const SIGN_OUT_INTENT = "chat-sign-out";
 export function probablySignedIn(): boolean {
   try { return localStorage.getItem(SIGNED_IN_HINT) === "1"; } catch { return false; }
 }
 function rememberSignedIn(signedIn: boolean) {
   try { if (signedIn) localStorage.setItem(SIGNED_IN_HINT, "1"); else localStorage.removeItem(SIGNED_IN_HINT); } catch { /* Storage can be disabled. */ }
+}
+
+function pendingSignOut(): number | undefined {
+  try {
+    const userId = Number(sessionStorage.getItem(SIGN_OUT_INTENT));
+    if (Number.isSafeInteger(userId) && userId > 0) return userId;
+  } catch { /* Storage can be disabled. */ }
+}
+
+function rememberSignOut(userId: number | null) {
+  try {
+    if (userId === null) sessionStorage.removeItem(SIGN_OUT_INTENT);
+    else sessionStorage.setItem(SIGN_OUT_INTENT, String(userId));
+  } catch { /* Keep the intent in memory while this page is open. */ }
 }
 
 export interface SignedIn { user: ChatProfile; botUsername: string; admin: boolean; drafts: DraftStore }
@@ -50,20 +65,28 @@ export function WorkspaceLoading() {
 }
 
 /** Shown when the workspace code could not be downloaded; retrying requests it again. */
-export function WorkspaceLoadFailed({ retry }: { retry: () => void }) {
+export function WorkspaceLoadFailed({ retry, updateReady }: { retry: () => void; updateReady: boolean }) {
   const t = useChatStrings();
+  const controlled = typeof location !== "undefined" && location.pathname === "/chat/" && navigator.serviceWorker?.controller;
   return <AccessFrame busy={false}>
     <p className="chat-access-note is-error" role="alert"><IconAlertCircle size={16} aria-hidden="true" /><span><strong>{t.serverUnreachable}.</strong> {t.checkConnection}</span></p>
+    {updateReady && <p className="chat-access-note" role="status">{t.appUpdateReady}</p>}
     <Button size="lg" variant="secondary" className="chat-access-button" icon={<IconRefresh size={18} aria-hidden="true" />} onClick={retry}>{t.tryAgain}</Button>
-    <Button size="lg" variant="ghost" className="chat-access-button" onClick={() => location.reload()}>{t.reloadPage}</Button>
+    {controlled
+      ? <LinkButton size="lg" variant="ghost" className="chat-access-button" href={`/${location.search}`}>{t.openChatInBrowser}</LinkButton>
+      : <Button size="lg" variant="ghost" className="chat-access-button" onClick={() => location.reload()}>{t.reloadPage}</Button>}
   </AccessFrame>;
 }
 
 export function ChatGate({ children }: { children: (session: SignedIn, signOut: () => Promise<void>) => ReactNode }) {
   const loginFailure = useLoginFailure();
-  const [state, setState] = useState<GateState>({ kind: "checking" });
-  const [sessionRequest, setSessionRequest] = useState<{ notice: Notice }>({ notice: "none" });
-  const operation = useRef<{ kind: "idle" | "checking" | "signing-out" }>({ kind: "idle" });
+  const [unfinishedSignOut] = useState(pendingSignOut);
+  const [state, setState] = useState<GateState>(() => unfinishedSignOut === undefined
+    ? { kind: "checking" } : { kind: "sign-out-failed", userId: unfinishedSignOut });
+  const [sessionRequest, setSessionRequest] = useState<{ notice: Notice } | null>(() => unfinishedSignOut === undefined ? { notice: "none" } : null);
+  const operation = useRef<{ kind: "idle" | "checking" | "signing-out" | "sign-out-failed" }>({
+    kind: unfinishedSignOut === undefined ? "idle" : "sign-out-failed",
+  });
   const automaticRetryUsed = useRef(false);
   const drafts = useRef<DraftStore | null>(null);
   const endSession = useCallback(() => {
@@ -74,7 +97,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, []);
 
   const check = useCallback(async (signal: AbortSignal, notice: Notice = "none") => {
-    if (operation.current.kind === "signing-out") return;
+    if (operation.current.kind === "signing-out" || operation.current.kind === "sign-out-failed") return;
     const attempt = { kind: "checking" } as const;
     operation.current = attempt;
     try {
@@ -110,6 +133,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   }, [endSession]);
 
   useEffect(() => {
+    if (!sessionRequest) return;
     const controller = new AbortController();
     void check(controller.signal, sessionRequest.notice);
     return () => controller.abort();
@@ -123,14 +147,16 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
 
   useEffect(() => {
     if (state.kind !== "unreachable") return;
+    let checking = false;
     const reconnect = () => {
-      if (automaticRetryUsed.current || document.hidden || !navigator.onLine) return;
+      if (checking || document.hidden || !navigator.onLine) return;
+      checking = true;
       retry(state.notice, true);
     };
     window.addEventListener("online", reconnect);
     document.addEventListener("visibilitychange", reconnect);
     // A navigation can initialize with an online signal even if its first request lost connectivity.
-    const timer = setTimeout(reconnect, 1_500);
+    const timer = automaticRetryUsed.current ? undefined : setTimeout(reconnect, 1_500);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("online", reconnect);
@@ -141,7 +167,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   useEffect(() => {
     const controller = new AbortController();
     const expired = () => {
-      if (operation.current.kind === "signing-out") return;
+      if (operation.current.kind === "signing-out" || operation.current.kind === "sign-out-failed") return;
       automaticRetryUsed.current = false;
       endSession();
       setState({ kind: "checking" });
@@ -156,6 +182,7 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
   const signOut = useCallback(async (userId = drafts.current?.userId) => {
     if (userId === undefined || operation.current.kind === "signing-out") return;
     operation.current = { kind: "signing-out" };
+    rememberSignOut(userId);
     const logout = chatApi.logout(userId);
     endSession();
     rememberSignedIn(false);
@@ -164,12 +191,13 @@ export function ChatGate({ children }: { children: (session: SignedIn, signOut: 
       await logout;
     } catch (error) {
       if (!(error instanceof ChatApiError) || error.status !== 401) {
+        operation.current = { kind: "sign-out-failed" };
         setState({ kind: "sign-out-failed", userId });
         return;
       }
-    } finally {
-      operation.current = { kind: "idle" };
     }
+    operation.current = { kind: "idle" };
+    rememberSignOut(null);
     history.replaceState(null, "", location.pathname);
     setState({ kind: "signed-out", loginAvailable: true, notice: "signed-out" });
   }, [endSession]);

@@ -51,6 +51,12 @@ it("recovers an interrupted text send for manual retry and forgets it on acknowl
   const alice = new DraftStore(1);
   alice.beginSend(threadId, { ...draft, status: "sending" });
   alice.beginSend(threadId, sending);
+  alice.beginSend(threadId, { ...draft, requestId: "oversized_message", text: "x".repeat(32_001), status: "sending" });
+
+  const storageKey = "chat-draft:1:pending:" + threadId;
+  const saved: unknown[] = JSON.parse(sessionStorage.getItem(storageKey)!);
+  expect(saved).toEqual([{ text: draft.text, requestId: draft.requestId }]);
+  sessionStorage.setItem(storageKey, JSON.stringify([null, ...saved, { requestId: false }]));
 
   const reloaded = new DraftStore(1);
   expect(reloaded.pending(threadId)).toEqual([{ ...draft, status: "failed", error: null }]);

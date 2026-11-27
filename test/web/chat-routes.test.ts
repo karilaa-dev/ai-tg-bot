@@ -186,6 +186,18 @@ it("keeps only the verified return link on cancelled and expired sign-in", async
   expect(expired.headers.get("Location")).toBe("/chat/?signin=expired");
 });
 
+it("returns to the verified chat when a Telegram profile lookup fails temporarily", async () => {
+  const start = await request("/api/auth/telegram/start?return=/chat/");
+  const location = new URL(start.headers.get("Location")!);
+  nonce = location.searchParams.get("nonce")!;
+  vi.mocked(chat.profile).mockRejectedValueOnce(new Error("Temporary profile lookup failure"));
+  const result = await request(`/api/auth/telegram/callback?state=${location.searchParams.get("state")}&code=sample`,
+    { headers: { Cookie: cookies(start, "__Host-ai_tg_bot_chat_login=") } });
+  expect(result.status).toBe(303);
+  expect(result.headers.get("Location")).toBe("/chat/?signin=try-again");
+  expect(result.headers.getSetCookie()).toEqual([expect.stringMatching(/^__Host-ai_tg_bot_chat_login=;.*Max-Age=0/)]);
+});
+
 it("rechecks database revocation before any private handler or attachment work", async () => {
   const cookie = await login();
   await access.revoke(42);
