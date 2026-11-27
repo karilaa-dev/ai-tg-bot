@@ -374,6 +374,8 @@ try {
   assert(!requests.some(request => request.path.includes("/usage")));
   assert.deepEqual(remote, []);
   assert.deepEqual(errors, []);
+  await page.unrouteAll({ behavior: "wait" });
+  await page.close();
   console.log(`Chat polish browser smoke passed (${development ? "development" : "production"})`);
 } finally {
   server.kill("SIGTERM");
